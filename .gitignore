@@ -1,0 +1,23 @@
+# credentials & local config
+.env
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# virtual envs
+.venv/
+venv/
+env/
+
+# Claude Code session data
+.claude/
+
+# state files (runtime data, not source)
+state/
+
+# IDE
+.idea/
+.vscode/
+*.swp

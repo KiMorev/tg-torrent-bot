@@ -1,0 +1,170 @@
+import re
+import unittest
+from pathlib import Path
+
+from config import env_bool, env_float, env_int, load_settings, parse_chat_ids, parse_statuses
+
+
+def _project_root() -> Path:
+    return Path(__file__).parent.parent
+
+
+def _env_example_keys() -> set[str]:
+    """Все имена переменных из .env.example."""
+    path = _project_root() / ".env.example"
+    keys = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _compose_env_keys() -> set[str]:
+    """Все имена переменных, объявленных в compose.yaml (паттерн ${VAR_NAME...})."""
+    path = _project_root() / "compose.yaml"
+    content = path.read_text(encoding="utf-8")
+    return set(re.findall(r"\$\{([A-Z_]+)[^}]*\}", content))
+
+
+BASE_ENV = {
+    "BOT_TOKEN": "123:token",
+    "ALLOWED_CHAT_IDS": "100, 200",
+    "DS_URL": "https://nas.example:5001/",
+    "DS_ACCOUNT": "tg_bot",
+    "DS_PASSWORD": "secret",
+    "DS_DESTINATION": "video",
+}
+
+
+class ConfigParsingTests(unittest.TestCase):
+    def test_parse_chat_ids_ignores_empty_and_invalid_values(self) -> None:
+        self.assertEqual(parse_chat_ids("1, 2, bad, , -3"), {1, 2, -3})
+
+    def test_env_helpers_use_defaults_for_invalid_values(self) -> None:
+        env = {
+            "COUNT": "not-a-number",
+            "RATIO": "bad",
+            "DISABLED": "off",
+            "ENABLED": "yes",
+        }
+
+        self.assertEqual(env_int(env, "COUNT", 7), 7)
+        self.assertEqual(env_float(env, "RATIO", 2.5), 2.5)
+        self.assertFalse(env_bool(env, "DISABLED", True))
+        self.assertTrue(env_bool(env, "ENABLED", False))
+
+    def test_parse_statuses_normalizes_and_skips_blanks(self) -> None:
+        self.assertEqual(parse_statuses(" finished, ERROR, ,seeding "), {"finished", "error", "seeding"})
+
+    def test_load_settings_builds_defaults(self) -> None:
+        settings = load_settings(BASE_ENV)
+
+        self.assertEqual(settings.bot_token, "123:token")
+        self.assertEqual(settings.allowed_chat_ids, {100, 200})
+        self.assertEqual(settings.admin_chat_ids, {100, 200})
+        self.assertEqual(settings.ds_url, "https://nas.example:5001")
+        self.assertTrue(settings.ds_verify_ssl)
+        self.assertEqual(settings.max_torrent_file_mb, 20)
+        self.assertEqual(settings.max_torrent_file_bytes, 20 * 1024 * 1024)
+        self.assertEqual(settings.trackers_background_interval_seconds, 180)
+        self.assertEqual(settings.approved_chat_ids_file, Path("/tmp/tg_torrent_drop/approved_chat_ids.json"))
+
+    def test_load_settings_accepts_overrides_and_clamps_values(self) -> None:
+        env = {
+            **BASE_ENV,
+            "ADMIN_CHAT_IDS": "300",
+            "STATE_DIR": "/data",
+            "DS_VERIFY_SSL": "false",
+            "MAX_TORRENT_FILE_MB": "0",
+            "TRACKERS_MAX": "-5",
+            "TRACKERS_CACHE_TTL_HOURS": "0",
+            "TRACKERS_BACKGROUND_INTERVAL_SECONDS": "10",
+            "TASK_NOTIFICATION_STATUSES": "finished,error",
+            "AUTO_DELETE_FINISHED_AFTER_HOURS": "0,5",
+        }
+
+        settings = load_settings(env)
+
+        self.assertEqual(settings.admin_chat_ids, {300})
+        self.assertFalse(settings.ds_verify_ssl)
+        self.assertEqual(settings.max_torrent_file_mb, 1)
+        self.assertEqual(settings.trackers_max, 0)
+        self.assertEqual(settings.trackers_cache_ttl_hours, 1)
+        self.assertEqual(settings.trackers_background_interval_seconds, 30)
+        self.assertEqual(settings.task_notification_statuses, {"finished", "error"})
+        self.assertEqual(settings.auto_delete_finished_after_hours, 0.5)
+        self.assertEqual(settings.task_owners_file, Path("/data/task_owners.json"))
+
+    def test_load_settings_reports_missing_required_values(self) -> None:
+        env = dict(BASE_ENV)
+        env.pop("BOT_TOKEN")
+
+        with self.assertRaisesRegex(RuntimeError, "BOT_TOKEN"):
+            load_settings(env)
+
+
+def _dockerfile_copied_files() -> set[str]:
+    """Имена файлов, перечисленных в COPY-строке Dockerfile (только корневые .py)."""
+    path = _project_root() / "Dockerfile"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("COPY") and line.endswith("./"):
+            # COPY file1.py file2.py ... ./
+            parts = line.split()
+            return {p for p in parts[1:-1]}  # без COPY и ./
+    return set()
+
+
+def _project_py_files() -> set[str]:
+    """Все .py-файлы в корне проекта (не в подпапках)."""
+    root = _project_root()
+    return {
+        f.name
+        for f in root.glob("*.py")
+        if f.is_file()
+    }
+
+
+class DockerfileCoverageTest(unittest.TestCase):
+    """Все .py-файлы в корне проекта должны быть перечислены в COPY-строке Dockerfile.
+    Тест поймает ситуацию, когда добавляется новый модуль (например jackett.py),
+    но он забывается в Dockerfile — и контейнер упадёт с ModuleNotFoundError."""
+
+    def test_dockerfile_copies_all_project_py_files(self) -> None:
+        copied = _dockerfile_copied_files()
+        project_files = _project_py_files()
+        missing = project_files - copied
+        self.assertFalse(
+            missing,
+            f"Файлы есть в корне проекта, но отсутствуют в COPY-строке Dockerfile: {sorted(missing)}",
+        )
+
+
+class ComposeEnvCoverageTest(unittest.TestCase):
+    """Каждая переменная из .env.example должна быть объявлена в compose.yaml.
+    Этот тест поймает ситуацию, когда новая переменная добавлена в .env.example
+    и config.py, но забыта в compose.yaml — и контейнер её не получит."""
+
+    def test_compose_exposes_all_env_example_variables(self) -> None:
+        missing = _env_example_keys() - _compose_env_keys()
+        self.assertFalse(
+            missing,
+            f"Переменные есть в .env.example, но отсутствуют в compose.yaml: {sorted(missing)}",
+        )
+
+    def test_env_example_has_no_unknown_variables(self) -> None:
+        """Обратная проверка: compose.yaml не объявляет переменные, которых нет в .env.example.
+        Помогает обнаружить опечатки в именах переменных в compose.yaml."""
+        extra = _compose_env_keys() - _env_example_keys()
+        self.assertFalse(
+            extra,
+            f"Переменные есть в compose.yaml, но отсутствуют в .env.example: {sorted(extra)}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
