@@ -17,6 +17,7 @@ from formatters import _short_title, _tracker_abbr
 
 TASK_CALLBACK_PREFIX = "task"
 ACCESS_CALLBACK_PREFIX = "access"
+ADMIN_CALLBACK_PREFIX = "admin"
 SEARCH_CALLBACK_PREFIX = "srch"
 JACKETT_SELECT_PREFIX = "jk"  # used inside srch: namespace
 SUB_CALLBACK_PREFIX = "sub"
@@ -51,6 +52,10 @@ def _access_callback(action: str, chat_id: int) -> str:
     return f"{ACCESS_CALLBACK_PREFIX}:{action}:{chat_id}"
 
 
+def _admin_callback(action: str) -> str:
+    return f"{ADMIN_CALLBACK_PREFIX}:{action}"
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers used by keyboard builders
 # ---------------------------------------------------------------------------
@@ -83,6 +88,32 @@ def _access_approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 def _download_list_keyboard(scope: str = TASK_LIST_SCOPE_DEFAULT) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", scope))]]
+    )
+
+
+def _admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔄 Обновить", callback_data=_admin_callback("home")),
+                InlineKeyboardButton("🧭 Диагностика", callback_data=_admin_callback("diagnostics")),
+            ],
+            [
+                InlineKeyboardButton("👥 Пользователи", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh"),
+                InlineKeyboardButton("📋 Загрузки", callback_data=_task_callback("list", TASK_LIST_SCOPE_ALL)),
+            ],
+        ]
+    )
+
+
+def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback("diagnostics")),
+                InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home")),
+            ]
+        ]
     )
 
 
@@ -465,4 +496,3 @@ def _jackett_select_keyboard(
         ),
     ])
     return InlineKeyboardMarkup(rows)
-

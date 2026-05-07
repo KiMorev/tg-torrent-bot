@@ -34,6 +34,8 @@ from bot import (
     _is_allowed,
     _start_task_card_refresh,
     _task_card_refresh_loop,
+    admin_callback,
+    admin_command,
     help_command,
     search_cancel,
     search_timeout,
@@ -62,6 +64,8 @@ def _make_callback_update(chat_id: int = 100, callback_data: str = "srch:cancel"
     """Simulate an Update triggered by an InlineKeyboard button press."""
     msg = MagicMock()
     msg.chat_id = chat_id
+    msg.chat = MagicMock()
+    msg.chat.id = chat_id
     msg.message_id = 42
     msg.delete = AsyncMock()
 
@@ -198,7 +202,6 @@ class HelpCommandTests(unittest.TestCase):
 
         text = update.message.reply_text.call_args.args[0]
         self.assertIn("сразу откроется поиск через Jackett", text)
-        self.assertNotIn("/searchstatus", text)
 
     def test_help_mentions_admin_diagnostics_for_admins(self):
         update = _make_message_update(chat_id=300)
@@ -215,8 +218,63 @@ class HelpCommandTests(unittest.TestCase):
             asyncio.run(help_command(update, context))
 
         text = update.message.reply_text.call_args.args[0]
-        self.assertIn("/searchstatus показывает диагностику Download Station, поиска и интеграций", text)
+        self.assertIn("/admin открывает админ-панель с диагностикой и главной сводкой", text)
         self.assertIn("/users управляет доступом пользователей", text)
+
+
+# ---------------------------------------------------------------------------
+# admin panel tests
+# ---------------------------------------------------------------------------
+
+
+class AdminPanelTests(unittest.TestCase):
+    def test_admin_command_shows_summary_panel(self):
+        update = _make_message_update(chat_id=300)
+        context = _make_context()
+
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {
+            "123": {"chat_id": 300},
+            "jk:abc": {"chat_id": 300, "type": "jackett"},
+        }
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = [
+            {"id": "1", "status": "downloading"},
+            {"id": "2", "status": "finished"},
+            {"id": "3", "status": "error"},
+        ]
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "ds_client", fake_ds),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", False),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(admin_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("Админ-панель", text)
+        self.assertIn("Загрузки: всего 3, активных 1, завершённых 1, ошибок 1", text)
+        self.assertIn("Подписки: 2 (Rutracker 1, Jackett 1)", text)
+        self.assertIn("Сервисы:", text)
+        update.message.reply_text.assert_called_once()
+
+    def test_admin_diagnostics_callback_reuses_diagnostics_view(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:diagnostics")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_build_diagnostics_text", AsyncMock(return_value="diag text")),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.edit_message_text.assert_called_once()
+        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "diag text")
 
 
 # ---------------------------------------------------------------------------

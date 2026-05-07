@@ -49,6 +49,7 @@ from formatters import (
 )
 from keyboards import (
     ACCESS_CALLBACK_PREFIX,
+    ADMIN_CALLBACK_PREFIX,
     JACKETT_SELECT_PREFIX,
     SEARCH_CALLBACK_PREFIX,
     TASK_CALLBACK_PREFIX,
@@ -58,6 +59,8 @@ from keyboards import (
     TASK_LIST_SCOPE_MY,
     _SRCH_DEFAULT_SETTINGS,
     _SRCH_QUALITY_OPTIONS,
+    _admin_diagnostics_keyboard,
+    _admin_panel_keyboard,
     _access_approval_keyboard,
     _access_callback,
     _delete_confirm_keyboard,
@@ -513,6 +516,90 @@ async def _background_monitor_loop(app: Application) -> None:
 
 def _format_updated_at() -> str:
     return datetime.now(DISPLAY_TIMEZONE).strftime("%H:%M:%S")
+
+
+def _format_admin_service_flags() -> str:
+    flags = [
+        f"Rutracker {'✅' if RUTRACKER_ENABLED else '⛔'}",
+        f"Jackett {'✅' if JACKETT_ENABLED else '⛔'}",
+        f"Кинопоиск {'✅' if KINOPOISK_ENABLED else '⛔'}",
+        f"Plex {'✅' if PLEX_ENABLED else '⛔'}",
+        f"Public-трекеры {'✅' if _public_trackers_enabled() else '⛔'}",
+    ]
+    return ", ".join(flags)
+
+
+def _format_admin_tasks_line(tasks: list[dict] | None, error: str = "") -> str:
+    if error:
+        return f"Загрузки: ошибка получения списка ({html_module.escape(error)})"
+    if tasks is None:
+        return "Загрузки: нет данных"
+
+    active = sum(1 for task in tasks if (task.get("status") or "").lower() in _ACTIVE_STATUSES)
+    finished = sum(1 for task in tasks if (task.get("status") or "").lower() == "finished")
+    failed = sum(1 for task in tasks if (task.get("status") or "").lower() == "error")
+    return f"Загрузки: всего {len(tasks)}, активных {active}, завершённых {finished}, ошибок {failed}"
+
+
+def _format_admin_subscriptions_line() -> str:
+    subs = state_store.load_topic_subscriptions()
+    rutracker_count = sum(1 for sub in subs.values() if sub.get("type") != "jackett")
+    jackett_count = sum(1 for sub in subs.values() if sub.get("type") == "jackett")
+    total = rutracker_count + jackett_count
+
+    next_check = ""
+    if _next_subscription_check_at is not None:
+        next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
+        next_check = f", следующая проверка {next_dt.strftime('%d.%m %H:%M')}"
+
+    return f"Подписки: {total} (Rutracker {rutracker_count}, Jackett {jackett_count}){next_check}"
+
+
+def _format_admin_auto_delete_line() -> str:
+    if not _auto_delete_finished_enabled():
+        return "Автоудаление: выключено"
+
+    statuses = ", ".join(sorted(AUTO_DELETE_FINISHED_STATUSES)) or "нет статусов"
+    return f"Автоудаление: через {AUTO_DELETE_FINISHED_AFTER_HOURS:g} ч, статусы: {statuses}"
+
+
+def _format_admin_notifications_line() -> str:
+    if not _task_notifications_enabled():
+        return "Уведомления: выключены"
+
+    statuses = ", ".join(sorted(TASK_NOTIFICATION_STATUSES)) or "нет статусов"
+    return f"Уведомления: включены, статусы: {statuses}"
+
+
+def _format_admin_search_defaults_line() -> str:
+    quality = _SRCH_DEFAULT_SETTINGS.get("quality", "1080p")
+    audio = "✅" if _SRCH_DEFAULT_SETTINGS.get("audio") else "⛔"
+    subs = "✅" if _SRCH_DEFAULT_SETTINGS.get("subs") else "⛔"
+    return f"Поиск по умолчанию: {quality}, оригинальная дорожка {audio}, субтитры {subs}"
+
+
+async def _build_admin_panel_text() -> str:
+    tasks = None
+    task_error = ""
+    try:
+        tasks = await asyncio.to_thread(ds_client.list_tasks)
+    except DownloadStationError as exc:
+        task_error = str(exc)
+
+    now = datetime.now(DISPLAY_TIMEZONE).strftime("%d.%m.%Y %H:%M")
+    lines = [
+        "🛠️ <b>Админ-панель</b>",
+        f"Время бота: {now}",
+        "",
+        _format_admin_tasks_line(tasks, task_error),
+        _format_admin_subscriptions_line(),
+        _format_admin_auto_delete_line(),
+        _format_admin_notifications_line(),
+        "",
+        f"Сервисы: {_format_admin_service_flags()}",
+        _format_admin_search_defaults_line(),
+    ]
+    return "\n".join(lines)
 
 
 def _default_list_scope(chat_id: int | None) -> str:
@@ -1083,13 +1170,7 @@ def _build_search_query(base: str, settings: dict) -> str:
     return " ".join(parts)
 
 
-async def search_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin-only: диагностика внешних сервисов бота."""
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not _is_admin_chat(chat_id):
-        return
-
-    msg = await update.message.reply_text("🔍 Проверяю соединение…")
+async def _build_diagnostics_text() -> str:
     report = await asyncio.to_thread(
         run_diagnostics,
         rutracker_client=rutracker_client,
@@ -1101,8 +1182,7 @@ async def search_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         plex_enabled=PLEX_ENABLED,
         plex_url=PLEX_URL,
     )
-
-    await msg.edit_text(format_diagnostics(report), parse_mode="HTML")
+    return format_diagnostics(report)
 
 
 async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2429,8 +2509,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id if update.effective_chat else None
     if _is_admin_chat(chat_id):
         admin_lines = (
+            "- /admin открывает админ-панель с диагностикой и главной сводкой;\n"
             "- /users управляет доступом пользователей;\n"
-            "- /searchstatus показывает диагностику Download Station, поиска и интеграций;\n"
         )
     await update.message.reply_text(
         "Что умею:\n"
@@ -2446,6 +2526,49 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{search_lines}"
         f"{admin_lines}"
         "\n/id показывает chat_id. Новые пользователи могут написать /start, а админ разрешит доступ кнопкой."
+    )
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not _is_admin_chat(chat_id):
+        return
+
+    await update.message.reply_text(
+        await _build_admin_panel_text(),
+        parse_mode="HTML",
+        reply_markup=_admin_panel_keyboard(),
+    )
+
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+
+    admin_chat_id = query.message.chat.id if query.message else None
+    if not _is_admin_chat(admin_chat_id):
+        await query.answer("Только для администратора", show_alert=True)
+        logger.warning("Rejected admin callback from chat_id=%s", admin_chat_id)
+        return
+
+    await query.answer()
+
+    parts = (query.data or "").split(":", 1)
+    action = parts[1] if len(parts) > 1 else "home"
+
+    if action == "diagnostics":
+        await query.edit_message_text(
+            await _build_diagnostics_text(),
+            parse_mode="HTML",
+            reply_markup=_admin_diagnostics_keyboard(),
+        )
+        return
+
+    await query.edit_message_text(
+        await _build_admin_panel_text(),
+        parse_mode="HTML",
+        reply_markup=_admin_panel_keyboard(),
     )
 
 
@@ -2538,6 +2661,7 @@ def _format_users_panel() -> tuple[str, InlineKeyboardMarkup]:
         for uid, info in approved_users.items()
     ]
     rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
+    rows.append([InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home")])
 
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -3075,17 +3199,18 @@ async def setup_bot_commands(app: Application) -> None:
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
-    if RUTRACKER_ENABLED:
+    if RUTRACKER_ENABLED or JACKETT_ENABLED:
         search_desc = (
-            "Поиск по Rutracker (или вставьте ссылку Кинопоиска)"
+            "Поиск торрентов (или вставьте ссылку Кинопоиска)"
             if KINOPOISK_ENABLED
-            else "Поиск торрентов на Rutracker"
+            else "Поиск торрентов"
         )
         commands.append(BotCommand("search", search_desc))
+    if RUTRACKER_ENABLED:
         commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
+        BotCommand("admin", "Админ-панель"),
         BotCommand("users", "Управление доступом пользователей"),
-        BotCommand("searchstatus", "Диагностика поиска и интеграций"),
     ]
     for admin_id in ADMIN_CHAT_IDS:
         try:
@@ -3125,11 +3250,12 @@ def main() -> None:
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("resume", resume))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(access_callback, pattern=f"^{ACCESS_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     app.add_handler(CommandHandler("users", users_command))
-    app.add_handler(CommandHandler("searchstatus", search_status))
     app.add_handler(CommandHandler("subs", subs_command))
     # Always register the ConversationHandler so text_message_entry intercepts
     # all plain-text messages (magnets, KP links, search queries).
