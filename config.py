@@ -121,6 +121,7 @@ class AppSettings:
     kinopoisk_api_key: str
     kinopoisk_enabled: bool
     plex_enabled: bool
+    plex_url: str
     topic_subscriptions_file: Path
     subscription_check_interval_hours: int
     jackett_url: str
@@ -203,6 +204,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         kinopoisk_api_key=env.get("KINOPOISK_API_KEY", "").strip(),
         kinopoisk_enabled=bool(env.get("KINOPOISK_API_KEY", "").strip()),
         plex_enabled=env_bool(env, "PLEX_ENABLED", False),
+        plex_url=(env.get("PLEX_URL", "https://app.plex.tv").strip() or "https://app.plex.tv"),
         topic_subscriptions_file=Path(
             env.get("TOPIC_SUBSCRIPTIONS_FILE", str(state_dir / "topic_subscriptions.json"))
         ),

@@ -73,6 +73,8 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.max_torrent_file_bytes, 20 * 1024 * 1024)
         self.assertEqual(settings.trackers_background_interval_seconds, 180)
         self.assertEqual(settings.approved_chat_ids_file, Path("/tmp/tg_torrent_drop/approved_chat_ids.json"))
+        self.assertFalse(settings.plex_enabled)
+        self.assertEqual(settings.plex_url, "https://app.plex.tv")
 
     def test_load_settings_accepts_overrides_and_clamps_values(self) -> None:
         env = {
@@ -86,6 +88,8 @@ class ConfigParsingTests(unittest.TestCase):
             "TRACKERS_BACKGROUND_INTERVAL_SECONDS": "10",
             "TASK_NOTIFICATION_STATUSES": "finished,error",
             "AUTO_DELETE_FINISHED_AFTER_HOURS": "0,5",
+            "PLEX_ENABLED": "true",
+            "PLEX_URL": "https://example.com/plex",
         }
 
         settings = load_settings(env)
@@ -99,6 +103,8 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.task_notification_statuses, {"finished", "error"})
         self.assertEqual(settings.auto_delete_finished_after_hours, 0.5)
         self.assertEqual(settings.task_owners_file, Path("/data/task_owners.json"))
+        self.assertTrue(settings.plex_enabled)
+        self.assertEqual(settings.plex_url, "https://example.com/plex")
 
     def test_load_settings_enables_jackett_only_with_complete_credentials(self) -> None:
         settings = load_settings({

@@ -165,6 +165,7 @@ RUTRACKER_MAX_RESULTS = settings.rutracker_max_results
 KINOPOISK_API_KEY = settings.kinopoisk_api_key
 KINOPOISK_ENABLED = settings.kinopoisk_enabled
 PLEX_ENABLED = settings.plex_enabled
+PLEX_URL = settings.plex_url
 TOPIC_SUBSCRIPTIONS_FILE = settings.topic_subscriptions_file
 SUBSCRIPTION_CHECK_INTERVAL_HOURS = settings.subscription_check_interval_hours
 JACKETT_URL = settings.jackett_url
@@ -696,7 +697,7 @@ def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> 
 
 def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
     if (status or "").lower() in {"finished", "seeding"}:
-        return _final_notification_keyboard(task_id, show_plex=PLEX_ENABLED)
+        return _final_notification_keyboard(task_id, show_plex=PLEX_ENABLED, plex_url=PLEX_URL)
 
     return _make_task_keyboard(task_id, status, task_type)
 

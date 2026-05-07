@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import requests
 
 logger = logging.getLogger("tg_torrent_drop")
+_STARTUP_ERROR = "Jackett ещё запускается — подождите ~1 мин."
+_STARTUP_DIAGNOSTIC_ERROR = "Jackett ещё запускается — подождите ~1 мин и повторите /searchstatus."
 
 # Characters forbidden in XML 1.0 (except tab \x09, LF \x0A, CR \x0D).
 # Some torrent titles or descriptions contain these, causing ET.ParseError.
@@ -138,32 +140,40 @@ class JackettClient:
         """
         url = f"{self._base_url}/api/v2.0/indexers"
         try:
-            resp = self._session.get(
-                url,
-                params={"apikey": self._api_key, "configured": "true"},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            html_kind = _classify_response(resp)
-            if html_kind == "login":
-                raise JackettError(
-                    "Jackett вернул страницу входа — API ключ не принят "
-                    "(проверьте JACKETT_API_KEY)"
+            for attempt in range(2):
+                resp = self._session.get(
+                    url,
+                    params={"apikey": self._api_key, "configured": "true"},
+                    timeout=10,
                 )
-            if html_kind == "loading":
-                raise JackettError("Jackett ещё запускается — подождите ~1 мин.")
-            data = resp.json()
-            if isinstance(data, list):
-                return [
-                    {"id": i.get("id", ""), "name": i.get("name") or i.get("id", "")}
-                    for i in data
-                    if i.get("configured") and i.get("id")
-                ]
+                resp.raise_for_status()
+                html_kind = _classify_response(resp)
+                if html_kind == "login":
+                    raise JackettError(
+                        "Jackett вернул страницу входа — API ключ не принят "
+                        "(проверьте JACKETT_API_KEY)"
+                    )
+                if html_kind == "loading":
+                    if attempt == 0:
+                        logger.debug("Jackett indexers probe returned startup response; retrying once")
+                        continue
+                    raise JackettError(_STARTUP_ERROR)
+                try:
+                    data = resp.json()
+                except ValueError:
+                    if attempt == 0:
+                        logger.debug("Jackett indexers probe returned non-JSON response; retrying once")
+                        continue
+                    raise JackettError(_STARTUP_ERROR)
+                if isinstance(data, list):
+                    return [
+                        {"id": i.get("id", ""), "name": i.get("name") or i.get("id", "")}
+                        for i in data
+                        if i.get("configured") and i.get("id")
+                    ]
             return []
         except JackettError:
             raise
-        except ValueError:
-            raise JackettError("Jackett ещё запускается — подождите ~1 мин.")
         except requests.RequestException as e:
             raise JackettError(f"Ошибка получения индексеров: {e}") from e
 
@@ -256,46 +266,54 @@ class JackettClient:
         }
         url = f"{self._base_url}/api/v2.0/indexers"
         try:
-            resp = self._session.get(
-                url,
-                params={"apikey": self._api_key, "configured": "true"},
-                timeout=10,
-            )
-            result["reachable"] = True
-            result["http_status"] = resp.status_code
-            if resp.status_code == 401:
-                result["error"] = "Неверный API-ключ Jackett."
+            for attempt in range(2):
+                resp = self._session.get(
+                    url,
+                    params={"apikey": self._api_key, "configured": "true"},
+                    timeout=10,
+                )
+                result["reachable"] = True
+                result["http_status"] = resp.status_code
+                if resp.status_code == 401:
+                    result["error"] = "Неверный API-ключ Jackett."
+                    return result
+                if resp.status_code not in (200, 404):
+                    result["error"] = f"Jackett вернул HTTP {resp.status_code}."
+                    return result
+                if resp.status_code == 200:
+                    # Classify the response before attempting JSON parse so we can
+                    # give an accurate error instead of a misleading one.
+                    html_kind = _classify_response(resp)
+                    if html_kind == "login":
+                        result["error"] = (
+                            "Jackett вернул страницу входа — API ключ не принят "
+                            "(проверьте JACKETT_API_KEY)"
+                        )
+                        return result
+                    if html_kind == "loading":
+                        result["error"] = _STARTUP_DIAGNOSTIC_ERROR
+                        if attempt == 0:
+                            logger.debug("Jackett diagnostics returned startup response; retrying once")
+                            continue
+                        return result
+                    try:
+                        data = resp.json()
+                    except ValueError:
+                        # Body is not valid JSON and wasn't detected as HTML above —
+                        # most likely Jackett is still initialising (empty body).
+                        result["error"] = _STARTUP_DIAGNOSTIC_ERROR
+                        if attempt == 0:
+                            logger.debug("Jackett diagnostics returned non-JSON response; retrying once")
+                            continue
+                        return result
+                    if isinstance(data, list):
+                        result["api_ok"] = True
+                        result["indexers"] = [
+                            {"id": i.get("id", ""), "name": i.get("name") or i.get("id", "")}
+                            for i in data
+                            if i.get("configured")
+                        ]
                 return result
-            if resp.status_code not in (200, 404):
-                result["error"] = f"Jackett вернул HTTP {resp.status_code}."
-                return result
-            if resp.status_code == 200:
-                # Classify the response before attempting JSON parse so we can
-                # give an accurate error instead of a misleading one.
-                html_kind = _classify_response(resp)
-                if html_kind == "login":
-                    result["error"] = (
-                        "Jackett вернул страницу входа — API ключ не принят "
-                        "(проверьте JACKETT_API_KEY)"
-                    )
-                    return result
-                if html_kind == "loading":
-                    result["error"] = "Jackett ещё запускается — подождите ~1 мин и повторите /searchstatus."
-                    return result
-                try:
-                    data = resp.json()
-                except ValueError:
-                    # Body is not valid JSON and wasn't detected as HTML above —
-                    # most likely Jackett is still initialising (empty body).
-                    result["error"] = "Jackett ещё запускается — подождите ~1 мин и повторите /searchstatus."
-                    return result
-                if isinstance(data, list):
-                    result["api_ok"] = True
-                    result["indexers"] = [
-                        {"id": i.get("id", ""), "name": i.get("name") or i.get("id", "")}
-                        for i in data
-                        if i.get("configured")
-                    ]
         except requests.ConnectionError:
             self._reset_session()
             result["error"] = f"Нет соединения с Jackett ({self._base_url})."

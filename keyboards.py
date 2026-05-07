@@ -190,10 +190,15 @@ def _task_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def _final_notification_keyboard(task_id: str, *, show_plex: bool = False) -> InlineKeyboardMarkup:
+def _final_notification_keyboard(
+    task_id: str,
+    *,
+    show_plex: bool = False,
+    plex_url: str = "https://app.plex.tv",
+) -> InlineKeyboardMarkup:
     rows = []
     if show_plex:
-        rows.append([InlineKeyboardButton("▶️ Открыть Plex", url="https://app.plex.tv")])
+        rows.append([InlineKeyboardButton("▶️ Открыть Plex", url=plex_url)])
     rows.append([InlineKeyboardButton("🧹 Удалить из списка", callback_data=_task_callback("delete_ask", task_id))])
     rows.append([InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))])
     return InlineKeyboardMarkup(rows)
@@ -460,5 +465,4 @@ def _jackett_select_keyboard(
         ),
     ])
     return InlineKeyboardMarkup(rows)
-
 
