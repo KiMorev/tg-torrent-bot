@@ -102,6 +102,7 @@ def _admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("👥 Пользователи", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh"),
                 InlineKeyboardButton("📋 Загрузки", callback_data=_task_callback("list", TASK_LIST_SCOPE_ALL)),
             ],
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
         ]
     )
 
@@ -112,7 +113,8 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback("diagnostics")),
                 InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home")),
-            ]
+            ],
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
         ]
     )
 

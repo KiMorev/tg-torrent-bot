@@ -210,6 +210,8 @@ SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # (chat_id, message_id) → running refresh task for that task card
 TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
+# task_id → task-card messages that can be removed after a final notification
+TASK_CARD_MESSAGES: dict[str, set[tuple[int, int]]] = {}
 # Unix timestamp of next scheduled subscription check (set by the loop)
 _next_subscription_check_at: float | None = None
 
@@ -627,6 +629,21 @@ def _chat_id_from_query(query) -> int | None:
     return None
 
 
+def _message_id_from_message(message) -> int | None:
+    message_id = getattr(message, "message_id", None)
+    return message_id if isinstance(message_id, int) else None
+
+
+def _chat_id_from_message(message) -> int | None:
+    chat_id = getattr(message, "chat_id", None)
+    if isinstance(chat_id, int):
+        return chat_id
+
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    return chat_id if isinstance(chat_id, int) else None
+
+
 def _task_owner(task_id: str | None, owners: dict[str, int] | None = None) -> int | None:
     if not task_id:
         return None
@@ -724,6 +741,9 @@ def _save_auto_delete_tasks(tasks: dict[str, float]) -> None:
 
 def _forget_task_state(task_ids: list[str]) -> None:
     state_store.forget_task_state(task_ids)
+    for task_id in task_ids:
+        for chat_id, message_id in TASK_CARD_MESSAGES.pop(str(task_id), set()):
+            _cancel_task_card_refresh(chat_id, message_id)
 
 
 def _explicit_notification_chat_ids() -> set[int]:
@@ -796,6 +816,7 @@ async def _run_task_notifications_once(app: Application) -> None:
                     text=_format_task_notification(task),
                     reply_markup=_notification_keyboard(task_id, status, task.get("type", "")),
                 )
+                await _delete_task_card_messages(app, task_id, chat_id=chat_id)
                 sent = True
             except Exception:
                 logger.warning(
@@ -882,6 +903,67 @@ async def _run_auto_delete_finished_once() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _register_task_card_message(chat_id: int | None, message_id: int | None, task_id: str | None) -> None:
+    if not task_id or not isinstance(chat_id, int) or not isinstance(message_id, int):
+        return
+
+    TASK_CARD_MESSAGES.setdefault(str(task_id), set()).add((chat_id, message_id))
+
+
+def _register_task_card_from_message(message, task_id: str | None, fallback_chat_id: int | None = None) -> None:
+    chat_id = _chat_id_from_message(message) or fallback_chat_id
+    _register_task_card_message(chat_id, _message_id_from_message(message), task_id)
+
+
+def _register_task_card_from_query(query, task_id: str | None) -> None:
+    message = getattr(query, "message", None)
+    if not message:
+        return
+
+    _register_task_card_message(_chat_id_from_query(query), _message_id_from_message(message), task_id)
+
+
+def _forget_task_card_message(chat_id: int | None, message_id: int | None, task_id: str | None = None) -> None:
+    if not isinstance(chat_id, int) or not isinstance(message_id, int):
+        return
+
+    _cancel_task_card_refresh(chat_id, message_id)
+
+    if task_id:
+        task_ids = [str(task_id)]
+    else:
+        task_ids = list(TASK_CARD_MESSAGES)
+
+    for current_task_id in task_ids:
+        messages = TASK_CARD_MESSAGES.get(current_task_id)
+        if not messages:
+            continue
+
+        messages.discard((chat_id, message_id))
+        if not messages:
+            TASK_CARD_MESSAGES.pop(current_task_id, None)
+
+
+async def _delete_task_card_messages(app, task_id: str, chat_id: int | None = None) -> None:
+    targets = list(TASK_CARD_MESSAGES.get(str(task_id), set()))
+    for target_chat_id, message_id in targets:
+        if chat_id is not None and target_chat_id != chat_id:
+            continue
+
+        try:
+            await app.bot.delete_message(chat_id=target_chat_id, message_id=message_id)
+        except Exception:
+            logger.debug(
+                "Failed to delete task card chat_id=%s message_id=%s task_id=%s",
+                target_chat_id,
+                message_id,
+                task_id,
+                exc_info=True,
+            )
+        finally:
+            _forget_task_card_message(target_chat_id, message_id, task_id)
+
+
 def _cancel_task_card_refresh(chat_id: int, message_id: int) -> None:
     """Cancel the auto-refresh loop for a specific task-card message."""
     key = (chat_id, message_id)
@@ -893,6 +975,7 @@ def _cancel_task_card_refresh(chat_id: int, message_id: int) -> None:
 def _start_task_card_refresh(app, chat_id: int, message_id: int, task_id: str) -> None:
     """Start (or restart) the 30-second auto-refresh loop for a task card."""
     _cancel_task_card_refresh(chat_id, message_id)
+    _register_task_card_message(chat_id, message_id, task_id)
     key = (chat_id, message_id)
     TASK_CARD_REFRESH_TASKS[key] = app.create_task(
         _task_card_refresh_loop(app, chat_id, message_id, task_id)
@@ -927,6 +1010,7 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
             except BadRequest as e:
                 err = str(e).lower()
                 if "message to edit not found" in err or "chat not found" in err:
+                    _forget_task_card_message(chat_id, message_id, task_id)
                     return  # user navigated away
                 # "message is not modified" is fine — just continue
             except Exception:
@@ -2095,9 +2179,11 @@ async def _download_and_add(
             await query.edit_message_text(
                 success_text, reply_markup=_search_after_add_keyboard(task_id)
             )
+            _register_task_card_from_query(query, task_id)
             return SEARCH_RESULTS
 
         await query.edit_message_text(success_text, reply_markup=_task_reply_markup(task_id))
+        _register_task_card_from_query(query, task_id)
     except (RutrackerError, JackettError, DownloadStationError) as e:
         await query.edit_message_text(f"Ошибка: {e}")
     finally:
@@ -2589,6 +2675,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     parts = (query.data or "").split(":", 1)
     action = parts[1] if len(parts) > 1 else "home"
 
+    if action == "close":
+        try:
+            if query.message:
+                await query.message.delete()
+            return
+        except Exception:
+            logger.debug("Failed to delete admin panel message", exc_info=True)
+            await _safe_edit_callback(query, "Админ-панель закрыта.")
+            return
+
     if action == "diagnostics":
         await _safe_edit_callback(query, "🧭 Проверяю сервисы…")
         await _safe_edit_callback(
@@ -2809,6 +2905,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if action == "list":
         scope = _normalize_list_scope(task_id, chat_id)
         DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
+        _forget_task_card_message(chat_id, message_id)
         await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
@@ -2823,6 +2920,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action in ("page_prev", "page_next"):
         scope = _normalize_list_scope(task_id, chat_id)
+        _forget_task_card_message(chat_id, message_id)
         await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
@@ -2844,6 +2942,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
             return
 
+        _forget_task_card_message(chat_id, message_id, task_id)
         await _safe_edit_callback(query, "🔎 Получаю задачу…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
@@ -2959,6 +3058,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "\n".join(["Трекеры обновлены.", *tracker_lines, "", _format_task_card(task)]),
             reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
         )
+        _register_task_card_from_query(query, task_id)
         return
 
     if action in {"resume", "pause", "delete"}:
@@ -3000,6 +3100,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"{notice}\n\n{_format_task_card(task)}",
                 reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
             )
+            _register_task_card_from_query(query, task_id)
         else:
             await query.edit_message_text(f"{notice}\nID: {task_id}")
         return
@@ -3025,6 +3126,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _format_task_card(task),
         reply_markup=_make_task_keyboard(task_id, status, task.get("type", "")),
     )
+    _register_task_card_from_query(query, task_id)
 
     # Start auto-refresh while the task is actively transferring
     if status in _ACTIVE_STATUSES and chat_id and message_id:
@@ -3089,6 +3191,11 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
         progress_message,
         msg_text,
         reply_markup=_task_reply_markup(task_id) or _download_list_keyboard(),
+    )
+    _register_task_card_from_message(
+        progress_message,
+        task_id,
+        fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
     )
 
 
@@ -3213,6 +3320,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 tracker_result=tracker_result,
             ),
             reply_markup=_task_reply_markup(task_id),
+        )
+        _register_task_card_from_message(
+            progress_message,
+            task_id,
+            fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
         )
 
     except Exception as e:

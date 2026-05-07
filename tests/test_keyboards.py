@@ -40,6 +40,7 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["🧭 Диагностика"], "admin:diagnostics")
         self.assertEqual(buttons["👥 Пользователи"], "access:users_refresh")
         self.assertEqual(buttons["📋 Загрузки"], "task:list:all")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
     def test_admin_diagnostics_keyboard_can_return_home(self) -> None:
         keyboard = _admin_diagnostics_keyboard()
@@ -52,6 +53,7 @@ class KeyboardTests(unittest.TestCase):
 
         self.assertEqual(buttons["🔄 Проверить снова"], "admin:diagnostics")
         self.assertEqual(buttons["⬅️ Админ-панель"], "admin:home")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
 
 if __name__ == "__main__":

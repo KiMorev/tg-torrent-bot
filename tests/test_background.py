@@ -66,8 +66,10 @@ class NotificationDeduplicationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self._store = _make_store(self._tmp.name)
+        bot.TASK_CARD_MESSAGES.clear()
 
     def tearDown(self) -> None:
+        bot.TASK_CARD_MESSAGES.clear()
         self._tmp.cleanup()
 
     def test_notification_not_sent_twice_for_same_status(self) -> None:
@@ -90,6 +92,30 @@ class NotificationDeduplicationTests(unittest.TestCase):
             asyncio.run(_run_task_notifications_once(mock_app))
 
         self.assertEqual(mock_app.bot.send_message.call_count, 1)
+
+    def test_notification_deletes_registered_task_card_for_notified_chat(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "TestFile", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_app.bot.delete_message = AsyncMock()
+        bot.TASK_CARD_MESSAGES["tid1"] = {(999, 77), (100, 88)}
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        mock_app.bot.send_message.assert_called_once()
+        mock_app.bot.delete_message.assert_awaited_once_with(chat_id=999, message_id=77)
+        self.assertEqual(bot.TASK_CARD_MESSAGES["tid1"], {(100, 88)})
 
 
 class AutoDeleteDelayTests(unittest.TestCase):

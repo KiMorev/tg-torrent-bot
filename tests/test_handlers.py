@@ -284,6 +284,32 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[0].args[0], "🧭 Проверяю сервисы…")
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "diag text")
 
+    def test_admin_close_callback_deletes_panel_message(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:close")
+        context = _make_context()
+
+        with patch.object(bot, "ADMIN_CHAT_IDS", {300}):
+            asyncio.run(admin_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.message.delete.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+
+    def test_admin_close_callback_falls_back_to_edit(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:close")
+        update.callback_query.message.delete.side_effect = Exception("cannot delete")
+        context = _make_context()
+
+        with patch.object(bot, "ADMIN_CHAT_IDS", {300}):
+            asyncio.run(admin_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.edit_message_text.assert_called_once_with(
+            "Админ-панель закрыта.",
+            reply_markup=None,
+            parse_mode=None,
+        )
+
 
 # ---------------------------------------------------------------------------
 # notification keyboard tests
