@@ -15,6 +15,7 @@ import requests
 logger = logging.getLogger("tg_torrent_drop")
 _STARTUP_ERROR = "Jackett ещё запускается — подождите ~1 мин."
 _STARTUP_DIAGNOSTIC_ERROR = "Jackett ещё запускается — подождите ~1 мин и повторите /searchstatus."
+_APIKEY_QUERY_RE = re.compile(r"(?i)(apikey=)[^&\s]+")
 
 # Characters forbidden in XML 1.0 (except tab \x09, LF \x0A, CR \x0D).
 # Some torrent titles or descriptions contain these, causing ET.ParseError.
@@ -27,6 +28,13 @@ _INVALID_XML_RE = re.compile(
 def _strip_invalid_xml(text: str) -> str:
     """Remove characters that are illegal in XML 1.0."""
     return _INVALID_XML_RE.sub("", text)
+
+
+def _sanitize_error_text(value: object, api_key: str = "") -> str:
+    text = str(value)
+    if api_key:
+        text = text.replace(api_key, "***")
+    return _APIKEY_QUERY_RE.sub(r"\1***", text)
 
 
 class JackettError(RuntimeError):
@@ -175,7 +183,7 @@ class JackettClient:
         except JackettError:
             raise
         except requests.RequestException as e:
-            raise JackettError(f"Ошибка получения индексеров: {e}") from e
+            raise JackettError(f"Ошибка получения индексеров: {_sanitize_error_text(e, self._api_key)}") from e
 
     @_synchronized
     def search(
@@ -229,9 +237,9 @@ class JackettClient:
                 resp.raise_for_status()
             except requests.ConnectionError as e:
                 self._reset_session()
-                raise JackettError(f"Ошибка подключения к Jackett: {e}") from e
+                raise JackettError(f"Ошибка подключения к Jackett: {_sanitize_error_text(e, self._api_key)}") from e
             except requests.RequestException as e:
-                raise JackettError(f"Ошибка подключения к Jackett: {e}") from e
+                raise JackettError(f"Ошибка подключения к Jackett: {_sanitize_error_text(e, self._api_key)}") from e
             return self._parse_json_results(resp.text, limit)
 
         results = _do_search(base)
@@ -249,7 +257,7 @@ class JackettClient:
             resp = self._session.get(torrent_url, timeout=30)
             resp.raise_for_status()
         except requests.RequestException as e:
-            raise JackettError(f"Не удалось скачать torrent через Jackett: {e}") from e
+            raise JackettError(f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}") from e
         if len(resp.content) < 20 or not resp.content.startswith(b"d"):
             raise JackettError("Полученный файл не является torrent-файлом.")
         return resp.content
@@ -320,7 +328,7 @@ class JackettClient:
         except requests.Timeout:
             result["error"] = "Таймаут подключения к Jackett (>10 сек)."
         except requests.RequestException as e:
-            result["error"] = f"Сетевая ошибка: {e}"
+            result["error"] = f"Сетевая ошибка: {_sanitize_error_text(e, self._api_key)}"
         except KeyError as e:
             result["error"] = f"Ошибка разбора ответа: {e}"
         return result

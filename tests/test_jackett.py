@@ -1,6 +1,8 @@
 import unittest
 
-from jackett import JackettClient
+import requests
+
+from jackett import JackettClient, JackettError
 
 
 class FakeResponse:
@@ -40,6 +42,18 @@ class SequenceSession:
         return response
 
 
+class RaisingSession:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.headers = {}
+
+    def get(self, *args, **kwargs):
+        raise self.error
+
+    def close(self) -> None:
+        return None
+
+
 class JackettStartupRetryTests(unittest.TestCase):
     def test_diagnostics_retries_transient_startup_html_before_reporting_failure(self) -> None:
         client = JackettClient("http://jackett.local:9117", "secret")
@@ -74,6 +88,32 @@ class JackettStartupRetryTests(unittest.TestCase):
 
         self.assertEqual(client.get_indexers(), [{"id": "rutracker", "name": "Rutracker"}])
         self.assertEqual(session.calls, 2)
+
+    def test_get_indexers_masks_api_key_in_request_errors(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret")
+        client._session = RaisingSession(
+            requests.RequestException("GET http://jackett.local/api/v2.0/indexers?apikey=secret&configured=true")
+        )
+
+        with self.assertRaises(JackettError) as cm:
+            client.get_indexers()
+
+        message = str(cm.exception)
+        self.assertNotIn("secret", message)
+        self.assertIn("apikey=***", message)
+
+    def test_search_masks_api_key_in_request_errors(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret")
+        client._session = RaisingSession(
+            requests.ConnectionError("GET http://jackett.local/api/v2.0/indexers/all/results?apikey=secret")
+        )
+
+        with self.assertRaises(JackettError) as cm:
+            client.search("movie")
+
+        message = str(cm.exception)
+        self.assertNotIn("secret", message)
+        self.assertIn("apikey=***", message)
 
 
 if __name__ == "__main__":
