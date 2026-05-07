@@ -34,6 +34,7 @@ from bot import (
     _is_allowed,
     _start_task_card_refresh,
     _task_card_refresh_loop,
+    help_command,
     search_cancel,
     search_timeout,
 )
@@ -75,6 +76,17 @@ def _make_callback_update(chat_id: int = 100, callback_data: str = "srch:cancel"
     update.effective_chat.id = chat_id
     update.callback_query = query
     update.message = None
+    return update
+
+
+def _make_message_update(chat_id: int = 100):
+    message = MagicMock()
+    message.reply_text = AsyncMock()
+
+    update = MagicMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = chat_id
+    update.message = message
     return update
 
 
@@ -162,6 +174,49 @@ class IsAllowedTests(unittest.TestCase):
     def test_is_admin_chat_none(self):
         with patch.object(bot, "ADMIN_CHAT_IDS", {300}):
             self.assertFalse(_is_admin_chat(None))
+
+
+# ---------------------------------------------------------------------------
+# help_command tests
+# ---------------------------------------------------------------------------
+
+
+class HelpCommandTests(unittest.TestCase):
+    def test_help_mentions_jackett_only_search(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", False),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", False),
+        ):
+            asyncio.run(help_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("сразу откроется поиск через Jackett", text)
+        self.assertNotIn("/searchstatus", text)
+
+    def test_help_mentions_admin_diagnostics_for_admins(self):
+        update = _make_message_update(chat_id=300)
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", set()),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+        ):
+            asyncio.run(help_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("/searchstatus показывает диагностику Download Station, поиска и интеграций", text)
+        self.assertIn("/users управляет доступом пользователей", text)
 
 
 # ---------------------------------------------------------------------------

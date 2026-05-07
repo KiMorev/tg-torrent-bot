@@ -30,6 +30,7 @@ from access_control import (
 )
 from app_context import build_app_context
 from config import load_settings, parse_chat_ids
+from diagnostics import friendly_error as _friendly_error, format_diagnostics, run_diagnostics
 from download_station import DownloadStationError
 from formatters import (
     _extract_season_from_query,
@@ -1082,78 +1083,26 @@ def _build_search_query(base: str, settings: dict) -> str:
     return " ".join(parts)
 
 
-def _friendly_error(service: str, raw: str) -> str:
-    """Return an HTML-formatted user-friendly error string.
-
-    Shows a brief human-readable summary as the visible line and hides raw
-    technical details inside a Telegram ``<blockquote expandable>`` block
-    (supported since Bot API 7.4 / Telegram 10.6).
-    ``service`` is ``"rutracker"`` or ``"jackett"``.
-    """
-    rl = raw.lower()
-    if service == "rutracker":
-        name = "<b>Rutracker</b>"
-        if "запускается" in rl:
-            return f"⏱ {name}: ещё запускается"
-        if "captcha" in rl or "капч" in rl:
-            head = f"🤖 {name}: требуется капча"
-        elif "авторизация не удалась" in rl or "username" in rl or "password" in rl:
-            head = f"🔑 {name}: ошибка авторизации — проверьте настройки"
-        else:
-            head = f"❌ {name}: недоступен"
-    else:
-        name = "🌐 <b>Jackett</b>"
-        if "запускается" in rl:
-            return f"{name}: ⏱ ещё запускается — подождите ~1 мин"
-        if "неверный" in rl or "api-ключ" in rl:
-            return f"{name}: 🔑 неверный API-ключ — проверьте настройки"
-        if "страницу входа" in rl or "не принят" in rl:
-            head = f"{name}: 🔑 API ключ не принят — проверьте <code>JACKETT_API_KEY</code>"
-        else:
-            head = f"{name}: ❌ недоступен"
-    return f"{head}\n<blockquote expandable>{html_module.escape(raw)}</blockquote>"
-
-
 async def search_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin-only: диагностика соединения с Rutracker и Jackett."""
+    """Admin-only: диагностика внешних сервисов бота."""
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not _is_admin_chat(chat_id):
         return
 
     msg = await update.message.reply_text("🔍 Проверяю соединение…")
-    lines: list[str] = []
+    report = await asyncio.to_thread(
+        run_diagnostics,
+        rutracker_client=rutracker_client,
+        jackett_client=jackett_client,
+        ds_client=ds_client,
+        tracker_service=_tracker_service(),
+        display_timezone=DISPLAY_TIMEZONE,
+        kinopoisk_enabled=KINOPOISK_ENABLED,
+        plex_enabled=PLEX_ENABLED,
+        plex_url=PLEX_URL,
+    )
 
-    if rutracker_client:
-        try:
-            status = await asyncio.to_thread(rutracker_client.diagnose)
-        except Exception as e:
-            lines.append(_friendly_error("rutracker", str(e)))
-            status = None
-
-        if status is not None:
-            if status["login_ok"]:
-                lines.append("✅ <b>Rutracker</b>: подключен")
-            else:
-                lines.append(_friendly_error("rutracker", status["error"]))
-    else:
-        lines.append("⛔ <b>Rutracker</b>: не настроен — задайте RUTRACKER_USERNAME в .env")
-
-    if jackett_client:
-        diag = await asyncio.to_thread(jackett_client.test_connection)
-        if diag["api_ok"]:
-            indexer_names = [i["name"] if isinstance(i, dict) else i for i in diag["indexers"]]
-            indexer_list = ", ".join(indexer_names[:10]) or "нет"
-            if len(indexer_names) > 10:
-                indexer_list += f" (+{len(indexer_names) - 10})"
-            lines.append(f"\n🌐 <b>Jackett</b>: ✅ подключен")
-            lines.append(f"   Индексеры: {html_module.escape(indexer_list)}")
-        else:
-            error = diag.get("error", "Неизвестная ошибка")
-            lines.append("\n" + _friendly_error("jackett", error))
-    else:
-        lines.append("\n🌐 <b>Jackett</b>: не настроен")
-
-    await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    await msg.edit_text(format_diagnostics(report), parse_mode="HTML")
 
 
 async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2448,7 +2397,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply_access_pending(update, context)
         return
 
-    if RUTRACKER_ENABLED:
+    if RUTRACKER_ENABLED or JACKETT_ENABLED:
         kp_hint = " или ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
         search_hint = f"Напишите название фильма{kp_hint} — бот найдёт торрент сам.\n"
     else:
@@ -2467,14 +2416,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _reply_access_pending(update, context)
         return
 
-    if RUTRACKER_ENABLED:
+    if RUTRACKER_ENABLED or JACKETT_ENABLED:
         kp_hint = " или вставьте ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
+        source_hint = "по Rutracker" if RUTRACKER_ENABLED else "через Jackett"
         search_lines = (
-            f"- напишите название фильма/сериала{kp_hint} — сразу откроется поиск по Rutracker;\n"
+            f"- напишите название фильма/сериала{kp_hint} — сразу откроется поиск {source_hint};\n"
             "- /search тоже работает как альтернативная точка входа;\n"
         )
     else:
         search_lines = ""
+    admin_lines = ""
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if _is_admin_chat(chat_id):
+        admin_lines = (
+            "- /users управляет доступом пользователей;\n"
+            "- /searchstatus показывает диагностику Download Station, поиска и интеграций;\n"
+        )
     await update.message.reply_text(
         "Что умею:\n"
         "- принимаю .torrent файлы;\n"
@@ -2487,6 +2444,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- даю кнопки управления задачами: обновить статус, пауза, запуск, удаление;\n"
         "- могу удалить завершенные задачи из списка вручную или автоматически;\n"
         f"{search_lines}"
+        f"{admin_lines}"
         "\n/id показывает chat_id. Новые пользователи могут написать /start, а админ разрешит доступ кнопкой."
     )
 
@@ -3127,7 +3085,7 @@ async def setup_bot_commands(app: Application) -> None:
         commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
         BotCommand("users", "Управление доступом пользователей"),
-        BotCommand("searchstatus", "Проверка соединения с Rutracker"),
+        BotCommand("searchstatus", "Диагностика поиска и интеграций"),
     ]
     for admin_id in ADMIN_CHAT_IDS:
         try:
