@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -49,7 +50,14 @@ def _synchronized(method):
 
 
 class RutrackerClient:
-    def __init__(self, username: str, password: str, max_results: int = 10) -> None:
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        max_results: int = 10,
+        backoff_base_seconds: float = 60.0,
+        backoff_max_seconds: float = 900.0,
+    ) -> None:
         self._username = username
         self._password = password
         self._max_results = max_results
@@ -57,6 +65,11 @@ class RutrackerClient:
         self._session = requests.Session()
         self._session.headers.update(_HEADERS)
         self._logged_in = False
+        self._backoff_base_seconds = backoff_base_seconds
+        self._backoff_max_seconds = backoff_max_seconds
+        self._backoff_current_seconds = 0.0
+        self._cooldown_until = 0.0
+        self._cooldown_reason = ""
 
     # ------------------------------------------------------------------
     # Page classification helpers
@@ -89,6 +102,7 @@ class RutrackerClient:
 
     @_synchronized
     def login(self) -> None:
+        self._check_cooldown()
         try:
             resp = self._session.post(
                 _LOGIN_URL,
@@ -102,20 +116,28 @@ class RutrackerClient:
             )
             resp.raise_for_status()
         except requests.RequestException as e:
-            raise RutrackerError(f"Не удалось подключиться к rutracker: {e}") from e
+            status_code = self._http_status_from_exception(e)
+            if status_code in (403, 503):
+                self._raise_with_backoff(
+                    f"Rutracker вернул HTTP {status_code} при авторизации.",
+                    f"HTTP {status_code}",
+                )
+            self._raise_with_backoff(f"Не удалось подключиться к rutracker: {e}", "сетевая ошибка")
 
         if "bb_session" not in self._session.cookies:
             if self._has_captcha(resp.text):
-                raise RutrackerError(
+                self._raise_with_backoff(
                     "Rutracker требует решения капчи.\n"
                     "Войдите на rutracker.org в браузере с этого IP, "
-                    "решите капчу вручную, затем попробуйте снова."
+                    "решите капчу вручную, затем попробуйте снова.",
+                    "капча",
                 )
             raise RutrackerError(
                 "Авторизация не удалась. Проверьте логин/пароль в настройках бота."
             )
 
         self._logged_in = True
+        self._clear_backoff()
         logger.info("Rutracker login successful")
 
     def _ensure_logged_in(self) -> None:
@@ -124,6 +146,47 @@ class RutrackerClient:
 
     def _is_login_page(self, html: str) -> bool:
         return "login_username" in html.lower()
+
+    def _cooldown_remaining_seconds(self) -> int:
+        remaining = self._cooldown_until - time.monotonic()
+        return max(0, int(remaining + 0.999))
+
+    def _check_cooldown(self) -> None:
+        remaining = self._cooldown_remaining_seconds()
+        if remaining <= 0:
+            return
+
+        reason = f" Причина: {self._cooldown_reason}." if self._cooldown_reason else ""
+        raise RutrackerError(
+            f"Rutracker временно на паузе после недавней ошибки.{reason} "
+            f"Повторите запрос примерно через {remaining} сек."
+        )
+
+    def _clear_backoff(self) -> None:
+        self._backoff_current_seconds = 0.0
+        self._cooldown_until = 0.0
+        self._cooldown_reason = ""
+
+    def _set_backoff(self, reason: str) -> int:
+        if self._backoff_current_seconds <= 0:
+            delay = self._backoff_base_seconds
+        else:
+            delay = min(self._backoff_current_seconds * 2, self._backoff_max_seconds)
+
+        self._backoff_current_seconds = delay
+        self._cooldown_until = time.monotonic() + delay
+        self._cooldown_reason = reason
+        return int(delay + 0.999)
+
+    def _raise_with_backoff(self, user_message: str, reason: str) -> None:
+        delay = self._set_backoff(reason)
+        raise RutrackerError(f"{user_message}\nПовтор к Rutracker отложен примерно на {delay} сек.")
+
+    @staticmethod
+    def _http_status_from_exception(error: requests.RequestException) -> int | None:
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        return status_code if isinstance(status_code, int) else None
 
     # ------------------------------------------------------------------
     # Diagnostics
@@ -150,6 +213,14 @@ class RutrackerClient:
             "error": "",
         }
 
+        cooldown_remaining = self._cooldown_remaining_seconds()
+        if cooldown_remaining > 0:
+            result["error"] = (
+                "Rutracker временно на паузе после недавней ошибки"
+                f" ({self._cooldown_reason}). Повтор примерно через {cooldown_remaining} сек."
+            )
+            return result
+
         # Step 1 — can we reach the server at all?
         try:
             idx = self._session.get(_INDEX_URL, timeout=10, allow_redirects=True)
@@ -157,16 +228,20 @@ class RutrackerClient:
             result["http_status"] = idx.status_code
             result["page_type"] = self._page_type(idx.text, idx.status_code)
         except requests.ConnectionError as e:
+            self._set_backoff("нет соединения")
             result["error"] = f"Нет соединения с rutracker.org: {e}"
             return result
         except requests.Timeout:
+            self._set_backoff("таймаут")
             result["error"] = "Таймаут при подключении к rutracker.org (>10 сек)"
             return result
         except requests.RequestException as e:
+            self._set_backoff("сетевая ошибка")
             result["error"] = f"Сетевая ошибка: {e}"
             return result
 
         if result["http_status"] in (403, 503):
+            self._set_backoff(f"HTTP {result['http_status']}")
             result["error"] = (
                 f"Rutracker вернул HTTP {result['http_status']} — "
                 "возможно, IP сервера заблокирован или сработала защита Cloudflare."
@@ -188,6 +263,7 @@ class RutrackerClient:
             )
             login_resp.raise_for_status()
         except requests.RequestException as e:
+            self._set_backoff("ошибка авторизации")
             result["error"] = f"Ошибка при отправке запроса авторизации: {e}"
             return result
 
@@ -196,10 +272,12 @@ class RutrackerClient:
         if "bb_session" in self._session.cookies:
             result["login_ok"] = True
             self._logged_in = True
+            self._clear_backoff()
             return result
 
         # Login failed — figure out why
         if self._has_captcha(login_html):
+            self._set_backoff("капча")
             result["captcha"] = True
             result["error"] = (
                 "Rutracker требует решения капчи. "
@@ -216,6 +294,7 @@ class RutrackerClient:
 
     @_synchronized
     def search(self, query: str) -> list[RutrackerResult]:
+        self._check_cooldown()
         self._ensure_logged_in()
 
         try:
@@ -227,7 +306,14 @@ class RutrackerClient:
             resp.raise_for_status()
             html = resp.text
         except requests.RequestException as e:
-            raise RutrackerError(f"Ошибка поиска на rutracker: {e}") from e
+            status_code = self._http_status_from_exception(e)
+            reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка поиска"
+            self._raise_with_backoff(f"Ошибка поиска на rutracker: {e}", reason)
+
+        page_type = self._page_type(html, resp.status_code)
+        if page_type in ("captcha", "blocked"):
+            reason = "капча" if page_type == "captcha" else f"HTTP {resp.status_code}"
+            self._raise_with_backoff("Rutracker временно не готов выполнять поиск.", reason)
 
         if self._is_login_page(html):
             logger.info("Rutracker session expired, re-logging in")
@@ -238,9 +324,18 @@ class RutrackerClient:
                 resp.raise_for_status()
                 html = resp.text
             except requests.RequestException as e:
-                raise RutrackerError(f"Ошибка поиска на rutracker: {e}") from e
+                status_code = self._http_status_from_exception(e)
+                reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка поиска"
+                self._raise_with_backoff(f"Ошибка поиска на rutracker: {e}", reason)
 
-        return self._parse_search_results(html)
+            page_type = self._page_type(html, resp.status_code)
+            if page_type in ("captcha", "blocked"):
+                reason = "капча" if page_type == "captcha" else f"HTTP {resp.status_code}"
+                self._raise_with_backoff("Rutracker временно не готов выполнять поиск.", reason)
+
+        results = self._parse_search_results(html)
+        self._clear_backoff()
+        return results
 
     def _parse_search_results(self, html: str) -> list[RutrackerResult]:
         soup = BeautifulSoup(html, "html.parser")
@@ -294,6 +389,7 @@ class RutrackerClient:
 
     @_synchronized
     def download_torrent(self, topic_id: str) -> bytes:
+        self._check_cooldown()
         self._ensure_logged_in()
 
         try:
@@ -304,7 +400,14 @@ class RutrackerClient:
             )
             resp.raise_for_status()
         except requests.RequestException as e:
-            raise RutrackerError(f"Не удалось скачать torrent-файл: {e}") from e
+            status_code = self._http_status_from_exception(e)
+            reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка скачивания"
+            self._raise_with_backoff(f"Не удалось скачать torrent-файл: {e}", reason)
+
+        page_type = self._page_type(resp.text[:1000] if resp.content[:3] != b"d8:" else "", resp.status_code)
+        if page_type in ("captcha", "blocked"):
+            reason = "капча" if page_type == "captcha" else f"HTTP {resp.status_code}"
+            self._raise_with_backoff("Rutracker временно не готов отдавать torrent-файл.", reason)
 
         if self._is_login_page(resp.text[:500] if resp.content[:3] != b"d8:" else ""):
             self._logged_in = False
@@ -313,11 +416,19 @@ class RutrackerClient:
                 resp = self._session.get(_DOWNLOAD_URL, params={"t": topic_id}, timeout=30)
                 resp.raise_for_status()
             except requests.RequestException as e:
-                raise RutrackerError(f"Не удалось скачать torrent-файл: {e}") from e
+                status_code = self._http_status_from_exception(e)
+                reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка скачивания"
+                self._raise_with_backoff(f"Не удалось скачать torrent-файл: {e}", reason)
+
+            page_type = self._page_type(resp.text[:1000] if resp.content[:3] != b"d8:" else "", resp.status_code)
+            if page_type in ("captcha", "blocked"):
+                reason = "капча" if page_type == "captcha" else f"HTTP {resp.status_code}"
+                self._raise_with_backoff("Rutracker временно не готов отдавать torrent-файл.", reason)
 
         if len(resp.content) < 20 or not resp.content.startswith(b"d"):
             raise RutrackerError("Полученный файл не является torrent-файлом.")
 
+        self._clear_backoff()
         return resp.content
 
     @_synchronized
@@ -370,6 +481,7 @@ class RutrackerClient:
     @_synchronized
     def get_topic_title(self, topic_id: str) -> str:
         """Fetch the current title of a topic page (for subscription update checks)."""
+        self._check_cooldown()
         self._ensure_logged_in()
 
         try:
@@ -381,7 +493,14 @@ class RutrackerClient:
             resp.raise_for_status()
             html = resp.text
         except requests.RequestException as e:
-            raise RutrackerError(f"Не удалось получить страницу темы: {e}") from e
+            status_code = self._http_status_from_exception(e)
+            reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка страницы темы"
+            self._raise_with_backoff(f"Не удалось получить страницу темы: {e}", reason)
+
+        page_type = self._page_type(html, resp.status_code)
+        if page_type in ("captcha", "blocked"):
+            reason = "капча" if page_type == "captcha" else f"HTTP {resp.status_code}"
+            self._raise_with_backoff("Rutracker временно не готов отдавать страницу темы.", reason)
 
         if self._is_login_page(html):
             self._logged_in = False
@@ -391,11 +510,19 @@ class RutrackerClient:
                 resp.raise_for_status()
                 html = resp.text
             except requests.RequestException as e:
-                raise RutrackerError(f"Не удалось получить страницу темы: {e}") from e
+                status_code = self._http_status_from_exception(e)
+                reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка страницы темы"
+                self._raise_with_backoff(f"Не удалось получить страницу темы: {e}", reason)
+
+            page_type = self._page_type(html, resp.status_code)
+            if page_type in ("captcha", "blocked"):
+                reason = "капча" if page_type == "captcha" else f"HTTP {resp.status_code}"
+                self._raise_with_backoff("Rutracker временно не готов отдавать страницу темы.", reason)
 
         soup = BeautifulSoup(html, "html.parser")
         tag = soup.select_one("h1.maintitle a") or soup.select_one("h1.maintitle")
         if tag:
+            self._clear_backoff()
             return tag.get_text(strip=True)
 
         raise RutrackerError(f"Не удалось найти заголовок темы {topic_id}")
