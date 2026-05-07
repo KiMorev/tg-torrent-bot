@@ -1,6 +1,7 @@
 import json
 import logging
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -25,6 +26,14 @@ class DownloadStationError(RuntimeError):
     pass
 
 
+def _synchronized(method):
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class DownloadStationClient:
     def __init__(
         self,
@@ -43,6 +52,7 @@ class DownloadStationClient:
         self.ssl_context = None if verify_ssl else ssl._create_unverified_context()
         self.retry_attempts = max(1, retry_attempts)
         self.retry_delay = max(0.0, retry_delay)
+        self._lock = threading.RLock()
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -172,6 +182,7 @@ class DownloadStationClient:
         except DownloadStationError:
             logger.warning("Download Station logout failed", exc_info=True)
 
+    @_synchronized
     def create_magnet(self, magnet_uri: str) -> str:
         sid = self._login()
         try:
@@ -195,6 +206,7 @@ class DownloadStationClient:
         finally:
             self._logout(sid)
 
+    @_synchronized
     def create_torrent_file(self, file_path: Path, filename: str) -> str:
         sid = self._login()
         try:
@@ -224,18 +236,23 @@ class DownloadStationClient:
         finally:
             self._logout(sid)
 
+    @_synchronized
     def resume_task(self, task_id: str, sid: str | None = None, raise_on_error: bool = True) -> None:
         self._task_action("resume", task_id, sid=sid, raise_on_error=raise_on_error)
 
+    @_synchronized
     def pause_task(self, task_id: str, sid: str | None = None, raise_on_error: bool = True) -> None:
         self._task_action("pause", task_id, sid=sid, raise_on_error=raise_on_error)
 
+    @_synchronized
     def delete_task(self, task_id: str) -> None:
         self._task_action("delete", task_id)
 
+    @_synchronized
     def delete_tasks(self, task_ids: list[str]) -> None:
         self._tasks_action("delete", task_ids)
 
+    @_synchronized
     def list_task_trackers(self, task_id: str) -> list[str]:
         sid = self._login()
         try:
@@ -261,6 +278,7 @@ class DownloadStationClient:
 
         return trackers
 
+    @_synchronized
     def add_task_trackers(self, task_id: str, trackers: list[str]) -> None:
         if not trackers:
             return
@@ -325,6 +343,7 @@ class DownloadStationClient:
             if own_sid:
                 self._logout(sid)
 
+    @_synchronized
     def list_tasks(self) -> list[dict]:
         sid = self._login()
         try:

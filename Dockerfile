@@ -13,7 +13,7 @@ RUN pip install \
     --index-url https://pypi.org/simple \
     -r requirements.txt
 
-COPY app_context.py bot.py config.py download_station.py state_store.py rutracker.py kinopoisk.py jackett.py formatters.py keyboards.py ./
+COPY app_context.py bot.py config.py download_station.py state_store.py rutracker.py kinopoisk.py jackett.py formatters.py keyboards.py torrent_utils.py ./
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c "import os, sys; sys.exit(0 if os.path.exists('/proc/1/status') else 1)"

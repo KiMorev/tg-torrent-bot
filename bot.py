@@ -4,15 +4,12 @@ import json
 import logging
 import os
 import re
-import secrets
 import time
-import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LinkPreviewOptions, Update
@@ -89,6 +86,20 @@ from keyboards import (
 from jackett import JackettError, JackettResult
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from rutracker import RutrackerError, RutrackerResult
+from torrent_utils import (
+    RawBencode,
+    bdecode_torrent as _bdecode_torrent,
+    bdecode_value as _bdecode_value,
+    find_magnet as _find_magnet,
+    find_magnet_task_id as _find_magnet_task_id,
+    looks_like_torrent as _looks_like_torrent,
+    magnet_info_hash as _magnet_info_hash,
+    safe_filename as _safe_filename,
+    task_matches_magnet as _task_matches_magnet,
+    temp_path as _make_temp_path,
+    torrent_file_is_private as _torrent_file_is_private,
+    torrent_is_private as _torrent_is_private,
+)
 
 
 settings = load_settings()
@@ -148,8 +159,6 @@ JACKETT_INDEXERS = settings.jackett_indexers
 JACKETT_MAX_RESULTS = settings.jackett_max_results
 JACKETT_FETCH_LIMIT = settings.jackett_fetch_limit
 
-SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
-MAGNET_RE = re.compile(r"magnet:\?[^\s<>\"]+", re.IGNORECASE)
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_QUERY, SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(6)
 BOT_COMMANDS = [
@@ -180,10 +189,6 @@ class TrackerApplyResult:
     cache_time: float | None = None
     skipped_reason: str = ""
 
-
-class RawBencode:
-    def __init__(self, data: bytes) -> None:
-        self.data = data
 
 logging.basicConfig(
     level=settings.log_level,
@@ -307,38 +312,8 @@ async def _reply_access_pending(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 
-def _safe_filename(name: str) -> str:
-    name = (name or "download.torrent").strip()
-    name = SAFE_NAME.sub("_", name)
-
-    if not name.lower().endswith(".torrent"):
-        name += ".torrent"
-
-    return name[:200]
-
-
 def _temp_path(filename: str) -> Path:
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_hex(6)
-    return TMP_DIR / f"{int(time.time())}_{token}_{filename}"
-
-
-def _looks_like_torrent(path: Path) -> bool:
-    try:
-        with path.open("rb") as file:
-            header = file.read(16)
-    except OSError:
-        return False
-
-    return header.startswith(b"d")
-
-
-def _find_magnet(text: str) -> str | None:
-    match = MAGNET_RE.search(text or "")
-    if not match:
-        return None
-
-    return match.group(0).rstrip(".,)")
+    return _make_temp_path(TMP_DIR, filename)
 
 
 def _public_trackers_enabled() -> bool:
@@ -617,120 +592,6 @@ async def _background_monitor_loop(app: Application) -> None:
     except asyncio.CancelledError:
         logger.info("Background monitor stopped")
         raise
-
-
-def _bdecode_value(data: bytes, index: int = 0) -> tuple[Any, int]:
-    if index >= len(data):
-        raise ValueError("unexpected end of bencode data")
-
-    marker = data[index:index + 1]
-    if marker == b"i":
-        end = data.index(b"e", index)
-        return int(data[index + 1:end]), end + 1
-    if marker == b"l":
-        index += 1
-        values = []
-        while data[index:index + 1] != b"e":
-            value, index = _bdecode_value(data, index)
-            values.append(value)
-        return values, index + 1
-    if marker == b"d":
-        index += 1
-        values = {}
-        while data[index:index + 1] != b"e":
-            key, index = _bdecode_value(data, index)
-            value, index = _bdecode_value(data, index)
-            values[key] = value
-        return values, index + 1
-    if marker.isdigit():
-        separator = data.index(b":", index)
-        length = int(data[index:separator])
-        start = separator + 1
-        end = start + length
-        return data[start:end], end
-
-    raise ValueError(f"unexpected bencode marker {marker!r}")
-
-
-def _bdecode_torrent(data: bytes) -> tuple[dict[bytes, Any], dict[bytes, Any] | None]:
-    if not data.startswith(b"d"):
-        raise ValueError("torrent root must be a dictionary")
-
-    index = 1
-    root: dict[bytes, Any] = {}
-    parsed_info = None
-
-    while index < len(data) and data[index:index + 1] != b"e":
-        key, index = _bdecode_value(data, index)
-        if not isinstance(key, bytes):
-            raise ValueError("torrent dictionary key must be bytes")
-
-        value_start = index
-        value, index = _bdecode_value(data, index)
-        if key == b"info":
-            parsed_info = value if isinstance(value, dict) else None
-            root[key] = RawBencode(data[value_start:index])
-        else:
-            root[key] = value
-
-    if index >= len(data) or data[index:index + 1] != b"e":
-        raise ValueError("unterminated torrent dictionary")
-
-    return root, parsed_info
-
-
-def _torrent_is_private(parsed_info: dict[bytes, Any] | None) -> bool:
-    return bool(isinstance(parsed_info, dict) and parsed_info.get(b"private") == 1)
-
-
-def _torrent_file_is_private(path: Path) -> bool:
-    try:
-        _, parsed_info = _bdecode_torrent(path.read_bytes())
-    except Exception:
-        logger.warning("Failed to parse torrent privacy flag: %s", path, exc_info=True)
-        return False
-
-    return _torrent_is_private(parsed_info)
-
-
-def _magnet_info_hash(magnet_uri: str) -> str:
-    parsed = urllib.parse.urlparse(magnet_uri)
-    query = urllib.parse.parse_qs(parsed.query)
-    for value in query.get("xt", []):
-        prefix = "urn:btih:"
-        if value.lower().startswith(prefix):
-            return value[len(prefix):].lower()
-
-    return ""
-
-
-def _task_matches_magnet(task: dict, magnet_uri: str) -> bool:
-    info_hash = _magnet_info_hash(magnet_uri)
-    if not info_hash:
-        return False
-
-    task_text = json.dumps(task, ensure_ascii=False).lower()
-    return info_hash in task_text
-
-
-def _find_magnet_task_id(tasks: list[dict], magnet_uri: str, known_task_ids: set[str]) -> str:
-    for task in tasks:
-        task_id = task.get("id")
-        if task_id and task_id not in known_task_ids and _task_matches_magnet(task, magnet_uri):
-            return task_id
-
-    for task in tasks:
-        task_id = task.get("id")
-        if task_id and _task_matches_magnet(task, magnet_uri):
-            return task_id
-
-    if known_task_ids:
-        for task in tasks:
-            task_id = task.get("id")
-            if task_id and task_id not in known_task_ids:
-                return task_id
-
-    return ""
 
 
 def _format_updated_at() -> str:
