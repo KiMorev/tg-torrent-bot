@@ -225,11 +225,11 @@ def _final_notification_keyboard(
     task_id: str,
     *,
     show_plex: bool = False,
-    plex_url: str = "https://app.plex.tv",
+    plex_url: str = "plex://",
 ) -> InlineKeyboardMarkup:
     rows = []
     if show_plex:
-        rows.append([InlineKeyboardButton("▶️ Открыть Plex", url=plex_url)])
+        rows.append([InlineKeyboardButton("▶️ Открыть Plex (iOS)", url=plex_url)])
     rows.append([InlineKeyboardButton("🧹 Удалить из списка", callback_data=_task_callback("delete_ask", task_id))])
     rows.append([InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))])
     return InlineKeyboardMarkup(rows)

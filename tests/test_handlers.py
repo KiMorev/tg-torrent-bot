@@ -32,6 +32,7 @@ from bot import (
     _cancel_task_card_refresh,
     _is_admin_chat,
     _is_allowed,
+    _notification_keyboard,
     _start_task_card_refresh,
     _task_card_refresh_loop,
     admin_callback,
@@ -275,6 +276,29 @@ class AdminPanelTests(unittest.TestCase):
         update.callback_query.answer.assert_called_once()
         update.callback_query.edit_message_text.assert_called_once()
         self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "diag text")
+
+
+# ---------------------------------------------------------------------------
+# notification keyboard tests
+# ---------------------------------------------------------------------------
+
+
+class NotificationKeyboardTests(unittest.TestCase):
+    def _labels(self, keyboard):
+        return [button.text for row in keyboard.inline_keyboard for button in row]
+
+    def test_plex_button_appears_only_for_final_download_statuses(self):
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "PLEX_URL", "plex://"),
+        ):
+            finished_labels = self._labels(_notification_keyboard("tid1", "finished", "bt"))
+            seeding_labels = self._labels(_notification_keyboard("tid1", "seeding", "bt"))
+            error_labels = self._labels(_notification_keyboard("tid1", "error", "bt"))
+
+        self.assertIn("▶️ Открыть Plex (iOS)", finished_labels)
+        self.assertIn("▶️ Открыть Plex (iOS)", seeding_labels)
+        self.assertNotIn("▶️ Открыть Plex (iOS)", error_labels)
 
 
 # ---------------------------------------------------------------------------

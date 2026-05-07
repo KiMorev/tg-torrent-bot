@@ -73,8 +73,8 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.max_torrent_file_bytes, 20 * 1024 * 1024)
         self.assertEqual(settings.trackers_background_interval_seconds, 180)
         self.assertEqual(settings.approved_chat_ids_file, Path("/tmp/tg_torrent_drop/approved_chat_ids.json"))
-        self.assertFalse(settings.plex_enabled)
-        self.assertEqual(settings.plex_url, "https://app.plex.tv")
+        self.assertTrue(settings.plex_enabled)
+        self.assertEqual(settings.plex_url, "plex://")
 
     def test_load_settings_accepts_overrides_and_clamps_values(self) -> None:
         env = {

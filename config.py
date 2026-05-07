@@ -203,8 +203,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         rutracker_max_results=max(1, min(50, env_int(env, "RUTRACKER_MAX_RESULTS", 50))),
         kinopoisk_api_key=env.get("KINOPOISK_API_KEY", "").strip(),
         kinopoisk_enabled=bool(env.get("KINOPOISK_API_KEY", "").strip()),
-        plex_enabled=env_bool(env, "PLEX_ENABLED", False),
-        plex_url=(env.get("PLEX_URL", "https://app.plex.tv").strip() or "https://app.plex.tv"),
+        plex_enabled=env_bool(env, "PLEX_ENABLED", True),
+        plex_url=(env.get("PLEX_URL", "plex://").strip() or "plex://"),
         topic_subscriptions_file=Path(
             env.get("TOPIC_SUBSCRIPTIONS_FILE", str(state_dir / "topic_subscriptions.json"))
         ),

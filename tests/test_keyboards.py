@@ -12,14 +12,21 @@ class KeyboardTests(unittest.TestCase):
         )
 
         plex_button = keyboard.inline_keyboard[0][0]
-        self.assertEqual(plex_button.text, "▶️ Открыть Plex")
+        self.assertEqual(plex_button.text, "▶️ Открыть Plex (iOS)")
         self.assertEqual(plex_button.url, "https://example.com/plex")
 
     def test_final_notification_keyboard_hides_plex_button_when_disabled(self) -> None:
         keyboard = _final_notification_keyboard("tid1", show_plex=False)
 
         labels = [button.text for row in keyboard.inline_keyboard for button in row]
-        self.assertNotIn("▶️ Открыть Plex", labels)
+        self.assertNotIn("▶️ Открыть Plex (iOS)", labels)
+
+    def test_final_notification_keyboard_defaults_to_ios_plex_scheme(self) -> None:
+        keyboard = _final_notification_keyboard("tid1", show_plex=True)
+
+        plex_button = keyboard.inline_keyboard[0][0]
+        self.assertEqual(plex_button.text, "▶️ Открыть Plex (iOS)")
+        self.assertEqual(plex_button.url, "plex://")
 
     def test_admin_panel_keyboard_links_core_sections(self) -> None:
         keyboard = _admin_panel_keyboard()
