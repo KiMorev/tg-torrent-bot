@@ -92,6 +92,13 @@ from keyboards import (
 from jackett import JackettError, JackettResult
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from rutracker import RutrackerError, RutrackerResult
+from task_policies import (
+    auto_delete_notice as _policy_auto_delete_notice,
+    format_task_notification as _policy_format_task_notification,
+    is_auto_delete_candidate as _policy_is_auto_delete_candidate,
+    notification_recipients as _policy_notification_recipients,
+    notification_status_key as _policy_notification_status_key,
+)
 from torrent_utils import (
     RawBencode,
     bdecode_torrent as _bdecode_torrent,
@@ -796,69 +803,35 @@ def _explicit_notification_chat_ids() -> set[int]:
 
 
 def _notification_recipients(task_id: str) -> set[int]:
-    explicit_chat_ids = _explicit_notification_chat_ids()
-    if explicit_chat_ids:
-        return explicit_chat_ids
-
-    owner_chat_id = _load_task_owners().get(task_id)
-    if owner_chat_id:
-        return {owner_chat_id}
-
-    if TASK_NOTIFY_EXTERNAL_TASKS:
-        return _all_allowed_chat_ids()
-
-    return set()
+    return _policy_notification_recipients(
+        task_id,
+        explicit_chat_ids=_explicit_notification_chat_ids(),
+        task_owners=_load_task_owners(),
+        notify_external_tasks=TASK_NOTIFY_EXTERNAL_TASKS,
+        fallback_chat_ids=_all_allowed_chat_ids(),
+    )
 
 
 def _notification_status_key(status: str) -> str:
-    if status in {"finished", "seeding"}:
-        return "done"
-    if status == "error":
-        return "error"
-
-    return status
+    return _policy_notification_status_key(status)
 
 
 def _auto_delete_notice(status: str) -> str:
-    if not _auto_delete_finished_enabled():
-        return ""
-    if (status or "").lower() not in AUTO_DELETE_FINISHED_STATUSES:
-        return ""
-
-    return f"Автоочистка: через {_format_hours(AUTO_DELETE_FINISHED_AFTER_HOURS)}."
+    return _policy_auto_delete_notice(
+        status,
+        enabled=_auto_delete_finished_enabled(),
+        finished_statuses=AUTO_DELETE_FINISHED_STATUSES,
+        delete_after_hours=AUTO_DELETE_FINISHED_AFTER_HOURS,
+    )
 
 
 def _format_task_notification(task: dict) -> str:
-    title = task.get("title") or task.get("id") or "без названия"
-    task_id = task.get("id") or "unknown"
-    status = task.get("status", "unknown")
-    transfer = task.get("additional", {}).get("transfer", {})
-    progress = _format_progress(transfer.get("size_downloaded"), task.get("size"))
-    speed = _format_size(transfer.get("speed_download"))
-
-    if (status or "").lower() == "finished":
-        header = "✅ Загрузка завершена"
-    elif (status or "").lower() == "seeding":
-        header = "✅ Загрузка завершена, идет раздача"
-    elif (status or "").lower() == "error":
-        header = "⚠️ Загрузка остановилась с ошибкой"
-    else:
-        header = f"{_status_icon(status)} Статус загрузки изменился"
-
-    lines = [
-        header,
-        f"Имя: {title}",
-        f"ID: {task_id}",
-        f"Статус: {_status_label(status)}",
-        f"Скачано: {progress}",
-        f"Скорость: {speed}/s",
-    ]
-
-    auto_delete_notice = _auto_delete_notice(status)
-    if auto_delete_notice:
-        lines.append(auto_delete_notice)
-
-    return "\n".join(lines)
+    return _policy_format_task_notification(
+        task,
+        auto_delete_enabled=_auto_delete_finished_enabled(),
+        auto_delete_statuses=AUTO_DELETE_FINISHED_STATUSES,
+        auto_delete_after_hours=AUTO_DELETE_FINISHED_AFTER_HOURS,
+    )
 
 
 async def _run_task_notifications_once(app: Application) -> None:
@@ -913,9 +886,7 @@ async def _run_task_notifications_once(app: Application) -> None:
 
 
 def _is_auto_delete_candidate(task: dict) -> bool:
-    task_id = task.get("id")
-    status = (task.get("status") or "").lower()
-    return bool(task_id and status in AUTO_DELETE_FINISHED_STATUSES)
+    return _policy_is_auto_delete_candidate(task, AUTO_DELETE_FINISHED_STATUSES)
 
 
 async def _run_auto_delete_finished_once() -> None:
