@@ -27,8 +27,9 @@ from telegram.ext import (
     filters,
 )
 
+from app_context import build_app_context
 from config import load_settings, parse_chat_ids
-from download_station import DownloadStationClient, DownloadStationError
+from download_station import DownloadStationError
 from formatters import (
     _extract_season_from_query,
     _extract_series_base_query,
@@ -85,13 +86,13 @@ from keyboards import (
     _task_reply_markup,
     _tasks_keyboard,
 )
-from jackett import JackettClient, JackettError, JackettResult
-from kinopoisk import KinopoiskClient, KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
-from rutracker import RutrackerClient, RutrackerError, RutrackerResult
-from state_store import JsonStateStore
+from jackett import JackettError, JackettResult
+from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
+from rutracker import RutrackerError, RutrackerResult
 
 
 settings = load_settings()
+app_context = build_app_context(settings)
 
 BOT_TOKEN = settings.bot_token
 ALLOWED_CHAT_IDS = settings.allowed_chat_ids
@@ -214,39 +215,11 @@ def _display_timezone() -> timezone:
 DISPLAY_TIMEZONE = _display_timezone()
 
 
-ds_client = DownloadStationClient(
-    DS_URL,
-    DS_ACCOUNT,
-    DS_PASSWORD,
-    destination=DS_DESTINATION,
-    verify_ssl=DS_VERIFY_SSL,
-    retry_attempts=DS_RETRY_ATTEMPTS,
-    retry_delay=DS_RETRY_DELAY,
-)
-state_store = JsonStateStore(
-    approved_chat_ids_file=APPROVED_CHAT_IDS_FILE,
-    tracker_processed_file=TRACKERS_PROCESSED_FILE,
-    task_owners_file=TASK_OWNERS_FILE,
-    notified_tasks_file=NOTIFIED_TASKS_FILE,
-    auto_delete_tasks_file=AUTO_DELETE_TASKS_FILE,
-    topic_subscriptions_file=TOPIC_SUBSCRIPTIONS_FILE,
-)
-rutracker_client: RutrackerClient | None = (
-    RutrackerClient(RUTRACKER_USERNAME, RUTRACKER_PASSWORD, max_results=RUTRACKER_MAX_RESULTS)
-    if RUTRACKER_ENABLED else None
-)
-jackett_client: JackettClient | None = (
-    JackettClient(
-        JACKETT_URL, JACKETT_API_KEY,
-        max_results=JACKETT_MAX_RESULTS,
-        indexers=JACKETT_INDEXERS,
-    )
-    if JACKETT_ENABLED else None
-)
-kinopoisk_client: KinopoiskClient | None = (
-    KinopoiskClient(KINOPOISK_API_KEY)
-    if KINOPOISK_ENABLED else None
-)
+ds_client = app_context.ds_client
+state_store = app_context.state_store
+rutracker_client = app_context.rutracker_client
+jackett_client = app_context.jackett_client
+kinopoisk_client = app_context.kinopoisk_client
 
 def _load_approved_chat_ids() -> set[int]:
     return state_store.load_approved_chat_ids()

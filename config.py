@@ -55,6 +55,26 @@ def parse_statuses(raw: str) -> set[str]:
     return {status.strip().lower() for status in raw.split(",") if status.strip()}
 
 
+def optional_secret_pair(
+    env: Mapping[str, str],
+    first_name: str,
+    second_name: str,
+    service_name: str,
+    *,
+    strip_second: bool = True,
+) -> tuple[str, str, bool]:
+    first = env.get(first_name, "").strip()
+    raw_second = env.get(second_name, "")
+    second = raw_second.strip() if strip_second else raw_second
+
+    if bool(first) != bool(second):
+        raise RuntimeError(
+            f"{service_name} settings are incomplete: set both {first_name} and {second_name}, or leave both empty"
+        )
+
+    return first, second, bool(first and second)
+
+
 @dataclass(frozen=True)
 class AppSettings:
     bot_token: str
@@ -122,6 +142,19 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
     tmp_dir = Path(env.get("TMP_DIR", "/tmp/tg_torrent_drop"))
     state_dir = Path(env.get("STATE_DIR", str(tmp_dir)))
     max_torrent_file_mb = max(1, env_int(env, "MAX_TORRENT_FILE_MB", 20))
+    rutracker_username, rutracker_password, rutracker_enabled = optional_secret_pair(
+        env,
+        "RUTRACKER_USERNAME",
+        "RUTRACKER_PASSWORD",
+        "Rutracker",
+        strip_second=False,
+    )
+    jackett_url, jackett_api_key, jackett_enabled = optional_secret_pair(
+        env,
+        "JACKETT_URL",
+        "JACKETT_API_KEY",
+        "Jackett",
+    )
 
     return AppSettings(
         bot_token=bot_token,
@@ -163,9 +196,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         magnet_poll_interval_seconds=max(0.5, env_float(env, "MAGNET_POLL_INTERVAL_SECONDS", 1.5)),
         ds_retry_attempts=max(1, env_int(env, "DS_RETRY_ATTEMPTS", 3)),
         ds_retry_delay=max(0.0, env_float(env, "DS_RETRY_DELAY", 2.0)),
-        rutracker_username=env.get("RUTRACKER_USERNAME", "").strip(),
-        rutracker_password=env.get("RUTRACKER_PASSWORD", ""),
-        rutracker_enabled=bool(env.get("RUTRACKER_USERNAME", "").strip()),
+        rutracker_username=rutracker_username,
+        rutracker_password=rutracker_password,
+        rutracker_enabled=rutracker_enabled,
         rutracker_max_results=max(1, min(50, env_int(env, "RUTRACKER_MAX_RESULTS", 50))),
         kinopoisk_api_key=env.get("KINOPOISK_API_KEY", "").strip(),
         kinopoisk_enabled=bool(env.get("KINOPOISK_API_KEY", "").strip()),
@@ -174,9 +207,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
             env.get("TOPIC_SUBSCRIPTIONS_FILE", str(state_dir / "topic_subscriptions.json"))
         ),
         subscription_check_interval_hours=max(1, env_int(env, "SUBSCRIPTION_CHECK_INTERVAL_HOURS", 6)),
-        jackett_url=env.get("JACKETT_URL", "").strip().rstrip("/"),
-        jackett_api_key=env.get("JACKETT_API_KEY", "").strip(),
-        jackett_enabled=bool(env.get("JACKETT_URL", "").strip()),
+        jackett_url=jackett_url.rstrip("/"),
+        jackett_api_key=jackett_api_key,
+        jackett_enabled=jackett_enabled,
         jackett_indexers=(env.get("JACKETT_INDEXERS", "all").strip() or "all"),
         jackett_max_results=max(1, min(50, env_int(env, "JACKETT_MAX_RESULTS", 10))),
         jackett_fetch_limit=max(10, min(200, env_int(env, "JACKETT_FETCH_LIMIT", 50))),

@@ -2,6 +2,7 @@ import re
 import unittest
 from pathlib import Path
 
+from app_context import build_app_context
 from config import env_bool, env_float, env_int, load_settings, parse_chat_ids, parse_statuses
 
 
@@ -99,12 +100,64 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.auto_delete_finished_after_hours, 0.5)
         self.assertEqual(settings.task_owners_file, Path("/data/task_owners.json"))
 
+    def test_load_settings_enables_jackett_only_with_complete_credentials(self) -> None:
+        settings = load_settings({
+            **BASE_ENV,
+            "JACKETT_URL": "http://jackett.local:9117/",
+            "JACKETT_API_KEY": "secret",
+        })
+
+        self.assertTrue(settings.jackett_enabled)
+        self.assertEqual(settings.jackett_url, "http://jackett.local:9117")
+        self.assertEqual(settings.jackett_api_key, "secret")
+
+    def test_load_settings_rejects_incomplete_jackett_credentials(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "JACKETT_URL and JACKETT_API_KEY"):
+            load_settings({**BASE_ENV, "JACKETT_URL": "http://jackett.local:9117"})
+
+        with self.assertRaisesRegex(RuntimeError, "JACKETT_URL and JACKETT_API_KEY"):
+            load_settings({**BASE_ENV, "JACKETT_API_KEY": "secret"})
+
+    def test_load_settings_rejects_incomplete_rutracker_credentials(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "RUTRACKER_USERNAME and RUTRACKER_PASSWORD"):
+            load_settings({**BASE_ENV, "RUTRACKER_USERNAME": "user"})
+
+        with self.assertRaisesRegex(RuntimeError, "RUTRACKER_USERNAME and RUTRACKER_PASSWORD"):
+            load_settings({**BASE_ENV, "RUTRACKER_PASSWORD": "pass"})
+
     def test_load_settings_reports_missing_required_values(self) -> None:
         env = dict(BASE_ENV)
         env.pop("BOT_TOKEN")
 
         with self.assertRaisesRegex(RuntimeError, "BOT_TOKEN"):
             load_settings(env)
+
+
+class AppContextTests(unittest.TestCase):
+    def test_build_app_context_wires_configured_clients(self) -> None:
+        settings = load_settings({
+            **BASE_ENV,
+            "RUTRACKER_USERNAME": "user",
+            "RUTRACKER_PASSWORD": "pass",
+            "JACKETT_URL": "http://jackett.local:9117",
+            "JACKETT_API_KEY": "secret",
+            "KINOPOISK_API_KEY": "kp-secret",
+        })
+
+        context = build_app_context(settings)
+
+        self.assertIs(context.settings, settings)
+        self.assertEqual(context.ds_client.base_url, "https://nas.example:5001")
+        self.assertIsNotNone(context.rutracker_client)
+        self.assertIsNotNone(context.jackett_client)
+        self.assertIsNotNone(context.kinopoisk_client)
+
+    def test_build_app_context_leaves_optional_clients_disabled(self) -> None:
+        context = build_app_context(load_settings(BASE_ENV))
+
+        self.assertIsNone(context.rutracker_client)
+        self.assertIsNone(context.jackett_client)
+        self.assertIsNone(context.kinopoisk_client)
 
 
 def _dockerfile_copied_files() -> set[str]:
