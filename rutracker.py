@@ -286,7 +286,7 @@ class RutrackerClient:
 
         # _max_results is a hard cap; Rutracker shows ≤50 per page naturally
 
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 logger.debug("Failed to parse rutracker result row", exc_info=True)
                 continue
 

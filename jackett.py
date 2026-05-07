@@ -96,7 +96,7 @@ def _classify_response(resp: requests.Response) -> str:
         try:
             snippet = resp.text.strip()[:15].lower()
             is_html = snippet.startswith("<!") or snippet.startswith("<html")
-        except Exception:
+        except (AttributeError, TypeError):
             pass
 
     if not is_html:
@@ -372,7 +372,7 @@ class JackettClient:
 
                 if limit is not None and len(results) >= limit:
                     break
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 logger.debug("Failed to parse Jackett JSON result item", exc_info=True)
                 continue
 
@@ -456,7 +456,7 @@ class JackettClient:
                 effective_limit = limit if limit is not None else self._max_results
                 if len(results) >= effective_limit:
                     break
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 logger.debug("Failed to parse Jackett result item", exc_info=True)
                 continue
 

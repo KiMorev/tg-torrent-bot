@@ -176,12 +176,17 @@ class KinopoiskClient:
             )
             resp.raise_for_status()
             staff = resp.json()
-        except Exception:
+        except (requests.RequestException, ValueError, TypeError):
+            return ""
+
+        if not isinstance(staff, list):
             return ""
 
         seen: set[str] = set()
         directors: list[str] = []
         for person in staff:
+            if not isinstance(person, dict):
+                continue
             if person.get("professionKey") != "DIRECTOR":
                 continue
             name = (person.get("nameRu") or person.get("nameEn") or "").strip()
