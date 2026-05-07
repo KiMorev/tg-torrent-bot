@@ -24,6 +24,12 @@ from telegram.ext import (
     filters,
 )
 
+from access_control import (
+    access_request_user_label,
+    all_allowed_chat_ids,
+    is_admin_chat,
+    is_allowed_chat,
+)
 from app_context import build_app_context
 from config import load_settings, parse_chat_ids
 from download_station import DownloadStationError
@@ -235,15 +241,16 @@ def _save_approved_chat_ids(chat_ids: set[int]) -> None:
 
 
 def _all_allowed_chat_ids() -> set[int]:
-    return ALLOWED_CHAT_IDS | ADMIN_CHAT_IDS | _load_approved_chat_ids()
+    return all_allowed_chat_ids(ALLOWED_CHAT_IDS, ADMIN_CHAT_IDS, _load_approved_chat_ids())
 
 
 def _is_admin_chat(chat_id: int | None) -> bool:
-    return bool(chat_id is not None and chat_id in ADMIN_CHAT_IDS)
+    return is_admin_chat(chat_id, ADMIN_CHAT_IDS)
 
 
 def _is_allowed(update: Update) -> bool:
-    return bool(update.effective_chat and update.effective_chat.id in _all_allowed_chat_ids())
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    return is_allowed_chat(chat_id, ALLOWED_CHAT_IDS, ADMIN_CHAT_IDS, _load_approved_chat_ids())
 
 
 def _chat_id(update: Update) -> str:
@@ -256,10 +263,9 @@ def _chat_id(update: Update) -> str:
 def _access_request_user_label(update: Update) -> str:
     user = update.effective_user
     if not user:
-        return "неизвестно"
+        return access_request_user_label(None, None, None)
 
-    parts = [part for part in [user.full_name, f"@{user.username}" if user.username else ""] if part]
-    return " ".join(parts) or str(user.id)
+    return access_request_user_label(user.full_name, user.username, user.id)
 
 
 async def _send_access_request_to_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
