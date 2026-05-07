@@ -37,23 +37,15 @@ from formatters import (
     _extract_season_from_query,
     _extract_series_base_query,
     _filter_by_season,
-    _format_eta,
     _format_hours,
-    _format_progress,
     _format_size,
     _format_sub_title,
     _magnet_wait_bar,
     _magnet_wait_text,
     _normalize_season_in_query,
     _parse_episode_info,
-    _progress_bar,
-    _progress_meter,
-    _progress_percent,
     _score_result,
     _short_title,
-    _status_icon,
-    _status_label,
-    _task_remaining_bytes,
     _tracker_abbr,
 )
 from keyboards import (
@@ -98,6 +90,16 @@ from task_policies import (
     is_auto_delete_candidate as _policy_is_auto_delete_candidate,
     notification_recipients as _policy_notification_recipients,
     notification_status_key as _policy_notification_status_key,
+)
+from task_views import (
+    ACTIVE_STATUSES as _ACTIVE_STATUSES,
+    default_list_scope as _view_default_list_scope,
+    filter_tasks_for_scope as _view_filter_tasks_for_scope,
+    find_task as _view_find_task,
+    format_task_card as _view_format_task_card,
+    format_tasks as _view_format_tasks,
+    has_active_tasks as _view_has_active_tasks,
+    normalize_list_scope as _view_normalize_list_scope,
 )
 from torrent_utils import (
     RawBencode,
@@ -612,18 +614,21 @@ def _format_updated_at() -> str:
 
 
 def _default_list_scope(chat_id: int | None) -> str:
-    return TASK_LIST_SCOPE_ALL if _is_admin_chat(chat_id) else TASK_LIST_SCOPE_MY
+    return _view_default_list_scope(
+        _is_admin_chat(chat_id),
+        scope_all=TASK_LIST_SCOPE_ALL,
+        scope_my=TASK_LIST_SCOPE_MY,
+    )
 
 
 def _normalize_list_scope(scope: str | None, chat_id: int | None) -> str:
-    if scope == TASK_LIST_SCOPE_MY:
-        return TASK_LIST_SCOPE_MY
-    if scope == TASK_LIST_SCOPE_DEFAULT or scope not in {TASK_LIST_SCOPE_ALL, TASK_LIST_SCOPE_MY}:
-        return _default_list_scope(chat_id)
-    if scope == TASK_LIST_SCOPE_ALL and _is_admin_chat(chat_id):
-        return TASK_LIST_SCOPE_ALL
-
-    return TASK_LIST_SCOPE_MY
+    return _view_normalize_list_scope(
+        scope,
+        _is_admin_chat(chat_id),
+        scope_all=TASK_LIST_SCOPE_ALL,
+        scope_my=TASK_LIST_SCOPE_MY,
+        scope_default=TASK_LIST_SCOPE_DEFAULT,
+    )
 
 
 def _chat_id_from_query(query) -> int | None:
@@ -649,15 +654,14 @@ def _can_access_task_id(chat_id: int | None, task_id: str) -> bool:
 
 def _filter_tasks_for_scope(tasks: list[dict], chat_id: int | None, scope: str) -> list[dict]:
     scope = _normalize_list_scope(scope, chat_id)
-    if scope == TASK_LIST_SCOPE_ALL and _is_admin_chat(chat_id):
-        return tasks
-
-    owners = _load_task_owners()
-    return [
-        task
-        for task in tasks
-        if task.get("id") and owners.get(str(task["id"])) == chat_id
-    ]
+    return _view_filter_tasks_for_scope(
+        tasks,
+        chat_id,
+        scope,
+        owners=_load_task_owners(),
+        is_admin=_is_admin_chat(chat_id),
+        scope_all=TASK_LIST_SCOPE_ALL,
+    )
 
 
 def _format_tasks(
@@ -666,62 +670,20 @@ def _format_tasks(
     total_count: int | None = None,
     page: int = 0,
 ) -> str:
-    heading = "Все задачи Download Station" if scope == TASK_LIST_SCOPE_ALL else "Мои загрузки"
-    if not tasks:
-        empty_text = "В Download Station нет задач." if scope == TASK_LIST_SCOPE_ALL else "В ваших загрузках нет задач."
-        return f"{heading}\nОбновлено: {_format_updated_at()}\n{empty_text}"
-
-    lines = [heading, f"Обновлено: {_format_updated_at()}"]
-    if total_count is not None and scope == TASK_LIST_SCOPE_MY and total_count != len(tasks):
-        lines.append(f"Показано: {len(tasks)} из {total_count}")
-
-    total_pages = max(1, (len(tasks) + TASK_LIST_PAGE_SIZE - 1) // TASK_LIST_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * TASK_LIST_PAGE_SIZE
-    visible_tasks = tasks[start: start + TASK_LIST_PAGE_SIZE]
-
-    owners = _load_task_owners() if scope == TASK_LIST_SCOPE_ALL else {}
-    for index, task in enumerate(visible_tasks, start=start + 1):
-        title = task.get("title") or task.get("id") or "без названия"
-        status = task.get("status", "unknown")
-        transfer = task.get("additional", {}).get("transfer", {})
-        downloaded = transfer.get("size_downloaded")
-        total = task.get("size")
-        percent = _progress_percent(downloaded, total)
-        progress = _format_progress(downloaded, total)
-        speed_bytes = transfer.get("speed_download")
-        speed = _format_size(speed_bytes)
-        eta = _format_eta(_task_remaining_bytes(task, transfer), speed_bytes)
-        task_id = task.get("id")
-
-        line = (
-            f"{index}. {_status_icon(status)} {title}\n"
-            f"   Статус: {_status_label(status)}\n"
-            f"   Прогресс: {_progress_meter(percent)}\n"
-            f"   Скачано: {progress}\n"
-            f"   Скорость: {speed}/s | Осталось: {eta}"
-        )
-        if task_id:
-            line += f"\n   ID: {task_id}"
-            if scope == TASK_LIST_SCOPE_ALL:
-                owner = owners.get(str(task_id))
-                line += f"\n   Владелец: {owner}" if owner else "\n   Владелец: неизвестно"
-        lines.append(line)
-        if index - start < len(visible_tasks):
-            lines.append("────────────")
-
-    if total_pages > 1:
-        lines.append(f"\nСтраница {page + 1} из {total_pages} (всего задач: {len(tasks)}).")
-
-    return "\n".join(lines)
+    return _view_format_tasks(
+        tasks,
+        scope=scope,
+        updated_at=_format_updated_at(),
+        owners=_load_task_owners() if scope == TASK_LIST_SCOPE_ALL else {},
+        total_count=total_count,
+        page=page,
+        page_size=TASK_LIST_PAGE_SIZE,
+        scope_all=TASK_LIST_SCOPE_ALL,
+    )
 
 
 def _find_task(tasks: list[dict], task_id: str) -> dict | None:
-    for task in tasks:
-        if task.get("id") == task_id:
-            return task
-
-    return None
+    return _view_find_task(tasks, task_id)
 
 
 def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
@@ -740,30 +702,7 @@ def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") 
 
 
 def _format_task_card(task: dict) -> str:
-    title = task.get("title") or "без названия"
-    task_id = task.get("id") or "unknown"
-    status = task.get("status", "unknown")
-    transfer = task.get("additional", {}).get("transfer", {})
-    downloaded = transfer.get("size_downloaded")
-    total = task.get("size")
-    percent = _progress_percent(downloaded, total)
-    progress = _format_progress(transfer.get("size_downloaded"), task.get("size"))
-    speed_bytes = transfer.get("speed_download")
-    speed = _format_size(speed_bytes)
-    eta = _format_eta(_task_remaining_bytes(task, transfer), speed_bytes)
-
-    lines = [
-        "Задача Download Station",
-        f"Имя: {title}",
-        f"ID: {task_id}",
-        f"Статус: {_status_icon(status)} {_status_label(status)}",
-        f"Прогресс: {_progress_bar(percent)}",
-        f"Скачано: {progress}",
-        f"Скорость: {speed}/s",
-        f"Осталось: {eta}",
-    ]
-
-    return "\n".join(lines)
+    return _view_format_task_card(task)
 
 
 def _load_task_owners() -> dict[str, int]:
@@ -949,9 +888,6 @@ async def _run_auto_delete_finished_once() -> None:
         _save_auto_delete_tasks(watched)
 
 
-_ACTIVE_STATUSES = {"downloading", "waiting", "finishing", "hash_checking"}
-
-
 # ---------------------------------------------------------------------------
 # Task-card auto-refresh
 # ---------------------------------------------------------------------------
@@ -1013,7 +949,7 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
 
 
 def _has_active_tasks(tasks: list[dict]) -> bool:
-    return any((task.get("status") or "").lower() in _ACTIVE_STATUSES for task in tasks)
+    return _view_has_active_tasks(tasks, _ACTIVE_STATUSES)
 
 
 async def _run_progress_panel_update_once(app) -> None:
