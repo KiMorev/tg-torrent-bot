@@ -37,6 +37,7 @@ Telegram-бот для Synology Download Station.
 | `task_policies.py` | Правила уведомлений и автоудаления задач |
 | `task_views.py` | Форматирование списков/карточек задач Download Station |
 | `torrent_utils.py` | Работа с magnet-ссылками, `.torrent`-файлами и bencode |
+| `tracker_service.py` | Публичные трекеры: загрузка, cache, дедупликация и добавление в BT-задачи |
 | `rutracker.py` | Клиент поиска и загрузки с Rutracker.org |
 | `jackett.py` | Клиент Jackett (поиск по внешним индексерам) |
 | `kinopoisk.py` | Клиент Кинопоиска (kinopoiskapiunofficial.tech) |

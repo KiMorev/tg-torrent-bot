@@ -5,9 +5,7 @@ import logging
 import os
 import re
 import time
-import urllib.request
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -115,6 +113,20 @@ from torrent_utils import (
     torrent_file_is_private as _torrent_file_is_private,
     torrent_is_private as _torrent_is_private,
 )
+from tracker_service import (
+    TrackerApplyResult,
+    TrackerConfig,
+    TrackerService,
+    is_tracker_task_candidate as _tracker_is_task_candidate,
+    parse_trackers_text as _tracker_parse_text,
+    public_trackers_enabled as _tracker_public_enabled,
+    tracker_attempt_is_final as _tracker_is_final,
+    tracker_background_enabled as _tracker_background_is_enabled,
+    tracker_button_visible as _tracker_is_button_visible,
+    format_tracker_cache_time as _tracker_format_cache_time,
+    tracker_key as _tracker_normalized_key,
+    tracker_result_lines as _tracker_lines,
+)
 
 
 settings = load_settings()
@@ -198,14 +210,6 @@ TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
 _next_subscription_check_at: float | None = None
 
 
-@dataclass
-class TrackerApplyResult:
-    added_count: int = 0
-    available_count: int = 0
-    cache_time: float | None = None
-    skipped_reason: str = ""
-
-
 logging.basicConfig(
     level=settings.log_level,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -241,6 +245,21 @@ state_store = app_context.state_store
 rutracker_client = app_context.rutracker_client
 jackett_client = app_context.jackett_client
 kinopoisk_client = app_context.kinopoisk_client
+
+
+def _tracker_config() -> TrackerConfig:
+    return TrackerConfig(
+        mode=TRACKERS_MODE,
+        url=TRACKERS_URL,
+        max_count=TRACKERS_MAX,
+        cache_ttl_hours=TRACKERS_CACHE_TTL_HOURS,
+        cache_file=TRACKERS_CACHE_FILE,
+        background_enabled=TRACKERS_BACKGROUND_ENABLED,
+    )
+
+
+def _tracker_service() -> TrackerService:
+    return TrackerService(_tracker_config(), ds_client, logger)
 
 def _load_approved_chat_ids() -> set[int]:
     return state_store.load_approved_chat_ids()
@@ -333,11 +352,11 @@ def _temp_path(filename: str) -> Path:
 
 
 def _public_trackers_enabled() -> bool:
-    return TRACKERS_MODE not in {"0", "false", "no", "off", "disabled"} and TRACKERS_MAX > 0
+    return _tracker_public_enabled(_tracker_config())
 
 
 def _tracker_background_enabled() -> bool:
-    return _public_trackers_enabled() and TRACKERS_BACKGROUND_ENABLED
+    return _tracker_background_is_enabled(_tracker_config())
 
 
 def _task_notifications_enabled() -> bool:
@@ -357,143 +376,39 @@ def _background_monitor_enabled() -> bool:
 
 
 def _tracker_key(tracker: str) -> str:
-    return tracker.strip().rstrip("/").lower()
+    return _tracker_normalized_key(tracker)
 
 
 def _parse_trackers_text(text: str) -> list[str]:
-    trackers = []
-    seen = set()
-
-    for raw_line in text.splitlines():
-        tracker = raw_line.strip().lstrip("\ufeff")
-        if not tracker or tracker.startswith("#"):
-            continue
-        if not tracker.lower().startswith(("udp://", "http://", "https://")):
-            continue
-
-        key = _tracker_key(tracker)
-        if key in seen:
-            continue
-
-        seen.add(key)
-        trackers.append(tracker)
-
-    return trackers
+    return _tracker_parse_text(text)
 
 
 def _read_trackers_cache(require_fresh: bool = True) -> tuple[list[str], float | None]:
-    try:
-        cache_time = TRACKERS_CACHE_FILE.stat().st_mtime
-    except OSError:
-        return [], None
-
-    max_age_seconds = TRACKERS_CACHE_TTL_HOURS * 3600
-    if require_fresh and time.time() - cache_time > max_age_seconds:
-        return [], cache_time
-
-    try:
-        text = TRACKERS_CACHE_FILE.read_text(encoding="utf-8")
-    except OSError:
-        return [], cache_time
-
-    return _parse_trackers_text(text)[:TRACKERS_MAX], cache_time
+    return _tracker_service().read_cache(require_fresh=require_fresh)
 
 
 def _write_trackers_cache(text: str) -> None:
-    TRACKERS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TRACKERS_CACHE_FILE.write_text(text, encoding="utf-8")
+    _tracker_service().write_cache(text)
 
 
 def _load_public_trackers() -> tuple[list[str], float | None]:
-    if not _public_trackers_enabled():
-        return [], None
-
-    cached_trackers, cache_time = _read_trackers_cache(require_fresh=True)
-    if cached_trackers:
-        return cached_trackers, cache_time
-
-    try:
-        request = urllib.request.Request(TRACKERS_URL, headers={"User-Agent": "tg-torrent-drop/1.0"})
-        with urllib.request.urlopen(request, timeout=10) as response:
-            text = response.read().decode("utf-8")
-        trackers = _parse_trackers_text(text)[:TRACKERS_MAX]
-        if trackers:
-            _write_trackers_cache("\n".join(trackers) + "\n")
-            return trackers, TRACKERS_CACHE_FILE.stat().st_mtime
-    except Exception:
-        logger.warning("Failed to update public trackers list", exc_info=True)
-
-    stale_trackers, stale_time = _read_trackers_cache(require_fresh=False)
-    return stale_trackers, stale_time
+    return _tracker_service().load_public_trackers()
 
 
 def _format_tracker_cache_time(cache_time: float | None) -> str:
-    if cache_time is None:
-        return ""
-
-    return datetime.fromtimestamp(cache_time, DISPLAY_TIMEZONE).strftime("%d.%m.%Y %H:%M")
+    return _tracker_format_cache_time(cache_time, DISPLAY_TIMEZONE)
 
 
 def _tracker_result_lines(result: TrackerApplyResult | None) -> list[str]:
-    if not result or not _public_trackers_enabled():
-        return []
-
-    if result.added_count:
-        lines = [f"Public-трекеры: добавлено {result.added_count}"]
-    elif result.skipped_reason:
-        lines = [f"Public-трекеры: {result.skipped_reason}"]
-    elif result.available_count:
-        lines = ["Public-трекеры: новых нет"]
-    else:
-        lines = ["Public-трекеры: список недоступен"]
-
-    cache_time = _format_tracker_cache_time(result.cache_time)
-    if cache_time:
-        lines.append(f"Список трекеров: {cache_time}")
-
-    return lines
+    return _tracker_lines(
+        result,
+        enabled=_public_trackers_enabled(),
+        display_timezone=DISPLAY_TIMEZONE,
+    )
 
 
 def _add_public_trackers_to_download_task(task_id: str) -> TrackerApplyResult:
-    result = TrackerApplyResult()
-    trackers, cache_time = _load_public_trackers()
-    result.available_count = len(trackers)
-    result.cache_time = cache_time
-
-    if not _public_trackers_enabled():
-        return result
-    if not task_id:
-        result.skipped_reason = "ID задачи пока не найден"
-        return result
-    if not trackers:
-        result.skipped_reason = "список недоступен"
-        return result
-
-    try:
-        existing = {_tracker_key(tracker) for tracker in ds_client.list_task_trackers(task_id)}
-        additions = [tracker for tracker in trackers if _tracker_key(tracker) not in existing]
-        if not additions:
-            return result
-
-        ds_client.add_task_trackers(task_id, additions)
-
-        confirmed = set()
-        for attempt in range(3):
-            if attempt:
-                time.sleep(1)
-
-            confirmed = {_tracker_key(tracker) for tracker in ds_client.list_task_trackers(task_id)}
-            if any(_tracker_key(tracker) in confirmed for tracker in additions):
-                break
-
-        result.added_count = sum(1 for tracker in additions if _tracker_key(tracker) in confirmed)
-        if not result.added_count:
-            result.skipped_reason = "добавление не подтвердилось"
-    except DownloadStationError:
-        logger.warning("Failed to add public trackers to task %s", task_id, exc_info=True)
-        result.skipped_reason = "Download Station API не принял список"
-
-    return result
+    return _tracker_service().add_public_trackers_to_download_task(task_id)
 
 
 def _load_tracker_processed_ids() -> set[str]:
@@ -513,25 +428,11 @@ def _add_tracker_processed_ids(task_ids: set[str]) -> None:
 
 
 def _is_tracker_task_candidate(task: dict, processed_ids: set[str]) -> bool:
-    task_id = task.get("id")
-    if not task_id or task_id in processed_ids:
-        return False
-
-    if (task.get("type") or "").lower() != "bt":
-        return False
-
-    status = (task.get("status") or "").lower()
-    return status != "finished"
+    return _tracker_is_task_candidate(task, processed_ids)
 
 
 def _tracker_attempt_is_final(result: TrackerApplyResult) -> bool:
-    if result.added_count:
-        return True
-    if result.available_count and not result.skipped_reason:
-        return True
-    if result.skipped_reason.startswith("приватный torrent"):
-        return True
-    return False
+    return _tracker_is_final(result)
 
 
 def _mark_tracker_processed_if_final(task_id: str, result: TrackerApplyResult) -> None:
@@ -542,14 +443,13 @@ def _mark_tracker_processed_if_final(task_id: str, result: TrackerApplyResult) -
 
 
 def _tracker_button_visible(task_id: str, status: str, task_type: str) -> bool:
-    if not task_id or not _tracker_background_enabled():
-        return False
-    if (task_type or "").lower() != "bt":
-        return False
-    if (status or "").lower() == "finished":
-        return False
-
-    return task_id not in _load_tracker_processed_ids()
+    return _tracker_is_button_visible(
+        task_id,
+        status,
+        task_type,
+        background_enabled=_tracker_background_enabled(),
+        processed_ids=_load_tracker_processed_ids(),
+    )
 
 
 async def _run_tracker_background_once() -> None:
