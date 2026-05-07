@@ -1027,17 +1027,27 @@ def _is_message_not_modified(error: BadRequest) -> bool:
     return "message is not modified" in str(error).lower()
 
 
-async def _safe_edit_message(message, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+async def _safe_edit_message(
+    message,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str | None = None,
+) -> None:
     try:
-        await message.edit_text(text, reply_markup=reply_markup)
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if not _is_message_not_modified(e):
             raise
 
 
-async def _safe_edit_callback(query, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+async def _safe_edit_callback(
+    query,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str | None = None,
+) -> None:
     try:
-        await query.edit_message_text(text, reply_markup=reply_markup)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if not _is_message_not_modified(e):
             raise
@@ -1086,6 +1096,26 @@ async def _send_download_panel(
     message = await context.bot.send_message(
         chat_id=chat_id,
         text=_format_tasks(tasks, scope=scope, total_count=total_count, page=page),
+        reply_markup=_tasks_keyboard(tasks, scope=scope, is_admin=_is_admin_chat(chat_id), page=page),
+    )
+    DOWNLOAD_PANEL_MESSAGES[chat_id] = message.message_id
+
+
+async def _replace_message_with_download_panel(
+    message,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    tasks: list[dict],
+    scope: str,
+    total_count: int | None = None,
+    page: int = 0,
+) -> None:
+    await _delete_download_panel(context, chat_id, keep_message_id=message.message_id)
+    DOWNLOAD_PANEL_PAGES[chat_id] = page
+    DOWNLOAD_PANEL_SCOPES[chat_id] = scope
+    await _safe_edit_message(
+        message,
+        _format_tasks(tasks, scope=scope, total_count=total_count, page=page),
         reply_markup=_tasks_keyboard(tasks, scope=scope, is_admin=_is_admin_chat(chat_id), page=page),
     )
     DOWNLOAD_PANEL_MESSAGES[chat_id] = message.message_id
@@ -2534,7 +2564,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not _is_admin_chat(chat_id):
         return
 
-    await update.message.reply_text(
+    progress_message = await update.message.reply_text("🛠️ Обновляю админ-панель…")
+    await _safe_edit_message(
+        progress_message,
         await _build_admin_panel_text(),
         parse_mode="HTML",
         reply_markup=_admin_panel_keyboard(),
@@ -2558,14 +2590,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     action = parts[1] if len(parts) > 1 else "home"
 
     if action == "diagnostics":
-        await query.edit_message_text(
+        await _safe_edit_callback(query, "🧭 Проверяю сервисы…")
+        await _safe_edit_callback(
+            query,
             await _build_diagnostics_text(),
             parse_mode="HTML",
             reply_markup=_admin_diagnostics_keyboard(),
         )
         return
 
-    await query.edit_message_text(
+    await _safe_edit_callback(query, "🛠️ Обновляю админ-панель…")
+    await _safe_edit_callback(
+        query,
         await _build_admin_panel_text(),
         parse_mode="HTML",
         reply_markup=_admin_panel_keyboard(),
@@ -2604,18 +2640,26 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await _delete_message_safely(context, chat.id, message.message_id, "status command")
+    progress_message = await context.bot.send_message(chat_id=chat.id, text="📋 Получаю список загрузок…")
 
     try:
         tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
         logger.exception("Failed to list Download Station tasks")
-        await context.bot.send_message(chat_id=chat.id, text=f"Не удалось получить задачи: {e}")
+        await _safe_edit_message(progress_message, f"Не удалось получить задачи: {e}")
         return
 
     scope = _default_list_scope(chat.id)
     visible_tasks = _filter_tasks_for_scope(tasks, chat.id, scope)
     total_count = len(tasks) if _is_admin_chat(chat.id) else None
-    await _send_download_panel(context, chat.id, visible_tasks, scope, total_count=total_count)
+    await _replace_message_with_download_panel(
+        progress_message,
+        context,
+        chat.id,
+        visible_tasks,
+        scope,
+        total_count=total_count,
+    )
 
 
 def _format_users_panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -2765,6 +2809,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if action == "list":
         scope = _normalize_list_scope(task_id, chat_id)
         DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
+        await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -2778,6 +2823,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action in ("page_prev", "page_next"):
         scope = _normalize_list_scope(task_id, chat_id)
+        await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -2798,6 +2844,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
             return
 
+        await _safe_edit_callback(query, "🔎 Получаю задачу…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -2814,6 +2861,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "delete_finished_ask":
         scope = _normalize_list_scope(task_id, chat_id)
+        await _safe_edit_callback(query, "🔎 Проверяю завершенные задачи…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -2837,6 +2885,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "delete_finished":
         scope = _normalize_list_scope(task_id, chat_id)
+        await _safe_edit_callback(query, "🧹 Удаляю завершенные задачи…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
             visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
@@ -2878,6 +2927,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
             return
 
+        await _safe_edit_callback(query, "➕ Добавляю public-трекеры…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -2916,6 +2966,12 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
             return
 
+        action_progress = {
+            "resume": "▶️ Отправляю команду запуска…",
+            "pause": "⏸️ Отправляю команду паузы…",
+            "delete": "🗑️ Удаляю задачу…",
+        }[action]
+        await _safe_edit_callback(query, action_progress)
         try:
             if action == "resume":
                 await asyncio.to_thread(ds_client.resume_task, task_id)
@@ -2952,6 +3008,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
         return
 
+    await _safe_edit_callback(query, "🔎 Получаю задачу…")
     try:
         tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
@@ -2989,14 +3046,15 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Эта задача не относится к вашим загрузкам.")
         return
 
+    progress_message = await update.message.reply_text("▶️ Отправляю команду запуска…")
     try:
         await asyncio.to_thread(ds_client.resume_task, task_id)
     except DownloadStationError as e:
         logger.exception("Failed to resume Download Station task")
-        await update.message.reply_text(f"Не удалось запустить задачу {task_id}: {e}")
+        await _safe_edit_message(progress_message, f"Не удалось запустить задачу {task_id}: {e}")
         return
 
-    await update.message.reply_text(f"Команда запуска отправлена для {task_id}.")
+    await _safe_edit_message(progress_message, f"Команда запуска отправлена для {task_id}.")
 
 
 async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE, magnet_uri: str) -> None:
@@ -3103,6 +3161,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     temp_path = None
+    progress_message = None
 
     try:
         doc = update.message.document
@@ -3123,26 +3182,30 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         safe_name = _safe_filename(original_name)
         temp_path = _temp_path(safe_name)
+        progress_message = await update.message.reply_text("⏳ Обрабатываю torrent-файл…")
 
         logger.info("Downloading %s from chat_id=%s", original_name, _chat_id(update))
         tg_file = await doc.get_file()
         await tg_file.download_to_drive(custom_path=str(temp_path))
 
         if not _looks_like_torrent(temp_path):
-            await update.message.reply_text("Файл не похож на настоящий .torrent.")
+            await _safe_edit_message(progress_message, "Файл не похож на настоящий .torrent.")
             return
 
         logger.info("Creating Download Station task from torrent file %s", safe_name)
+        await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
         task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
         _remember_task_owner(task_id, update.effective_chat.id if update.effective_chat else None)
         if _torrent_file_is_private(temp_path):
             tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
             _mark_tracker_processed_if_final(task_id, tracker_result)
         else:
+            await _safe_edit_message(progress_message, "➕ Добавляю public-трекеры…")
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
 
-        await update.message.reply_text(
+        await _safe_edit_message(
+            progress_message,
             _task_added_message(
                 "torrent-файл",
                 title=safe_name,
@@ -3156,9 +3219,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.exception("Failed to process torrent")
 
         try:
-            await update.message.reply_text(
-                f"Ошибка при обработке .torrent: {type(e).__name__}: {e}"
-            )
+            error_text = f"Ошибка при обработке .torrent: {type(e).__name__}: {e}"
+            if progress_message is not None:
+                await _safe_edit_message(progress_message, error_text)
+            else:
+                await update.message.reply_text(error_text)
         except Exception:
             pass
 

@@ -40,6 +40,7 @@ from bot import (
     help_command,
     search_cancel,
     search_timeout,
+    status,
 )
 from state_store import JsonStateStore
 
@@ -87,11 +88,13 @@ def _make_callback_update(chat_id: int = 100, callback_data: str = "srch:cancel"
 def _make_message_update(chat_id: int = 100):
     message = MagicMock()
     message.reply_text = AsyncMock()
+    message.message_id = 42
 
     update = MagicMock()
     update.effective_chat = MagicMock()
     update.effective_chat.id = chat_id
     update.message = message
+    update.effective_message = message
     return update
 
 
@@ -232,6 +235,9 @@ class AdminPanelTests(unittest.TestCase):
     def test_admin_command_shows_summary_panel(self):
         update = _make_message_update(chat_id=300)
         context = _make_context()
+        progress_message = MagicMock()
+        progress_message.edit_text = AsyncMock()
+        update.message.reply_text.return_value = progress_message
 
         fake_store = MagicMock()
         fake_store.load_topic_subscriptions.return_value = {
@@ -256,12 +262,12 @@ class AdminPanelTests(unittest.TestCase):
         ):
             asyncio.run(admin_command(update, context))
 
-        text = update.message.reply_text.call_args.args[0]
+        update.message.reply_text.assert_called_once_with("🛠️ Обновляю админ-панель…")
+        text = progress_message.edit_text.call_args.args[0]
         self.assertIn("Админ-панель", text)
         self.assertIn("Загрузки: всего 3, активных 1, завершённых 1, ошибок 1", text)
         self.assertIn("Подписки: 2 (Rutracker 1, Jackett 1)", text)
         self.assertIn("Сервисы:", text)
-        update.message.reply_text.assert_called_once()
 
     def test_admin_diagnostics_callback_reuses_diagnostics_view(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:diagnostics")
@@ -274,8 +280,9 @@ class AdminPanelTests(unittest.TestCase):
             asyncio.run(admin_callback(update, context))
 
         update.callback_query.answer.assert_called_once()
-        update.callback_query.edit_message_text.assert_called_once()
-        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "diag text")
+        self.assertEqual(update.callback_query.edit_message_text.call_count, 2)
+        self.assertEqual(update.callback_query.edit_message_text.call_args_list[0].args[0], "🧭 Проверяю сервисы…")
+        self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "diag text")
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +306,42 @@ class NotificationKeyboardTests(unittest.TestCase):
         self.assertIn("▶️ Открыть Plex (iOS)", finished_labels)
         self.assertIn("▶️ Открыть Plex (iOS)", seeding_labels)
         self.assertNotIn("▶️ Открыть Plex (iOS)", error_labels)
+
+
+# ---------------------------------------------------------------------------
+# status command tests
+# ---------------------------------------------------------------------------
+
+
+class StatusCommandTests(unittest.TestCase):
+    def test_status_replaces_progress_message_with_download_panel(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        progress_message = MagicMock()
+        progress_message.message_id = 77
+        progress_message.edit_text = AsyncMock()
+        context.bot.send_message.return_value = progress_message
+
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = [{"id": "tid1", "title": "Film", "status": "finished"}]
+        bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {100}),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "ds_client", fake_ds),
+        ):
+            asyncio.run(status(update, context))
+
+        context.bot.send_message.assert_called_once_with(chat_id=100, text="📋 Получаю список загрузок…")
+        self.assertIn("Film", progress_message.edit_text.call_args.args[0])
+        self.assertEqual(bot.DOWNLOAD_PANEL_MESSAGES[100], 77)
+        bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
 
 
 # ---------------------------------------------------------------------------
