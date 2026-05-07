@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -39,6 +40,14 @@ class JackettResult:
     topic_url: str      # URL of the topic on the original tracker
     magnet_url: str | None
     torrent_url: str | None  # Jackett proxy download URL
+
+
+def _synchronized(method):
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 def _fmt_size(size_bytes: int) -> str:
@@ -104,6 +113,7 @@ class JackettClient:
         self._api_key = api_key
         self._max_results = max_results
         self._indexers = indexers or "all"
+        self._lock = threading.RLock()
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "tg-torrent-bot/1.0"})
 
@@ -121,6 +131,7 @@ class JackettClient:
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "tg-torrent-bot/1.0"})
 
+    @_synchronized
     def get_indexers(self) -> list[dict]:
         """Return list of configured indexers as [{"id": ..., "name": ...}].
         Raises JackettError on failure.
@@ -156,6 +167,7 @@ class JackettClient:
         except requests.RequestException as e:
             raise JackettError(f"Ошибка получения индексеров: {e}") from e
 
+    @_synchronized
     def search(
         self,
         query: str,
@@ -220,6 +232,7 @@ class JackettClient:
 
         return results
 
+    @_synchronized
     def download_torrent(self, torrent_url: str) -> bytes:
         """Download a .torrent file via Jackett's proxy URL."""
         try:
@@ -231,6 +244,7 @@ class JackettClient:
             raise JackettError("Полученный файл не является torrent-файлом.")
         return resp.content
 
+    @_synchronized
     def test_connection(self) -> dict:
         """Probe Jackett and return a structured diagnostics dict."""
         result: dict = {

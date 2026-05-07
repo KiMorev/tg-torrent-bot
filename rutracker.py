@@ -1,4 +1,5 @@
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -39,11 +40,20 @@ class RutrackerResult:
     seeders: int
 
 
+def _synchronized(method):
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class RutrackerClient:
     def __init__(self, username: str, password: str, max_results: int = 10) -> None:
         self._username = username
         self._password = password
         self._max_results = max_results
+        self._lock = threading.RLock()
         self._session = requests.Session()
         self._session.headers.update(_HEADERS)
         self._logged_in = False
@@ -77,6 +87,7 @@ class RutrackerClient:
     # Auth
     # ------------------------------------------------------------------
 
+    @_synchronized
     def login(self) -> None:
         try:
             resp = self._session.post(
@@ -118,6 +129,7 @@ class RutrackerClient:
     # Diagnostics
     # ------------------------------------------------------------------
 
+    @_synchronized
     def diagnose(self) -> dict:
         """Probe Rutracker step by step and return a structured report.
 
@@ -202,6 +214,7 @@ class RutrackerClient:
 
         return result
 
+    @_synchronized
     def search(self, query: str) -> list[RutrackerResult]:
         self._ensure_logged_in()
 
@@ -279,6 +292,7 @@ class RutrackerClient:
 
         return results
 
+    @_synchronized
     def download_torrent(self, topic_id: str) -> bytes:
         self._ensure_logged_in()
 
@@ -306,6 +320,7 @@ class RutrackerClient:
 
         return resp.content
 
+    @_synchronized
     def get_topic_image_url(self, topic_id: str) -> str | None:
         """Extract the cover/poster image URL from the first post of a topic.
 
@@ -352,6 +367,7 @@ class RutrackerClient:
 
         return None
 
+    @_synchronized
     def get_topic_title(self, topic_id: str) -> str:
         """Fetch the current title of a topic page (for subscription update checks)."""
         self._ensure_logged_in()

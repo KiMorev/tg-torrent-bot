@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 
 import requests
@@ -71,14 +72,24 @@ class KinopoiskInfo:
         }.get(self.media_type, "🎬")
 
 
+def _synchronized(method):
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class KinopoiskClient:
     def __init__(self, api_key: str) -> None:
+        self._lock = threading.RLock()
         self._session = requests.Session()
         self._session.headers.update({
             "X-API-KEY": api_key,
             "Content-Type": "application/json",
         })
 
+    @_synchronized
     def get_film_info(self, kp_id: int) -> KinopoiskInfo:
         """Fetch film/series details by Kinopoisk numeric ID."""
         try:
@@ -112,6 +123,7 @@ class KinopoiskClient:
             director=director,
         )
 
+    @_synchronized
     def search_series_seasons(self, title: str) -> int | None:
         """Search KinoPoisk for a TV series by title and return its season count.
 
