@@ -192,7 +192,7 @@ JACKETT_MAX_RESULTS = settings.jackett_max_results
 JACKETT_FETCH_LIMIT = settings.jackett_fetch_limit
 
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
-SEARCH_QUERY, SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(6)
+SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
 BOT_COMMANDS = [
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
@@ -1347,32 +1347,11 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return SEARCH_OPTIONS
 
 
-async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _is_allowed(update):
-        await _reply_access_pending(update, context)
-        return ConversationHandler.END
-
-    if rutracker_client is None and jackett_client is None:
-        await update.message.reply_text(
-            "⛔ Поиск недоступен: не настроен ни Rutracker, ни Jackett.\n"
-            "Добавьте учётные данные в .env и перезапустите бот."
-        )
-        return ConversationHandler.END
-
-    await _delete_message_safely(
-        context, update.effective_chat.id, update.message.message_id, "search command"
-    )
-    await update.message.reply_text(
-        "🔍 Введите название для поиска:\n(или /cancel для отмены)"
-    )
-    return SEARCH_QUERY
-
-
 async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query_text = (update.message.text or "").strip()
     if not query_text:
         await update.message.reply_text("Введите текст для поиска или /cancel для отмены.")
-        return SEARCH_QUERY
+        return ConversationHandler.END
 
     # Normalise 'Сезон N' → 'Сезон: N' to match Rutracker title format
     query_text = _normalize_season_in_query(query_text)
@@ -2617,7 +2596,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         source_hint = "по Rutracker" if RUTRACKER_ENABLED else "через Jackett"
         search_lines = (
             f"- напишите название фильма/сериала{kp_hint} — сразу откроется поиск {source_hint};\n"
-            "- /search тоже работает как альтернативная точка входа;\n"
         )
     else:
         search_lines = ""
@@ -3202,7 +3180,7 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """ConversationHandler entry point for all plain text messages.
 
-    Routes automatically — the user never needs to type /search:
+    Routes plain text automatically:
     • magnet link     → add to Download Station, end conversation
     • Kinopoisk URL   → Kinopoisk lookup + quality-options keyboard
     • anything else   → treat as a Rutracker search query
@@ -3376,13 +3354,6 @@ async def setup_bot_commands(app: Application) -> None:
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
-    if RUTRACKER_ENABLED or JACKETT_ENABLED:
-        search_desc = (
-            "Поиск торрентов (или вставьте ссылку Кинопоиска)"
-            if KINOPOISK_ENABLED
-            else "Поиск торрентов"
-        )
-        commands.append(BotCommand("search", search_desc))
     if RUTRACKER_ENABLED:
         commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
@@ -3439,10 +3410,8 @@ def main() -> None:
     # When Rutracker is disabled text_message_entry falls back gracefully.
     app.add_handler(ConversationHandler(
         entry_points=[
-            # /search is kept for backward-compat / menu discoverability.
-            CommandHandler("search", search_start),
             # Every plain text message (KP links, search queries, magnets)
-            # is routed by text_message_entry — no /search needed.
+            # is routed by text_message_entry.
             MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
             # Jackett subscription "view results" entry point.
             CallbackQueryHandler(
@@ -3451,9 +3420,6 @@ def main() -> None:
             ),
         ],
             states={
-                SEARCH_QUERY: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, search_got_query),
-                ],
                 SEARCH_OPTIONS: [
                     CallbackQueryHandler(search_quick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quick$"),
                     CallbackQueryHandler(search_show_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:adv$"),

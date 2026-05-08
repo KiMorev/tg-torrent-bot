@@ -206,6 +206,7 @@ class HelpCommandTests(unittest.TestCase):
 
         text = update.message.reply_text.call_args.args[0]
         self.assertIn("сразу откроется поиск через Jackett", text)
+        self.assertNotIn("/search", text)
 
     def test_help_mentions_admin_diagnostics_for_admins(self):
         update = _make_message_update(chat_id=300)
