@@ -640,7 +640,8 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
         async def run():
             with (
                 patch.object(bot, "_cleanup_tmp_dir"),
-                patch.object(bot, "_background_monitor_enabled", return_value=False),
+                patch.object(bot, "_tracker_background_enabled", return_value=False),
+                patch.object(bot, "_task_maintenance_enabled", return_value=False),
                 patch.object(bot, "ADMIN_CHAT_IDS", set()),
                 patch.object(bot, "RUTRACKER_ENABLED", False),
                 patch.object(bot, "JACKETT_ENABLED", True),
@@ -654,6 +655,34 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
         public_commands = app.bot.set_my_commands.await_args_list[-1].args[0]
         self.assertIn("subs", [command.command for command in public_commands])
         self.assertEqual(app.create_task.call_count, 2)
+
+    def test_setup_starts_tracker_and_maintenance_loops_separately(self):
+        app = MagicMock()
+        app.bot.set_my_commands = AsyncMock()
+        created: list[str] = []
+
+        def close_task(coro):
+            created.append(coro.cr_code.co_name)
+            coro.close()
+            return MagicMock()
+
+        app.create_task.side_effect = close_task
+
+        async def run():
+            with (
+                patch.object(bot, "_cleanup_tmp_dir"),
+                patch.object(bot, "_tracker_background_enabled", return_value=True),
+                patch.object(bot, "_task_maintenance_enabled", return_value=True),
+                patch.object(bot, "_subscription_monitor_enabled", return_value=False),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            ):
+                await setup_bot_commands(app)
+
+        asyncio.run(run())
+
+        self.assertIn("_tracker_background_loop", created)
+        self.assertIn("_task_maintenance_loop", created)
+        self.assertIn("_progress_update_loop", created)
 
     def test_check_runs_immediately_before_first_sleep(self):
         """_subscription_check_loop must call _check_subscriptions at startup,

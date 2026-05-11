@@ -206,6 +206,7 @@ DOWNLOAD_PANEL_HAD_ACTIVE: dict[int, bool] = {}
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
+TRACKER_BACKGROUND_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
@@ -383,6 +384,10 @@ def _background_monitor_enabled() -> bool:
     )
 
 
+def _task_maintenance_enabled() -> bool:
+    return _background_monitor_enabled()
+
+
 def _subscription_monitor_enabled() -> bool:
     return bool(rutracker_client or jackett_client)
 
@@ -510,28 +515,52 @@ async def _run_background_step(label: str, step) -> None:
 
 async def _run_background_monitor_cycle(app: Application) -> None:
     await _run_background_step("public tracker scan", _run_tracker_background_once)
+    await _run_task_maintenance_cycle(app)
+
+
+async def _run_task_maintenance_cycle(app: Application) -> None:
     await _run_background_step("task notifications", lambda: _run_task_notifications_once(app))
     await _run_background_step("auto-delete finished tasks", _run_auto_delete_finished_once)
     await _run_background_step("stale state pruning", _run_prune_stale_state_once)
 
 
-async def _background_monitor_loop(app: Application) -> None:
-    if not _background_monitor_enabled():
-        logger.info("Background monitor disabled")
+async def _tracker_background_loop() -> None:
+    if not _tracker_background_enabled():
+        logger.info("Tracker background monitor disabled")
         return
 
     logger.info(
-        "Background monitor enabled, interval=%ss",
+        "Tracker background monitor enabled, interval=%ss",
         TRACKERS_BACKGROUND_INTERVAL_SECONDS,
     )
 
     try:
         await asyncio.sleep(10)
         while True:
-            await _run_background_monitor_cycle(app)
+            await _run_background_step("public tracker scan", _run_tracker_background_once)
             await asyncio.sleep(TRACKERS_BACKGROUND_INTERVAL_SECONDS)
     except asyncio.CancelledError:
-        logger.info("Background monitor stopped")
+        logger.info("Tracker background monitor stopped")
+        raise
+
+
+async def _task_maintenance_loop(app: Application) -> None:
+    if not _task_maintenance_enabled():
+        logger.info("Task maintenance monitor disabled")
+        return
+
+    logger.info(
+        "Task maintenance monitor enabled, interval=%ss",
+        TRACKERS_BACKGROUND_INTERVAL_SECONDS,
+    )
+
+    try:
+        await asyncio.sleep(10)
+        while True:
+            await _run_task_maintenance_cycle(app)
+            await asyncio.sleep(TRACKERS_BACKGROUND_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        logger.info("Task maintenance monitor stopped")
         raise
 
 
@@ -3551,7 +3580,7 @@ def _cleanup_tmp_dir() -> None:
 
 
 async def setup_bot_commands(app: Application) -> None:
-    global BACKGROUND_MONITOR_TASK, PROGRESS_UPDATE_TASK
+    global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
@@ -3569,8 +3598,11 @@ async def setup_bot_commands(app: Application) -> None:
     await app.bot.set_my_commands(commands)
     logger.info("Telegram command menu updated")
 
-    if _background_monitor_enabled():
-        BACKGROUND_MONITOR_TASK = app.create_task(_background_monitor_loop(app))
+    if _tracker_background_enabled():
+        TRACKER_BACKGROUND_TASK = app.create_task(_tracker_background_loop())
+
+    if _task_maintenance_enabled():
+        BACKGROUND_MONITOR_TASK = app.create_task(_task_maintenance_loop(app))
 
     PROGRESS_UPDATE_TASK = app.create_task(_progress_update_loop(app))
     logger.info("Progress update loop started, interval=%ss", PROGRESS_UPDATE_INTERVAL_SECONDS)
