@@ -289,6 +289,79 @@ class SubscriptionCheckTests(unittest.TestCase):
         updated = self._store.load_topic_subscriptions()["jackett:abc"]
         self.assertEqual(updated["seen_titles"], ["old"])
 
+    def test_rutracker_subscription_retries_pending_notification_without_duplicate_download(self) -> None:
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 1 из 10",
+                "last_episode_end": 1,
+                "total_episodes": 10,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 2 из 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "dbid_1"
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None])
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(2, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="WARNING"):
+                asyncio.run(bot._check_subscriptions(mock_app))
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        updated = self._store.load_topic_subscriptions()["123"]
+        self.assertNotIn("pending_notification", updated)
+        self.assertEqual(updated["last_episode_end"], 2)
+        self.assertEqual(updated["title"], "Series / 2 из 10")
+        mock_ds.create_torrent_file.assert_called_once()
+        mock_rt.download_torrent.assert_called_once_with("123")
+        self.assertEqual(mock_app.bot.send_message.await_count, 2)
+
+    def test_complete_rutracker_subscription_removed_only_after_notification_delivered(self) -> None:
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 9 из 10",
+                "last_episode_end": 9,
+                "total_episodes": 10,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 10 из 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "dbid_1"
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None])
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(10, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="WARNING"):
+                asyncio.run(bot._check_subscriptions(mock_app))
+            self.assertIn("123", self._store.load_topic_subscriptions())
+
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        self.assertNotIn("123", self._store.load_topic_subscriptions())
+        mock_ds.create_torrent_file.assert_called_once()
+        mock_rt.download_torrent.assert_called_once_with("123")
+        self.assertEqual(mock_app.bot.send_message.await_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

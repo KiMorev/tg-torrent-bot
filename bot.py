@@ -2513,6 +2513,83 @@ async def _mark_rutracker_subscription_unavailable(
     return True
 
 
+def _rutracker_subscription_pending_payload(
+    *,
+    title: str,
+    last_episode_end: int,
+    new_episode_end: int,
+    total_episodes: int,
+    task_id: str,
+    complete: bool,
+) -> dict:
+    return {
+        "title": title,
+        "last_episode_end": last_episode_end,
+        "new_episode_end": new_episode_end,
+        "total_episodes": total_episodes,
+        "task_id": task_id,
+        "complete": complete,
+        "created_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[str, InlineKeyboardMarkup]:
+    title = str(pending.get("title") or topic_id)
+    short = _format_sub_title(title)
+    last_end = pending.get("last_episode_end", "?")
+    new_end = pending.get("new_episode_end", "?")
+    new_total = pending.get("total_episodes", "?")
+    task_id = str(pending.get("task_id") or "")
+    is_complete = bool(pending.get("complete"))
+
+    if is_complete:
+        text = (
+            f"🔔 {short}: сезон завершён!\n"
+            f"Эпизодов: {last_end} → {new_end} из {new_total} ✅\n"
+            "Торрент обновлён в Download Station.\n"
+            "Подписка снята автоматически."
+        )
+        return text, _download_list_keyboard()
+
+    text = (
+        f"🔔 {short}: новая серия!\n"
+        f"Эпизодов: {last_end} → {new_end} из {new_total}\n"
+        "Торрент обновлён в Download Station."
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
+        InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
+    ]])
+    return text, keyboard
+
+
+async def _deliver_rutracker_subscription_notification(
+    app: Application,
+    subs: dict[str, dict],
+    topic_id: str,
+    sub: dict,
+    pending: dict,
+) -> bool:
+    text, keyboard = _rutracker_subscription_notification(pending, topic_id)
+    chat_id = sub.get("chat_id")
+    if chat_id:
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+        except Exception:
+            logger.warning("Failed to notify chat %s for subscription update", chat_id, exc_info=True)
+            return False
+
+    if pending.get("complete"):
+        subs.pop(topic_id, None)
+    else:
+        sub["last_episode_end"] = pending.get("new_episode_end", sub.get("last_episode_end", 0))
+        sub["total_episodes"] = pending.get("total_episodes", sub.get("total_episodes", 0))
+        sub["title"] = pending.get("title", sub.get("title", ""))
+        sub.pop("pending_notification", None)
+
+    return True
+
+
 async def _check_subscriptions(app: Application) -> None:
     if not rutracker_client:
         await _check_jackett_subscriptions(app)
@@ -2532,6 +2609,13 @@ async def _check_subscriptions(app: Application) -> None:
         if sub.get("unavailable_at"):
             continue
         try:
+            pending = sub.get("pending_notification")
+            if isinstance(pending, dict):
+                if await _deliver_rutracker_subscription_notification(app, subs, topic_id, sub, pending):
+                    changed = True
+                    logger.info("Subscription notification delivered: topic=%s", topic_id)
+                continue
+
             try:
                 new_title = await asyncio.to_thread(rutracker_client.get_topic_title, topic_id)
             except RutrackerTopicUnavailable as e:
@@ -2551,7 +2635,6 @@ async def _check_subscriptions(app: Application) -> None:
 
             chat_id = sub.get("chat_id")
             is_complete = new_end >= new_total
-            short = _format_sub_title(new_title)
 
             safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
             temp_path = _temp_path(safe_name)
@@ -2572,36 +2655,20 @@ async def _check_subscriptions(app: Application) -> None:
                 except OSError:
                     pass
 
-            if is_complete:
-                text = (
-                    f"🔔 {short}: сезон завершён!\n"
-                    f"Эпизодов: {last_end} → {new_end} из {new_total} ✅\n"
-                    "Торрент обновлён в Download Station.\n"
-                    "Подписка снята автоматически."
-                )
-                del subs[topic_id]
-                kb = _download_list_keyboard()
+            pending = _rutracker_subscription_pending_payload(
+                title=new_title,
+                last_episode_end=last_end,
+                new_episode_end=new_end,
+                total_episodes=new_total,
+                task_id=task_id,
+                complete=is_complete,
+            )
+            if await _deliver_rutracker_subscription_notification(app, subs, topic_id, sub, pending):
+                logger.info("Subscription update: topic=%s episodes=%s→%s/%s", topic_id, last_end, new_end, new_total)
             else:
-                text = (
-                    f"🔔 {short}: новая серия!\n"
-                    f"Эпизодов: {last_end} → {new_end} из {new_total}\n"
-                    "Торрент обновлён в Download Station."
-                )
-                sub["last_episode_end"] = new_end
-                sub["title"] = new_title
-                kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
-                    InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
-                ]])
-
+                sub["pending_notification"] = pending
+                logger.info("Subscription update pending notification: topic=%s episodes=%s→%s/%s", topic_id, last_end, new_end, new_total)
             changed = True
-            logger.info("Subscription update: topic=%s episodes=%s→%s/%s", topic_id, last_end, new_end, new_total)
-
-            if chat_id:
-                try:
-                    await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-                except Exception:
-                    logger.warning("Failed to notify chat %s for subscription update", chat_id, exc_info=True)
 
         except Exception:
             logger.warning("Error checking subscription for topic %s", topic_id, exc_info=True)
