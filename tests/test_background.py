@@ -17,9 +17,12 @@ import bot
 from bot import (
     _is_auto_delete_candidate,
     _is_tracker_task_candidate,
+    _run_background_monitor_cycle,
+    _run_background_step,
     _run_auto_delete_finished_once,
     _run_task_notifications_once,
 )
+from rutracker import RutrackerTopicUnavailable
 from state_store import JsonStateStore
 
 
@@ -31,6 +34,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         task_owners_file=d / "owners.json",
         notified_tasks_file=d / "notified.json",
         auto_delete_tasks_file=d / "auto_delete.json",
+        topic_subscriptions_file=d / "subscriptions.json",
     )
 
 
@@ -159,6 +163,131 @@ class AutoDeleteDelayTests(unittest.TestCase):
             asyncio.run(_run_auto_delete_finished_once())
 
         mock_ds.delete_tasks.assert_called_once_with(["tid1"])
+
+
+class BackgroundMonitorResilienceTests(unittest.TestCase):
+    def test_cycle_continues_after_unexpected_step_error(self) -> None:
+        calls: list[str] = []
+
+        async def fail_tracker() -> None:
+            calls.append("trackers")
+            raise RuntimeError("boom")
+
+        async def notifications(app) -> None:
+            calls.append("notifications")
+
+        async def auto_delete() -> None:
+            calls.append("auto_delete")
+
+        async def prune() -> None:
+            calls.append("prune")
+
+        with (
+            patch.object(bot, "_run_tracker_background_once", fail_tracker),
+            patch.object(bot, "_run_task_notifications_once", notifications),
+            patch.object(bot, "_run_auto_delete_finished_once", auto_delete),
+            patch.object(bot, "_run_prune_stale_state_once", prune),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="ERROR") as logs:
+                asyncio.run(_run_background_monitor_cycle(MagicMock()))
+
+        self.assertEqual(calls, ["trackers", "notifications", "auto_delete", "prune"])
+        self.assertIn("Background step failed: public tracker scan", logs.output[0])
+
+    def test_background_step_does_not_swallow_cancellation(self) -> None:
+        async def cancel() -> None:
+            raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(_run_background_step("cancel", cancel))
+
+
+class SubscriptionCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_unavailable_rutracker_topic_pauses_subscription_and_notifies(self) -> None:
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 1 из 10",
+                "last_episode_end": 1,
+                "total_episodes": 10,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.side_effect = RutrackerTopicUnavailable("topic removed")
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        updated = self._store.load_topic_subscriptions()["123"]
+        self.assertIn("unavailable_at", updated)
+        self.assertEqual(updated["unavailable_reason"], "topic removed")
+        mock_app.bot.send_message.assert_awaited_once()
+
+    def test_unavailable_rutracker_topic_is_not_rechecked_after_pause(self) -> None:
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 1 из 10",
+                "last_episode_end": 1,
+                "total_episodes": 10,
+                "unavailable_at": "2026-05-11 22:00",
+            }
+        })
+        mock_rt = MagicMock()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        mock_rt.get_topic_title.assert_not_called()
+        mock_app.bot.send_message.assert_not_called()
+
+    def test_jackett_subscription_seen_titles_update_only_after_notification(self) -> None:
+        self._store.save_topic_subscriptions({
+            "jackett:abc": {
+                "type": "jackett",
+                "chat_id": 999,
+                "query": "series",
+                "seen_titles": ["old"],
+            }
+        })
+        result = MagicMock()
+        result.title = "new"
+        result.size = "1 GB"
+        result.seeders = 5
+        result.tracker = "idx"
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [result]
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "jackett_client", mock_jackett),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="WARNING"):
+                asyncio.run(bot._check_jackett_subscriptions(mock_app))
+
+        updated = self._store.load_topic_subscriptions()["jackett:abc"]
+        self.assertEqual(updated["seen_titles"], ["old"])
 
 
 if __name__ == "__main__":

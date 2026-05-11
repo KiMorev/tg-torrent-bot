@@ -40,6 +40,7 @@ from bot import (
     help_command,
     search_cancel,
     search_timeout,
+    setup_bot_commands,
     status,
 )
 from state_store import JsonStateStore
@@ -586,6 +587,34 @@ class TaskCardRefreshLoopTests(unittest.TestCase):
 
 
 class SubscriptionLoopStartupTests(unittest.TestCase):
+    def test_setup_starts_subscription_loop_for_jackett_only_mode(self):
+        app = MagicMock()
+        app.bot.set_my_commands = AsyncMock()
+
+        def close_task(coro):
+            coro.close()
+            return MagicMock()
+
+        app.create_task.side_effect = close_task
+
+        async def run():
+            with (
+                patch.object(bot, "_cleanup_tmp_dir"),
+                patch.object(bot, "_background_monitor_enabled", return_value=False),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "RUTRACKER_ENABLED", False),
+                patch.object(bot, "JACKETT_ENABLED", True),
+                patch.object(bot, "rutracker_client", None),
+                patch.object(bot, "jackett_client", object()),
+            ):
+                await setup_bot_commands(app)
+
+        asyncio.run(run())
+
+        public_commands = app.bot.set_my_commands.await_args_list[-1].args[0]
+        self.assertIn("subs", [command.command for command in public_commands])
+        self.assertEqual(app.create_task.call_count, 2)
+
     def test_check_runs_immediately_before_first_sleep(self):
         """_subscription_check_loop must call _check_subscriptions at startup,
         not only after the first interval has elapsed."""

@@ -32,6 +32,10 @@ class RutrackerError(RuntimeError):
     pass
 
 
+class RutrackerTopicUnavailable(RutrackerError):
+    pass
+
+
 @dataclass
 class RutrackerResult:
     topic_id: str
@@ -146,6 +150,19 @@ class RutrackerClient:
 
     def _is_login_page(self, html: str) -> bool:
         return "login_username" in html.lower()
+
+    def _is_topic_unavailable_page(self, html: str) -> bool:
+        low = html.lower()
+        markers = (
+            "такой темы не существует",
+            "запрошенной темы не существует",
+            "тема не найдена",
+            "тема удалена",
+            "сообщение не существует",
+            "topic not found",
+            "topic does not exist",
+        )
+        return any(marker in low for marker in markers)
 
     def _cooldown_remaining_seconds(self) -> int:
         remaining = self._cooldown_until - time.monotonic()
@@ -494,6 +511,8 @@ class RutrackerClient:
             html = resp.text
         except requests.RequestException as e:
             status_code = self._http_status_from_exception(e)
+            if status_code in (404, 410):
+                raise RutrackerTopicUnavailable(f"Тема Rutracker {topic_id} недоступна: HTTP {status_code}") from e
             reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка страницы темы"
             self._raise_with_backoff(f"Не удалось получить страницу темы: {e}", reason)
 
@@ -511,6 +530,8 @@ class RutrackerClient:
                 html = resp.text
             except requests.RequestException as e:
                 status_code = self._http_status_from_exception(e)
+                if status_code in (404, 410):
+                    raise RutrackerTopicUnavailable(f"Тема Rutracker {topic_id} недоступна: HTTP {status_code}") from e
                 reason = f"HTTP {status_code}" if status_code in (403, 503) else "ошибка страницы темы"
                 self._raise_with_backoff(f"Не удалось получить страницу темы: {e}", reason)
 
@@ -524,5 +545,8 @@ class RutrackerClient:
         if tag:
             self._clear_backoff()
             return tag.get_text(strip=True)
+
+        if self._is_topic_unavailable_page(html):
+            raise RutrackerTopicUnavailable(f"Тема Rutracker {topic_id} недоступна или удалена")
 
         raise RutrackerError(f"Не удалось найти заголовок темы {topic_id}")

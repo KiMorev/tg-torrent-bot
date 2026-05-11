@@ -2,7 +2,7 @@ import unittest
 
 import requests
 
-from rutracker import RutrackerClient, RutrackerError
+from rutracker import RutrackerClient, RutrackerError, RutrackerTopicUnavailable
 
 
 class FakeResponse:
@@ -107,6 +107,24 @@ class RutrackerBackoffTests(unittest.TestCase):
 
         self.assertIn("временно на паузе", result["error"])
         self.assertEqual(session.get_calls, 0)
+
+    def test_get_topic_title_404_raises_unavailable_without_backoff(self) -> None:
+        session = SequenceSession([FakeResponse(status_code=404, text="not found")])
+        client = self._client(session)
+
+        with self.assertRaises(RutrackerTopicUnavailable):
+            client.get_topic_title("123")
+
+        self.assertEqual(client._cooldown_remaining_seconds(), 0)
+
+    def test_get_topic_title_deleted_page_raises_unavailable_without_backoff(self) -> None:
+        session = SequenceSession([FakeResponse(text="<html><body>Такой темы не существует</body></html>")])
+        client = self._client(session)
+
+        with self.assertRaises(RutrackerTopicUnavailable):
+            client.get_topic_title("123")
+
+        self.assertEqual(client._cooldown_remaining_seconds(), 0)
 
 
 if __name__ == "__main__":

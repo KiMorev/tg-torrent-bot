@@ -85,7 +85,7 @@ from keyboards import (
 )
 from jackett import JackettError, JackettResult
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
-from rutracker import RutrackerError, RutrackerResult
+from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
 from task_policies import (
     auto_delete_notice as _policy_auto_delete_notice,
     format_task_notification as _policy_format_task_notification,
@@ -381,6 +381,10 @@ def _background_monitor_enabled() -> bool:
     )
 
 
+def _subscription_monitor_enabled() -> bool:
+    return bool(rutracker_client or jackett_client)
+
+
 def _tracker_key(tracker: str) -> str:
     return _tracker_normalized_key(tracker)
 
@@ -493,6 +497,22 @@ async def _run_tracker_background_once() -> None:
         _add_tracker_processed_ids(processed_ids)
 
 
+async def _run_background_step(label: str, step) -> None:
+    try:
+        await step()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background step failed: %s", label)
+
+
+async def _run_background_monitor_cycle(app: Application) -> None:
+    await _run_background_step("public tracker scan", _run_tracker_background_once)
+    await _run_background_step("task notifications", lambda: _run_task_notifications_once(app))
+    await _run_background_step("auto-delete finished tasks", _run_auto_delete_finished_once)
+    await _run_background_step("stale state pruning", _run_prune_stale_state_once)
+
+
 async def _background_monitor_loop(app: Application) -> None:
     if not _background_monitor_enabled():
         logger.info("Background monitor disabled")
@@ -506,10 +526,7 @@ async def _background_monitor_loop(app: Application) -> None:
     try:
         await asyncio.sleep(10)
         while True:
-            await _run_tracker_background_once()
-            await _run_task_notifications_once(app)
-            await _run_auto_delete_finished_once()
-            await _run_prune_stale_state_once()
+            await _run_background_monitor_cycle(app)
             await asyncio.sleep(TRACKERS_BACKGROUND_INTERVAL_SECONDS)
     except asyncio.CancelledError:
         logger.info("Background monitor stopped")
@@ -1068,7 +1085,7 @@ async def _progress_update_loop(app) -> None:
     try:
         await asyncio.sleep(PROGRESS_UPDATE_INTERVAL_SECONDS)
         while True:
-            await _run_progress_panel_update_once(app)
+            await _run_background_step("progress panel update", lambda: _run_progress_panel_update_once(app))
             await asyncio.sleep(PROGRESS_UPDATE_INTERVAL_SECONDS)
     except asyncio.CancelledError:
         logger.info("Progress update loop stopped")
@@ -2328,6 +2345,8 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ep_end = sub.get("last_episode_end", "?")
         total = sub.get("total_episodes", "?")
         lines.append(f"\n{i}. {_html.escape(short)}\n   📺 {ep_end} из {total} эп.")
+        if sub.get("unavailable_at"):
+            lines.append("   ⚠️ Тема недоступна, проверка приостановлена.")
         rows.append([
             InlineKeyboardButton(
                 f"🔕 {i}. Отписаться",
@@ -2439,22 +2458,59 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 ),
             ]])
 
-            sub["seen_titles"] = list(seen_titles | new_titles)
-            sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
-            changed = True
-            logger.info("Jackett subscription update: key=%s fresh=%d", key, len(fresh))
-
+            sent = not chat_id
             if chat_id:
                 try:
                     await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+                    sent = True
                 except Exception:
                     logger.warning("Failed to notify chat %s for Jackett subscription", chat_id, exc_info=True)
+
+            if sent:
+                sub["seen_titles"] = list(seen_titles | new_titles)
+                sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                changed = True
+                logger.info("Jackett subscription update: key=%s fresh=%d", key, len(fresh))
 
         except Exception:
             logger.warning("Error checking Jackett subscription %s", key, exc_info=True)
 
     if changed:
         state_store.save_topic_subscriptions(subs)
+
+
+async def _mark_rutracker_subscription_unavailable(
+    app: Application,
+    topic_id: str,
+    sub: dict,
+    error: RutrackerTopicUnavailable,
+) -> bool:
+    if sub.get("unavailable_at"):
+        return False
+
+    chat_id = sub.get("chat_id")
+    short = _format_sub_title(sub.get("title", "")) or topic_id
+    text = (
+        "⚠️ Подписка Rutracker больше недоступна.\n\n"
+        f"{short}\n"
+        f"ID темы: {topic_id}\n\n"
+        "Я приостановил проверку этой подписки. Если тема удалена окончательно, её можно убрать."
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑️ Удалить подписку", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}")
+    ]])
+
+    if chat_id:
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+        except Exception:
+            logger.warning("Failed to notify chat %s about unavailable topic %s", chat_id, topic_id, exc_info=True)
+            return False
+
+    sub["unavailable_at"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    sub["unavailable_reason"] = str(error)
+    logger.info("Rutracker subscription paused: topic=%s reason=%s", topic_id, error)
+    return True
 
 
 async def _check_subscriptions(app: Application) -> None:
@@ -2473,8 +2529,16 @@ async def _check_subscriptions(app: Application) -> None:
     for topic_id, sub in list(subs.items()):
         if sub.get("type") == "jackett":
             continue
+        if sub.get("unavailable_at"):
+            continue
         try:
-            new_title = await asyncio.to_thread(rutracker_client.get_topic_title, topic_id)
+            try:
+                new_title = await asyncio.to_thread(rutracker_client.get_topic_title, topic_id)
+            except RutrackerTopicUnavailable as e:
+                if await _mark_rutracker_subscription_unavailable(app, topic_id, sub, e):
+                    changed = True
+                continue
+
             new_info = _parse_episode_info(new_title)
             if new_info is None:
                 continue
@@ -2553,17 +2617,15 @@ async def _subscription_check_loop(app: Application) -> None:
     interval = SUBSCRIPTION_CHECK_INTERVAL_HOURS * 3600
     # Run immediately on startup so users don't wait N hours for the first check
     try:
-        await _check_subscriptions(app)
-    except Exception:
-        logger.error("Initial subscription check error", exc_info=True)
-    while True:
-        _next_subscription_check_at = time.time() + interval
-        await asyncio.sleep(interval)
-        _next_subscription_check_at = None
-        try:
-            await _check_subscriptions(app)
-        except Exception:
-            logger.error("Subscription check loop error", exc_info=True)
+        await _run_background_step("initial subscription check", lambda: _check_subscriptions(app))
+        while True:
+            _next_subscription_check_at = time.time() + interval
+            await asyncio.sleep(interval)
+            _next_subscription_check_at = None
+            await _run_background_step("subscription check", lambda: _check_subscriptions(app))
+    except asyncio.CancelledError:
+        logger.info("Subscription check loop stopped")
+        raise
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3354,7 +3416,7 @@ async def setup_bot_commands(app: Application) -> None:
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
-    if RUTRACKER_ENABLED:
+    if RUTRACKER_ENABLED or JACKETT_ENABLED:
         commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
         BotCommand("admin", "Админ-панель"),
@@ -3374,7 +3436,7 @@ async def setup_bot_commands(app: Application) -> None:
     PROGRESS_UPDATE_TASK = app.create_task(_progress_update_loop(app))
     logger.info("Progress update loop started, interval=%ss", PROGRESS_UPDATE_INTERVAL_SECONDS)
 
-    if rutracker_client:
+    if _subscription_monitor_enabled():
         global SUBSCRIPTION_MONITOR_TASK
         SUBSCRIPTION_MONITOR_TASK = app.create_task(_subscription_check_loop(app))
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
