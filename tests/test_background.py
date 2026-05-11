@@ -121,6 +121,69 @@ class NotificationDeduplicationTests(unittest.TestCase):
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=999, message_id=77)
         self.assertEqual(bot.TASK_CARD_MESSAGES["tid1"], {(100, 88)})
 
+    def test_notification_retries_only_failed_recipients(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "TestFile", "size": 0}
+        attempts: list[int] = []
+        failed_once = False
+
+        async def send_message(*, chat_id, **kwargs):
+            nonlocal failed_once
+            attempts.append(chat_id)
+            if chat_id == 999 and not failed_once:
+                failed_once = True
+                raise RuntimeError("telegram down")
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=send_message)
+        mock_app.bot.delete_message = AsyncMock()
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "NOTIFY_CHAT_IDS_RAW", "100,999"),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="WARNING"):
+                asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertEqual(attempts, [100, 999, 999])
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["status"], "done")
+        self.assertEqual(notified["sent"], ["100", "999"])
+        self.assertEqual(notified["failures"], {})
+
+    def test_notification_stops_retrying_after_failure_limit(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "TestFile", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("chat not found"))
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "MAX_TASK_NOTIFICATION_FAILURES", 2),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="WARNING"):
+                asyncio.run(_run_task_notifications_once(mock_app))
+            with self.assertLogs("tg_torrent_drop", level="WARNING"):
+                asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertEqual(mock_app.bot.send_message.await_count, 2)
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["failures"], {"999": 2})
+
 
 class AutoDeleteDelayTests(unittest.TestCase):
     def setUp(self) -> None:

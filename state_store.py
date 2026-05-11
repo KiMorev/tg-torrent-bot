@@ -180,14 +180,40 @@ class JsonStateStore:
             owners[task_id] = chat_id
             self.save_task_owners(owners)
 
-    def load_notified_tasks(self) -> dict[str, str]:
+    def load_notified_tasks(self) -> dict[str, object]:
         payload = self.load_json_file(self.notified_tasks_file, {})
         if not isinstance(payload, dict):
             return {}
 
-        return {str(task_id): str(status) for task_id, status in payload.items() if task_id and status}
+        tasks: dict[str, object] = {}
+        for task_id, value in payload.items():
+            if not task_id or not value:
+                continue
 
-    def save_notified_tasks(self, tasks: dict[str, str]) -> None:
+            if isinstance(value, dict):
+                status = str(value.get("status", ""))
+                if not status:
+                    continue
+                sent = [str(chat_id) for chat_id in value.get("sent", []) if chat_id]
+                raw_failures = value.get("failures", {})
+                failures = {}
+                if isinstance(raw_failures, dict):
+                    for chat_id, count in raw_failures.items():
+                        try:
+                            failures[str(chat_id)] = max(0, int(count))
+                        except (TypeError, ValueError):
+                            continue
+                tasks[str(task_id)] = {
+                    "status": status,
+                    "sent": sent,
+                    "failures": failures,
+                }
+            else:
+                tasks[str(task_id)] = str(value)
+
+        return tasks
+
+    def save_notified_tasks(self, tasks: dict[str, object]) -> None:
         if len(tasks) > _MAX_NOTIFIED_TASKS:
             # dict preserves insertion order — drop the oldest entries
             tasks = dict(list(tasks.items())[-_MAX_NOTIFIED_TASKS:])

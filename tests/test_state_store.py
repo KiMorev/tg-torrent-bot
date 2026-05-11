@@ -163,6 +163,26 @@ class StateStoreTests(unittest.TestCase):
 
         self.assertEqual(len(loaded), _MAX_NOTIFIED_TASKS)
 
+    def test_notified_tasks_preserve_per_recipient_state(self) -> None:
+        self.store.save_notified_tasks({
+            "tid1": {
+                "status": "done",
+                "sent": ["100"],
+                "failures": {"999": 2},
+            }
+        })
+
+        self.assertEqual(
+            self.store.load_notified_tasks(),
+            {
+                "tid1": {
+                    "status": "done",
+                    "sent": ["100"],
+                    "failures": {"999": 2},
+                }
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

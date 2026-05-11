@@ -212,6 +212,7 @@ PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
 # task_id → task-card messages that can be removed after a final notification
 TASK_CARD_MESSAGES: dict[str, set[tuple[int, int]]] = {}
+MAX_TASK_NOTIFICATION_FAILURES = 3
 # Unix timestamp of next scheduled subscription check (set by the loop)
 _next_subscription_check_at: float | None = None
 
@@ -740,11 +741,11 @@ def _remember_task_owner(task_id: str, chat_id: int | None) -> None:
     state_store.remember_task_owner(task_id, chat_id)
 
 
-def _load_notified_tasks() -> dict[str, str]:
+def _load_notified_tasks() -> dict[str, object]:
     return state_store.load_notified_tasks()
 
 
-def _save_notified_tasks(tasks: dict[str, str]) -> None:
+def _save_notified_tasks(tasks: dict[str, object]) -> None:
     state_store.save_notified_tasks(tasks)
 
 
@@ -799,6 +800,42 @@ def _format_task_notification(task: dict) -> str:
     )
 
 
+def _notification_delivery_state(raw_state: object, notification_key: str) -> tuple[set[str], dict[str, int], bool]:
+    if raw_state == notification_key:
+        return set(), {}, True
+
+    if not isinstance(raw_state, dict) or raw_state.get("status") != notification_key:
+        return set(), {}, False
+
+    sent = {str(chat_id) for chat_id in raw_state.get("sent", []) if chat_id}
+    failures = {}
+    raw_failures = raw_state.get("failures", {})
+    if isinstance(raw_failures, dict):
+        for chat_id, count in raw_failures.items():
+            try:
+                failures[str(chat_id)] = max(0, int(count))
+            except (TypeError, ValueError):
+                continue
+
+    return sent, failures, False
+
+
+def _make_notification_delivery_state(
+    notification_key: str,
+    sent: set[str],
+    failures: dict[str, int],
+) -> dict:
+    return {
+        "status": notification_key,
+        "sent": sorted(sent),
+        "failures": {
+            chat_id: count
+            for chat_id, count in sorted(failures.items())
+            if count > 0
+        },
+    }
+
+
 async def _run_task_notifications_once(app: Application) -> None:
     if not _task_notifications_enabled():
         return
@@ -818,15 +855,25 @@ async def _run_task_notifications_once(app: Application) -> None:
             continue
 
         notification_key = _notification_status_key(status)
-        if notified.get(task_id) == notification_key:
+        sent_recipients, failed_recipients, legacy_done = _notification_delivery_state(
+            notified.get(task_id),
+            notification_key,
+        )
+        if legacy_done:
             continue
 
         recipients = _notification_recipients(task_id)
         if not recipients:
             continue
 
-        sent = False
-        for chat_id in recipients:
+        task_changed = False
+        for chat_id in sorted(recipients):
+            recipient_key = str(chat_id)
+            if recipient_key in sent_recipients:
+                continue
+            if failed_recipients.get(recipient_key, 0) >= MAX_TASK_NOTIFICATION_FAILURES:
+                continue
+
             try:
                 await app.bot.send_message(
                     chat_id=chat_id,
@@ -834,17 +881,28 @@ async def _run_task_notifications_once(app: Application) -> None:
                     reply_markup=_notification_keyboard(task_id, status, task.get("type", "")),
                 )
                 await _delete_task_card_messages(app, task_id, chat_id=chat_id)
-                sent = True
+                sent_recipients.add(recipient_key)
+                failed_recipients.pop(recipient_key, None)
+                task_changed = True
             except Exception:
+                failure_count = failed_recipients.get(recipient_key, 0) + 1
+                failed_recipients[recipient_key] = failure_count
+                task_changed = True
                 logger.warning(
-                    "Failed to send task status notification chat_id=%s task_id=%s",
+                    "Failed to send task status notification chat_id=%s task_id=%s attempt=%s/%s",
                     chat_id,
                     task_id,
+                    failure_count,
+                    MAX_TASK_NOTIFICATION_FAILURES,
                     exc_info=True,
                 )
 
-        if sent:
-            notified[task_id] = notification_key
+        if task_changed:
+            notified[task_id] = _make_notification_delivery_state(
+                notification_key,
+                sent_recipients,
+                failed_recipients,
+            )
             changed = True
 
     if changed:
