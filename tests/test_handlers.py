@@ -33,6 +33,7 @@ from bot import (
     _is_admin_chat,
     _is_allowed,
     _notification_keyboard,
+    _run_progress_panel_update_once,
     _start_task_card_refresh,
     _task_card_refresh_loop,
     admin_callback,
@@ -355,6 +356,7 @@ class StatusCommandTests(unittest.TestCase):
         bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
         bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
         bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
 
         with (
             patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
@@ -370,6 +372,44 @@ class StatusCommandTests(unittest.TestCase):
         bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
         bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
         bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
+
+    def test_progress_panel_gets_final_update_when_last_task_finished(self):
+        active_task = {
+            "id": "t1", "status": "downloading", "title": "Film",
+            "size": 1024, "type": "bt",
+            "additional": {"transfer": {"size_downloaded": 512, "speed_download": 100}},
+        }
+        done_task = {
+            "id": "t1", "status": "finished", "title": "Film",
+            "size": 1024, "type": "bt", "additional": {"transfer": {}},
+        }
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.side_effect = [[active_task], [done_task], [done_task]]
+        app = MagicMock()
+        app.bot.edit_message_text = AsyncMock()
+
+        bot.DOWNLOAD_PANEL_MESSAGES[100] = 77
+        bot.DOWNLOAD_PANEL_PAGES[100] = 0
+        bot.DOWNLOAD_PANEL_SCOPES[100] = bot.TASK_LIST_SCOPE_ALL
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE[100] = True
+
+        try:
+            with (
+                patch.object(bot, "ds_client", mock_ds),
+                patch.object(bot, "ADMIN_CHAT_IDS", {100}),
+            ):
+                asyncio.run(_run_progress_panel_update_once(app))
+                asyncio.run(_run_progress_panel_update_once(app))
+                asyncio.run(_run_progress_panel_update_once(app))
+
+            self.assertEqual(app.bot.edit_message_text.await_count, 2)
+            self.assertFalse(bot.DOWNLOAD_PANEL_HAD_ACTIVE[100])
+        finally:
+            bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
+            bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
+            bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+            bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
 
 
 # ---------------------------------------------------------------------------
@@ -534,13 +574,13 @@ class TaskCardRefreshLoopTests(unittest.TestCase):
         task = {"id": "t1", "status": "finished", "title": "F",
                 "size": 0, "type": "bt", "additional": {"transfer": {}}}
         app = self._run_loop([[task]])
-        app.bot.edit_message_text.assert_not_called()
+        app.bot.edit_message_text.assert_awaited_once()
 
     def test_stops_when_task_is_paused(self):
         task = {"id": "t1", "status": "paused", "title": "F",
                 "size": 0, "type": "bt", "additional": {"transfer": {}}}
         app = self._run_loop([[task]])
-        app.bot.edit_message_text.assert_not_called()
+        app.bot.edit_message_text.assert_awaited_once()
 
     def test_stops_when_task_disappears(self):
         # DS returns empty list — task was deleted
@@ -559,7 +599,7 @@ class TaskCardRefreshLoopTests(unittest.TestCase):
         }
         # First poll: active → edit; second poll: finished → stop
         app = self._run_loop([[task_active], [task_done]])
-        app.bot.edit_message_text.assert_called_once()
+        self.assertEqual(app.bot.edit_message_text.await_count, 2)
 
     def test_cleanup_removes_key_from_dict(self):
         task = {"id": "t1", "status": "finished", "title": "F",

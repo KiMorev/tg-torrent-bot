@@ -202,6 +202,7 @@ BOT_COMMANDS = [
 DOWNLOAD_PANEL_MESSAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_PAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_SCOPES: dict[int, str] = {}
+DOWNLOAD_PANEL_HAD_ACTIVE: dict[int, bool] = {}
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
@@ -1072,9 +1073,6 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
                 return  # task deleted from DS
 
             status = (task.get("status") or "").lower()
-            if status not in _ACTIVE_STATUSES:
-                return  # no longer actively transferring — stop refreshing
-
             try:
                 await app.bot.edit_message_text(
                     chat_id=chat_id,
@@ -1090,6 +1088,9 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
                 # "message is not modified" is fine — just continue
             except Exception:
                 logger.debug("Task card auto-refresh edit error", exc_info=True)
+
+            if status not in _ACTIVE_STATUSES:
+                return  # final refresh is done — stop updating this card
     except asyncio.CancelledError:
         pass
     finally:
@@ -1110,13 +1111,18 @@ async def _run_progress_panel_update_once(app) -> None:
         logger.warning("Progress panel update failed to list tasks", exc_info=True)
         return
 
-    if not _has_active_tasks(tasks):
+    active_now = _has_active_tasks(tasks)
+    if not active_now and not any(DOWNLOAD_PANEL_HAD_ACTIVE.values()):
         return
 
     for chat_id, message_id in list(DOWNLOAD_PANEL_MESSAGES.items()):
         scope = _normalize_list_scope(DOWNLOAD_PANEL_SCOPES.get(chat_id), chat_id)
         page = DOWNLOAD_PANEL_PAGES.get(chat_id, 0)
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
+        visible_active = _has_active_tasks(visible_tasks)
+        if not active_now and not DOWNLOAD_PANEL_HAD_ACTIVE.get(chat_id, False):
+            continue
+
         total_count = len(tasks) if _is_admin_chat(chat_id) else None
         text = _format_tasks(visible_tasks, scope=scope, total_count=total_count, page=page)
         keyboard = _tasks_keyboard(visible_tasks, scope=scope, is_admin=_is_admin_chat(chat_id), page=page)
@@ -1135,8 +1141,11 @@ async def _run_progress_panel_update_once(app) -> None:
                 DOWNLOAD_PANEL_MESSAGES.pop(chat_id, None)
                 DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
                 DOWNLOAD_PANEL_SCOPES.pop(chat_id, None)
+                DOWNLOAD_PANEL_HAD_ACTIVE.pop(chat_id, None)
             else:
                 logger.warning("Failed to update progress panel chat_id=%s: %s", chat_id, e)
+        else:
+            DOWNLOAD_PANEL_HAD_ACTIVE[chat_id] = visible_active
 
 
 async def _progress_update_loop(app) -> None:
@@ -1239,6 +1248,7 @@ async def _delete_download_panel(
     DOWNLOAD_PANEL_MESSAGES.pop(chat_id, None)
     DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
     DOWNLOAD_PANEL_SCOPES.pop(chat_id, None)
+    DOWNLOAD_PANEL_HAD_ACTIVE.pop(chat_id, None)
 
 
 async def _send_download_panel(
@@ -1258,6 +1268,7 @@ async def _send_download_panel(
         reply_markup=_tasks_keyboard(tasks, scope=scope, is_admin=_is_admin_chat(chat_id), page=page),
     )
     DOWNLOAD_PANEL_MESSAGES[chat_id] = message.message_id
+    DOWNLOAD_PANEL_HAD_ACTIVE[chat_id] = _has_active_tasks(tasks)
 
 
 async def _replace_message_with_download_panel(
@@ -1278,6 +1289,7 @@ async def _replace_message_with_download_panel(
         reply_markup=_tasks_keyboard(tasks, scope=scope, is_admin=_is_admin_chat(chat_id), page=page),
     )
     DOWNLOAD_PANEL_MESSAGES[chat_id] = message.message_id
+    DOWNLOAD_PANEL_HAD_ACTIVE[chat_id] = _has_active_tasks(tasks)
 
 
 async def _edit_message_as_download_panel(
@@ -1314,6 +1326,7 @@ async def _edit_download_panel(
         _format_tasks(tasks, scope=scope, total_count=total_count, page=page),
         _tasks_keyboard(tasks, scope=scope, is_admin=_is_admin_chat(chat_id), page=page),
     )
+    DOWNLOAD_PANEL_HAD_ACTIVE[chat_id] = _has_active_tasks(tasks)
 
 
 async def _wait_for_magnet_task_id(
@@ -3184,6 +3197,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ),
             reply_markup=_tasks_keyboard(visible_tasks, scope=scope, is_admin=_is_admin_chat(chat_id)),
         )
+        DOWNLOAD_PANEL_HAD_ACTIVE[chat_id] = _has_active_tasks(visible_tasks)
         return
 
     if action == "trackers":
