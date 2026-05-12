@@ -1134,6 +1134,9 @@ async def _refresh_movie_discovery_cache() -> dict:
         {fp: "" for fp in raw_seen} if isinstance(raw_seen, list) else dict(raw_seen)
     )
     known = _movie_prune_seen_fingerprints(known, now=now)
+    prev_kp_cache: dict = (
+        previous["kp_cache"] if isinstance(previous.get("kp_cache"), dict) else {}
+    )
     cache = await asyncio.to_thread(
         _movie_build_cards,
         list(by_fingerprint.values()),
@@ -1142,6 +1145,7 @@ async def _refresh_movie_discovery_cache() -> dict:
         limit=MOVIE_DISCOVERY_LIMIT,
         min_kp_rating=MOVIE_DISCOVERY_MIN_KP_RATING,
         kinopoisk_client=kinopoisk_client,
+        kp_cache=prev_kp_cache,
     )
     _save_movie_discovery_cache(cache)
     debug_report = {

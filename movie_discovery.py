@@ -423,6 +423,72 @@ def _merge_duplicate_cards(cards: list[dict], known_fingerprints: set[str]) -> l
     return list(merged.values())
 
 
+# ---------------------------------------------------------------------------
+# KP result cache helpers
+# ---------------------------------------------------------------------------
+
+# How long to keep a successful KP match before re-querying (ratings update slowly)
+_KP_CACHE_TTL_FOUND_DAYS = 14
+# How long to keep a "not found" entry before retrying (new films get indexed later)
+_KP_CACHE_TTL_MISS_DAYS = 3
+
+
+def _kp_cache_key(title: str, year: int | None) -> str:
+    return f"{title.lower().strip()}|{year or ''}"
+
+
+def _kp_cache_lookup(
+    kp_cache: dict,
+    title: str,
+    year: int | None,
+    now: datetime,
+) -> tuple[bool, dict | None]:
+    """Return *(hit, entry)*.
+
+    *hit* is True when a fresh entry exists.
+    *entry* is None when the film was previously not found in KP.
+    """
+    key = _kp_cache_key(title, year)
+    entry = kp_cache.get(key)
+    if not isinstance(entry, dict):
+        return False, None
+
+    try:
+        cached_at = datetime.fromisoformat(entry.get("cached_at", ""))
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False, None
+
+    ttl = _KP_CACHE_TTL_FOUND_DAYS if entry.get("kp_id") else _KP_CACHE_TTL_MISS_DAYS
+    if (now - cached_at).days >= ttl:
+        return False, None
+
+    return True, entry
+
+
+def _kp_cache_store(
+    kp_cache: dict,
+    title: str,
+    year: int | None,
+    match,  # KinopoiskMovieMatch | None
+    now_iso: str,
+) -> None:
+    key = _kp_cache_key(title, year)
+    if match is not None:
+        kp_cache[key] = {
+            "kp_id": match.kp_id,
+            "title": match.title,
+            "year": match.year,
+            "rating": match.rating,
+            "genres": match.genres,
+            "url": match.url,
+            "cached_at": now_iso,
+        }
+    else:
+        kp_cache[key] = {"kp_id": None, "cached_at": now_iso}
+
+
 def build_cards(
     releases: list[dict],
     *,
@@ -431,13 +497,29 @@ def build_cards(
     limit: int,
     min_kp_rating: float,
     kinopoisk_client=None,
+    kp_cache: dict | None = None,
 ) -> dict:
     """Build scored movie cards from raw releases.
 
     ``known_fingerprints`` accepts either the legacy ``set[str]`` format or the
     new ``dict[str, str]`` format (fingerprint → timestamp).  The return value
     always uses the dict format so callers can persist it and prune with TTL.
+
+    ``kp_cache`` is a persistent dict keyed by ``title|year`` that avoids
+    redundant API calls across discovery runs.  Pass the value from the
+    previous cache load; an updated copy is returned in the result dict.
     """
+    if kp_cache is None:
+        kp_cache = {}
+
+    # Parse now_text into a timezone-aware datetime for TTL comparisons
+    try:
+        now_dt = datetime.fromisoformat(now_text.replace(" ", "T"))
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        now_dt = datetime.now(timezone.utc)
+
     # Normalise known_fingerprints to both set (is_new checks) and dict (timestamped save)
     if isinstance(known_fingerprints, dict):
         known_fps_set: set[str] = set(known_fingerprints.keys())
@@ -475,20 +557,36 @@ def build_cards(
         _finalize_card(card, known_fps_set)
 
         if kinopoisk_client is not None:
-            match = kinopoisk_client.search_movie(
-                card["title"], card["year"], alt_title=card.get("alt_title", "")
-            )
-            if match is not None:
-                # Discard match if KP returned a film from a very different year
-                year_ok = not (
-                    match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}
+            search_title = card["title"]
+            search_year = card["year"]
+            cache_hit, cached = _kp_cache_lookup(kp_cache, search_title, search_year, now_dt)
+
+            if cache_hit:
+                if cached and cached.get("kp_id"):
+                    card["kp_id"] = cached["kp_id"]
+                    card["kp_url"] = cached.get("url", "")
+                    card["rating"] = cached.get("rating")
+                    card["genres"] = cached.get("genres", [])
+                    card["title"] = cached.get("title") or search_title
+                    logger.debug("KP cache hit for %r → kp_id=%s", search_title, cached["kp_id"])
+                # cached entry with kp_id=None means previously not found — skip API call
+            else:
+                match = kinopoisk_client.search_movie(
+                    search_title, search_year, alt_title=card.get("alt_title", "")
                 )
-                if year_ok:
-                    card["kp_id"] = match.kp_id
-                    card["kp_url"] = match.url
-                    card["rating"] = match.rating
-                    card["genres"] = match.genres
-                    card["title"] = match.title
+                _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
+                if match is not None:
+                    # Discard match if KP returned a film from a very different year
+                    year_ok = not (
+                        match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}
+                    )
+                    if year_ok:
+                        card["kp_id"] = match.kp_id
+                        card["kp_url"] = match.url
+                        card["rating"] = match.rating
+                        card["genres"] = match.genres
+                        card["title"] = match.title
+
             # Apply rating filter only when we have a confirmed rating
             if card.get("rating") is not None and card["rating"] < min_kp_rating:
                 continue
@@ -509,8 +607,12 @@ def build_cards(
         if fp not in known_fps_dict:
             known_fps_dict[fp] = now_text
 
+    kp_hits = sum(1 for e in kp_cache.values() if isinstance(e, dict) and e.get("kp_id"))
+    logger.info("KP cache: %d entries (%d with match)", len(kp_cache), kp_hits)
+
     return {
         "updated_at": now_text,
         "seen_fingerprints": known_fps_dict,
+        "kp_cache": kp_cache,
         "cards": cards[:limit],
     }
