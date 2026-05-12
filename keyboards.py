@@ -102,6 +102,9 @@ def _admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("👥 Пользователи", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh"),
                 InlineKeyboardButton("📋 Загрузки", callback_data=_task_callback("list", TASK_LIST_SCOPE_ALL)),
             ],
+            [
+                InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
+            ],
             [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
         ]
     )

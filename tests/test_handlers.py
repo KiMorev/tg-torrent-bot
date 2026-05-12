@@ -44,6 +44,7 @@ from bot import (
     search_cancel,
     search_timeout,
     setup_bot_commands,
+    sub_callback,
     status,
 )
 from state_store import JsonStateStore
@@ -288,6 +289,86 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(update.callback_query.edit_message_text.call_count, 2)
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[0].args[0], "🧭 Проверяю сервисы…")
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "diag text")
+
+    def test_admin_subscriptions_callback_shows_all_owners(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:subscriptions")
+        context = _make_context()
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {
+            "123": {
+                "chat_id": 100,
+                "title": "Клиника / Scrubs / Сезон: 1",
+                "last_episode_end": 8,
+                "total_episodes": 10,
+            },
+            "jackett:abc": {
+                "chat_id": 200,
+                "type": "jackett",
+                "query": "Some show",
+                "last_check": "2026-05-12 08:00",
+            },
+        }
+        fake_store.load_approved_users.return_value = {
+            100: {"name": "Ivan"},
+            200: {"name": "Petr"},
+        }
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Подписки", text)
+        self.assertIn("Rutracker", text)
+        self.assertIn("Jackett", text)
+        self.assertIn("100 (Ivan)", text)
+        self.assertIn("200 (Petr)", text)
+
+    def test_admin_subscription_delete_refreshes_panel(self):
+        update = _make_callback_update(chat_id=300, callback_data="sub:admin_unsub:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {"chat_id": 100, "title": "Клиника", "last_episode_end": 1, "total_episodes": 2},
+                "jackett:abc": {"chat_id": 200, "type": "jackett", "query": "Film"},
+            })
+            with (
+                patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+            self.assertNotIn("123", store.load_topic_subscriptions())
+            self.assertIn("jackett:abc", store.load_topic_subscriptions())
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Подписки", text)
+        self.assertIn("Jackett", text)
+
+    def test_non_owner_cannot_delete_subscription(self):
+        update = _make_callback_update(chat_id=100, callback_data="sub:unsub:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {"chat_id": 200, "title": "Клиника", "last_episode_end": 1, "total_episodes": 2},
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100, 200}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+            self.assertIn("123", store.load_topic_subscriptions())
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("не относится", text)
 
     def test_admin_close_callback_deletes_panel_message(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:close")

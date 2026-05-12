@@ -606,6 +606,100 @@ def _format_admin_subscriptions_line() -> str:
     return f"Подписки: {total} (Rutracker {rutracker_count}, Jackett {jackett_count}){next_check}"
 
 
+def _subscription_owner_label(chat_id: int | None, approved_users: dict[int, dict] | None = None) -> str:
+    if chat_id is None:
+        return "владелец неизвестен"
+
+    label = str(chat_id)
+    approved_users = approved_users if approved_users is not None else state_store.load_approved_users()
+    user_info = approved_users.get(chat_id, {})
+    name = user_info.get("name") if isinstance(user_info, dict) else ""
+    if name:
+        label = f"{label} ({html_module.escape(str(name))})"
+
+    if _is_admin_chat(chat_id):
+        label += ", админ"
+
+    return label
+
+
+def _can_manage_subscription(chat_id: int | None, sub: dict | None) -> bool:
+    if not sub or chat_id is None:
+        return False
+    return _is_admin_chat(chat_id) or sub.get("chat_id") == chat_id
+
+
+def _admin_subscriptions_keyboard(subs: dict[str, dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for index, (key, sub) in enumerate(subs.items(), 1):
+        if sub.get("type") == "jackett":
+            rows.append([
+                InlineKeyboardButton(
+                    f"🗑️ {index}. Jackett",
+                    callback_data=f"{SUB_CALLBACK_PREFIX}:admin_jackett_unsub:{key}",
+                )
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(
+                    f"🗑️ {index}. Rutracker",
+                    callback_data=f"{SUB_CALLBACK_PREFIX}:admin_unsub:{key}",
+                )
+            ])
+
+    rows.append([
+        InlineKeyboardButton("🔄 Обновить", callback_data=f"{ADMIN_CALLBACK_PREFIX}:subscriptions"),
+        InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
+    ])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=f"{ADMIN_CALLBACK_PREFIX}:close")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
+    subs = state_store.load_topic_subscriptions()
+    approved_users = state_store.load_approved_users()
+
+    if not subs:
+        return (
+            "🔔 <b>Подписки</b>\n\nАктивных подписок нет.",
+            _admin_subscriptions_keyboard({}),
+        )
+
+    lines = [f"🔔 <b>Подписки</b> ({len(subs)})"]
+
+    for index, (key, sub) in enumerate(subs.items(), 1):
+        owner = _subscription_owner_label(sub.get("chat_id"), approved_users)
+        if sub.get("type") == "jackett":
+            query_text = html_module.escape(str(sub.get("query") or key))
+            last_check = html_module.escape(str(sub.get("last_check") or "—"))
+            lines.append(
+                f"\n{index}. 🌐 <b>Jackett</b>\n"
+                f"   Владелец: {owner}\n"
+                f"   Запрос: {query_text}\n"
+                f"   Проверено: {last_check}"
+            )
+            continue
+
+        title = html_module.escape(_format_sub_title(sub.get("title", "") or key))
+        ep_end = html_module.escape(str(sub.get("last_episode_end", "?")))
+        total = html_module.escape(str(sub.get("total_episodes", "?")))
+        lines.append(
+            f"\n{index}. 🔎 <b>Rutracker</b>\n"
+            f"   Владелец: {owner}\n"
+            f"   Тема: {title}\n"
+            f"   Серии: {ep_end} из {total}"
+        )
+        if sub.get("unavailable_at"):
+            reason = html_module.escape(str(sub.get("unavailable_reason") or "тема недоступна"))
+            lines.append(f"   ⚠️ Проверка приостановлена: {reason}")
+
+    if _next_subscription_check_at is not None:
+        next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
+        lines.append(f"\n🕐 Следующая проверка: {next_dt.strftime('%d.%m %H:%M')}")
+
+    return "\n".join(lines), _admin_subscriptions_keyboard(subs)
+
+
 def _format_admin_auto_delete_line() -> str:
     if not _auto_delete_finished_enabled():
         return "Автоудаление: выключено"
@@ -2403,6 +2497,11 @@ async def search_jackett_check_entry(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("Подписка не найдена.")
         return ConversationHandler.END
 
+    chat_id = query.message.chat.id if query.message else None
+    if not _can_manage_subscription(chat_id, sub):
+        await query.edit_message_text("Эта подписка не относится к вашему чату.")
+        return ConversationHandler.END
+
     search_query = sub.get("query", "")
     if not search_query or jackett_client is None:
         await query.edit_message_text("Подписка или Jackett недоступны.")
@@ -2490,9 +2589,14 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     action = parts[1]
     topic_id = parts[2] if len(parts) > 2 else ""
+    chat_id = query.message.chat.id if query.message else None
 
     if action == "unsub":
         subs = state_store.load_topic_subscriptions()
+        sub = subs.get(topic_id)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
         sub = subs.pop(topic_id, None)
         state_store.save_topic_subscriptions(subs)
         if sub:
@@ -2504,12 +2608,31 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif action == "jackett_unsub":
         key = topic_id
         subs = state_store.load_topic_subscriptions()
+        sub = subs.get(key)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
         sub = subs.pop(key, None)
         state_store.save_topic_subscriptions(subs)
         if sub:
             await query.edit_message_text(f"🔕 Подписка отменена:\n{sub.get('query', key)}")
         else:
             await query.edit_message_text("Подписка не найдена.")
+
+    elif action in {"admin_unsub", "admin_jackett_unsub"}:
+        if not _is_admin_chat(chat_id):
+            await query.edit_message_text("Только администратор может управлять всеми подписками.")
+            return
+
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.pop(topic_id, None)
+        state_store.save_topic_subscriptions(subs)
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.")
+            return
+
+        text, keyboard = _build_admin_subscriptions_view()
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def _check_jackett_subscriptions(app: Application) -> None:
@@ -2901,6 +3024,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="HTML",
             reply_markup=_admin_diagnostics_keyboard(),
         )
+        return
+
+    if action == "subscriptions":
+        text, keyboard = _build_admin_subscriptions_view()
+        await _safe_edit_callback(query, text, parse_mode="HTML", reply_markup=keyboard)
         return
 
     await _safe_edit_callback(query, "🛠️ Обновляю админ-панель…")
