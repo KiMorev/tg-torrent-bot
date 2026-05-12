@@ -213,6 +213,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         jackett_api_key=jackett_api_key,
         jackett_enabled=jackett_enabled,
         jackett_indexers=(env.get("JACKETT_INDEXERS", "all").strip() or "all"),
-        jackett_max_results=max(1, min(50, env_int(env, "JACKETT_MAX_RESULTS", 10))),
-        jackett_fetch_limit=max(10, min(200, env_int(env, "JACKETT_FETCH_LIMIT", 50))),
+        jackett_max_results=max(1, min(50, env_int(env, "JACKETT_MAX_RESULTS", 20))),
+        jackett_fetch_limit=max(10, min(200, env_int(env, "JACKETT_FETCH_LIMIT", 100))),
     )

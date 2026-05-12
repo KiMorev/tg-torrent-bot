@@ -73,6 +73,9 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.max_torrent_file_bytes, 20 * 1024 * 1024)
         self.assertEqual(settings.trackers_background_interval_seconds, 180)
         self.assertEqual(settings.approved_chat_ids_file, Path("/tmp/tg_torrent_drop/approved_chat_ids.json"))
+        self.assertEqual(settings.rutracker_max_results, 50)
+        self.assertEqual(settings.jackett_max_results, 20)
+        self.assertEqual(settings.jackett_fetch_limit, 100)
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "plex://")
 
@@ -88,6 +91,9 @@ class ConfigParsingTests(unittest.TestCase):
             "TRACKERS_BACKGROUND_INTERVAL_SECONDS": "10",
             "TASK_NOTIFICATION_STATUSES": "finished,error",
             "AUTO_DELETE_FINISHED_AFTER_HOURS": "0,5",
+            "RUTRACKER_MAX_RESULTS": "500",
+            "JACKETT_MAX_RESULTS": "500",
+            "JACKETT_FETCH_LIMIT": "500",
             "PLEX_ENABLED": "true",
             "PLEX_URL": "https://example.com/plex",
         }
@@ -102,6 +108,9 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.trackers_background_interval_seconds, 30)
         self.assertEqual(settings.task_notification_statuses, {"finished", "error"})
         self.assertEqual(settings.auto_delete_finished_after_hours, 0.5)
+        self.assertEqual(settings.rutracker_max_results, 50)
+        self.assertEqual(settings.jackett_max_results, 50)
+        self.assertEqual(settings.jackett_fetch_limit, 200)
         self.assertEqual(settings.task_owners_file, Path("/data/task_owners.json"))
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "https://example.com/plex")
