@@ -987,7 +987,10 @@ def _movie_discovery_audit_row(search_query: str, source: str, result, release: 
 def _movie_discovery_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for index, card in enumerate(cards[:10], 1):
-        title = _short_title({"title": str(card.get("title") or "Новинка")}, limit=42)
+        main = str(card.get("title") or "Новинка")
+        alt = str(card.get("alt_title") or "")
+        display = f"{main} / {alt}" if alt else main
+        title = _short_title({"title": display}, limit=42)
         rows.append([InlineKeyboardButton(
             f"🎬 {index}. {title}",
             callback_data=f"new:show:{index - 1}",
@@ -1030,7 +1033,9 @@ def _format_movie_discovery_cache(cache: dict) -> str:
         return "\n".join(lines)
 
     for index, card in enumerate(cards[:10], 1):
-        title = html_module.escape(str(card.get("title") or "Без названия"))
+        main_title = html_module.escape(str(card.get("title") or "Без названия"))
+        alt_title = html_module.escape(str(card.get("alt_title") or ""))
+        title = f"{main_title} / {alt_title}" if alt_title else main_title
         year = html_module.escape(str(card.get("year") or ""))
         rating = card.get("rating")
         rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
@@ -3633,12 +3638,17 @@ async def movie_new_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
     await query.answer()
     cache = _load_movie_discovery_cache()
-    await _safe_edit_callback(
-        query,
-        _format_movie_discovery_cache(cache),
-        reply_markup=_movie_discovery_keyboard(cache.get("cards") if isinstance(cache.get("cards"), list) else []),
-        parse_mode="HTML",
-    )
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    try:
+        await query.edit_message_text(
+            _format_movie_discovery_cache(cache),
+            reply_markup=_movie_discovery_keyboard(cards),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except BadRequest as e:
+        if not _is_message_not_modified(e):
+            raise
     return ConversationHandler.END
 
 

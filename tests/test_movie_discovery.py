@@ -6,6 +6,7 @@ from movie_discovery import (
     build_cards,
     discovery_years,
     evaluate_result,
+    extract_alt_title,
     is_recent_published_at,
     normalize_movie_title,
     parse_published_at,
@@ -50,6 +51,33 @@ class MovieDiscoveryTests(unittest.TestCase):
         self.assertIsNotNone(release)
         self.assertEqual(release["year"], 2026)
         self.assertEqual(release["quality"], "1080p")
+
+    def test_extract_alt_title_bilingual(self) -> None:
+        self.assertEqual(extract_alt_title("Невеста! / The Bride! [2026, BDRip 1080p]"), "The Bride!")
+
+    def test_extract_alt_title_three_parts_picks_non_cyrillic(self) -> None:
+        self.assertEqual(extract_alt_title("На вершине / Вершина / Apex [2026, WEB-DL 1080p]"), "Apex")
+
+    def test_extract_alt_title_monolingual_returns_empty(self) -> None:
+        self.assertEqual(extract_alt_title("Хейтер [2026, WEB-DL 1080p]"), "")
+        self.assertEqual(extract_alt_title("Project Hail Mary [2026, WEB-DL 1080p]"), "")
+
+    def test_extract_alt_title_stored_in_release(self) -> None:
+        result = SimpleNamespace(
+            title="Проект «Конец света» / Project Hail Mary (2026) WEB-DL 1080p",
+            size="12 GB",
+            seeders=700,
+            tracker="rutracker",
+            topic_id="1",
+        )
+        release = release_from_result(
+            result,
+            source="rutracker",
+            allowed_years={2026, 2025},
+            qualities={"1080p", "2160p"},
+        )
+        self.assertIsNotNone(release)
+        self.assertEqual(release["alt_title"], "Project Hail Mary")
 
     def test_leading_bracket_year_prefix_is_stripped(self) -> None:
         self.assertEqual(normalize_movie_title("[2026, WEB-DL 1080p] Фильм"), "Фильм")

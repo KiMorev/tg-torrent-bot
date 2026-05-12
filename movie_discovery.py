@@ -180,6 +180,32 @@ def _has_meaningful_title(normalized: str) -> bool:
     return not all(w in _AUDIO_NOISE for w in words)
 
 
+def extract_alt_title(title: str) -> str:
+    """Return the foreign (non-Cyrillic) name from a bilingual title like 'Русское / Foreign'.
+
+    Returns an empty string if the title is monolingual.
+    """
+    # Strip leading "[year, tech]" prefix before processing
+    stripped = re.sub(r"^\s*\[\s*\d{4}[^\]]*\]\s*", "", title)
+    work_title = stripped if stripped.strip() else title
+
+    # Work only with the part before the year/tech block
+    pre_year = YEAR_RE.split(work_title, maxsplit=1)[0]
+    pre_year = pre_year.split("[", 1)[0].split("(", 1)[0]
+
+    parts = [p.strip() for p in pre_year.split("/") if p.strip()]
+    if len(parts) < 2:
+        return ""
+
+    # Return the first part that contains no Cyrillic characters
+    for part in parts[1:]:
+        if not re.search(r"[а-яА-ЯёЁ]", part):
+            cleaned = re.sub(r"\s+", " ", part).strip()
+            if cleaned:
+                return cleaned
+    return ""
+
+
 def movie_key(title: str, year: int) -> str:
     normalized = normalize_movie_title(title).lower()
     return f"{year}:{normalized}"
@@ -237,10 +263,13 @@ def evaluate_result(
     if not _has_meaningful_title(movie_title):
         return None, "no_movie_title"
 
+    alt_title = extract_alt_title(title)
+
     release = {
         "source": source,
         "title": title,
         "movie_title": movie_title,
+        "alt_title": alt_title,
         "year": year,
         "quality": quality,
         "size": size,
@@ -384,6 +413,8 @@ def _merge_duplicate_cards(cards: list[dict], known_fingerprints: set[str]) -> l
         if not existing.get("kp_id") and card.get("kp_id"):
             for field in ("kp_id", "kp_url", "rating", "genres", "title"):
                 existing[field] = card.get(field)
+        if not existing.get("alt_title") and card.get("alt_title"):
+            existing["alt_title"] = card["alt_title"]
         _finalize_card(existing, known_fingerprints)
     return list(merged.values())
 
@@ -424,11 +455,15 @@ def build_cards(
             {
                 "key": key,
                 "title": release["movie_title"],
+                "alt_title": release.get("alt_title", ""),
                 "year": release["year"],
                 "first_seen_at": now_text,
                 "releases": [],
             },
         )
+        # Promote alt_title from release if card doesn't have one yet
+        if not card.get("alt_title") and release.get("alt_title"):
+            card["alt_title"] = release["alt_title"]
         card["releases"].append(release)
 
     cards = []
