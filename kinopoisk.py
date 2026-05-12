@@ -8,9 +8,15 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass
 
 import requests
+
+# Minimum gap between consecutive KP API calls (seconds).
+# The free tier has a strict burst limit; sequential calls without a pause
+# all get 429 after the first 3-5 requests.
+_KP_REQUEST_INTERVAL = 1.0
 
 logger = logging.getLogger("tg_torrent_drop")
 
@@ -207,6 +213,9 @@ class KinopoiskClient:
         self, keyword: str, year: int | None
     ) -> KinopoiskMovieMatch | None:
         """Single keyword search against /v2.1/films/search-by-keyword."""
+        # Throttle: every individual HTTP request gets its own mandatory pause
+        # so bursting N cards at once never triggers the 429 rate limit.
+        time.sleep(_KP_REQUEST_INTERVAL)
         query = f"{keyword} {year}" if year else keyword
         try:
             resp = self._session.get(

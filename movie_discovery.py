@@ -478,8 +478,6 @@ def build_cards(
             match = kinopoisk_client.search_movie(
                 card["title"], card["year"], alt_title=card.get("alt_title", "")
             )
-            # Small pause to stay within KP API per-minute rate limit
-            time.sleep(0.6)
             if match is not None:
                 # Discard match if KP returned a film from a very different year
                 year_ok = not (
