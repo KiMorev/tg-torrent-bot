@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from movie_discovery import (
@@ -8,6 +8,7 @@ from movie_discovery import (
     evaluate_result,
     is_recent_published_at,
     parse_published_at,
+    prune_seen_fingerprints,
     release_from_result,
 )
 
@@ -138,6 +139,181 @@ class MovieDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(cache["cards"]), 1)
         self.assertEqual(cache["cards"][0]["title"], "Невеста!")
         self.assertEqual(cache["cards"][0]["release_count"], 2)
+
+
+class PruneSeenFingerprintsTests(unittest.TestCase):
+    def _now(self) -> datetime:
+        return datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+
+    def test_empty_dict_returns_empty(self) -> None:
+        self.assertEqual(prune_seen_fingerprints({}, now=self._now()), {})
+
+    def test_entries_within_ttl_are_kept(self) -> None:
+        seen = {"fp1": "2026-05-01 10:00", "fp2": "2026-04-15 10:00"}
+        result = prune_seen_fingerprints(seen, now=self._now(), ttl_days=60)
+        self.assertIn("fp1", result)
+        self.assertIn("fp2", result)
+
+    def test_entries_older_than_ttl_are_removed(self) -> None:
+        seen = {"old": "2026-01-01 10:00", "fresh": "2026-05-10 10:00"}
+        result = prune_seen_fingerprints(seen, now=self._now(), ttl_days=30)
+        self.assertNotIn("old", result)
+        self.assertIn("fresh", result)
+
+    def test_entries_without_timestamp_are_kept_but_deprioritised(self) -> None:
+        seen = {"no_ts": ""}
+        result = prune_seen_fingerprints(seen, now=self._now(), ttl_days=30)
+        self.assertIn("no_ts", result)
+
+    def test_excess_entries_trimmed_to_max(self) -> None:
+        seen = {f"fp{i}": f"2026-05-{i:02d} 10:00" for i in range(1, 11)}
+        result = prune_seen_fingerprints(seen, now=self._now(), ttl_days=60, max_entries=5)
+        self.assertEqual(len(result), 5)
+
+    def test_trimming_keeps_newest_entries(self) -> None:
+        seen = {
+            "old": "2026-05-01 10:00",
+            "new": "2026-05-11 10:00",
+        }
+        result = prune_seen_fingerprints(seen, now=self._now(), ttl_days=60, max_entries=1)
+        self.assertIn("new", result)
+        self.assertNotIn("old", result)
+
+
+class BuildCardsEnricherTests(unittest.TestCase):
+    def _make_release(self, title: str, tracker: str = "a", topic_url: str = "") -> dict:
+        return {
+            "source": "jackett",
+            "title": title,
+            "movie_title": "Тест",
+            "year": 2026,
+            "quality": "1080p",
+            "size": "3 GB",
+            "size_gb": 3.0,
+            "seeders": 50,
+            "tracker": tracker,
+            "topic_id": "",
+            "topic_url": topic_url or f"https://example.com/{tracker}",
+            "url": "",
+            "magnet_url": None,
+            "torrent_url": None,
+            "published_at": "",
+            "score": 500,
+        }
+
+    def test_film_not_found_in_kp_is_kept_in_cards(self) -> None:
+        """KP enricher: missing KP match must not drop the card."""
+        releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
+        kp = SimpleNamespace(search_movie=lambda title, year: None)
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=6.0,
+            kinopoisk_client=kp,
+        )
+
+        self.assertEqual(len(cache["cards"]), 1)
+        self.assertIsNone(cache["cards"][0].get("rating"))
+
+    def test_film_with_low_kp_rating_is_dropped(self) -> None:
+        releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
+        match = SimpleNamespace(kp_id=1, title="Тест", url="", year=2026, rating=4.5, genres=[])
+        kp = SimpleNamespace(search_movie=lambda title, year: match)
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=6.0,
+            kinopoisk_client=kp,
+        )
+
+        self.assertEqual(len(cache["cards"]), 0)
+
+    def test_known_fingerprints_as_dict_is_accepted(self) -> None:
+        """build_cards must accept dict[str, str] for known_fingerprints."""
+        releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
+        known: dict[str, str] = {"some|old|fp|||title|3 GB": "2026-01-01 10:00"}
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=known,
+            limit=20,
+            min_kp_rating=0.0,
+        )
+
+        self.assertIsInstance(cache["seen_fingerprints"], dict)
+
+    def test_seen_fingerprints_returned_as_dict_with_timestamps(self) -> None:
+        releases = [self._make_release("Тест (2026) WEB-DL 1080p", topic_url="https://x.com/1")]
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+        )
+
+        seen = cache["seen_fingerprints"]
+        self.assertIsInstance(seen, dict)
+        # Every value must be a non-empty timestamp string
+        for fp, ts in seen.items():
+            with self.subTest(fp=fp):
+                self.assertIsInstance(ts, str)
+                self.assertTrue(ts, msg="timestamp should not be empty for new fingerprints")
+
+    def test_legacy_set_known_fingerprints_still_works(self) -> None:
+        """Backward compat: passing set[str] must not raise."""
+        releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints={"some_old_fp"},
+            limit=20,
+            min_kp_rating=0.0,
+        )
+
+        self.assertIsInstance(cache["seen_fingerprints"], dict)
+        self.assertEqual(len(cache["cards"]), 1)
+
+    def test_higher_kp_rating_produces_higher_card_score(self) -> None:
+        """Normalised scoring: KP rating must be the dominant signal."""
+        releases_good = [self._make_release("Тест (2026) WEB-DL 1080p", tracker="good")]
+        releases_bad = [self._make_release("Тест (2026) WEB-DL 1080p", tracker="bad", topic_url="https://b.com/1")]
+
+        def _kp_good(title, year):
+            return SimpleNamespace(kp_id=1, title=title, url="", year=year, rating=8.5, genres=[])
+
+        def _kp_bad(title, year):
+            return SimpleNamespace(kp_id=2, title=title, url="", year=year, rating=6.0, genres=[])
+
+        cache_good = build_cards(
+            releases_good,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=_kp_good),
+        )
+        cache_bad = build_cards(
+            releases_bad,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=_kp_bad),
+        )
+
+        score_good = cache_good["cards"][0]["score"]
+        score_bad = cache_bad["cards"][0]["score"]
+        self.assertGreater(score_good, score_bad)
 
 
 if __name__ == "__main__":
