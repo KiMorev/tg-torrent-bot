@@ -200,13 +200,21 @@ class KinopoiskClient:
     ) -> KinopoiskMovieMatch | None:
         """Best-effort movie lookup for discovery cards.
 
-        Tries *title* first (with year appended for better ranking).
-        If nothing is found and *alt_title* is provided, retries with it.
+        When *alt_title* is present (non-Russian original title) it is tried
+        FIRST: foreign-language titles give more precise KP results and avoid
+        false matches on Russian titles that share the same word
+        (e.g. "Вершина" → wrong Russian film instead of "Apex").
+        Falls back to *title* when the alt_title search yields nothing.
+        Without an alt_title the single *title* search is used as before.
         """
-        match = self._search_movie_keyword(title, year)
-        if match is None and alt_title:
-            logger.debug("KP retry with alt_title %r for %r", alt_title, title)
+        if alt_title:
+            logger.debug("KP searching alt_title %r first for %r", alt_title, title)
             match = self._search_movie_keyword(alt_title, year)
+            if match is None:
+                logger.debug("KP alt_title miss, retrying with title %r", title)
+                match = self._search_movie_keyword(title, year)
+        else:
+            match = self._search_movie_keyword(title, year)
         return match
 
     def _search_movie_keyword(
@@ -256,6 +264,13 @@ class KinopoiskClient:
                 logger.debug(
                     "  skip %r: year=%s (wanted %s)", item.get("nameRu"), item_year, year
                 )
+                continue
+            # Skip results with no year when we have a known year — avoids
+            # matching "announced / coming soon" entries that share a title
+            # with the actual film we're looking for (e.g. Russian "Вершина"
+            # with year=None beats the correct Netflix "Apex" year=2026).
+            if year and item_year is None:
+                logger.debug("  skip %r: no year in KP entry (wanted %s)", item.get("nameRu"), year)
                 continue
 
             try:
