@@ -84,6 +84,12 @@ from keyboards import (
     _tasks_keyboard,
 )
 from jackett import JackettError, JackettResult
+from jackett_subscriptions import (
+    JACKETT_SUBSCRIPTION_SCHEMA,
+    apply_jackett_subscription_match,
+    build_jackett_subscription,
+    select_jackett_subscription_candidate,
+)
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
 from task_policies import (
@@ -672,9 +678,16 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
         if sub.get("type") == "jackett":
             query_text = html_module.escape(str(sub.get("query") or key))
             last_check = html_module.escape(str(sub.get("last_check") or "—"))
+            tracker = html_module.escape(str(sub.get("tracker") or "—"))
+            title = html_module.escape(_format_sub_title(str(sub.get("title") or "")))
+            ep_end = html_module.escape(str(sub.get("last_episode_end", "?")))
+            total = html_module.escape(str(sub.get("total_episodes", "?")))
             lines.append(
                 f"\n{index}. 🌐 <b>Jackett</b>\n"
                 f"   Владелец: {owner}\n"
+                f"   Трекер: {tracker}\n"
+                f"   Тема: {title or query_text}\n"
+                f"   Серии: {ep_end} из {total}\n"
                 f"   Запрос: {query_text}\n"
                 f"   Проверено: {last_check}"
             )
@@ -2327,17 +2340,17 @@ async def _download_and_add(
 
         if subscribe:
             if source == "jackett":
-                # Query-based subscription for Jackett results
                 sub_key = f"jackett:{uuid.uuid4().hex[:8]}"
                 subs = state_store.load_topic_subscriptions()
-                subs[sub_key] = {
-                    "type": "jackett",
-                    "chat_id": chat_id,
-                    "query": context.user_data.get("srch_search_query", context.user_data.get("srch_query", title)),
-                    "seen_titles": [r["title"] for r in context.user_data.get("srch_results", [])],
-                    "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
-                    "last_check": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
-                }
+                now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", title))
+                subs[sub_key] = build_jackett_subscription(
+                    chat_id=chat_id,
+                    query=search_query,
+                    result=result,
+                    seen_results=context.user_data.get("srch_results", []),
+                    added_at=now_text,
+                )
                 state_store.save_topic_subscriptions(subs)
                 logger.info("Jackett subscription added: key=%s query=%s", sub_key, subs[sub_key]["query"])
             else:
@@ -2655,11 +2668,8 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 continue
 
             new_results = await asyncio.to_thread(jackett_client.search, search_query)
-            new_titles = {r.title for r in new_results}
-            seen_titles = set(sub.get("seen_titles", []))
-
-            fresh = [r for r in new_results if r.title not in seen_titles]
-            if not fresh:
+            candidate = select_jackett_subscription_candidate(sub, new_results)
+            if candidate is None:
                 sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
                 changed = True
                 continue
@@ -2667,9 +2677,14 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             chat_id = sub.get("chat_id")
             short_q = search_query[:40] + "…" if len(search_query) > 40 else search_query
 
-            text = f"🔔 Новые результаты по запросу «{short_q}»:\n"
-            for r in fresh[:5]:
-                text += f"\n🔎 {r.title}\n   📦 {r.size} | 🌱 {r.seeders} | 📡 {r.tracker}"
+            episode_info = _parse_episode_info(candidate.title)
+            progress = f"\nСерии: {episode_info[0]} из {episode_info[1]}" if episode_info else ""
+            text = (
+                f"🔔 Найдено обновление Jackett-подписки «{short_q}»:\n"
+                f"\n🔎 {candidate.title}"
+                f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                f"{progress}"
+            )
 
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
@@ -2691,10 +2706,18 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     logger.warning("Failed to notify chat %s for Jackett subscription", chat_id, exc_info=True)
 
             if sent:
-                sub["seen_titles"] = list(seen_titles | new_titles)
-                sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                if sub.get("version") == JACKETT_SUBSCRIPTION_SCHEMA:
+                    apply_jackett_subscription_match(sub, candidate, checked_at)
+                else:
+                    seen_titles = list(dict.fromkeys([
+                        *sub.get("seen_titles", []),
+                        *(r.title for r in new_results),
+                    ]))
+                    sub["seen_titles"] = seen_titles[-100:]
+                    sub["last_check"] = checked_at
                 changed = True
-                logger.info("Jackett subscription update: key=%s fresh=%d", key, len(fresh))
+                logger.info("Jackett subscription update: key=%s title=%s", key, candidate.title)
 
         except Exception:
             logger.warning("Error checking Jackett subscription %s", key, exc_info=True)
