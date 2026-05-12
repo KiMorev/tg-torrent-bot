@@ -56,7 +56,7 @@ def parse_qualities(raw: str) -> list[str]:
         quality = QUALITY_ALIASES.get(value.strip().lower())
         if quality and quality not in result:
             result.append(quality)
-    return result or ["1080p", "2160p"]
+    return result or ["1080p"]
 
 
 def parse_size_gb(size: str) -> float:

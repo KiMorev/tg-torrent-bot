@@ -242,5 +242,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         movie_discovery_jackett_max_age_days=max(1, env_int(env, "MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS", 32)),
         movie_discovery_limit=max(1, min(50, env_int(env, "MOVIE_DISCOVERY_LIMIT", 20))),
         movie_discovery_min_kp_rating=max(0.0, env_float(env, "MOVIE_DISCOVERY_MIN_KP_RATING", 6.0)),
-        movie_discovery_qualities=(env.get("MOVIE_DISCOVERY_QUALITIES", "1080p,2160p").strip() or "1080p,2160p"),
+        movie_discovery_qualities=(env.get("MOVIE_DISCOVERY_QUALITIES", "1080p").strip() or "1080p"),
     )

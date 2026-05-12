@@ -33,6 +33,7 @@ from bot import (
     _cancel_task_card_refresh,
     _is_admin_chat,
     _is_allowed,
+    _format_movie_discovery_cache,
     _movie_discovery_keyboard,
     _notification_keyboard,
     _run_polling,
@@ -431,14 +432,35 @@ class AdminPanelTests(unittest.TestCase):
 
 class MovieDiscoveryHandlerTests(unittest.TestCase):
     def test_movie_discovery_keyboard_has_close_button(self):
-        keyboard = _movie_discovery_keyboard([{"title": "Film"}])
+        keyboard = _movie_discovery_keyboard([{"title": "Невеста!"}])
         buttons = {
             button.text: button.callback_data
             for row in keyboard.inline_keyboard
             for button in row
         }
 
+        self.assertEqual(buttons["🎬 1. Невеста!"], "new:show:0")
         self.assertEqual(buttons["✖️ Закрыть"], "new:close")
+
+    def test_movie_discovery_text_lists_unique_tracker_abbreviations(self):
+        text = _format_movie_discovery_cache({
+            "updated_at": "2026-05-12 13:00",
+            "cards": [{
+                "title": "Невеста!",
+                "year": 2026,
+                "best_quality": "1080p",
+                "best_size": "3 GB",
+                "best_seeders": 10,
+                "release_count": 3,
+                "releases": [
+                    {"source": "rutracker", "tracker": "rutracker"},
+                    {"source": "jackett", "tracker": "rutracker"},
+                    {"source": "jackett", "tracker": "nnmclub"},
+                ],
+            }],
+        })
+
+        self.assertIn("Раздач: 3 · RT, NNM", text)
 
     def test_movie_discovery_close_deletes_message(self):
         update = _make_callback_update(chat_id=100, callback_data="new:close")

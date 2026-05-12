@@ -978,8 +978,9 @@ def _movie_discovery_audit_row(search_query: str, source: str, result, release: 
 def _movie_discovery_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for index, card in enumerate(cards[:10], 1):
+        title = _short_title({"title": str(card.get("title") or "Новинка")}, limit=42)
         rows.append([InlineKeyboardButton(
-            f"🎬 {index}. Раздачи",
+            f"🎬 {index}. {title}",
             callback_data=f"new:show:{index - 1}",
         )])
     rows.append([
@@ -987,6 +988,22 @@ def _movie_discovery_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✖️ Закрыть", callback_data="new:close"),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def _movie_card_tracker_labels(card: dict) -> str:
+    labels = []
+    seen = set()
+    for release in card.get("releases") or []:
+        tracker = str(release.get("tracker") or "")
+        source = str(release.get("source") or "")
+        tracker_id = tracker or ("rutracker" if source == "rutracker" else source)
+        if not tracker_id:
+            continue
+        label = _tracker_abbr(tracker_id)
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return ", ".join(labels)
 
 
 def _format_movie_discovery_cache(cache: dict) -> str:
@@ -1013,13 +1030,15 @@ def _format_movie_discovery_cache(cache: dict) -> str:
         kp_url = card.get("kp_url")
         kp_text = f"\n   <a href=\"{html_module.escape(str(kp_url))}\">Кинопоиск</a>" if kp_url else ""
         new_mark = " 🆕" if card.get("is_new") else ""
+        tracker_labels = _movie_card_tracker_labels(card)
+        tracker_text = f" · {html_module.escape(tracker_labels)}" if tracker_labels else ""
         lines.append(
             f"\n{index}. <b>{title}</b>{new_mark}\n"
             f"   {year}{rating_text}\n"
             f"   Лучшее: {html_module.escape(str(card.get('best_quality') or '?'))}, "
             f"{html_module.escape(str(card.get('best_size') or '?'))}, "
             f"сидов {html_module.escape(str(card.get('best_seeders') or 0))}\n"
-            f"   Раздач: {html_module.escape(str(card.get('release_count') or len(card.get('releases') or [])))}"
+            f"   Раздач: {html_module.escape(str(card.get('release_count') or len(card.get('releases') or [])))}{tracker_text}"
             f"{genres_text}{kp_text}"
         )
     return "\n".join(lines)
