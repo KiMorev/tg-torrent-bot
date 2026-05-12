@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+
+logger = logging.getLogger("tg_torrent_drop")
 
 
 BAD_QUALITY_RE = re.compile(r"\b(camrip|cam|hdcam|ts|telesync|tc|hdts|screener|scr|workprint)\b", re.I)
@@ -474,6 +478,8 @@ def build_cards(
             match = kinopoisk_client.search_movie(
                 card["title"], card["year"], alt_title=card.get("alt_title", "")
             )
+            # Small pause to stay within KP API per-minute rate limit
+            time.sleep(0.6)
             if match is not None:
                 # Discard match if KP returned a film from a very different year
                 year_ok = not (
