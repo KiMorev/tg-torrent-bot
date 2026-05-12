@@ -471,7 +471,9 @@ def build_cards(
         _finalize_card(card, known_fps_set)
 
         if kinopoisk_client is not None:
-            match = kinopoisk_client.search_movie(card["title"], card["year"])
+            match = kinopoisk_client.search_movie(
+                card["title"], card["year"], alt_title=card.get("alt_title", "")
+            )
             if match is not None:
                 # Discard match if KP returned a film from a very different year
                 year_ok = not (

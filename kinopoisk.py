@@ -186,22 +186,49 @@ class KinopoiskClient:
         return len(items) if items else None
 
     @_synchronized
-    def search_movie(self, title: str, year: int | None = None) -> KinopoiskMovieMatch | None:
-        """Best-effort movie lookup for discovery cards."""
+    def search_movie(
+        self,
+        title: str,
+        year: int | None = None,
+        alt_title: str = "",
+    ) -> KinopoiskMovieMatch | None:
+        """Best-effort movie lookup for discovery cards.
+
+        Tries *title* first (with year appended for better ranking).
+        If nothing is found and *alt_title* is provided, retries with it.
+        """
+        match = self._search_movie_keyword(title, year)
+        if match is None and alt_title:
+            logger.debug("KP retry with alt_title %r for %r", alt_title, title)
+            match = self._search_movie_keyword(alt_title, year)
+        return match
+
+    def _search_movie_keyword(
+        self, keyword: str, year: int | None
+    ) -> KinopoiskMovieMatch | None:
+        """Single keyword search against /v2.1/films/search-by-keyword."""
+        query = f"{keyword} {year}" if year else keyword
         try:
             resp = self._session.get(
                 f"{_API_BASE}/v2.1/films/search-by-keyword",
-                params={"keyword": title, "page": 1},
+                params={"keyword": query, "page": 1},
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
-        except (requests.RequestException, ValueError, TypeError):
+        except requests.HTTPError as e:
+            logger.warning("KP HTTP error for %r: %s", keyword, e)
+            return None
+        except (requests.RequestException, ValueError, TypeError) as e:
+            logger.warning("KP request error for %r: %s", keyword, e)
             return None
 
         films = data.get("films") or []
         if not isinstance(films, list):
+            logger.warning("KP unexpected response for %r: %r", keyword, data)
             return None
+
+        logger.debug("KP search %r → %d results", query, len(films))
 
         for item in films[:10]:
             if not isinstance(item, dict):
@@ -209,6 +236,7 @@ class KinopoiskClient:
 
             media_type = str(item.get("type") or "").upper()
             if media_type in {"TV_SERIES", "MINI_SERIES", "TV_SHOW"}:
+                logger.debug("  skip %r: type=%s", item.get("nameRu"), media_type)
                 continue
 
             try:
@@ -216,6 +244,9 @@ class KinopoiskClient:
             except (TypeError, ValueError):
                 item_year = None
             if year and item_year and abs(item_year - year) > 1:
+                logger.debug(
+                    "  skip %r: year=%s (wanted %s)", item.get("nameRu"), item_year, year
+                )
                 continue
 
             try:
@@ -245,8 +276,13 @@ class KinopoiskClient:
                 genres=genres,
             )
             if match.kp_id and match.title:
+                logger.debug(
+                    "KP match %r → %s (id=%s year=%s rating=%s)",
+                    keyword, match.title, match.kp_id, match.year, match.rating,
+                )
                 return match
 
+        logger.info("KP no match for %r (year=%s, %d films checked)", keyword, year, len(films[:10]))
         return None
 
     def _get_director(self, kp_id: int) -> str:

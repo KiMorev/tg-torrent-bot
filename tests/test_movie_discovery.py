@@ -175,7 +175,7 @@ class MovieDiscoveryTests(unittest.TestCase):
             rating=7.1,
             genres=["ужасы"],
         )
-        kp = SimpleNamespace(search_movie=lambda title, year: match)
+        kp = SimpleNamespace(search_movie=lambda title, year, **kw: match)
 
         cache = build_cards(
             releases,
@@ -254,7 +254,7 @@ class BuildCardsEnricherTests(unittest.TestCase):
     def test_film_not_found_in_kp_is_kept_in_cards(self) -> None:
         """KP enricher: missing KP match must not drop the card."""
         releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
-        kp = SimpleNamespace(search_movie=lambda title, year: None)
+        kp = SimpleNamespace(search_movie=lambda title, year, **kw: None)
 
         cache = build_cards(
             releases,
@@ -271,7 +271,7 @@ class BuildCardsEnricherTests(unittest.TestCase):
     def test_film_with_low_kp_rating_is_dropped(self) -> None:
         releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
         match = SimpleNamespace(kp_id=1, title="Тест", url="", year=2026, rating=4.5, genres=[])
-        kp = SimpleNamespace(search_movie=lambda title, year: match)
+        kp = SimpleNamespace(search_movie=lambda title, year, **kw: match)
 
         cache = build_cards(
             releases,
@@ -338,10 +338,10 @@ class BuildCardsEnricherTests(unittest.TestCase):
         releases_good = [self._make_release("Тест (2026) WEB-DL 1080p", tracker="good")]
         releases_bad = [self._make_release("Тест (2026) WEB-DL 1080p", tracker="bad", topic_url="https://b.com/1")]
 
-        def _kp_good(title, year):
+        def _kp_good(title, year, **kw):
             return SimpleNamespace(kp_id=1, title=title, url="", year=year, rating=8.5, genres=[])
 
-        def _kp_bad(title, year):
+        def _kp_bad(title, year, **kw):
             return SimpleNamespace(kp_id=2, title=title, url="", year=year, rating=6.0, genres=[])
 
         cache_good = build_cards(
