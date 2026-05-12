@@ -152,8 +152,18 @@ def is_noise_title(title: str, category: str = "") -> bool:
     )
 
 
+_AUDIO_NOISE = frozenset({
+    "original", "rus", "ru", "eng", "en", "dub", "dubbed",
+    "sub", "subs", "kaz", "deu", "fra", "ita", "heb",
+})
+
+
 def normalize_movie_title(title: str) -> str:
-    cleaned = YEAR_RE.split(title, maxsplit=1)[0]
+    # Strip leading "[year, tech specs]" prefix (Jackett-style) before normal processing
+    stripped = re.sub(r"^\s*\[\s*\d{4}[^\]]*\]\s*", "", title)
+    work_title = stripped if stripped.strip() else title
+
+    cleaned = YEAR_RE.split(work_title, maxsplit=1)[0]
     cleaned = cleaned.split("[", 1)[0].split("(", 1)[0]
     parts = [part.strip() for part in cleaned.split("/") if part.strip()]
     if parts:
@@ -161,6 +171,13 @@ def normalize_movie_title(title: str) -> str:
     cleaned = re.sub(r"\b(1080p|2160p|720p|web-?dl|webrip|bdremux|bdrip|bluray|blu-ray|uhd|4k)\b", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"[^\wа-яА-ЯёЁ]+", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _has_meaningful_title(normalized: str) -> bool:
+    if not normalized or len(normalized) < 2:
+        return False
+    words = normalized.lower().split()
+    return not all(w in _AUDIO_NOISE for w in words)
 
 
 def movie_key(title: str, year: int) -> str:
@@ -216,10 +233,14 @@ def evaluate_result(
     lower = title.lower()
     score += max((points for token, points in SOURCE_SCORE.items() if token in lower), default=0)
 
+    movie_title = normalize_movie_title(title)
+    if not _has_meaningful_title(movie_title):
+        return None, "no_movie_title"
+
     release = {
         "source": source,
         "title": title,
-        "movie_title": normalize_movie_title(title),
+        "movie_title": movie_title,
         "year": year,
         "quality": quality,
         "size": size,

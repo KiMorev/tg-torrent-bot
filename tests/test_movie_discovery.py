@@ -7,6 +7,7 @@ from movie_discovery import (
     discovery_years,
     evaluate_result,
     is_recent_published_at,
+    normalize_movie_title,
     parse_published_at,
     prune_seen_fingerprints,
     release_from_result,
@@ -49,6 +50,27 @@ class MovieDiscoveryTests(unittest.TestCase):
         self.assertIsNotNone(release)
         self.assertEqual(release["year"], 2026)
         self.assertEqual(release["quality"], "1080p")
+
+    def test_leading_bracket_year_prefix_is_stripped(self) -> None:
+        self.assertEqual(normalize_movie_title("[2026, WEB-DL 1080p] Фильм"), "Фильм")
+
+    def test_audio_only_title_is_rejected(self) -> None:
+        result = SimpleNamespace(
+            title="[2026, WEB-DL 1080p] Original Rus",
+            size="3 GB",
+            seeders=10,
+            tracker="jackett",
+        )
+        _, reason = evaluate_result(
+            result,
+            source="jackett",
+            allowed_years={2026, 2025},
+            qualities={"1080p", "2160p"},
+        )
+        self.assertEqual(reason, "no_movie_title")
+
+    def test_normal_titles_unchanged(self) -> None:
+        self.assertEqual(normalize_movie_title("Project Hail Mary [2026, WEB-DL 1080p]"), "Project Hail Mary")
 
     def test_current_year_gets_recency_boost_over_previous_year(self) -> None:
         current, reason_current = evaluate_result(

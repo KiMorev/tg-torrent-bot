@@ -341,6 +341,7 @@ def _search_results_keyboard(
     page: int = 0,
     show_jackett_expand: bool = False,
     show_jackett_direct: bool = False,
+    show_back_to_discovery: bool = False,
 ) -> InlineKeyboardMarkup:
     total = len(results)
     total_pages = max(1, (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
@@ -403,6 +404,8 @@ def _search_results_keyboard(
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:jackett_direct",
             )
         ])
+    if show_back_to_discovery:
+        rows.append([InlineKeyboardButton("🎬 ← Новинки", callback_data="new:back")])
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")])
     return InlineKeyboardMarkup(rows)
 

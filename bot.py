@@ -3620,11 +3620,26 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["srch_source"] = "movie_discovery"
     await query.edit_message_text(
         _build_results_text(releases, search_query, 0, banner="🎬 Раздачи по выбранной новинке"),
-        reply_markup=_search_results_keyboard(releases, page=0, show_jackett_expand=False, show_jackett_direct=False),
+        reply_markup=_search_results_keyboard(releases, page=0, show_jackett_expand=False, show_jackett_direct=False, show_back_to_discovery=True),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     return SEARCH_RESULTS
+
+
+async def movie_new_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    await query.answer()
+    cache = _load_movie_discovery_cache()
+    await _safe_edit_callback(
+        query,
+        _format_movie_discovery_cache(cache),
+        reply_markup=_movie_discovery_keyboard(cache.get("cards") if isinstance(cache.get("cards"), list) else []),
+        parse_mode="HTML",
+    )
+    return ConversationHandler.END
 
 
 def _format_users_panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -4355,6 +4370,7 @@ def main() -> None:
                     CallbackQueryHandler(search_expand_jackett, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_jackett$"),
                     CallbackQueryHandler(search_jackett_start_direct, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jackett_direct$"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
+                    CallbackQueryHandler(movie_new_back, pattern=r"^new:back$"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
                 ],
