@@ -8,12 +8,13 @@ def notification_recipients(
     task_owners: dict[str, int],
     notify_external_tasks: bool,
     fallback_chat_ids: set[int],
+    allowed_chat_ids: set[int] | None = None,
 ) -> set[int]:
     if explicit_chat_ids:
         return explicit_chat_ids
 
     owner_chat_id = task_owners.get(task_id)
-    if owner_chat_id:
+    if owner_chat_id and (allowed_chat_ids is None or owner_chat_id in allowed_chat_ids):
         return {owner_chat_id}
 
     if notify_external_tasks:

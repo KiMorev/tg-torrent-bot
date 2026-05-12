@@ -38,6 +38,7 @@ from bot import (
     _run_progress_panel_update_once,
     _start_task_card_refresh,
     _task_card_refresh_loop,
+    access_callback,
     admin_callback,
     admin_command,
     help_command,
@@ -370,6 +371,30 @@ class AdminPanelTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("не относится", text)
 
+    def test_access_remove_revokes_owned_tasks_and_subscriptions(self):
+        update = _make_callback_update(chat_id=300, callback_data="access:remove:200")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.add_approved_user(200, "Petr")
+            store.save_task_owners({"tid1": 200, "tid2": 100})
+            store.save_topic_subscriptions({
+                "123": {"chat_id": 200, "title": "Series", "last_episode_end": 1, "total_episodes": 2},
+                "456": {"chat_id": 100, "title": "Other", "last_episode_end": 1, "total_episodes": 2},
+            })
+
+            with (
+                patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(access_callback(update, context))
+
+            self.assertNotIn(200, store.load_approved_chat_ids())
+            self.assertEqual(store.load_task_owners(), {"tid2": 100})
+            self.assertEqual(set(store.load_topic_subscriptions()), {"456"})
+
     def test_admin_close_callback_deletes_panel_message(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:close")
         context = _make_context()
@@ -647,6 +672,7 @@ class TaskCardRefreshLoopTests(unittest.TestCase):
             with (
                 patch.object(bot, "ds_client", mock_ds),
                 patch.object(bot, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0),
+                patch.object(bot, "_can_access_task_id", return_value=True),
             ):
                 await _task_card_refresh_loop(app, chat_id=1, message_id=2, task_id="t1")
 
@@ -697,11 +723,29 @@ class TaskCardRefreshLoopTests(unittest.TestCase):
             with (
                 patch.object(bot, "ds_client", mock_ds),
                 patch.object(bot, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0),
+                patch.object(bot, "_can_access_task_id", return_value=True),
             ):
                 await _task_card_refresh_loop(app, chat_id=1, message_id=2, task_id="t1")
             self.assertNotIn((1, 2), TASK_CARD_REFRESH_TASKS)
 
         asyncio.run(run())
+
+    def test_stops_when_access_is_revoked(self):
+        mock_ds = MagicMock()
+        app = MagicMock()
+        app.bot.edit_message_text = AsyncMock()
+
+        async def run():
+            with (
+                patch.object(bot, "ds_client", mock_ds),
+                patch.object(bot, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0),
+                patch.object(bot, "_can_access_task_id", return_value=False),
+            ):
+                await _task_card_refresh_loop(app, chat_id=1, message_id=2, task_id="t1")
+
+        asyncio.run(run())
+        mock_ds.list_tasks.assert_not_called()
+        app.bot.edit_message_text.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import ssl
 import threading
 import time
@@ -20,6 +21,15 @@ DS_ERROR_HINTS = {
     406: "не задана папка загрузки по умолчанию; проверьте DS_DESTINATION",
     407: "не удалось установить папку назначения",
 }
+_SENSITIVE_QUERY_RE = re.compile(r"(?i)((?:passwd|password|_sid|sid|token|apikey)=)[^&\s]+")
+
+
+def _sanitize_secret_text(value: object, secrets: tuple[str, ...] = ()) -> str:
+    text = str(value)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return _SENSITIVE_QUERY_RE.sub(r"\1***", text)
 
 
 class DownloadStationError(RuntimeError):
@@ -63,11 +73,14 @@ class DownloadStationClient:
         message = f"DSM API вернул ошибку {code}"
 
         if error.get("message"):
-            message = f"{message}: {error['message']}"
+            message = f"{message}: {self._sanitize_error(error['message'])}"
         elif DS_ERROR_HINTS.get(code):
             message = f"{message}: {DS_ERROR_HINTS[code]}"
 
         raise DownloadStationError(message)
+
+    def _sanitize_error(self, value: object) -> str:
+        return _sanitize_secret_text(value, (self.password,))
 
     def _read_json_response(self, request: urllib.request.Request, timeout: int = 30) -> dict:
         last_error: Exception | None = None
@@ -87,7 +100,8 @@ class DownloadStationClient:
             except urllib.error.URLError as e:
                 last_error = e
         else:
-            raise DownloadStationError(f"DSM API недоступен после {self.retry_attempts} попыток: {last_error}") from last_error
+            safe_error = self._sanitize_error(last_error)
+            raise DownloadStationError(f"DSM API недоступен после {self.retry_attempts} попыток: {safe_error}") from last_error
 
         try:
             result = json.loads(payload)
@@ -164,6 +178,7 @@ class DownloadStationClient:
                 "session": "DownloadStation",
                 "format": "sid",
             },
+            method="POST",
         )
         return result["data"]["sid"]
 

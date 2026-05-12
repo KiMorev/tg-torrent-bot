@@ -902,6 +902,39 @@ def _forget_task_state(task_ids: list[str]) -> None:
             _cancel_task_card_refresh(chat_id, message_id)
 
 
+def _revoke_chat_runtime_state(chat_id: int) -> None:
+    owners = _load_task_owners()
+    revoked_task_ids = [task_id for task_id, owner in owners.items() if owner == chat_id]
+    if revoked_task_ids:
+        for task_id in revoked_task_ids:
+            owners.pop(task_id, None)
+        _save_task_owners(owners)
+
+    subs = state_store.load_topic_subscriptions()
+    revoked_subs = [key for key, sub in subs.items() if sub.get("chat_id") == chat_id]
+    if revoked_subs:
+        for key in revoked_subs:
+            subs.pop(key, None)
+        state_store.save_topic_subscriptions(subs)
+
+    DOWNLOAD_PANEL_MESSAGES.pop(chat_id, None)
+    DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
+    DOWNLOAD_PANEL_SCOPES.pop(chat_id, None)
+    DOWNLOAD_PANEL_HAD_ACTIVE.pop(chat_id, None)
+
+    for key in list(TASK_CARD_REFRESH_TASKS):
+        card_chat_id, message_id = key
+        if card_chat_id == chat_id:
+            _cancel_task_card_refresh(card_chat_id, message_id)
+
+    for task_id, messages in list(TASK_CARD_MESSAGES.items()):
+        remaining = {message for message in messages if message[0] != chat_id}
+        if remaining:
+            TASK_CARD_MESSAGES[task_id] = remaining
+        else:
+            TASK_CARD_MESSAGES.pop(task_id, None)
+
+
 def _explicit_notification_chat_ids() -> set[int]:
     return parse_chat_ids(NOTIFY_CHAT_IDS_RAW)
 
@@ -913,6 +946,7 @@ def _notification_recipients(task_id: str) -> set[int]:
         task_owners=_load_task_owners(),
         notify_external_tasks=TASK_NOTIFY_EXTERNAL_TASKS,
         fallback_chat_ids=_all_allowed_chat_ids(),
+        allowed_chat_ids=_all_allowed_chat_ids(),
     )
 
 
@@ -1200,6 +1234,8 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
     try:
         while True:
             await asyncio.sleep(PROGRESS_UPDATE_INTERVAL_SECONDS)
+            if not _can_access_task_id(chat_id, task_id):
+                return
             try:
                 tasks = await asyncio.to_thread(ds_client.list_tasks)
             except DownloadStationError:
@@ -3228,6 +3264,7 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "remove":
         state_store.remove_approved_user(target_chat_id)
+        _revoke_chat_runtime_state(target_chat_id)
         ACCESS_PENDING_USERS.pop(target_chat_id, None)
         logger.info("Admin removed access for chat_id=%s", target_chat_id)
         text, keyboard = _format_users_panel()

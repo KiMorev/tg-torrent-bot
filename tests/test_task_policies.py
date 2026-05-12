@@ -54,6 +54,19 @@ class NotificationPolicyTests(unittest.TestCase):
             set(),
         )
 
+    def test_notification_recipients_ignores_revoked_owner(self) -> None:
+        self.assertEqual(
+            notification_recipients(
+                "tid1",
+                explicit_chat_ids=set(),
+                task_owners={"tid1": 3},
+                notify_external_tasks=False,
+                fallback_chat_ids={4},
+                allowed_chat_ids={4},
+            ),
+            set(),
+        )
+
     def test_notification_status_key_deduplicates_finished_and_seeding(self) -> None:
         self.assertEqual(notification_status_key("finished"), "done")
         self.assertEqual(notification_status_key("seeding"), "done")
