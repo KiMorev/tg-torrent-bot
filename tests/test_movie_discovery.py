@@ -1,8 +1,11 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from movie_discovery import (
+    _KP_CACHE_TTL_FOUND_DAYS,
+    _KP_CACHE_TTL_JITTER_MAX_DAYS,
+    _KP_MAX_STALE_REFRESH_PER_RUN,
     build_cards,
     discovery_years,
     evaluate_result,
@@ -10,6 +13,7 @@ from movie_discovery import (
     is_recent_published_at,
     normalize_movie_title,
     parse_published_at,
+    prune_kp_cache,
     prune_seen_fingerprints,
     release_from_result,
 )
@@ -384,6 +388,412 @@ class BuildCardsEnricherTests(unittest.TestCase):
         score_good = cache_good["cards"][0]["score"]
         score_bad = cache_bad["cards"][0]["score"]
         self.assertGreater(score_good, score_bad)
+
+
+class PruneKpCacheTests(unittest.TestCase):
+    def _now(self) -> datetime:
+        return datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+
+    def _found(self, days_ago: int) -> dict:
+        ts = (self._now() - timedelta(days=days_ago)).isoformat()
+        return {"kp_id": 1, "title": "Film", "cached_at": ts}
+
+    def _miss(self, days_ago: int) -> dict:
+        ts = (self._now() - timedelta(days=days_ago)).isoformat()
+        return {"kp_id": None, "cached_at": ts}
+
+    def test_empty_cache_returns_empty(self) -> None:
+        self.assertEqual(prune_kp_cache({}, now=self._now()), {})
+
+    def test_fresh_found_entry_is_kept(self) -> None:
+        cache = {"film|2026": self._found(days_ago=5)}
+        self.assertIn("film|2026", prune_kp_cache(cache, now=self._now()))
+
+    def test_stale_found_entry_is_removed(self) -> None:
+        # TTL for found = 14 days; 15 days old → expired
+        cache = {"film|2026": self._found(days_ago=15)}
+        self.assertNotIn("film|2026", prune_kp_cache(cache, now=self._now()))
+
+    def test_fresh_miss_entry_is_kept(self) -> None:
+        # TTL for miss = 3 days; 2 days old → fresh
+        cache = {"miss|2026": self._miss(days_ago=2)}
+        self.assertIn("miss|2026", prune_kp_cache(cache, now=self._now()))
+
+    def test_stale_miss_entry_is_removed(self) -> None:
+        # TTL for miss = 3 days; 4 days old → expired
+        cache = {"miss|2026": self._miss(days_ago=4)}
+        self.assertNotIn("miss|2026", prune_kp_cache(cache, now=self._now()))
+
+    def test_malformed_cached_at_is_dropped(self) -> None:
+        cache = {"bad|2026": {"kp_id": 1, "cached_at": "not-a-date"}}
+        self.assertNotIn("bad|2026", prune_kp_cache(cache, now=self._now()))
+
+    def test_non_dict_entry_is_dropped(self) -> None:
+        cache = {"bad": "string-value"}  # type: ignore[dict-item]
+        self.assertNotIn("bad", prune_kp_cache(cache, now=self._now()))
+
+    def test_excess_entries_trimmed_to_max(self) -> None:
+        cache = {
+            f"film{i}|2026": self._found(days_ago=i)
+            for i in range(1, 11)  # 10 entries, all within TTL
+        }
+        self.assertEqual(len(prune_kp_cache(cache, now=self._now(), max_entries=5)), 5)
+
+    def test_trimming_keeps_newest_entries(self) -> None:
+        cache = {
+            "old|2026": self._found(days_ago=10),
+            "new|2026": self._found(days_ago=1),
+        }
+        result = prune_kp_cache(cache, now=self._now(), max_entries=1)
+        self.assertIn("new|2026", result)
+        self.assertNotIn("old|2026", result)
+
+    def test_found_and_miss_ttls_differ(self) -> None:
+        """A 4-day-old found entry (TTL=14) is kept; a 4-day-old miss (TTL=3) is removed."""
+        cache = {
+            "found|2026": self._found(days_ago=4),
+            "miss|2026": self._miss(days_ago=4),
+        }
+        result = prune_kp_cache(cache, now=self._now())
+        self.assertIn("found|2026", result)
+        self.assertNotIn("miss|2026", result)
+
+
+class BuildCardsKpCacheTests(unittest.TestCase):
+    def _make_release(self, title: str = "Тест (2026) WEB-DL 1080p") -> dict:
+        return {
+            "source": "jackett",
+            "title": title,
+            "movie_title": "Тест",
+            "alt_title": "",
+            "year": 2026,
+            "quality": "1080p",
+            "size": "3 GB",
+            "size_gb": 3.0,
+            "seeders": 50,
+            "tracker": "a",
+            "topic_id": "",
+            "topic_url": "https://example.com/a",
+            "url": "",
+            "magnet_url": None,
+            "torrent_url": None,
+            "published_at": "",
+            "score": 500,
+        }
+
+    def test_cache_hit_skips_api_call(self) -> None:
+        """A fresh kp_cache entry must prevent any call to search_movie."""
+        releases = [self._make_release()]
+        call_count = {"n": 0}
+
+        def spy(title, year, **kw):
+            call_count["n"] += 1
+            return None
+
+        kp_cache = {
+            "тест|2026": {
+                "kp_id": 99,
+                "title": "Тест (KP)",
+                "year": 2026,
+                "rating": 7.8,
+                "genres": ["драма"],
+                "url": "https://www.kinopoisk.ru/film/99/",
+                "cached_at": "2026-05-12T11:00:00+00:00",
+            }
+        }
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=spy),
+            kp_cache=kp_cache,
+        )
+
+        self.assertEqual(call_count["n"], 0, "search_movie must not be called on cache hit")
+        self.assertEqual(result["cards"][0]["kp_id"], 99)
+        self.assertAlmostEqual(result["cards"][0]["rating"], 7.8)
+
+    def test_cache_miss_calls_api_and_stores_result(self) -> None:
+        """On a cache miss the API is called and the result is stored in the returned cache."""
+        releases = [self._make_release()]
+        match = SimpleNamespace(kp_id=42, title="Тест", url="", year=2026, rating=8.0, genres=[])
+        kp = SimpleNamespace(search_movie=lambda title, year, **kw: match)
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=kp,
+            kp_cache={},
+        )
+
+        returned = result["kp_cache"]
+        self.assertTrue(
+            any(isinstance(e, dict) and e.get("kp_id") == 42 for e in returned.values()),
+            "API result must be persisted in kp_cache",
+        )
+
+    def test_cached_miss_skips_api_call(self) -> None:
+        """A cached 'not found' entry (kp_id=None) must suppress further API calls."""
+        releases = [self._make_release()]
+        call_count = {"n": 0}
+
+        def spy(title, year, **kw):
+            call_count["n"] += 1
+            return None
+
+        kp_cache = {
+            "тест|2026": {"kp_id": None, "cached_at": "2026-05-12T11:00:00+00:00"},
+        }
+
+        build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=spy),
+            kp_cache=kp_cache,
+        )
+
+        self.assertEqual(call_count["n"], 0, "search_movie must not be called for a cached miss")
+
+    def test_returned_cache_is_independent_copy(self) -> None:
+        """The kp_cache dict returned in the result must contain the new entry."""
+        releases = [self._make_release()]
+        match = SimpleNamespace(kp_id=7, title="X", url="", year=2026, rating=7.0, genres=[])
+        initial_cache: dict = {}
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda *a, **kw: match),
+            kp_cache=initial_cache,
+        )
+
+        self.assertGreater(len(result["kp_cache"]), 0)
+
+    def test_ttl_jitter_stored_in_found_entry(self) -> None:
+        """A newly stored found entry must include ttl_days in the valid jitter range."""
+        releases = [self._make_release()]
+        match = SimpleNamespace(kp_id=5, title="Тест", url="", year=2026, rating=7.0, genres=[])
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda *a, **kw: match),
+            kp_cache={},
+        )
+
+        entry = next(iter(result["kp_cache"].values()))
+        self.assertIn("ttl_days", entry)
+        min_ttl = _KP_CACHE_TTL_FOUND_DAYS
+        max_ttl = _KP_CACHE_TTL_FOUND_DAYS + _KP_CACHE_TTL_JITTER_MAX_DAYS
+        self.assertGreaterEqual(entry["ttl_days"], min_ttl)
+        self.assertLessEqual(entry["ttl_days"], max_ttl)
+
+    def test_miss_entry_has_no_ttl_days(self) -> None:
+        """A 'not found' entry must NOT include ttl_days (jitter only for found entries)."""
+        releases = [self._make_release()]
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda *a, **kw: None),
+            kp_cache={},
+        )
+
+        entry = next(iter(result["kp_cache"].values()))
+        self.assertNotIn("ttl_days", entry)
+
+    def test_kp_searches_counter_increments_on_cache_miss(self) -> None:
+        """kp_searches in the result must count actual search_movie() calls made."""
+        releases = [
+            self._make_release("Фильм А (2026) WEB-DL 1080p"),
+            self._make_release("Фильм Б (2026) WEB-DL 1080p"),
+        ]
+        # Adjust movie_title to create two distinct cards
+        releases[0]["movie_title"] = "Фильм А"
+        releases[1]["movie_title"] = "Фильм Б"
+        releases[1]["topic_url"] = "https://example.com/b"
+
+        match = SimpleNamespace(kp_id=1, title="A", url="", year=2026, rating=7.0, genres=[])
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda *a, **kw: match),
+            kp_cache={},
+        )
+
+        self.assertEqual(result["kp_searches"], 2, "one search per distinct card on cache miss")
+
+    def test_kp_searches_zero_on_cache_hit(self) -> None:
+        """kp_searches must be 0 when all cards are served from a fresh cache."""
+        releases = [self._make_release()]
+
+        kp_cache = {
+            "тест|2026": {
+                "kp_id": 99,
+                "title": "Тест",
+                "year": 2026,
+                "rating": 7.0,
+                "genres": [],
+                "url": "",
+                "cached_at": "2026-05-12T11:00:00+00:00",
+            }
+        }
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda *a, **kw: None),
+            kp_cache=kp_cache,
+        )
+
+        self.assertEqual(result["kp_searches"], 0)
+
+    def test_stale_cap_limits_api_calls_and_uses_stale_data(self) -> None:
+        """When max_stale_refresh=1, only the first stale entry triggers an API call;
+        the second stale entry falls back to its stale cached value."""
+        stale_ts = "2000-01-01T00:00:00+00:00"  # guaranteed stale
+        releases = [
+            self._make_release("Фильм А (2026) WEB-DL 1080p"),
+            self._make_release("Фильм Б (2026) WEB-DL 1080p"),
+        ]
+        releases[0]["movie_title"] = "Фильм А"
+        releases[1]["movie_title"] = "Фильм Б"
+        releases[1]["topic_url"] = "https://example.com/b"
+
+        kp_cache = {
+            "фильм а|2026": {
+                "kp_id": 10, "title": "Фильм А", "year": 2026,
+                "rating": 7.0, "genres": [], "url": "", "cached_at": stale_ts,
+            },
+            "фильм б|2026": {
+                "kp_id": 20, "title": "Фильм Б", "year": 2026,
+                "rating": 8.0, "genres": [], "url": "", "cached_at": stale_ts,
+            },
+        }
+        call_count = {"n": 0}
+
+        def refreshed_match(title, year, **kw):
+            call_count["n"] += 1
+            return SimpleNamespace(kp_id=99, title=title, url="", year=year, rating=9.0, genres=[])
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=refreshed_match),
+            kp_cache=kp_cache,
+            max_stale_refresh=1,
+        )
+
+        # Exactly one API call should have been made
+        self.assertEqual(call_count["n"], 1, "only one stale entry should be refreshed")
+        self.assertEqual(result["kp_searches"], 1)
+
+        # Both cards should still appear (stale fallback used for the second)
+        self.assertEqual(len(result["cards"]), 2)
+
+    def test_max_stale_refresh_none_refreshes_all(self) -> None:
+        """When max_stale_refresh=None, all stale entries are refreshed."""
+        stale_ts = "2000-01-01T00:00:00+00:00"
+        releases = [
+            self._make_release("Фильм А (2026) WEB-DL 1080p"),
+            self._make_release("Фильм Б (2026) WEB-DL 1080p"),
+        ]
+        releases[0]["movie_title"] = "Фильм А"
+        releases[1]["movie_title"] = "Фильм Б"
+        releases[1]["topic_url"] = "https://example.com/b"
+
+        kp_cache = {
+            "фильм а|2026": {"kp_id": 1, "title": "А", "year": 2026, "rating": 7.0, "genres": [], "url": "", "cached_at": stale_ts},
+            "фильм б|2026": {"kp_id": 2, "title": "Б", "year": 2026, "rating": 7.0, "genres": [], "url": "", "cached_at": stale_ts},
+        }
+        call_count = {"n": 0}
+
+        def spy(title, year, **kw):
+            call_count["n"] += 1
+            return SimpleNamespace(kp_id=99, title=title, url="", year=year, rating=9.0, genres=[])
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=spy),
+            kp_cache=kp_cache,
+            max_stale_refresh=None,
+        )
+
+        self.assertEqual(call_count["n"], 2, "all stale entries should be refreshed when cap is None")
+        self.assertEqual(result["kp_searches"], 2)
+
+
+class PruneKpCachePerEntryTtlTests(unittest.TestCase):
+    """prune_kp_cache must respect per-entry ttl_days when present."""
+
+    def _now(self) -> datetime:
+        return datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+
+    def test_per_entry_ttl_days_extends_expiry(self) -> None:
+        """An entry with ttl_days=21 that is 20 days old should still be kept."""
+        ts = (self._now() - timedelta(days=20)).isoformat()
+        cache = {
+            "film|2026": {
+                "kp_id": 1, "title": "Film", "cached_at": ts, "ttl_days": 21,
+            }
+        }
+        result = prune_kp_cache(cache, now=self._now())
+        self.assertIn("film|2026", result)
+
+    def test_per_entry_ttl_days_expires_correctly(self) -> None:
+        """An entry with ttl_days=21 that is 22 days old must be expired."""
+        ts = (self._now() - timedelta(days=22)).isoformat()
+        cache = {
+            "film|2026": {
+                "kp_id": 1, "title": "Film", "cached_at": ts, "ttl_days": 21,
+            }
+        }
+        result = prune_kp_cache(cache, now=self._now())
+        self.assertNotIn("film|2026", result)
+
+    def test_no_ttl_days_falls_back_to_global_constant(self) -> None:
+        """An entry without ttl_days uses the global _KP_CACHE_TTL_FOUND_DAYS constant."""
+        # 13 days old, global TTL = 14 → should be kept
+        ts = (self._now() - timedelta(days=13)).isoformat()
+        cache = {"film|2026": {"kp_id": 1, "title": "Film", "cached_at": ts}}
+        self.assertIn("film|2026", prune_kp_cache(cache, now=self._now()))
+
+        # 15 days old → should be removed
+        ts_stale = (self._now() - timedelta(days=15)).isoformat()
+        cache_stale = {"film|2026": {"kp_id": 1, "title": "Film", "cached_at": ts_stale}}
+        self.assertNotIn("film|2026", prune_kp_cache(cache_stale, now=self._now()))
 
 
 if __name__ == "__main__":

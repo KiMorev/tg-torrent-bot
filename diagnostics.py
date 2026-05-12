@@ -195,7 +195,11 @@ def _public_trackers_diagnostic(tracker_service, display_timezone: tzinfo) -> Se
         )
 
     if not trackers:
-        return ServiceDiagnostic("Public trackers", "warn", _summary("warn", "➕", "Public-трекеры", "кэш пуст"))
+        return ServiceDiagnostic(
+            "Public trackers",
+            "warn",
+            _summary("warn", "➕", "Public-трекеры", "кэш пуст — загрузится при первом BT-торренте"),
+        )
 
     details = [f"   Доступно: {len(trackers)}"]
     cache_time_text = _format_cache_time(cache_time, display_timezone)
@@ -203,7 +207,14 @@ def _public_trackers_diagnostic(tracker_service, display_timezone: tzinfo) -> Se
         details.append(f"   Обновлён: {cache_time_text}")
 
     if cache_is_stale:
-        return ServiceDiagnostic("Public trackers", "warn", _summary("warn", "➕", "Public-трекеры", "кэш устарел"), details)
+        # Stale ≠ broken: the list is still fully functional, trackers change rarely.
+        # Show ok so the admin panel stays green in normal on-demand-refresh usage.
+        return ServiceDiagnostic(
+            "Public trackers",
+            "ok",
+            _summary("ok", "➕", "Public-трекеры", "кэш доступен (устарел)"),
+            details,
+        )
 
     return ServiceDiagnostic("Public trackers", "ok", _summary("ok", "➕", "Public-трекеры", "кэш готов"), details)
 

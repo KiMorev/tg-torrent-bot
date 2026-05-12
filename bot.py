@@ -61,6 +61,9 @@ from keyboards import (
     _SRCH_DEFAULT_SETTINGS,
     _SRCH_QUALITY_OPTIONS,
     _admin_diagnostics_keyboard,
+    _admin_kp_cache_cleared_keyboard,
+    _admin_kp_cache_confirm_keyboard,
+    _admin_kp_force_refresh_keyboard,
     _admin_panel_keyboard,
     _access_approval_keyboard,
     _access_callback,
@@ -100,6 +103,7 @@ from movie_discovery import (
     is_recent_published_at as _movie_is_recent_published_at,
     parse_published_at as _movie_parse_published_at,
     parse_qualities as _movie_parse_qualities,
+    prune_kp_cache as _movie_prune_kp_cache,
     prune_seen_fingerprints as _movie_prune_seen_fingerprints,
 )
 from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
@@ -216,6 +220,11 @@ MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS = settings.movie_discovery_jackett_max_age_
 MOVIE_DISCOVERY_LIMIT = settings.movie_discovery_limit
 MOVIE_DISCOVERY_MIN_KP_RATING = settings.movie_discovery_min_kp_rating
 MOVIE_DISCOVERY_QUALITIES = settings.movie_discovery_qualities
+
+# kinopoiskapiunofficial.tech free tier: 500 requests/day
+_KP_DAILY_LIMIT = 500
+# Max stale KP entries refreshed per discovery run (mirrors movie_discovery._KP_MAX_STALE_REFRESH_PER_RUN)
+_KP_MAX_STALE_REFRESH = 15
 
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
@@ -597,15 +606,35 @@ def _format_updated_at() -> str:
     return datetime.now(DISPLAY_TIMEZONE).strftime("%H:%M:%S")
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Return the correct Russian plural form for *n*.
+
+    ``one``  — 1, 21, 31 … (одна запись)
+    ``few``  — 2-4, 22-24 … (две записи)
+    ``many`` — 0, 5-20, 25-30 … (пять записей)
+    """
+    n = abs(n)
+    rem100 = n % 100
+    rem10 = n % 10
+    if 11 <= rem100 <= 19:
+        return many
+    if rem10 == 1:
+        return one
+    if 2 <= rem10 <= 4:
+        return few
+    return many
+
+
 def _format_admin_configured_integrations() -> str:
     integrations = [
         ("Rutracker", RUTRACKER_ENABLED),
         ("Jackett", JACKETT_ENABLED),
         ("Кинопоиск", KINOPOISK_ENABLED),
         ("Plex", PLEX_ENABLED),
-        ("Public-трекеры", _public_trackers_enabled()),
+        ("Трекеры", _public_trackers_enabled()),
     ]
-    return "\n".join(f"• {'🟢' if enabled else '🔴'} {name}: {'настроен' if enabled else 'нет'}" for name, enabled in integrations)
+    parts = [f"{'🟢' if enabled else '🔴'} {name}" for name, enabled in integrations]
+    return "• " + " · ".join(parts)
 
 
 def _format_admin_tasks_line(tasks: list[dict] | None, error: str = "") -> str:
@@ -758,6 +787,23 @@ def _format_admin_search_defaults_line() -> str:
     return f"• Поиск: {quality} · оригинальная дорожка: {audio} · субтитры: {subs}"
 
 
+def _format_kp_api_stats_line(cache: dict) -> str:
+    """Format the KP API budget line for the admin panel Новинки section."""
+    if not KINOPOISK_ENABLED:
+        return ""
+    stats = cache.get("kp_api_stats")
+    today = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
+    if not isinstance(stats, dict) or stats.get("date") != today:
+        return "• KP API сегодня: нет данных"
+    searches = int(stats.get("searches") or 0)
+    http_est = round(searches * 1.5)
+    remaining = max(0, _KP_DAILY_LIMIT - http_est)
+    return (
+        f"• KP API сегодня: {searches} {_plural(searches, 'поиск', 'поиска', 'поисков')} "
+        f"(~{http_est} HTTP-вызовов) · ~{remaining} из {_KP_DAILY_LIMIT} осталось"
+    )
+
+
 def _format_admin_movie_discovery_line() -> str:
     cache = state_store.load_movie_discovery_cache()
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
@@ -774,16 +820,20 @@ def _format_admin_movie_discovery_line() -> str:
         return "• Статус: выключены"
 
     status = "включены" if sources else "включены, но нет источников"
-    return (
-        f"• Статус: {status}\n"
-        f"• Источники: {source_text}\n"
-        f"• Общие фильтры: {qualities} · КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}\n"
-        f"• Rutracker: {_movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM)}\n"
+    kp_stats_line = _format_kp_api_stats_line(cache)
+    lines = [
+        f"• Статус: {status}",
+        f"• Источники: {source_text}",
+        f"• Общие фильтры: {qualities} · КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}",
+        f"• Rutracker: {_movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM)}",
         f"• Jackett: {'только с датой' if MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE else 'без строгой даты'} · "
-        f"до {MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS} дн.\n"
-        f"• Автообновление: раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч\n"
-        f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}"
-    )
+        f"до {MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS} дн.",
+        f"• Автообновление: раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч",
+        f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}",
+    ]
+    if kp_stats_line:
+        lines.append(kp_stats_line)
+    return "\n".join(lines)
 
 
 async def _build_admin_panel_text() -> str:
@@ -803,14 +853,12 @@ async def _build_admin_panel_text() -> str:
         _format_admin_tasks_line(tasks, task_error),
         _format_admin_subscriptions_line(),
         "",
-        "⚙️ <b>Правила</b>",
+        "⚙️ <b>Правила и интеграции</b>",
+        _format_admin_configured_integrations(),
         _format_admin_auto_delete_line(),
         _format_admin_notifications_line(),
         _format_admin_search_defaults_line(),
-        "",
-        "🔌 <b>Настроенные интеграции</b>",
-        _format_admin_configured_integrations(),
-        "<i>Доступность сервисов в разделе «Диагностика».</i>",
+        "<i>Живой статус сервисов — в разделе «Диагностика».</i>",
         "",
         "🎬 <b>Новинки</b>",
         _format_admin_movie_discovery_line(),
@@ -1058,7 +1106,7 @@ def _format_movie_discovery_cache(cache: dict) -> str:
     return "\n".join(lines)
 
 
-async def _refresh_movie_discovery_cache() -> dict:
+async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
     qualities = _movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES)
@@ -1137,6 +1185,7 @@ async def _refresh_movie_discovery_cache() -> dict:
     prev_kp_cache: dict = (
         previous["kp_cache"] if isinstance(previous.get("kp_cache"), dict) else {}
     )
+    prev_kp_cache = _movie_prune_kp_cache(prev_kp_cache, now=now)
     cache = await asyncio.to_thread(
         _movie_build_cards,
         list(by_fingerprint.values()),
@@ -1146,7 +1195,19 @@ async def _refresh_movie_discovery_cache() -> dict:
         min_kp_rating=MOVIE_DISCOVERY_MIN_KP_RATING,
         kinopoisk_client=kinopoisk_client,
         kp_cache=prev_kp_cache,
+        max_stale_refresh=max_stale_kp_refresh,
     )
+
+    # Accumulate daily KP API search counter
+    kp_searches_this_run = int(cache.get("kp_searches") or 0)
+    today_str = now.strftime("%Y-%m-%d")
+    prev_stats = previous.get("kp_api_stats")
+    if isinstance(prev_stats, dict) and prev_stats.get("date") == today_str:
+        searches_today = int(prev_stats.get("searches") or 0) + kp_searches_this_run
+    else:
+        searches_today = kp_searches_this_run
+    cache["kp_api_stats"] = {"date": today_str, "searches": searches_today}
+
     _save_movie_discovery_cache(cache)
     debug_report = {
         "updated_at": now_text,
@@ -3461,6 +3522,127 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "subscriptions":
         text, keyboard = _build_admin_subscriptions_view()
         await _safe_edit_callback(query, text, parse_mode="HTML", reply_markup=keyboard)
+        return
+
+    if action == "force_kp_refresh":
+        cache = _load_movie_discovery_cache()
+        kp_cache_dict = cache.get("kp_cache") if isinstance(cache.get("kp_cache"), dict) else {}
+        total_entries = len(kp_cache_dict)
+        found_entries = sum(1 for e in kp_cache_dict.values() if isinstance(e, dict) and e.get("kp_id"))
+        miss_entries = total_entries - found_entries
+
+        # Budget estimate: each search_movie() call ≈ 1.5 HTTP requests on average
+        today_str = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
+        stats = cache.get("kp_api_stats")
+        if isinstance(stats, dict) and stats.get("date") == today_str:
+            searches_today = int(stats.get("searches") or 0)
+        else:
+            searches_today = 0
+        http_used_est = round(searches_today * 1.5)
+        remaining = max(0, _KP_DAILY_LIMIT - http_used_est)
+        needed_http_est = round(total_entries * 1.5)
+        can_full = total_entries > 0 and remaining >= needed_http_est
+
+        runs_needed = (total_entries + _KP_MAX_STALE_REFRESH - 1) // _KP_MAX_STALE_REFRESH if total_entries > 0 else 1
+
+        text_lines = [
+            "🔄 <b>Принудительное обновление KP кэша</b>",
+            "",
+            f"Записей в кэше: <b>{total_entries}</b> "
+            f"({found_entries} найдено · {miss_entries} не найдено)",
+            "",
+            "📊 <b>Бюджет API сегодня</b>",
+            f"• Использовано: ~{http_used_est} из {_KP_DAILY_LIMIT} HTTP-вызовов",
+            f"• Осталось: ~{remaining}",
+            f"• Потребуется для полного обновления: ~{needed_http_est}",
+            "",
+        ]
+        if can_full:
+            text_lines.append("✅ Бюджета достаточно для обновления за один прогон.")
+        else:
+            text_lines.append(
+                f"⚠️ Бюджета не хватит для одного прогона. "
+                f"Постепенное обновление: по {_KP_MAX_STALE_REFRESH} записей в прогоне, "
+                f"~{runs_needed} {_plural(runs_needed, 'прогон', 'прогона', 'прогонов')}."
+            )
+
+        await _safe_edit_callback(
+            query,
+            "\n".join(text_lines),
+            parse_mode="HTML",
+            reply_markup=_admin_kp_force_refresh_keyboard(can_full),
+        )
+        return
+
+    if action == "confirm_force_kp_refresh_full":
+        cache = _load_movie_discovery_cache()
+        kp_cache_dict = cache.get("kp_cache") if isinstance(cache.get("kp_cache"), dict) else {}
+        stale_ts = "2000-01-01T00:00:00+00:00"
+        for entry in kp_cache_dict.values():
+            if isinstance(entry, dict):
+                entry["cached_at"] = stale_ts
+        cache["kp_cache"] = kp_cache_dict
+        _save_movie_discovery_cache(cache)
+        asyncio.create_task(_refresh_movie_discovery_cache(max_stale_kp_refresh=None))
+        await _safe_edit_callback(
+            query,
+            "🔄 <b>Запускаю полное обновление KP кэша</b>\n\n"
+            f"Все <b>{len(kp_cache_dict)}</b> {_plural(len(kp_cache_dict), 'запись', 'записи', 'записей')} "
+            f"помечены устаревшими.\n"
+            "Обновление идёт в фоне — займёт несколько минут.",
+            parse_mode="HTML",
+            reply_markup=_admin_kp_cache_cleared_keyboard(),
+        )
+        return
+
+    if action == "confirm_force_kp_refresh_gradual":
+        cache = _load_movie_discovery_cache()
+        kp_cache_dict = cache.get("kp_cache") if isinstance(cache.get("kp_cache"), dict) else {}
+        stale_ts = "2000-01-01T00:00:00+00:00"
+        for entry in kp_cache_dict.values():
+            if isinstance(entry, dict):
+                entry["cached_at"] = stale_ts
+        cache["kp_cache"] = kp_cache_dict
+        _save_movie_discovery_cache(cache)
+        asyncio.create_task(_refresh_movie_discovery_cache())
+        runs_needed = (len(kp_cache_dict) + _KP_MAX_STALE_REFRESH - 1) // _KP_MAX_STALE_REFRESH if kp_cache_dict else 1
+        await _safe_edit_callback(
+            query,
+            "🔄 <b>Запускаю постепенное обновление KP кэша</b>\n\n"
+            f"Все <b>{len(kp_cache_dict)}</b> {_plural(len(kp_cache_dict), 'запись', 'записи', 'записей')} "
+            f"помечены устаревшими.\n"
+            f"Обновляется по {_KP_MAX_STALE_REFRESH} за прогон — "
+            f"~{runs_needed} {_plural(runs_needed, 'прогон', 'прогона', 'прогонов')} автообновления.",
+            parse_mode="HTML",
+            reply_markup=_admin_kp_cache_cleared_keyboard(),
+        )
+        return
+
+    if action == "clear_kp_cache":
+        cache = _load_movie_discovery_cache()
+        entry_count = len(cache.get("kp_cache", {})) if isinstance(cache.get("kp_cache"), dict) else 0
+        await _safe_edit_callback(
+            query,
+            f"🗑 <b>Очистить кэш результатов Кинопоиска?</b>\n\n"
+            f"В кэше сейчас <b>{entry_count}</b> {_plural(entry_count, 'запись', 'записи', 'записей')}.\n"
+            f"После очистки все фильмы будут запрошены заново при следующем обновлении новинок.",
+            parse_mode="HTML",
+            reply_markup=_admin_kp_cache_confirm_keyboard(),
+        )
+        return
+
+    if action == "confirm_clear_kp_cache":
+        cache = _load_movie_discovery_cache()
+        old_size = len(cache.get("kp_cache", {})) if isinstance(cache.get("kp_cache"), dict) else 0
+        cache["kp_cache"] = {}
+        _save_movie_discovery_cache(cache)
+        await _safe_edit_callback(
+            query,
+            f"✅ KP кеш очищен: удалено <b>{old_size}</b> {_plural(old_size, 'запись', 'записи', 'записей')}.\n\n"
+            f"Кеш будет заполнен заново при следующем обновлении новинок.",
+            parse_mode="HTML",
+            reply_markup=_admin_kp_cache_cleared_keyboard(),
+        )
         return
 
     await _safe_edit_callback(query, "🛠️ Обновляю админ-панель…")

@@ -36,6 +36,7 @@ from bot import (
     _format_movie_discovery_cache,
     _movie_discovery_keyboard,
     _notification_keyboard,
+    _plural,
     _run_polling,
     _run_progress_panel_update_once,
     _start_task_card_refresh,
@@ -278,10 +279,10 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("📊 <b>Состояние</b>", text)
         self.assertIn("• Загрузки: 3 всего · 1 активных · 1 завершённых · 1 ошибок", text)
         self.assertIn("• Подписки: 2 всего · Rutracker 1 · Jackett 1", text)
-        self.assertIn("🔌 <b>Настроенные интеграции</b>", text)
-        self.assertIn("• 🟢 Rutracker: настроен", text)
-        self.assertIn("• 🔴 Кинопоиск: нет", text)
-        self.assertIn("Доступность сервисов в разделе «Диагностика»", text)
+        self.assertIn("⚙️ <b>Правила и интеграции</b>", text)
+        self.assertIn("🟢 Rutracker", text)
+        self.assertIn("🔴 Кинопоиск", text)
+        self.assertIn("Живой статус сервисов — в разделе «Диагностика»", text)
         self.assertIn("🎬 <b>Новинки</b>", text)
 
     def test_admin_diagnostics_callback_reuses_diagnostics_view(self):
@@ -927,6 +928,31 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
 
         asyncio.run(run())
         self.assertIn("check", calls, "_check_subscriptions was not called on startup")
+
+
+class PluralTests(unittest.TestCase):
+    """Tests for the Russian plural helper _plural()."""
+
+    def test_one(self) -> None:
+        self.assertEqual(_plural(1, "запись", "записи", "записей"), "запись")
+        self.assertEqual(_plural(21, "запись", "записи", "записей"), "запись")
+        self.assertEqual(_plural(101, "запись", "записи", "записей"), "запись")
+
+    def test_few(self) -> None:
+        self.assertEqual(_plural(2, "запись", "записи", "записей"), "записи")
+        self.assertEqual(_plural(3, "запись", "записи", "записей"), "записи")
+        self.assertEqual(_plural(4, "запись", "записи", "записей"), "записи")
+        self.assertEqual(_plural(22, "запись", "записи", "записей"), "записи")
+
+    def test_many(self) -> None:
+        self.assertEqual(_plural(0, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(5, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(11, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(12, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(19, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(20, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(111, "запись", "записи", "записей"), "записей")
+        self.assertEqual(_plural(156, "запись", "записи", "записей"), "записей")
 
 
 if __name__ == "__main__":

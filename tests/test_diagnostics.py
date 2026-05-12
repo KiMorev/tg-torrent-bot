@@ -49,7 +49,7 @@ class FakeTrackerService:
         exc: Exception | None = None,
     ) -> None:
         self.enabled = enabled
-        self.trackers = trackers or ["udp://tracker.one/announce"]
+        self.trackers = trackers if trackers is not None else ["udp://tracker.one/announce"]
         self.fresh_trackers = self.trackers if fresh_trackers is None else fresh_trackers
         self.cache_time = cache_time
         self.exc = exc
@@ -111,7 +111,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("Public-трекеры</b>: выключены", text)
         self.assertIn("Plex</b>: кнопка выключена", text)
 
-    def test_run_diagnostics_reports_stale_tracker_cache(self) -> None:
+    def test_stale_tracker_cache_reports_ok_not_warning(self) -> None:
+        """A stale but non-empty cache is still functional — must show ✅, not ⚠️."""
         report = run_diagnostics(
             rutracker_client=None,
             jackett_client=None,
@@ -125,8 +126,27 @@ class DiagnosticsTests(unittest.TestCase):
 
         text = format_diagnostics(report)
 
-        self.assertIn("⚠️ ➕ <b>Public-трекеры</b>: кэш устарел", text)
+        self.assertIn("✅ ➕ <b>Public-трекеры</b>: кэш доступен (устарел)", text)
         self.assertIn("Доступно: 1", text)
+        self.assertNotIn("⚠️ ➕ <b>Public-трекеры</b>: кэш устарел", text)
+
+    def test_empty_tracker_cache_reports_warning(self) -> None:
+        """An empty cache means trackers won't be added until first on-demand load — must show ⚠️."""
+        report = run_diagnostics(
+            rutracker_client=None,
+            jackett_client=None,
+            ds_client=FakeDownloadStation(),
+            tracker_service=FakeTrackerService(trackers=[], fresh_trackers=[]),
+            display_timezone=timezone.utc,
+            kinopoisk_enabled=False,
+            plex_enabled=False,
+            plex_url="https://app.plex.tv",
+        )
+
+        text = format_diagnostics(report)
+
+        self.assertIn("⚠️ ➕ <b>Public-трекеры</b>: кэш пуст", text)
+        self.assertIn("загрузится при первом BT-торренте", text)
 
     def test_run_diagnostics_keeps_external_errors_readable(self) -> None:
         report = run_diagnostics(

@@ -105,9 +105,59 @@ def _admin_panel_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
             ],
+            [
+                InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
+                InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
+            ],
             [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
         ]
     )
+
+
+def _admin_kp_cache_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Confirmation dialog before clearing the KP results cache."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Да, очистить", callback_data=_admin_callback("confirm_clear_kp_cache")),
+                InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home")),
+            ],
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
+        ]
+    )
+
+
+def _admin_kp_cache_cleared_keyboard() -> InlineKeyboardMarkup:
+    """Shown after the KP cache has been successfully cleared."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home"))],
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
+        ]
+    )
+
+
+def _admin_kp_force_refresh_keyboard(can_full: bool) -> InlineKeyboardMarkup:
+    """Budget info screen: offers full (one-run) or gradual KP cache refresh."""
+    rows = []
+    if can_full:
+        rows.append([
+            InlineKeyboardButton(
+                "✅ Обновить за один прогон",
+                callback_data=_admin_callback("confirm_force_kp_refresh_full"),
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            "🔄 Обновлять постепенно",
+            callback_data=_admin_callback("confirm_force_kp_refresh_gradual"),
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home")),
+        InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:

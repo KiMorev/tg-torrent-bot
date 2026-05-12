@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -449,6 +450,10 @@ def _merge_duplicate_cards(cards: list[dict], known_fingerprints: set[str]) -> l
 _KP_CACHE_TTL_FOUND_DAYS = 14
 # How long to keep a "not found" entry before retrying (new films get indexed later)
 _KP_CACHE_TTL_MISS_DAYS = 3
+# Extra random days added to found-entry TTL to spread expiry across a window (anti thundering-herd)
+_KP_CACHE_TTL_JITTER_MAX_DAYS = 7
+# Maximum stale entries refreshed via API per build_cards run (prevents daily budget spikes)
+_KP_MAX_STALE_REFRESH_PER_RUN = 15
 
 
 def _kp_cache_key(title: str, year: int | None) -> str:
@@ -461,10 +466,12 @@ def _kp_cache_lookup(
     year: int | None,
     now: datetime,
 ) -> tuple[bool, dict | None]:
-    """Return *(hit, entry)*.
+    """Return *(hit, entry)* — three-state result.
 
-    *hit* is True when a fresh entry exists.
-    *entry* is None when the film was previously not found in KP.
+    - *(True, entry)*  — fresh entry, use it directly
+    - *(False, entry)* — stale entry, caller may use for graceful degradation
+    - *(False, None)*  — key not in cache at all
+    An *entry* with ``kp_id=None`` means the film was previously not found in KP.
     """
     key = _kp_cache_key(title, year)
     entry = kp_cache.get(key)
@@ -478,9 +485,14 @@ def _kp_cache_lookup(
     except (ValueError, TypeError):
         return False, None
 
-    ttl = _KP_CACHE_TTL_FOUND_DAYS if entry.get("kp_id") else _KP_CACHE_TTL_MISS_DAYS
+    # Use per-entry ttl_days (supports jitter) with fallback to global constants
+    if entry.get("kp_id"):
+        ttl = int(entry.get("ttl_days") or _KP_CACHE_TTL_FOUND_DAYS)
+    else:
+        ttl = _KP_CACHE_TTL_MISS_DAYS
+
     if (now - cached_at).days >= ttl:
-        return False, None
+        return False, entry  # stale but available for graceful degradation
 
     return True, entry
 
@@ -502,9 +514,52 @@ def _kp_cache_store(
             "genres": match.genres,
             "url": match.url,
             "cached_at": now_iso,
+            # Jitter spreads expiry over a window to prevent thundering-herd re-queries
+            "ttl_days": _KP_CACHE_TTL_FOUND_DAYS + random.randint(0, _KP_CACHE_TTL_JITTER_MAX_DAYS),
         }
     else:
         kp_cache[key] = {"kp_id": None, "cached_at": now_iso}
+
+
+def prune_kp_cache(
+    kp_cache: dict,
+    *,
+    now: datetime,
+    max_entries: int = 2000,
+) -> dict:
+    """Remove stale entries from the KP cache and trim to *max_entries*.
+
+    Entries are expired individually: found entries after 14 days, miss entries
+    after 3 days.  After expiry pruning, if more than *max_entries* remain the
+    oldest ones (by ``cached_at``) are removed first.
+    """
+    if not kp_cache:
+        return {}
+
+    comparable_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    pruned: dict = {}
+    for key, entry in kp_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            cached_at = datetime.fromisoformat(entry.get("cached_at", ""))
+            if cached_at.tzinfo is None:
+                cached_at = cached_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            # Malformed timestamp — drop the entry
+            continue
+        if entry.get("kp_id"):
+            ttl = int(entry.get("ttl_days") or _KP_CACHE_TTL_FOUND_DAYS)
+        else:
+            ttl = _KP_CACHE_TTL_MISS_DAYS
+        if (comparable_now - cached_at).days < ttl:
+            pruned[key] = entry
+
+    if len(pruned) > max_entries:
+        sorted_items = sorted(pruned.items(), key=lambda item: item[1].get("cached_at", ""))
+        pruned = dict(sorted_items[-max_entries:])
+
+    return pruned
 
 
 def build_cards(
@@ -516,6 +571,7 @@ def build_cards(
     min_kp_rating: float,
     kinopoisk_client=None,
     kp_cache: dict | None = None,
+    max_stale_refresh: int | None = _KP_MAX_STALE_REFRESH_PER_RUN,
 ) -> dict:
     """Build scored movie cards from raw releases.
 
@@ -529,6 +585,9 @@ def build_cards(
     """
     if kp_cache is None:
         kp_cache = {}
+
+    stale_refresh_count = 0
+    kp_searches_this_run = 0
 
     # Parse now_text into a timezone-aware datetime for TTL comparisons
     try:
@@ -580,6 +639,7 @@ def build_cards(
             cache_hit, cached = _kp_cache_lookup(kp_cache, search_title, search_year, now_dt)
 
             if cache_hit:
+                # Fresh cache entry — use it directly
                 if cached and cached.get("kp_id"):
                     card["kp_id"] = cached["kp_id"]
                     card["kp_url"] = cached.get("url", "")
@@ -587,14 +647,45 @@ def build_cards(
                     card["genres"] = cached.get("genres", [])
                     card["title"] = cached.get("title") or search_title
                     logger.debug("KP cache hit for %r → kp_id=%s", search_title, cached["kp_id"])
-                # cached entry with kp_id=None means previously not found — skip API call
+                # cached with kp_id=None means previously not found — skip API call
+            elif cached is not None:
+                # Stale entry: refresh if under per-run cap, else degrade gracefully
+                can_refresh = max_stale_refresh is None or stale_refresh_count < max_stale_refresh
+                if can_refresh:
+                    stale_refresh_count += 1
+                    match = kinopoisk_client.search_movie(
+                        search_title, search_year, alt_title=card.get("alt_title", "")
+                    )
+                    kp_searches_this_run += 1
+                    _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
+                    if match is not None:
+                        year_ok = not (
+                            match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}
+                        )
+                        if year_ok:
+                            card["kp_id"] = match.kp_id
+                            card["kp_url"] = match.url
+                            card["rating"] = match.rating
+                            card["genres"] = match.genres
+                            card["title"] = match.title
+                else:
+                    # Per-run cap exhausted — use stale data silently (no user-visible degradation)
+                    logger.debug("KP stale cap hit, using stale data for %r", search_title)
+                    if cached.get("kp_id"):
+                        card["kp_id"] = cached["kp_id"]
+                        card["kp_url"] = cached.get("url", "")
+                        card["rating"] = cached.get("rating")
+                        card["genres"] = cached.get("genres", [])
+                        card["title"] = cached.get("title") or search_title
+                    # cached with kp_id=None: silently skip
             else:
+                # Not in cache at all — must query API
                 match = kinopoisk_client.search_movie(
                     search_title, search_year, alt_title=card.get("alt_title", "")
                 )
+                kp_searches_this_run += 1
                 _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
                 if match is not None:
-                    # Discard match if KP returned a film from a very different year
                     year_ok = not (
                         match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}
                     )
@@ -626,11 +717,16 @@ def build_cards(
             known_fps_dict[fp] = now_text
 
     kp_hits = sum(1 for e in kp_cache.values() if isinstance(e, dict) and e.get("kp_id"))
-    logger.info("KP cache: %d entries (%d with match)", len(kp_cache), kp_hits)
+    logger.info(
+        "KP cache: %d entries (%d with match); searches this run: %d (stale refreshed: %d/%s)",
+        len(kp_cache), kp_hits, kp_searches_this_run, stale_refresh_count,
+        str(max_stale_refresh) if max_stale_refresh is not None else "∞",
+    )
 
     return {
         "updated_at": now_text,
         "seen_fingerprints": known_fps_dict,
         "kp_cache": kp_cache,
+        "kp_searches": kp_searches_this_run,
         "cards": cards[:limit],
     }
