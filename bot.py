@@ -100,6 +100,7 @@ from movie_discovery import (
     is_recent_published_at as _movie_is_recent_published_at,
     parse_published_at as _movie_parse_published_at,
     parse_qualities as _movie_parse_qualities,
+    prune_seen_fingerprints as _movie_prune_seen_fingerprints,
 )
 from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
 from task_policies import (
@@ -1066,7 +1067,12 @@ async def _refresh_movie_discovery_cache() -> dict:
     for search_query in queries:
         if jackett_client is not None:
             try:
-                results = await asyncio.to_thread(jackett_client.search, search_query, fetch_limit=JACKETT_FETCH_LIMIT)
+                results = await asyncio.to_thread(
+                    jackett_client.search,
+                    search_query,
+                    fetch_limit=JACKETT_FETCH_LIMIT,
+                    categories="2000",
+                )
                 source_counts["jackett_raw"] += len(results)
                 for result in results:
                     release, reason = _movie_evaluate_result(
@@ -1117,7 +1123,12 @@ async def _refresh_movie_discovery_cache() -> dict:
         by_fingerprint[key] = release
 
     previous = _load_movie_discovery_cache()
-    known = set(previous.get("seen_fingerprints", []))
+    # Migrate legacy list format → dict[fingerprint, timestamp]
+    raw_seen = previous.get("seen_fingerprints", [])
+    known: dict[str, str] = (
+        {fp: "" for fp in raw_seen} if isinstance(raw_seen, list) else dict(raw_seen)
+    )
+    known = _movie_prune_seen_fingerprints(known, now=now)
     cache = await asyncio.to_thread(
         _movie_build_cards,
         list(by_fingerprint.values()),

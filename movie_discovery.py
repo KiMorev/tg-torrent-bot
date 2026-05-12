@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -40,6 +41,33 @@ SOURCE_SCORE = {
     "hdrip": 120,
 }
 YEAR_SCORE_STEP = 180
+
+# Seen-fingerprints retention settings
+SEEN_FP_TTL_DAYS = 60
+SEEN_FP_MAX = 2000
+
+# Normalised weights for card scoring (must sum to 1.0)
+_WEIGHT_RATING = 0.35
+_WEIGHT_RECENCY = 0.20
+_WEIGHT_POPULARITY = 0.20
+_WEIGHT_TECH = 0.25
+
+# Normalised source quality [0–1]
+_SOURCE_QUALITY: dict[str, float] = {
+    "bdremux": 1.00,
+    "blu-ray": 0.85,
+    "bluray": 0.85,
+    "web-dl": 0.75,
+    "webdl": 0.75,
+    "webrip": 0.60,
+    "bdrip": 0.50,
+    "hdrip": 0.30,
+}
+_QUALITY_LEVEL: dict[str, float] = {
+    "2160p": 1.00,
+    "1080p": 0.75,
+    "720p": 0.50,
+}
 
 
 def discovery_years(now: datetime) -> set[int]:
@@ -214,6 +242,99 @@ def release_from_result(result: Any, *, source: str, allowed_years: set[int], qu
     return release
 
 
+def _parse_timestamp(ts: str) -> datetime | None:
+    """Parse a stored fingerprint timestamp in various formats."""
+    if not ts:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return parse_published_at(ts)
+
+
+def prune_seen_fingerprints(
+    seen: dict[str, str],
+    *,
+    now: datetime,
+    ttl_days: int = SEEN_FP_TTL_DAYS,
+    max_entries: int = SEEN_FP_MAX,
+) -> dict[str, str]:
+    """Remove expired and excess entries from the seen-fingerprints dict.
+
+    ``seen`` maps fingerprint → ISO/datetime timestamp string.
+    Entries older than ``ttl_days`` are dropped; if more than ``max_entries``
+    remain the oldest ones are trimmed.
+    """
+    if not seen:
+        return {}
+    comparable_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    cutoff = comparable_now - timedelta(days=ttl_days)
+
+    pruned: dict[str, str] = {}
+    no_ts: dict[str, str] = {}
+    for fp, ts in seen.items():
+        if not ts:
+            no_ts[fp] = ts
+            continue
+        dt = _parse_timestamp(ts)
+        if dt is None or dt >= cutoff:
+            pruned[fp] = ts
+
+    # Entries without timestamps are kept but deprioritised for trimming
+    combined = {**no_ts, **pruned}
+    if len(combined) > max_entries:
+        # Keep newest max_entries by timestamp (entries without ts sort first → trimmed first)
+        sorted_items = sorted(combined.items(), key=lambda item: item[1] or "")
+        combined = dict(sorted_items[-max_entries:])
+    return combined
+
+
+def _compute_card_score(card: dict, current_year: int) -> float:
+    """Return a normalised [0, ~1.1] relevance score for a card.
+
+    Weights: KP rating 35 %, recency 20 %, popularity 20 %, tech quality 25 %.
+    A small novelty bonus (+0.08) is added for cards not seen before.
+    """
+    best_release = card["releases"][0] if card.get("releases") else {}
+
+    # Rating [0, 1]: maps KP range [5.0, 9.5] → [0, 1]; unknown → neutral 0.5
+    rating = card.get("rating")
+    if rating is not None:
+        rating_score = max(0.0, min((float(rating) - 5.0) / 4.5, 1.0))
+    else:
+        rating_score = 0.5
+
+    # Recency: current year = 1.0, previous year = 0.65
+    year = card.get("year") or 0
+    year_score = 1.0 if year >= current_year else 0.65
+
+    # Popularity: log-scaled seeders, capped at 500
+    seeders = int(card.get("best_seeders") or 0)
+    pop_score = min(math.log1p(seeders) / math.log1p(500), 1.0)
+
+    # Technical quality: resolution + source type
+    q_score = _QUALITY_LEVEL.get(card.get("best_quality") or "", 0.5)
+    title_lower = (best_release.get("title") or "").lower()
+    s_score = max(
+        (v for k, v in _SOURCE_QUALITY.items() if k in title_lower),
+        default=0.4,
+    )
+    tech_score = q_score * 0.6 + s_score * 0.4
+
+    new_bonus = 0.08 if card.get("is_new") else 0.0
+
+    return round(
+        rating_score  * _WEIGHT_RATING
+        + year_score  * _WEIGHT_RECENCY
+        + pop_score   * _WEIGHT_POPULARITY
+        + tech_score  * _WEIGHT_TECH
+        + new_bonus,
+        4,
+    )
+
+
 def _finalize_card(card: dict, known_fingerprints: set[str]) -> dict:
     deduped = {fingerprint(release): release for release in card["releases"]}
     releases_sorted = sorted(deduped.values(), key=lambda item: item["score"], reverse=True)
@@ -224,6 +345,7 @@ def _finalize_card(card: dict, known_fingerprints: set[str]) -> dict:
     card["best_seeders"] = best["seeders"]
     card["release_count"] = len(releases_sorted)
     card["is_new"] = any(fingerprint(release) not in known_fingerprints for release in releases_sorted)
+    # Preliminary score used internally during merge; overridden by _compute_card_score in build_cards.
     card["score"] = best["score"] + (float(card.get("rating") or 0) * 30) + (250 if card["is_new"] else 0)
     return card
 
@@ -249,11 +371,30 @@ def build_cards(
     releases: list[dict],
     *,
     now_text: str,
-    known_fingerprints: set[str],
+    known_fingerprints: set[str] | dict[str, str],
     limit: int,
     min_kp_rating: float,
     kinopoisk_client=None,
 ) -> dict:
+    """Build scored movie cards from raw releases.
+
+    ``known_fingerprints`` accepts either the legacy ``set[str]`` format or the
+    new ``dict[str, str]`` format (fingerprint → timestamp).  The return value
+    always uses the dict format so callers can persist it and prune with TTL.
+    """
+    # Normalise known_fingerprints to both set (is_new checks) and dict (timestamped save)
+    if isinstance(known_fingerprints, dict):
+        known_fps_set: set[str] = set(known_fingerprints.keys())
+        known_fps_dict: dict[str, str] = dict(known_fingerprints)
+    else:
+        known_fps_set = set(known_fingerprints)
+        known_fps_dict = {fp: "" for fp in known_fingerprints}
+
+    try:
+        current_year = int(now_text[:4])
+    except (ValueError, IndexError):
+        current_year = datetime.now(timezone.utc).year
+
     grouped: dict[str, dict] = {}
     for release in releases:
         key = movie_key(release["movie_title"], release["year"])
@@ -271,33 +412,43 @@ def build_cards(
 
     cards = []
     for card in grouped.values():
-        card = _finalize_card(card, known_fingerprints)
+        _finalize_card(card, known_fps_set)
 
         if kinopoisk_client is not None:
             match = kinopoisk_client.search_movie(card["title"], card["year"])
-            if match is None:
+            if match is not None:
+                # Discard match if KP returned a film from a very different year
+                year_ok = not (
+                    match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}
+                )
+                if year_ok:
+                    card["kp_id"] = match.kp_id
+                    card["kp_url"] = match.url
+                    card["rating"] = match.rating
+                    card["genres"] = match.genres
+                    card["title"] = match.title
+            # Apply rating filter only when we have a confirmed rating
+            if card.get("rating") is not None and card["rating"] < min_kp_rating:
                 continue
-            if match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}:
-                continue
-            if match.rating is not None and match.rating < min_kp_rating:
-                continue
-            card["kp_id"] = match.kp_id
-            card["kp_url"] = match.url
-            card["rating"] = match.rating
-            card["genres"] = match.genres
-            card["title"] = match.title
 
-        card = _finalize_card(card, known_fingerprints)
         cards.append(card)
 
-    cards = _merge_duplicate_cards(cards, known_fingerprints)
+    cards = _merge_duplicate_cards(cards, known_fps_set)
+
+    # Apply normalised scoring after all KP enrichment and merging are done
+    for card in cards:
+        card["score"] = _compute_card_score(card, current_year)
+
     cards.sort(key=lambda item: item["score"], reverse=True)
-    all_fingerprints = set(known_fingerprints)
+
+    # Record new fingerprints with current timestamp
     for release in releases:
-        all_fingerprints.add(fingerprint(release))
+        fp = fingerprint(release)
+        if fp not in known_fps_dict:
+            known_fps_dict[fp] = now_text
 
     return {
         "updated_at": now_text,
-        "seen_fingerprints": sorted(all_fingerprints)[-2000:],
+        "seen_fingerprints": known_fps_dict,
         "cards": cards[:limit],
     }
