@@ -310,14 +310,17 @@ class RutrackerClient:
         return result
 
     @_synchronized
-    def search(self, query: str) -> list[RutrackerResult]:
+    def search(self, query: str, torrent_age_days: int | None = None) -> list[RutrackerResult]:
         self._check_cooldown()
         self._ensure_logged_in()
+        params = {"nm": query}
+        if torrent_age_days in {-1, 1, 3, 7, 14, 32}:
+            params["tm"] = str(torrent_age_days)
 
         try:
             resp = self._session.get(
                 _SEARCH_URL,
-                params={"nm": query},
+                params=params,
                 timeout=20,
             )
             resp.raise_for_status()
@@ -337,7 +340,7 @@ class RutrackerClient:
             self._logged_in = False
             self.login()
             try:
-                resp = self._session.get(_SEARCH_URL, params={"nm": query}, timeout=20)
+                resp = self._session.get(_SEARCH_URL, params=params, timeout=20)
                 resp.raise_for_status()
                 html = resp.text
             except requests.RequestException as e:

@@ -23,6 +23,7 @@ class JsonStateStore:
         task_owners_file: Path,
         notified_tasks_file: Path,
         auto_delete_tasks_file: Path,
+        movie_discovery_cache_file: Path | None = None,
         topic_subscriptions_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
@@ -30,6 +31,7 @@ class JsonStateStore:
         self.task_owners_file = task_owners_file
         self.notified_tasks_file = notified_tasks_file
         self.auto_delete_tasks_file = auto_delete_tasks_file
+        self.movie_discovery_cache_file = movie_discovery_cache_file
         self.topic_subscriptions_file = topic_subscriptions_file
         self.lock = threading.RLock()
 
@@ -320,3 +322,14 @@ class JsonStateStore:
         if not self.topic_subscriptions_file:
             return
         self.save_json_file(self.topic_subscriptions_file, subs, "topic subscriptions")
+
+    def load_movie_discovery_cache(self) -> dict:
+        if not self.movie_discovery_cache_file:
+            return {}
+        payload = self.load_json_file(self.movie_discovery_cache_file, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def save_movie_discovery_cache(self, cache: dict) -> None:
+        if not self.movie_discovery_cache_file:
+            return
+        self.save_json_file(self.movie_discovery_cache_file, cache, "movie discovery cache")

@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -91,6 +92,15 @@ from jackett_subscriptions import (
     select_jackett_subscription_candidate,
 )
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
+from movie_discovery import (
+    build_cards as _movie_build_cards,
+    discovery_queries as _movie_discovery_queries,
+    discovery_years as _movie_discovery_years,
+    evaluate_result as _movie_evaluate_result,
+    is_recent_published_at as _movie_is_recent_published_at,
+    parse_published_at as _movie_parse_published_at,
+    parse_qualities as _movie_parse_qualities,
+)
 from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
 from task_policies import (
     auto_delete_notice as _policy_auto_delete_notice,
@@ -196,10 +206,20 @@ JACKETT_ENABLED = settings.jackett_enabled
 JACKETT_INDEXERS = settings.jackett_indexers
 JACKETT_MAX_RESULTS = settings.jackett_max_results
 JACKETT_FETCH_LIMIT = settings.jackett_fetch_limit
+MOVIE_DISCOVERY_ENABLED = settings.movie_discovery_enabled
+MOVIE_DISCOVERY_INTERVAL_HOURS = settings.movie_discovery_interval_hours
+MOVIE_DISCOVERY_DEBUG_FILE = settings.movie_discovery_debug_file
+MOVIE_DISCOVERY_RUTRACKER_TM = settings.movie_discovery_rutracker_tm
+MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE = settings.movie_discovery_jackett_require_date
+MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS = settings.movie_discovery_jackett_max_age_days
+MOVIE_DISCOVERY_LIMIT = settings.movie_discovery_limit
+MOVIE_DISCOVERY_MIN_KP_RATING = settings.movie_discovery_min_kp_rating
+MOVIE_DISCOVERY_QUALITIES = settings.movie_discovery_qualities
 
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
 BOT_COMMANDS = [
+    BotCommand("new", "Новинки фильмов"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
@@ -216,6 +236,7 @@ BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
 TRACKER_BACKGROUND_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
+MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # (chat_id, message_id) → running refresh task for that task card
 TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
@@ -736,6 +757,33 @@ def _format_admin_search_defaults_line() -> str:
     return f"Поиск по умолчанию: {quality}, оригинальная дорожка {audio}, субтитры {subs}"
 
 
+def _format_admin_movie_discovery_line() -> str:
+    cache = state_store.load_movie_discovery_cache()
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    updated_at = str(cache.get("updated_at") or "ещё не обновлялись")
+    qualities = ", ".join(_movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES))
+    sources = []
+    if rutracker_client is not None:
+        sources.append("Rutracker")
+    if jackett_client is not None:
+        sources.append("Jackett")
+    source_text = ", ".join(sources) if sources else "нет источников"
+
+    if not MOVIE_DISCOVERY_ENABLED:
+        return "Новинки: выключены"
+
+    status = "включены" if sources else "включены, но нет источников"
+    return (
+        f"Новинки: {status}; источники: {source_text}; "
+        f"автообновление раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч; "
+        f"Rutracker: {_movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM)}; "
+        f"Jackett: {'только с датой' if MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE else 'без строгой даты'}, "
+        f"до {MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS} дн.; "
+        f"качество: {qualities}; КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}; "
+        f"обновлено: {html_module.escape(updated_at)}; карточек: {len(cards)}"
+    )
+
+
 async def _build_admin_panel_text() -> str:
     tasks = None
     task_error = ""
@@ -756,6 +804,7 @@ async def _build_admin_panel_text() -> str:
         "",
         f"Сервисы: {_format_admin_service_flags()}",
         _format_admin_search_defaults_line(),
+        _format_admin_movie_discovery_line(),
     ]
     return "\n".join(lines)
 
@@ -842,6 +891,276 @@ def _format_tasks(
         page_size=TASK_LIST_PAGE_SIZE,
         scope_all=TASK_LIST_SCOPE_ALL,
     )
+
+
+def _load_movie_discovery_cache() -> dict:
+    return state_store.load_movie_discovery_cache()
+
+
+def _save_movie_discovery_cache(cache: dict) -> None:
+    state_store.save_movie_discovery_cache(cache)
+
+
+def _save_movie_discovery_debug(report: dict) -> None:
+    state_store.save_json_file(MOVIE_DISCOVERY_DEBUG_FILE, report, "movie discovery debug")
+
+
+def _movie_discovery_enabled() -> bool:
+    return MOVIE_DISCOVERY_ENABLED and bool(rutracker_client or jackett_client)
+
+
+def _movie_rutracker_tm_label(value: int) -> str:
+    labels = {
+        -1: "за всё время",
+        1: "за сегодня",
+        3: "за последние 3 дня",
+        7: "за неделю",
+        14: "за 2 недели",
+        32: "за месяц",
+    }
+    return labels.get(value, "за месяц")
+
+
+def _movie_jackett_date_filter_reason(release: dict | None, now: datetime) -> str:
+    if release is None or not MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE:
+        return "accepted"
+
+    published_at = str(release.get("published_at") or "")
+    if not published_at.strip():
+        return "published_missing"
+    if _movie_parse_published_at(published_at) is None:
+        return "published_invalid"
+    if not _movie_is_recent_published_at(
+        published_at,
+        now=now,
+        max_age_days=MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS,
+    ):
+        return "published_too_old"
+    return "accepted"
+
+
+def _movie_release_to_search_result(release: dict) -> dict:
+    return {
+        "source": release.get("source") or "jackett",
+        "topic_id": release.get("topic_id") or "",
+        "title": release.get("title") or "",
+        "url": release.get("url") or release.get("topic_url") or "",
+        "category": release.get("tracker") or "",
+        "size": release.get("size") or "",
+        "seeders": release.get("seeders") or 0,
+        "partial": False,
+        "ep_str": "",
+        "magnet_url": release.get("magnet_url"),
+        "torrent_url": release.get("torrent_url"),
+        "published_at": release.get("published_at"),
+        "tracker_name": release.get("tracker") or ("rutracker" if release.get("source") == "rutracker" else ""),
+    }
+
+
+def _movie_discovery_audit_row(search_query: str, source: str, result, release: dict | None, reason: str) -> dict:
+    return {
+        "query": search_query,
+        "source": source,
+        "decision": reason,
+        "title": str(getattr(result, "title", "") or ""),
+        "category": str(getattr(result, "category", "") or getattr(result, "tracker", "") or ""),
+        "tracker": str(getattr(result, "tracker", "") or ""),
+        "size": str(getattr(result, "size", "") or ""),
+        "seeders": int(getattr(result, "seeders", 0) or 0),
+        "published_at": str(getattr(result, "published_at", "") or ""),
+        "movie_title": release.get("movie_title") if release else "",
+        "year": release.get("year") if release else None,
+        "quality": release.get("quality") if release else "",
+        "score": release.get("score") if release else None,
+    }
+
+
+def _movie_discovery_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for index, card in enumerate(cards[:10], 1):
+        rows.append([InlineKeyboardButton(
+            f"🎬 {index}. Раздачи",
+            callback_data=f"new:show:{index - 1}",
+        )])
+    rows.append([
+        InlineKeyboardButton("🔄 Обновить", callback_data="new:refresh"),
+        InlineKeyboardButton("✖️ Закрыть", callback_data="new:close"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _format_movie_discovery_cache(cache: dict) -> str:
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    updated_at = cache.get("updated_at") or "—"
+    qualities = ", ".join(_movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES))
+    years = ", ".join(str(year) for year in sorted(_movie_discovery_years(datetime.now(DISPLAY_TIMEZONE)), reverse=True))
+    lines = [
+        "🎬 <b>Новинки</b>",
+        f"Обновлено: {html_module.escape(str(updated_at))}",
+        f"Фильтр: годы {years}; качество {html_module.escape(qualities)}; КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}",
+    ]
+    if not cards:
+        lines.append("\nПока нет подходящих фильмов. Кэш обновится в фоне, можно попробовать позже.")
+        return "\n".join(lines)
+
+    for index, card in enumerate(cards[:10], 1):
+        title = html_module.escape(str(card.get("title") or "Без названия"))
+        year = html_module.escape(str(card.get("year") or ""))
+        rating = card.get("rating")
+        rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
+        genres = ", ".join(card.get("genres") or [])
+        genres_text = f"\n   Жанры: {html_module.escape(genres)}" if genres else ""
+        kp_url = card.get("kp_url")
+        kp_text = f"\n   <a href=\"{html_module.escape(str(kp_url))}\">Кинопоиск</a>" if kp_url else ""
+        new_mark = " 🆕" if card.get("is_new") else ""
+        lines.append(
+            f"\n{index}. <b>{title}</b>{new_mark}\n"
+            f"   {year}{rating_text}\n"
+            f"   Лучшее: {html_module.escape(str(card.get('best_quality') or '?'))}, "
+            f"{html_module.escape(str(card.get('best_size') or '?'))}, "
+            f"сидов {html_module.escape(str(card.get('best_seeders') or 0))}\n"
+            f"   Раздач: {html_module.escape(str(card.get('release_count') or len(card.get('releases') or [])))}"
+            f"{genres_text}{kp_text}"
+        )
+    return "\n".join(lines)
+
+
+async def _refresh_movie_discovery_cache() -> dict:
+    now = datetime.now(DISPLAY_TIMEZONE)
+    now_text = now.strftime("%Y-%m-%d %H:%M")
+    qualities = _movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES)
+    allowed_years = _movie_discovery_years(now)
+    queries = _movie_discovery_queries(now, qualities)
+    releases = []
+    audit_rows = []
+    reason_counts = Counter()
+    source_counts = Counter()
+
+    for search_query in queries:
+        if jackett_client is not None:
+            try:
+                results = await asyncio.to_thread(jackett_client.search, search_query, fetch_limit=JACKETT_FETCH_LIMIT)
+                source_counts["jackett_raw"] += len(results)
+                for result in results:
+                    release, reason = _movie_evaluate_result(
+                        result,
+                        source="jackett",
+                        allowed_years=allowed_years,
+                        qualities=set(qualities),
+                    )
+                    if release:
+                        date_reason = _movie_jackett_date_filter_reason(release, now)
+                        if date_reason != "accepted":
+                            reason = date_reason
+                            release = None
+                    reason_counts[f"jackett:{reason}"] += 1
+                    audit_rows.append(_movie_discovery_audit_row(search_query, "jackett", result, release, reason))
+                    if release:
+                        releases.append(release)
+            except JackettError:
+                logger.warning("Movie discovery Jackett search failed: %s", search_query, exc_info=True)
+                reason_counts["jackett:error"] += 1
+
+        if rutracker_client is not None:
+            try:
+                results = await asyncio.to_thread(
+                    rutracker_client.search,
+                    search_query,
+                    torrent_age_days=MOVIE_DISCOVERY_RUTRACKER_TM,
+                )
+                source_counts["rutracker_raw"] += len(results)
+                for result in results:
+                    release, reason = _movie_evaluate_result(
+                        result,
+                        source="rutracker",
+                        allowed_years=allowed_years,
+                        qualities=set(qualities),
+                    )
+                    reason_counts[f"rutracker:{reason}"] += 1
+                    audit_rows.append(_movie_discovery_audit_row(search_query, "rutracker", result, release, reason))
+                    if release:
+                        releases.append(release)
+            except RutrackerError:
+                logger.warning("Movie discovery Rutracker search failed: %s", search_query, exc_info=True)
+                reason_counts["rutracker:error"] += 1
+
+    by_fingerprint = {}
+    for release in releases:
+        key = "|".join(str(release.get(part, "") or "") for part in ("source", "tracker", "topic_id", "topic_url", "title", "size"))
+        by_fingerprint[key] = release
+
+    previous = _load_movie_discovery_cache()
+    known = set(previous.get("seen_fingerprints", []))
+    cache = await asyncio.to_thread(
+        _movie_build_cards,
+        list(by_fingerprint.values()),
+        now_text=now_text,
+        known_fingerprints=known,
+        limit=MOVIE_DISCOVERY_LIMIT,
+        min_kp_rating=MOVIE_DISCOVERY_MIN_KP_RATING,
+        kinopoisk_client=kinopoisk_client,
+    )
+    _save_movie_discovery_cache(cache)
+    debug_report = {
+        "updated_at": now_text,
+        "freshness_model": (
+            "Поиск сейчас ищет свежие фильмы по году выпуска, а не гарантированно новые "
+            "раздачи по дате публикации. Если источник отдаёт published_at, дата сохраняется в аудите."
+        ),
+        "filters": {
+            "years": sorted(allowed_years, reverse=True),
+            "qualities": qualities,
+            "min_kp_rating": MOVIE_DISCOVERY_MIN_KP_RATING,
+            "limit": MOVIE_DISCOVERY_LIMIT,
+            "rutracker_tm": MOVIE_DISCOVERY_RUTRACKER_TM,
+            "rutracker_tm_label": _movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM),
+            "jackett_require_date": MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE,
+            "jackett_max_age_days": MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS,
+        },
+        "queries": queries,
+        "counts": {
+            **dict(source_counts),
+            "accepted_before_dedup": len(releases),
+            "accepted_after_dedup": len(by_fingerprint),
+            "cards": len(cache.get("cards", [])),
+        },
+        "decision_counts": dict(sorted(reason_counts.items())),
+        "cards": [
+            {
+                "title": card.get("title"),
+                "year": card.get("year"),
+                "kp_id": card.get("kp_id"),
+                "rating": card.get("rating"),
+                "score": card.get("score"),
+                "release_count": card.get("release_count"),
+                "best_quality": card.get("best_quality"),
+                "best_size": card.get("best_size"),
+                "best_seeders": card.get("best_seeders"),
+            }
+            for card in cache.get("cards", [])
+        ],
+        "audit": audit_rows[:1000],
+        "audit_truncated": len(audit_rows) > 1000,
+    }
+    _save_movie_discovery_debug(debug_report)
+    logger.info("Movie discovery refreshed: cards=%d releases=%d", len(cache.get("cards", [])), len(releases))
+    return cache
+
+
+async def _movie_discovery_loop() -> None:
+    if not _movie_discovery_enabled():
+        logger.info("Movie discovery disabled")
+        return
+
+    interval = MOVIE_DISCOVERY_INTERVAL_HOURS * 3600
+    try:
+        await _run_background_step("initial movie discovery refresh", _refresh_movie_discovery_cache)
+        while True:
+            await asyncio.sleep(interval)
+            await _run_background_step("movie discovery refresh", _refresh_movie_discovery_cache)
+    except asyncio.CancelledError:
+        logger.info("Movie discovery loop stopped")
+        raise
 
 
 def _find_task(tasks: list[dict], task_id: str) -> dict | None:
@@ -1564,7 +1883,7 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     """ConversationHandler entry point: user sent a Kinopoisk URL.
 
     Fetches film/series info, stores the search base in user_data, then shows
-    the quality-options keyboard so the user can kick off a Rutracker search.
+    the quality-options keyboard so the user can kick off the normal search flow.
     """
     if not _is_allowed(update):
         await _reply_access_pending(update, context)
@@ -3011,6 +3330,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
     else:
         search_lines = ""
+    movie_lines = ""
+    if MOVIE_DISCOVERY_ENABLED and (RUTRACKER_ENABLED or JACKETT_ENABLED):
+        movie_lines = (
+            "- /new показывает кэш новинок фильмов и мультфильмов: свежие годы, 1080p/2160p, "
+            "без сериалов, CAM/TS и adult-раздач;\n"
+        )
     admin_lines = ""
     chat_id = update.effective_chat.id if update.effective_chat else None
     if _is_admin_chat(chat_id):
@@ -3030,6 +3355,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- даю кнопки управления задачами: обновить статус, пауза, запуск, удаление;\n"
         "- могу удалить завершенные задачи из списка вручную или автоматически;\n"
         f"{search_lines}"
+        f"{movie_lines}"
         f"{admin_lines}"
         "\n/id показывает chat_id. Новые пользователи могут написать /start, а админ разрешит доступ кнопкой."
     )
@@ -3151,6 +3477,116 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         scope,
         total_count=total_count,
     )
+
+
+async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        logger.warning("Rejected /new from chat_id=%s", _chat_id(update))
+        await _reply_access_pending(update, context)
+        return
+
+    if not _movie_discovery_enabled():
+        await update.message.reply_text("Новинки недоступны: не настроен Rutracker или Jackett.")
+        return
+
+    cache = _load_movie_discovery_cache()
+    if not cache.get("cards"):
+        progress = await update.message.reply_text("🎬 Собираю новинки…")
+        cache = await _refresh_movie_discovery_cache()
+        await _safe_edit_message(
+            progress,
+            _format_movie_discovery_cache(cache),
+            reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.reply_text(
+        _format_movie_discovery_cache(cache),
+        reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+
+
+async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+
+    await query.answer()
+    await _safe_edit_callback(query, "🎬 Обновляю новинки…")
+    cache = await _refresh_movie_discovery_cache()
+    await _safe_edit_callback(
+        query,
+        _format_movie_discovery_cache(cache),
+        reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
+        parse_mode="HTML",
+    )
+
+
+async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+
+    await query.answer()
+    try:
+        if query.message:
+            await query.message.delete()
+            return
+    except Exception:
+        logger.debug("Failed to delete movie discovery message", exc_info=True)
+
+    await _safe_edit_callback(query, "Новинки закрыты.")
+
+
+async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    try:
+        index = int((query.data or "").split(":")[-1])
+    except (TypeError, ValueError):
+        await query.edit_message_text("Не удалось открыть новинку.")
+        return ConversationHandler.END
+
+    cache = _load_movie_discovery_cache()
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    if index < 0 or index >= len(cards):
+        await query.edit_message_text("Новинка не найдена. Обновите список.")
+        return ConversationHandler.END
+
+    card = cards[index]
+    releases = [_movie_release_to_search_result(release) for release in card.get("releases", [])]
+    releases = sorted(releases, key=_score_result, reverse=True)
+    if not releases:
+        await query.edit_message_text("По этой новинке пока нет подходящих раздач.")
+        return ConversationHandler.END
+
+    search_query = f"{card.get('title', '')} {card.get('year', '')}".strip()
+    context.user_data["srch_results"] = releases
+    context.user_data["srch_search_query"] = search_query
+    context.user_data["srch_query"] = search_query
+    context.user_data["srch_source"] = "movie_discovery"
+    await query.edit_message_text(
+        _build_results_text(releases, search_query, 0, banner="🎬 Раздачи по выбранной новинке"),
+        reply_markup=_search_results_keyboard(releases, page=0, show_jackett_expand=False, show_jackett_direct=False),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    return SEARCH_RESULTS
 
 
 def _format_users_panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -3776,7 +4212,7 @@ def _run_polling(app: Application) -> None:
 
 
 async def setup_bot_commands(app: Application) -> None:
-    global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK
+    global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK, MOVIE_DISCOVERY_TASK
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
@@ -3808,6 +4244,10 @@ async def setup_bot_commands(app: Application) -> None:
         SUBSCRIPTION_MONITOR_TASK = app.create_task(_subscription_check_loop(app))
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
 
+    if _movie_discovery_enabled():
+        MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop())
+        logger.info("Movie discovery loop started, interval=%sh", MOVIE_DISCOVERY_INTERVAL_HOURS)
+
 
 def main() -> None:
     app = (
@@ -3826,12 +4266,15 @@ def main() -> None:
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("new", movie_new_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(access_callback, pattern=f"^{ACCESS_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
+    app.add_handler(CallbackQueryHandler(movie_new_refresh_callback, pattern=r"^new:refresh$"))
+    app.add_handler(CallbackQueryHandler(movie_new_close_callback, pattern=r"^new:close$"))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("subs", subs_command))
     # Always register the ConversationHandler so text_message_entry intercepts
@@ -3847,6 +4290,7 @@ def main() -> None:
                 search_jackett_check_entry,
                 pattern=rf"^{SUB_CALLBACK_PREFIX}:jackett_view:",
             ),
+            CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+$"),
         ],
             states={
                 SEARCH_OPTIONS: [

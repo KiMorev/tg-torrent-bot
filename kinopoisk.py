@@ -72,6 +72,25 @@ class KinopoiskInfo:
         }.get(self.media_type, "🎬")
 
 
+@dataclass
+class KinopoiskMovieMatch:
+    kp_id: int
+    title_ru: str
+    title_en: str
+    year: int | None
+    media_type: str
+    rating: float | None
+    genres: list[str]
+
+    @property
+    def title(self) -> str:
+        return self.title_ru or self.title_en
+
+    @property
+    def url(self) -> str:
+        return f"https://www.kinopoisk.ru/film/{self.kp_id}/"
+
+
 def _synchronized(method):
     def wrapper(self, *args, **kwargs):
         with self._lock:
@@ -165,6 +184,70 @@ class KinopoiskClient:
 
         items = data.get("items") or []
         return len(items) if items else None
+
+    @_synchronized
+    def search_movie(self, title: str, year: int | None = None) -> KinopoiskMovieMatch | None:
+        """Best-effort movie lookup for discovery cards."""
+        try:
+            resp = self._session.get(
+                f"{_API_BASE}/v2.1/films/search-by-keyword",
+                params={"keyword": title, "page": 1},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError, TypeError):
+            return None
+
+        films = data.get("films") or []
+        if not isinstance(films, list):
+            return None
+
+        for item in films[:10]:
+            if not isinstance(item, dict):
+                continue
+
+            media_type = str(item.get("type") or "").upper()
+            if media_type in {"TV_SERIES", "MINI_SERIES", "TV_SHOW"}:
+                continue
+
+            try:
+                item_year = int(item.get("year")) if item.get("year") else None
+            except (TypeError, ValueError):
+                item_year = None
+            if year and item_year and abs(item_year - year) > 1:
+                continue
+
+            try:
+                raw_rating = str(item.get("rating") or "").replace(",", ".")
+                rating = float(raw_rating) if raw_rating and raw_rating != "null" else None
+            except ValueError:
+                rating = None
+
+            genres = [
+                str(g.get("genre", "")).strip()
+                for g in item.get("genres", [])
+                if isinstance(g, dict) and g.get("genre")
+            ][:3]
+
+            try:
+                kp_id = int(item.get("filmId") or item.get("kinopoiskId") or 0)
+            except (TypeError, ValueError):
+                kp_id = 0
+
+            match = KinopoiskMovieMatch(
+                kp_id=kp_id,
+                title_ru=str(item.get("nameRu") or "").strip(),
+                title_en=str(item.get("nameEn") or "").strip(),
+                year=item_year,
+                media_type=media_type,
+                rating=rating,
+                genres=genres,
+            )
+            if match.kp_id and match.title:
+                return match
+
+        return None
 
     def _get_director(self, kp_id: int) -> str:
         """Return up to two director names for display (best-effort, never raises)."""

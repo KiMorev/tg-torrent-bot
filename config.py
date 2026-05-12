@@ -130,6 +130,16 @@ class AppSettings:
     jackett_indexers: str
     jackett_max_results: int
     jackett_fetch_limit: int
+    movie_discovery_enabled: bool
+    movie_discovery_interval_hours: int
+    movie_discovery_cache_file: Path
+    movie_discovery_debug_file: Path
+    movie_discovery_rutracker_tm: int
+    movie_discovery_jackett_require_date: bool
+    movie_discovery_jackett_max_age_days: int
+    movie_discovery_limit: int
+    movie_discovery_min_kp_rating: float
+    movie_discovery_qualities: str
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
@@ -156,6 +166,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         "JACKETT_API_KEY",
         "Jackett",
     )
+
+    movie_discovery_rutracker_tm = env_int(env, "MOVIE_DISCOVERY_RUTRACKER_TM", 32)
+    if movie_discovery_rutracker_tm not in {-1, 1, 3, 7, 14, 32}:
+        movie_discovery_rutracker_tm = 32
 
     return AppSettings(
         bot_token=bot_token,
@@ -215,4 +229,18 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         jackett_indexers=(env.get("JACKETT_INDEXERS", "all").strip() or "all"),
         jackett_max_results=max(1, min(50, env_int(env, "JACKETT_MAX_RESULTS", 20))),
         jackett_fetch_limit=max(10, min(200, env_int(env, "JACKETT_FETCH_LIMIT", 100))),
+        movie_discovery_enabled=env_bool(env, "MOVIE_DISCOVERY_ENABLED", True),
+        movie_discovery_interval_hours=max(1, env_int(env, "MOVIE_DISCOVERY_INTERVAL_HOURS", 12)),
+        movie_discovery_cache_file=Path(
+            env.get("MOVIE_DISCOVERY_CACHE_FILE", str(state_dir / "movie_discovery.json"))
+        ),
+        movie_discovery_debug_file=Path(
+            env.get("MOVIE_DISCOVERY_DEBUG_FILE", str(state_dir / "movie_discovery_debug.json"))
+        ),
+        movie_discovery_rutracker_tm=movie_discovery_rutracker_tm,
+        movie_discovery_jackett_require_date=env_bool(env, "MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE", True),
+        movie_discovery_jackett_max_age_days=max(1, env_int(env, "MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS", 32)),
+        movie_discovery_limit=max(1, min(50, env_int(env, "MOVIE_DISCOVERY_LIMIT", 20))),
+        movie_discovery_min_kp_rating=max(0.0, env_float(env, "MOVIE_DISCOVERY_MIN_KP_RATING", 6.0)),
+        movie_discovery_qualities=(env.get("MOVIE_DISCOVERY_QUALITIES", "1080p,2160p").strip() or "1080p,2160p"),
     )

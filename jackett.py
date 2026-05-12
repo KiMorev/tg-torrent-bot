@@ -50,6 +50,7 @@ class JackettResult:
     topic_url: str      # URL of the topic on the original tracker
     magnet_url: str | None
     torrent_url: str | None  # Jackett proxy download URL
+    published_at: str = ""
 
 
 def _synchronized(method):
@@ -359,6 +360,7 @@ class JackettClient:
                     topic_url = ""
                 torrent_url = (item.get("Link") or "").strip() or None
                 magnet_url = (item.get("MagnetUri") or "").strip() or None
+                published_at = str(item.get("PublishDate") or item.get("FirstSeen") or "").strip()
 
                 results.append(JackettResult(
                     title=title,
@@ -368,6 +370,7 @@ class JackettClient:
                     topic_url=topic_url,
                     magnet_url=magnet_url,
                     torrent_url=torrent_url,
+                    published_at=published_at,
                 ))
 
                 if limit is not None and len(results) >= limit:
@@ -424,6 +427,7 @@ class JackettClient:
                     topic_url = ""
 
                 torrent_url = (item.findtext("link") or "").strip() or None
+                published_at = (item.findtext("pubDate") or "").strip()
 
                 # torznab:attr elements — namespace-agnostic
                 attrs: dict[str, str] = {}
@@ -451,6 +455,7 @@ class JackettClient:
                     topic_url=topic_url,
                     magnet_url=magnet_url,
                     torrent_url=torrent_url,
+                    published_at=published_at,
                 ))
 
                 effective_limit = limit if limit is not None else self._max_results

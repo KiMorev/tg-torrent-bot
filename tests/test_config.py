@@ -76,6 +76,16 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.rutracker_max_results, 50)
         self.assertEqual(settings.jackett_max_results, 20)
         self.assertEqual(settings.jackett_fetch_limit, 100)
+        self.assertTrue(settings.movie_discovery_enabled)
+        self.assertEqual(settings.movie_discovery_interval_hours, 12)
+        self.assertEqual(settings.movie_discovery_cache_file, Path("/tmp/tg_torrent_drop/movie_discovery.json"))
+        self.assertEqual(settings.movie_discovery_debug_file, Path("/tmp/tg_torrent_drop/movie_discovery_debug.json"))
+        self.assertEqual(settings.movie_discovery_rutracker_tm, 32)
+        self.assertTrue(settings.movie_discovery_jackett_require_date)
+        self.assertEqual(settings.movie_discovery_jackett_max_age_days, 32)
+        self.assertEqual(settings.movie_discovery_limit, 20)
+        self.assertEqual(settings.movie_discovery_min_kp_rating, 6.0)
+        self.assertEqual(settings.movie_discovery_qualities, "1080p,2160p")
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "plex://")
 
@@ -94,6 +104,16 @@ class ConfigParsingTests(unittest.TestCase):
             "RUTRACKER_MAX_RESULTS": "500",
             "JACKETT_MAX_RESULTS": "500",
             "JACKETT_FETCH_LIMIT": "500",
+            "MOVIE_DISCOVERY_ENABLED": "false",
+            "MOVIE_DISCOVERY_INTERVAL_HOURS": "0",
+            "MOVIE_DISCOVERY_CACHE_FILE": "/cache/new.json",
+            "MOVIE_DISCOVERY_DEBUG_FILE": "/cache/new_debug.json",
+            "MOVIE_DISCOVERY_RUTRACKER_TM": "7",
+            "MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE": "false",
+            "MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS": "0",
+            "MOVIE_DISCOVERY_LIMIT": "500",
+            "MOVIE_DISCOVERY_MIN_KP_RATING": "7.2",
+            "MOVIE_DISCOVERY_QUALITIES": "2160p",
             "PLEX_ENABLED": "true",
             "PLEX_URL": "https://example.com/plex",
         }
@@ -112,6 +132,16 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.jackett_max_results, 50)
         self.assertEqual(settings.jackett_fetch_limit, 200)
         self.assertEqual(settings.task_owners_file, Path("/data/task_owners.json"))
+        self.assertFalse(settings.movie_discovery_enabled)
+        self.assertEqual(settings.movie_discovery_interval_hours, 1)
+        self.assertEqual(settings.movie_discovery_cache_file, Path("/cache/new.json"))
+        self.assertEqual(settings.movie_discovery_debug_file, Path("/cache/new_debug.json"))
+        self.assertEqual(settings.movie_discovery_rutracker_tm, 7)
+        self.assertFalse(settings.movie_discovery_jackett_require_date)
+        self.assertEqual(settings.movie_discovery_jackett_max_age_days, 1)
+        self.assertEqual(settings.movie_discovery_limit, 50)
+        self.assertEqual(settings.movie_discovery_min_kp_rating, 7.2)
+        self.assertEqual(settings.movie_discovery_qualities, "2160p")
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "https://example.com/plex")
 
@@ -146,6 +176,11 @@ class ConfigParsingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "BOT_TOKEN"):
             load_settings(env)
+
+    def test_load_settings_falls_back_for_invalid_movie_discovery_tm(self) -> None:
+        settings = load_settings({**BASE_ENV, "MOVIE_DISCOVERY_RUTRACKER_TM": "99"})
+
+        self.assertEqual(settings.movie_discovery_rutracker_tm, 32)
 
 
 class AppContextTests(unittest.TestCase):

@@ -22,11 +22,13 @@ class SequenceSession:
     def __init__(self, responses: list[FakeResponse]) -> None:
         self.responses = list(responses)
         self.get_calls = 0
+        self.get_kwargs = []
         self.post_calls = 0
         self.cookies = {}
 
     def get(self, *args, **kwargs) -> FakeResponse:
         self.get_calls += 1
+        self.get_kwargs.append(kwargs)
         return self.responses.pop(0)
 
     def post(self, *args, **kwargs) -> FakeResponse:
@@ -97,6 +99,22 @@ class RutrackerBackoffTests(unittest.TestCase):
 
         self.assertEqual(client._backoff_current_seconds, 0)
         self.assertEqual(client._cooldown_reason, "")
+
+    def test_search_can_limit_torrent_age_with_tm_parameter(self) -> None:
+        session = SequenceSession([FakeResponse(text="<html><body><table></table></body></html>")])
+        client = self._client(session)
+
+        client.search("movie", torrent_age_days=32)
+
+        self.assertEqual(session.get_kwargs[0]["params"], {"nm": "movie", "tm": "32"})
+
+    def test_search_ignores_unsupported_torrent_age_value(self) -> None:
+        session = SequenceSession([FakeResponse(text="<html><body><table></table></body></html>")])
+        client = self._client(session)
+
+        client.search("movie", torrent_age_days=99)
+
+        self.assertEqual(session.get_kwargs[0]["params"], {"nm": "movie"})
 
     def test_diagnostics_reports_active_cooldown_without_http_request(self) -> None:
         session = SequenceSession([])

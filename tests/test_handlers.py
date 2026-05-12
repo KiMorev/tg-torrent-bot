@@ -33,6 +33,7 @@ from bot import (
     _cancel_task_card_refresh,
     _is_admin_chat,
     _is_allowed,
+    _movie_discovery_keyboard,
     _notification_keyboard,
     _run_polling,
     _run_progress_panel_update_once,
@@ -42,6 +43,7 @@ from bot import (
     admin_callback,
     admin_command,
     help_command,
+    movie_new_close_callback,
     search_cancel,
     search_timeout,
     setup_bot_commands,
@@ -423,6 +425,57 @@ class AdminPanelTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# movie discovery tests
+# ---------------------------------------------------------------------------
+
+
+class MovieDiscoveryHandlerTests(unittest.TestCase):
+    def test_movie_discovery_keyboard_has_close_button(self):
+        keyboard = _movie_discovery_keyboard([{"title": "Film"}])
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["✖️ Закрыть"], "new:close")
+
+    def test_movie_discovery_close_deletes_message(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:close")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            asyncio.run(movie_new_close_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.message.delete.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+
+    def test_movie_discovery_close_falls_back_to_edit(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:close")
+        update.callback_query.message.delete.side_effect = Exception("cannot delete")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            asyncio.run(movie_new_close_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.edit_message_text.assert_called_once_with(
+            "Новинки закрыты.",
+            reply_markup=None,
+            parse_mode=None,
+        )
+
+
+# ---------------------------------------------------------------------------
 # notification keyboard tests
 # ---------------------------------------------------------------------------
 
@@ -784,6 +837,7 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
                 patch.object(bot, "JACKETT_ENABLED", True),
                 patch.object(bot, "rutracker_client", None),
                 patch.object(bot, "jackett_client", object()),
+                patch.object(bot, "MOVIE_DISCOVERY_ENABLED", False),
             ):
                 await setup_bot_commands(app)
 
