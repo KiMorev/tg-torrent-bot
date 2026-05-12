@@ -100,6 +100,26 @@ class MovieDiscoveryTests(unittest.TestCase):
     def test_normal_titles_unchanged(self) -> None:
         self.assertEqual(normalize_movie_title("Project Hail Mary [2026, WEB-DL 1080p]"), "Project Hail Mary")
 
+    def test_sports_events_are_rejected(self) -> None:
+        cases = [
+            "NBA Playoffs (2026) WEB-DL 1080p",
+            "WWE Raw 11 05 (2026) HDTV 1080p",
+            "Чемпионат Польши (2026) WEB-DL 1080p",
+            "Чемпионат Испании (2026) 1080p",
+            "UEFA Champions League (2026) WEB-DL 1080p",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertIsNone(
+                    release_from_result(
+                        SimpleNamespace(title=title, size="3 GB", seeders=20, category=""),
+                        source="jackett",
+                        allowed_years={2026, 2025},
+                        qualities={"1080p"},
+                    ),
+                    msg=f"Expected {title!r} to be rejected as sports event",
+                )
+
     def test_current_year_gets_recency_boost_over_previous_year(self) -> None:
         current, reason_current = evaluate_result(
             SimpleNamespace(title="Фильм (2026) WEB-DL 1080p", size="3 GB", seeders=10),

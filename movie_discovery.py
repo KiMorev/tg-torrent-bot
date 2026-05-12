@@ -19,6 +19,23 @@ ADULT_RE = re.compile(
 )
 COLLECTION_RE = re.compile(r"\b(collection|сборник|коллекци[яи]|трилоги[яи]|дилоги[яи])\b", re.I)
 EXTRA_RE = re.compile(r"\b(trailer|sample|extras?|bonus|трейлер|сэмпл|sample)\b", re.I)
+# Sports events, leagues and recurring broadcast shows that are not movies
+SPORTS_EVENT_RE = re.compile(
+    # Well-known sports leagues / organisations
+    r"\b(NBA|NFL|NHL|MLS|UFC|WWE|WWF|FIFA|UEFA|KHL|IPL|F1|MotoGP|WTA|ATP|Champions\s+League)\b"
+    # Russian "Championship of [country / league]"
+    r"|\bЧемпионат\s+(Польши|Чехии|Испании|Германии|Франции|Италии|Англии|России|Украины"
+    r"|Португалии|Шотландии|Нидерландов|Бельгии|Турции|Греции|Австрии|мира|Европы|Азии|Африки)\b"
+    # Russian league / cup names
+    r"|\bЕдиная\s+лига\s+ВТБ\b"
+    r"|\b(Евролига|Еврокубок)\b"
+    # Recurring broadcast shows with date stamps (e.g. "WWE Raw 11 05", "SmackDown 05 09")
+    r"|\b(SmackDown|Raw|Dynamite|Rampage|Nitro)\b\s+\d{1,2}\s+\d{2}\b"
+    # Generic sports-event keywords that almost never appear in movie titles
+    r"|\bPlayoffs?\b"
+    r"|\bГран[-\s]?[Пп]ри\b",
+    re.I,
+)
 YEAR_RE = re.compile(r"\b(20[2-9]\d|19\d{2})\b")
 
 QUALITY_LIMITS = {
@@ -153,6 +170,7 @@ def is_noise_title(title: str, category: str = "") -> bool:
         or ADULT_RE.search(text)
         or COLLECTION_RE.search(text)
         or EXTRA_RE.search(text)
+        or SPORTS_EVENT_RE.search(text)
     )
 
 
