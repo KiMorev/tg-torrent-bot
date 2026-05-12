@@ -596,27 +596,27 @@ def _format_updated_at() -> str:
     return datetime.now(DISPLAY_TIMEZONE).strftime("%H:%M:%S")
 
 
-def _format_admin_service_flags() -> str:
-    flags = [
-        f"Rutracker {'✅' if RUTRACKER_ENABLED else '⛔'}",
-        f"Jackett {'✅' if JACKETT_ENABLED else '⛔'}",
-        f"Кинопоиск {'✅' if KINOPOISK_ENABLED else '⛔'}",
-        f"Plex {'✅' if PLEX_ENABLED else '⛔'}",
-        f"Public-трекеры {'✅' if _public_trackers_enabled() else '⛔'}",
+def _format_admin_configured_integrations() -> str:
+    integrations = [
+        ("Rutracker", RUTRACKER_ENABLED),
+        ("Jackett", JACKETT_ENABLED),
+        ("Кинопоиск", KINOPOISK_ENABLED),
+        ("Plex", PLEX_ENABLED),
+        ("Public-трекеры", _public_trackers_enabled()),
     ]
-    return ", ".join(flags)
+    return "\n".join(f"• {'🟢' if enabled else '🔴'} {name}: {'настроен' if enabled else 'нет'}" for name, enabled in integrations)
 
 
 def _format_admin_tasks_line(tasks: list[dict] | None, error: str = "") -> str:
     if error:
-        return f"Загрузки: ошибка получения списка ({html_module.escape(error)})"
+        return f"• Загрузки: ошибка получения списка ({html_module.escape(error)})"
     if tasks is None:
-        return "Загрузки: нет данных"
+        return "• Загрузки: нет данных"
 
     active = sum(1 for task in tasks if (task.get("status") or "").lower() in _ACTIVE_STATUSES)
     finished = sum(1 for task in tasks if (task.get("status") or "").lower() == "finished")
     failed = sum(1 for task in tasks if (task.get("status") or "").lower() == "error")
-    return f"Загрузки: всего {len(tasks)}, активных {active}, завершённых {finished}, ошибок {failed}"
+    return f"• Загрузки: {len(tasks)} всего · {active} активных · {finished} завершённых · {failed} ошибок"
 
 
 def _format_admin_subscriptions_line() -> str:
@@ -628,9 +628,9 @@ def _format_admin_subscriptions_line() -> str:
     next_check = ""
     if _next_subscription_check_at is not None:
         next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
-        next_check = f", следующая проверка {next_dt.strftime('%d.%m %H:%M')}"
+        next_check = f"\n  Следующая проверка: {next_dt.strftime('%d.%m %H:%M')}"
 
-    return f"Подписки: {total} (Rutracker {rutracker_count}, Jackett {jackett_count}){next_check}"
+    return f"• Подписки: {total} всего · Rutracker {rutracker_count} · Jackett {jackett_count}{next_check}"
 
 
 def _subscription_owner_label(chat_id: int | None, approved_users: dict[int, dict] | None = None) -> str:
@@ -736,25 +736,25 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
 
 def _format_admin_auto_delete_line() -> str:
     if not _auto_delete_finished_enabled():
-        return "Автоудаление: выключено"
+        return "• Автоудаление: выключено"
 
     statuses = ", ".join(sorted(AUTO_DELETE_FINISHED_STATUSES)) or "нет статусов"
-    return f"Автоудаление: через {AUTO_DELETE_FINISHED_AFTER_HOURS:g} ч, статусы: {statuses}"
+    return f"• Автоудаление: через {AUTO_DELETE_FINISHED_AFTER_HOURS:g} ч · {statuses}"
 
 
 def _format_admin_notifications_line() -> str:
     if not _task_notifications_enabled():
-        return "Уведомления: выключены"
+        return "• Уведомления: выключены"
 
     statuses = ", ".join(sorted(TASK_NOTIFICATION_STATUSES)) or "нет статусов"
-    return f"Уведомления: включены, статусы: {statuses}"
+    return f"• Уведомления: {statuses}"
 
 
 def _format_admin_search_defaults_line() -> str:
     quality = _SRCH_DEFAULT_SETTINGS.get("quality", "1080p")
-    audio = "✅" if _SRCH_DEFAULT_SETTINGS.get("audio") else "⛔"
-    subs = "✅" if _SRCH_DEFAULT_SETTINGS.get("subs") else "⛔"
-    return f"Поиск по умолчанию: {quality}, оригинальная дорожка {audio}, субтитры {subs}"
+    audio = "да" if _SRCH_DEFAULT_SETTINGS.get("audio") else "нет"
+    subs = "да" if _SRCH_DEFAULT_SETTINGS.get("subs") else "нет"
+    return f"• Поиск: {quality} · оригинальная дорожка: {audio} · субтитры: {subs}"
 
 
 def _format_admin_movie_discovery_line() -> str:
@@ -770,17 +770,18 @@ def _format_admin_movie_discovery_line() -> str:
     source_text = ", ".join(sources) if sources else "нет источников"
 
     if not MOVIE_DISCOVERY_ENABLED:
-        return "Новинки: выключены"
+        return "• Статус: выключены"
 
     status = "включены" if sources else "включены, но нет источников"
     return (
-        f"Новинки: {status}; источники: {source_text}; "
-        f"автообновление раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч; "
-        f"Rutracker: {_movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM)}; "
-        f"Jackett: {'только с датой' if MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE else 'без строгой даты'}, "
-        f"до {MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS} дн.; "
-        f"качество: {qualities}; КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}; "
-        f"обновлено: {html_module.escape(updated_at)}; карточек: {len(cards)}"
+        f"• Статус: {status}\n"
+        f"• Источники: {source_text}\n"
+        f"• Общие фильтры: {qualities} · КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}\n"
+        f"• Rutracker: {_movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM)}\n"
+        f"• Jackett: {'только с датой' if MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE else 'без строгой даты'} · "
+        f"до {MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS} дн.\n"
+        f"• Автообновление: раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч\n"
+        f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}"
     )
 
 
@@ -797,13 +798,20 @@ async def _build_admin_panel_text() -> str:
         "🛠️ <b>Админ-панель</b>",
         f"Время бота: {now}",
         "",
+        "📊 <b>Состояние</b>",
         _format_admin_tasks_line(tasks, task_error),
         _format_admin_subscriptions_line(),
+        "",
+        "⚙️ <b>Правила</b>",
         _format_admin_auto_delete_line(),
         _format_admin_notifications_line(),
-        "",
-        f"Сервисы: {_format_admin_service_flags()}",
         _format_admin_search_defaults_line(),
+        "",
+        "🔌 <b>Настроенные интеграции</b>",
+        _format_admin_configured_integrations(),
+        "<i>Доступность сервисов в разделе «Диагностика».</i>",
+        "",
+        "🎬 <b>Новинки</b>",
         _format_admin_movie_discovery_line(),
     ]
     return "\n".join(lines)

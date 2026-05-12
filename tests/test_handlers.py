@@ -275,9 +275,14 @@ class AdminPanelTests(unittest.TestCase):
         update.message.reply_text.assert_called_once_with("🛠️ Обновляю админ-панель…")
         text = progress_message.edit_text.call_args.args[0]
         self.assertIn("Админ-панель", text)
-        self.assertIn("Загрузки: всего 3, активных 1, завершённых 1, ошибок 1", text)
-        self.assertIn("Подписки: 2 (Rutracker 1, Jackett 1)", text)
-        self.assertIn("Сервисы:", text)
+        self.assertIn("📊 <b>Состояние</b>", text)
+        self.assertIn("• Загрузки: 3 всего · 1 активных · 1 завершённых · 1 ошибок", text)
+        self.assertIn("• Подписки: 2 всего · Rutracker 1 · Jackett 1", text)
+        self.assertIn("🔌 <b>Настроенные интеграции</b>", text)
+        self.assertIn("• 🟢 Rutracker: настроен", text)
+        self.assertIn("• 🔴 Кинопоиск: нет", text)
+        self.assertIn("Доступность сервисов в разделе «Диагностика»", text)
+        self.assertIn("🎬 <b>Новинки</b>", text)
 
     def test_admin_diagnostics_callback_reuses_diagnostics_view(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:diagnostics")
