@@ -199,6 +199,7 @@ BOT_COMMANDS = [
     BotCommand("id", "Показать мой chat_id"),
     BotCommand("ping", "Проверка связи"),
 ]
+TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"]
 DOWNLOAD_PANEL_MESSAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_PAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_SCOPES: dict[int, str] = {}
@@ -3579,6 +3580,13 @@ def _cleanup_tmp_dir() -> None:
         logger.warning("Failed to clean up temp dir %s", TMP_DIR, exc_info=True)
 
 
+def _run_polling(app: Application) -> None:
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+    )
+
+
 async def setup_bot_commands(app: Application) -> None:
     global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK
 
@@ -3725,7 +3733,7 @@ def main() -> None:
         "enabled" if KINOPOISK_ENABLED else "disabled",
         "enabled" if PLEX_ENABLED else "disabled",
     )
-    app.run_polling(drop_pending_updates=True)
+    _run_polling(app)
 
 
 if __name__ == "__main__":

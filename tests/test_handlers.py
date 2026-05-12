@@ -27,12 +27,14 @@ os.environ.setdefault("DS_DESTINATION", "video")
 
 import bot
 from bot import (
+    TELEGRAM_ALLOWED_UPDATES,
     TASK_CARD_REFRESH_TASKS,
     _ACTIVE_STATUSES,
     _cancel_task_card_refresh,
     _is_admin_chat,
     _is_allowed,
     _notification_keyboard,
+    _run_polling,
     _run_progress_panel_update_once,
     _start_task_card_refresh,
     _task_card_refresh_loop,
@@ -627,6 +629,16 @@ class TaskCardRefreshLoopTests(unittest.TestCase):
 
 
 class SubscriptionLoopStartupTests(unittest.TestCase):
+    def test_run_polling_limits_allowed_updates(self):
+        app = MagicMock()
+
+        _run_polling(app)
+
+        app.run_polling.assert_called_once_with(
+            drop_pending_updates=True,
+            allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+        )
+
     def test_setup_starts_subscription_loop_for_jackett_only_mode(self):
         app = MagicMock()
         app.bot.set_my_commands = AsyncMock()
