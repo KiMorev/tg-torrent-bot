@@ -3407,6 +3407,58 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id: int | None) -> str:
+    """Try to download the subscription update and add it to Download Station.
+
+    Returns the task_id string (may be empty if DS didn't return one immediately).
+    Raises on unrecoverable errors so the caller can fall back to notify-only mode.
+    """
+    title = candidate.title
+    safe_name = _safe_filename(f"{title}.torrent")
+    temp_path = _temp_path(safe_name)
+    task_id = ""
+
+    try:
+        if candidate.torrent_url:
+            try:
+                torrent_bytes = await asyncio.to_thread(
+                    jackett_client.download_torrent, candidate.torrent_url
+                )
+                temp_path.write_bytes(torrent_bytes)
+                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                if chat_id and task_id:
+                    _remember_task_owner(task_id, chat_id)
+                # Add public trackers unless private torrent
+                if not _torrent_file_is_private(temp_path):
+                    await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
+                return task_id
+            except JackettMagnetRedirect as redir:
+                magnet = redir.magnet_url or candidate.magnet_url or ""
+                if not magnet:
+                    raise
+                logger.info("Subscription torrent redirected to magnet, using it directly")
+                task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                if chat_id and task_id:
+                    _remember_task_owner(task_id, chat_id)
+                return task_id
+            except (JackettError, DownloadStationError) as e:
+                logger.warning("Subscription torrent_url download failed (%s), trying magnet", e)
+
+        if candidate.magnet_url:
+            task_id = await asyncio.to_thread(ds_client.create_magnet, candidate.magnet_url)
+            if chat_id and task_id:
+                _remember_task_owner(task_id, chat_id)
+            return task_id
+
+        raise JackettError("Нет torrent_url и magnet_url у кандидата")
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
 async def _check_jackett_subscriptions(app: Application) -> None:
     """Check all Jackett query-based subscriptions for new results."""
     if jackett_client is None:
@@ -3426,7 +3478,16 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             if not search_query:
                 continue
 
-            new_results = await asyncio.to_thread(jackett_client.search, search_query)
+            # Narrow search to the subscription's tracker if known (faster, less noise).
+            tracker_id = str(sub.get("tracker") or "").strip().lower() or None
+            indexers_filter: list[str] | None = [tracker_id] if tracker_id else None
+
+            new_results = await asyncio.to_thread(
+                jackett_client.search,
+                search_query,
+                indexers=indexers_filter,
+                fetch_limit=JACKETT_FETCH_LIMIT,
+            )
             candidate = select_jackett_subscription_candidate(sub, new_results)
             if candidate is None:
                 sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -3435,26 +3496,59 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
             chat_id = sub.get("chat_id")
             short_q = search_query[:40] + "…" if len(search_query) > 40 else search_query
-
             episode_info = _parse_episode_info(candidate.title)
             progress = f"\nСерии: {episode_info[0]} из {episode_info[1]}" if episode_info else ""
-            text = (
-                f"🔔 Найдено обновление Jackett-подписки «{short_q}»:\n"
-                f"\n🔎 {candidate.title}"
-                f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
-                f"{progress}"
-            )
 
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "🔍 Посмотреть и скачать",
-                    callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
-                ),
-                InlineKeyboardButton(
-                    "🔕 Отписаться",
-                    callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
-                ),
-            ]])
+            # Try to auto-download the update (same as Rutracker subscription behaviour).
+            task_id: str | None = None
+            try:
+                task_id = await _jackett_subscription_auto_download(candidate, chat_id)
+                logger.info(
+                    "Subscription auto-download: key=%s task_id=%s title=%s",
+                    key, task_id, candidate.title,
+                )
+            except Exception as dl_err:
+                logger.warning(
+                    "Subscription auto-download failed for %s: %s — sending notify-only",
+                    key, dl_err,
+                )
+
+            # Build notification text depending on whether auto-download succeeded.
+            if task_id is not None:
+                text = (
+                    f"🔔 Подписка «{short_q}» обновилась — задача добавлена в DS!\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}"
+                )
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔄 Статус задачи",
+                        callback_data=_task_callback("info", task_id),
+                    ),
+                    InlineKeyboardButton(
+                        "🔕 Отписаться",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                    ),
+                ]])
+            else:
+                text = (
+                    f"🔔 Найдено обновление подписки «{short_q}»:\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}"
+                    "\n\n⚠️ Авто-загрузка не удалась — скачайте вручную."
+                )
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔍 Посмотреть и скачать",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
+                    ),
+                    InlineKeyboardButton(
+                        "🔕 Отписаться",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                    ),
+                ]])
 
             sent = not chat_id
             if chat_id:
