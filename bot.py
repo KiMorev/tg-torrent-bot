@@ -3,6 +3,7 @@ import html as html_module
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -20,6 +21,7 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     filters,
 )
 
@@ -77,8 +79,10 @@ from keyboards import (
     _search_advanced_keyboard,
     _search_after_add_keyboard,
     _no_quality_keyboard,
+    _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
+    tracker_selection_label,
     _season_select_keyboard,
     SEARCH_PAGE_SIZE,
     SUB_CALLBACK_PREFIX,
@@ -87,7 +91,7 @@ from keyboards import (
     _task_reply_markup,
     _tasks_keyboard,
 )
-from jackett import JackettError, JackettResult
+from jackett import JackettError, JackettMagnetRedirect, JackettResult
 from jackett_subscriptions import (
     JACKETT_SUBSCRIPTION_SCHEMA,
     apply_jackett_subscription_match,
@@ -235,7 +239,7 @@ BOT_COMMANDS = [
     BotCommand("id", "Показать мой chat_id"),
     BotCommand("ping", "Проверка связи"),
 ]
-TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"]
+TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query", "message_reaction"]
 DOWNLOAD_PANEL_MESSAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_PAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_SCOPES: dict[int, str] = {}
@@ -248,6 +252,12 @@ PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
+# Seconds to wait after DS task creation before injecting public trackers.
+# DS may not have fully initialised the task metadata immediately after create_torrent_file /
+# create_magnet returns, so attempting tracker injection at t=0 often results in
+# "добавление не подтвердилось".  The background monitor never needs this delay because
+# tasks have been running for at least one check interval by the time it processes them.
+_TRACKER_INJECT_INITIAL_DELAY = 3.0
 # (chat_id, message_id) → running refresh task for that task card
 TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
 # task_id → task-card messages that can be removed after a final notification
@@ -1818,6 +1828,62 @@ async def _send_auto_delete(bot, chat_id: int, text: str, delay: float = 3.0) ->
         pass
 
 
+# ---------------------------------------------------------------------------
+# Easter-egg: reaction to download-notification messages
+# ---------------------------------------------------------------------------
+
+_REACTION_EASTER_EGG: dict[str, list[str]] = {
+    "👍": ["Стараюсь! 💪", "Всегда рад помочь 🤖", "На здоровье!"],
+    "❤": ["Тоже тебя люблю 🤖❤️", "Приятно! 😊", "Взаимно!"],
+    "🔥": ["Огонь раздача! 🎉", "Горячий контент 🔥", "Я знаю толк в хороших файлах 😎"],
+    "🤩": ["Согласен, хороший выбор! 🎬", "Я тоже рад за тебя 🤩", "Отличный вкус!"],
+    "👎": ["Ой, что-то не так? 😅", "Попробуй другую раздачу, подберём!", "Понимаю..."],
+    "😂": ["Хорошо качать с хорошим настроением 😄", "Ха! 🤖"],
+    "🎉": ["Ура! Праздник загрузки! 🎊", "Вечеринка началась! 🎬🍿"],
+    "🤔": ["Задумался о жизни? Или о качестве раздачи? 🤖", "Выбор непростой, да?"],
+    "😱": ["Всё хорошо? 😅 Надеюсь в хорошем смысле!", "Я тоже иногда удивляюсь 🤖"],
+    "💯": ["Именно! 💯", "В точку 🎯"],
+    "🫡": ["Есть! Выполнено! 🤖", "Служу верой и правдой 🫡"],
+    "🍿": ["О, кино-вечер намечается? 🎬", "Приятного просмотра! 🍿"],
+    "❤‍🔥": ["Страсть к хорошему кино — это правильно! 🔥❤️"],
+    "🥰": ["Спасибо! 🤖🥰", "Такой приятный пользователь!"],
+    "👏": ["Стараюсь! 👏", "Спасибо, буду и дальше в том же духе!"],
+    "🤖": ["Привет коллеге! 🤖", "Свои! 🤜🤛"],
+}
+_REACTION_EASTER_EGG_DEFAULT = [
+    "Спасибо за реакцию! 🤖",
+    "Приятно получать отзывы 😊",
+    "🤖❤️",
+    "Понял, принял!",
+]
+
+
+async def reaction_easter_egg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Respond to any message reaction with a fun auto-deleting reply."""
+    rct = update.message_reaction
+    if not rct or not rct.new_reaction:
+        return  # reaction removed — skip
+
+    chat_id = rct.chat.id
+    if chat_id not in _all_allowed_chat_ids():
+        return
+
+    first = rct.new_reaction[0]
+    emoji: str = getattr(first, "emoji", "")
+    responses = _REACTION_EASTER_EGG.get(emoji, _REACTION_EASTER_EGG_DEFAULT)
+    text = random.choice(responses)
+    asyncio.create_task(_send_auto_delete(context.bot, chat_id, text, delay=5.0))
+
+
+async def _delayed_delete_message(bot, chat_id: int, message_id: int, delay: float = 4.0) -> None:
+    """Delete an existing message after *delay* seconds (fire-and-forget)."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 async def _safe_edit_callback(
     query,
     text: str,
@@ -2037,9 +2103,24 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await msg.edit_text(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=_search_options_keyboard(),
+        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
     )
     return SEARCH_OPTIONS
+
+
+def _tracker_label_from_context(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Return a human-readable label for the currently selected Jackett trackers.
+
+    Returns an empty string when Jackett is not configured (no tracker button shown).
+    Falls back to 'Rutracker' when no indexer list has been fetched yet.
+    """
+    if jackett_client is None:
+        return ""
+    indexers = context.user_data.get("srch_jackett_indexers", [])
+    selected = context.user_data.get("srch_jackett_selected", set())
+    if not indexers or not selected:
+        return "Rutracker"  # default before first fetch
+    return tracker_selection_label(indexers, selected)
 
 
 async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2053,7 +2134,7 @@ async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["srch_query"] = query_text
     msg = await update.message.reply_text(
         f"Запрос: «{query_text}»",
-        reply_markup=_search_options_keyboard(),
+        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
     )
     context.user_data["srch_ui_msg_id"] = msg.message_id
     context.user_data["srch_ui_chat_id"] = update.effective_chat.id
@@ -2098,11 +2179,16 @@ async def _show_jackett_selector(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     header: str = "",
+    return_to: str = "results",
 ) -> int:
     """Fetch Jackett indexers and show the tracker-selection keyboard.
 
+    return_to controls what happens when the user confirms:
+      "options"  → save selection, return to SEARCH_OPTIONS screen
+      "advanced" → save selection, return to SEARCH_ADVANCED screen
+      "results"  → run search immediately, return to SEARCH_RESULTS
+
     Returns SEARCH_JACKETT_SELECT on success, ConversationHandler.END on failure.
-    header is optional text shown above the keyboard prompt.
     """
     if jackett_client is None:
         await edit_fn("Jackett не настроен.")
@@ -2112,28 +2198,181 @@ async def _show_jackett_selector(
         indexers = await asyncio.to_thread(jackett_client.get_indexers)
     except JackettError as e:
         logger.error("Jackett get_indexers failed: %s", e)
-        await edit_fn(_friendly_error("jackett", str(e)), parse_mode="HTML")
+        await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
     if not indexers:
         logger.warning("Jackett: no indexers configured")
-        await edit_fn("🌐 <b>Jackett</b>: нет настроенных индексеров", parse_mode="HTML")
+        await edit_fn("🌐 <b>Jackett</b>: нет настроенных индексеров", reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
-    # Default: select only Rutracker; fallback to all if not found
-    rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
-    selected = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
+    # Keep existing selection if available; otherwise default to Rutracker
+    if "srch_jackett_selected" not in context.user_data:
+        rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
+        context.user_data["srch_jackett_selected"] = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
 
     context.user_data["srch_jackett_indexers"] = indexers
-    context.user_data["srch_jackett_selected"] = selected
+    context.user_data["srch_picker_return_to"] = return_to
+
+    selected = context.user_data["srch_jackett_selected"]
+    confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
+    show_back = return_to in ("options", "advanced")
 
     prompt = (header + "\n" if header else "") + "Выберите трекеры для поиска:"
     try:
-        await edit_fn(prompt, reply_markup=_jackett_select_keyboard(indexers, selected), parse_mode="HTML")
+        await edit_fn(
+            prompt,
+            reply_markup=_jackett_select_keyboard(
+                indexers, selected, confirm_label=confirm_label, show_back=show_back
+            ),
+            parse_mode="HTML",
+        )
     except Exception as exc:
         logger.error("Jackett selector edit failed: %s", exc, exc_info=True)
         raise
     return SEARCH_JACKETT_SELECT
+
+
+async def search_pick_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Open tracker picker from SEARCH_OPTIONS or SEARCH_ADVANCED."""
+    query = update.callback_query
+    await query.answer()
+    # callback_data: srch:pick_tracker:options  or  srch:pick_tracker:advanced
+    parts = (query.data or "").split(":")
+    return_to = parts[2] if len(parts) > 2 else "options"
+    return await _show_jackett_selector(query.edit_message_text, context, return_to=return_to)
+
+
+async def search_switch_trackers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Open tracker picker from SEARCH_RESULTS (will re-run search on confirm)."""
+    query = update.callback_query
+    await query.answer()
+    return await _show_jackett_selector(query.edit_message_text, context, return_to="results")
+
+
+async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Search directly on Rutracker, bypassing Jackett."""
+    query = update.callback_query
+    await query.answer()
+    if rutracker_client is None:
+        await query.answer("Rutracker не настроен.", show_alert=True)
+        return SEARCH_RESULTS
+    search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
+    if not search_query:
+        await query.answer("Запрос потерян. Начните поиск заново.", show_alert=True)
+        return ConversationHandler.END
+    await query.edit_message_text(f"🔍 Ищу «{search_query}» напрямую в Rutracker…")
+    try:
+        rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
+    except RutrackerError as rt_err:
+        await query.edit_message_text(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+        return ConversationHandler.END
+    results_data = []
+    for r in rt_results:
+        ep = _parse_episode_info(r.title)
+        partial = ep is not None and ep[0] < ep[1]
+        results_data.append({
+            "source": "rutracker",
+            "topic_id": r.topic_id,
+            "title": r.title,
+            "url": f"https://rutracker.org/forum/viewtopic.php?t={r.topic_id}",
+            "category": r.category,
+            "size": r.size,
+            "seeders": r.seeders,
+            "partial": partial,
+            "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
+            "magnet_url": None,
+            "torrent_url": None,
+            "tracker_name": "rutracker",
+        })
+    if not results_data:
+        await query.edit_message_text(
+            f"По запросу «{search_query}» ничего не найдено в Rutracker."
+        )
+        return ConversationHandler.END
+    results_data.sort(key=_score_result, reverse=True)
+    results_data[0]["recommended"] = True
+    banner = "🔗 Прямой поиск Rutracker"
+    context.user_data["srch_results"] = results_data
+    context.user_data["srch_results_page"] = 0
+    context.user_data["srch_banner"] = banner
+    context.user_data["srch_source"] = "rutracker"
+    await query.edit_message_text(
+        _build_results_text(results_data, search_query, 0, banner=banner),
+        reply_markup=_search_results_keyboard(
+            results_data, page=0,
+            show_switch_trackers=False,
+            show_retry_jackett=bool(jackett_client),  # offer back to Jackett
+            show_direct_rutracker=False,              # already on direct RT
+        ),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    return SEARCH_RESULTS
+
+
+def _extract_rutracker_topic_id(url: str) -> str:
+    """Extract numeric topic_id from a Rutracker topic URL.
+
+    Handles both:
+      https://rutracker.org/forum/viewtopic.php?t=1234567
+      https://rutracker.net/forum/viewtopic.php?t=1234567
+    Returns the id string or "" if not found / not a Rutracker URL.
+    """
+    if "rutracker." not in url:
+        return ""
+    match = re.search(r"[?&]t=(\d+)", url)
+    return match.group(1) if match else ""
+
+
+async def _refresh_jackett_torrent_url(
+    jackett_client,
+    result: dict,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> str | None:
+    """Re-run Jackett search to obtain a fresh torrent_url for the given result.
+
+    Used when the cached torrent_url returns 404 (Jackett proxy token may have
+    expired or the tracker session was refreshed).  Matches fresh results first
+    by topic URL, then by title + tracker + size.
+
+    Returns a fresh torrent_url string, or None if the result could not be found.
+    """
+    query = (
+        context.user_data.get("srch_search_query")
+        or context.user_data.get("srch_query", "")
+    )
+    if not query:
+        logger.debug("_refresh_jackett_torrent_url: no query in user_data, skipping")
+        return None
+
+    indexers = list(context.user_data.get("srch_jackett_selected") or [])
+    topic_url = result.get("url", "")
+    tracker_name = result.get("tracker_name") or result.get("category", "")
+    title = result.get("title", "")
+    size = result.get("size", "")
+
+    try:
+        fresh = await asyncio.to_thread(jackett_client.search, query, indexers or None)
+    except JackettError as e:
+        logger.warning("_refresh_jackett_torrent_url: re-search failed: %s", e)
+        return None
+
+    # Primary match: same topic URL (unique per tracker post)
+    if topic_url:
+        for r in fresh:
+            if r.topic_url == topic_url and r.torrent_url:
+                logger.debug("_refresh_jackett_torrent_url: matched by topic_url")
+                return r.torrent_url
+
+    # Fallback match: title + tracker + size
+    for r in fresh:
+        if r.title == title and r.tracker == tracker_name and r.size == size and r.torrent_url:
+            logger.debug("_refresh_jackett_torrent_url: matched by title+tracker+size")
+            return r.torrent_url
+
+    logger.debug("_refresh_jackett_torrent_url: no matching result found in %d fresh results", len(fresh))
+    return None
 
 
 async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query: str) -> int:
@@ -2161,37 +2400,81 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     edit_fn = loading_msg.edit_text if loading_msg is not None else send_fn
 
     # --- Search: Rutracker first, Jackett as fallback on error ---
-    results = []
+    results_data = []
     banner = ""
     source = "rutracker"
 
-    if rutracker_client:
-        try:
-            results = await asyncio.to_thread(rutracker_client.search, search_query)
-            source = "rutracker"
-        except RutrackerError as rt_err:
-            if jackett_client:
-                header = _friendly_error("rutracker", str(rt_err))
-                return await _show_jackett_selector(edit_fn, context, header=header)
+    if jackett_client:
+        # --- Jackett-first: use pre-selected indexers (default to Rutracker indexer) ---
+        if "srch_jackett_selected" not in context.user_data:
+            try:
+                indexers = await asyncio.to_thread(jackett_client.get_indexers)
+                rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
+                selected = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
+                context.user_data["srch_jackett_indexers"] = indexers
+                context.user_data["srch_jackett_selected"] = selected
+            except JackettError as e:
+                logger.warning("Jackett get_indexers failed at search start: %s", e)
+                if rutracker_client:
+                    banner = f"⚠️ Jackett недоступен, ищу напрямую в Rutracker"
+                    # fall through to Rutracker path below
+                else:
+                    await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+                    return ConversationHandler.END
+
+        selected: set[str] = context.user_data.get("srch_jackett_selected", set())
+
+        if selected:  # Jackett search
+            try:
+                j_results_raw = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        jackett_client.search,
+                        search_query,
+                        indexers=list(selected),
+                        fetch_limit=JACKETT_FETCH_LIMIT,
+                    ),
+                    timeout=45.0,
+                )
+            except (JackettError, asyncio.TimeoutError) as e:
+                raw_err = (
+                    "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
+                    if isinstance(e, asyncio.TimeoutError) else str(e)
+                )
+                logger.error("Jackett search failed in _run_search: %s", raw_err)
+                if rutracker_client:
+                    banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
+                    # fall through to Rutracker path
+                else:
+                    await edit_fn(_friendly_error("jackett", raw_err), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+                    return ConversationHandler.END
             else:
-                await edit_fn(_friendly_error("rutracker", str(rt_err)), parse_mode="HTML")
-                return ConversationHandler.END
-    elif jackett_client:
-        return await _show_jackett_selector(edit_fn, context)
-    else:
-        await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.")
-        return ConversationHandler.END
+                for r in j_results_raw:
+                    ep = _parse_episode_info(r.title)
+                    partial = ep is not None and ep[0] < ep[1]
+                    results_data.append({
+                        "source": "jackett",
+                        "topic_id": "",
+                        "title": r.title,
+                        "url": r.topic_url or "",
+                        "category": r.tracker,
+                        "size": r.size,
+                        "seeders": r.seeders,
+                        "partial": partial,
+                        "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
+                        "magnet_url": r.magnet_url,
+                        "torrent_url": r.torrent_url,
+                        "tracker_name": r.tracker,
+                    })
+                source = "jackett"
 
-    if not results:
-        await edit_fn(
-            f"По запросу «{search_query}» ничего не найдено.\n"
-            "Попробуйте другой запрос."
-        )
-        return ConversationHandler.END
-
-    results_data = []
-    if source == "rutracker":
-        for r in results:
+    if not results_data and rutracker_client:
+        # Direct Rutracker search: either Jackett not configured, or Jackett failed/returned nothing
+        try:
+            rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
+        except RutrackerError as rt_err:
+            await edit_fn(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+            return ConversationHandler.END
+        for r in rt_results:
             ep = _parse_episode_info(r.title)
             partial = ep is not None and ep[0] < ep[1]
             results_data.append({
@@ -2208,33 +2491,26 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "torrent_url": None,
                 "tracker_name": "rutracker",
             })
-    else:  # jackett
-        for r in results:
-            ep = _parse_episode_info(r.title)
-            partial = ep is not None and ep[0] < ep[1]
-            results_data.append({
-                "source": "jackett",
-                "topic_id": "",
-                "title": r.title,
-                "url": r.topic_url or "",
-                "category": r.tracker,
-                "size": r.size,
-                "seeders": r.seeders,
-                "partial": partial,
-                "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
-                "magnet_url": r.magnet_url,
-                "torrent_url": r.torrent_url,
-                "tracker_name": r.tracker,
-            })
+        source = "rutracker"
 
-    # --- Step 1: season filter (only for Rutracker results where titles match) ---
+    if not results_data and not rutracker_client and not jackett_client:
+        await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.", reply_markup=_search_error_keyboard(), parse_mode="HTML")
+        return ConversationHandler.END
+
+    if not results_data:
+        await edit_fn(
+            f"По запросу «{search_query}» ничего не найдено.\n"
+            "Попробуйте другой запрос."
+        )
+        return ConversationHandler.END
+
+    # --- Step 1: season filter ---
     season_num = _extract_season_from_query(search_query)
     if season_num is not None:
         filtered = _filter_by_season(results_data, season_num)
         if filtered:
             results_data = filtered
         else:
-            # Season filter wiped everything — check if quality caused it.
             base_query = context.user_data.get("srch_query", "").strip()
             has_quality = bool(base_query) and base_query.lower() != search_query.lower()
             if has_quality:
@@ -2244,7 +2520,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     reply_markup=_no_quality_keyboard(base_query),
                 )
                 return SEARCH_RESULTS
-            # No quality to drop — just report nothing found.
             await edit_fn(
                 f"По запросу «{search_query}» ничего не найдено.\n"
                 "Попробуйте другой запрос."
@@ -2260,15 +2535,13 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     context.user_data["srch_banner"] = banner
     context.user_data["srch_source"] = source
 
-    show_jackett_expand = bool(jackett_client and source == "rutracker")
-    show_jackett_direct = bool(jackett_client)
-
     await edit_fn(
         _build_results_text(results_data, search_query, 0, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=0,
-            show_jackett_expand=show_jackett_expand,
-            show_jackett_direct=show_jackett_direct,
+            show_switch_trackers=bool(jackett_client and source == "jackett"),
+            show_retry_jackett=bool(jackett_client and source == "rutracker"),
+            show_direct_rutracker=bool(rutracker_client and source == "jackett"),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2295,15 +2568,15 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
     results_data = context.user_data.get("srch_results", [])
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
     banner = context.user_data.get("srch_banner", "")
-    show_jackett_expand = bool(jackett_client and context.user_data.get("srch_source") == "rutracker")
-    show_jackett_direct = bool(jackett_client)
+    source = context.user_data.get("srch_source", "")
 
     await query.edit_message_text(
         _build_results_text(results_data, search_query, page, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=page,
-            show_jackett_expand=show_jackett_expand,
-            show_jackett_direct=show_jackett_direct,
+            show_switch_trackers=bool(jackett_client and source == "jackett"),
+            show_retry_jackett=bool(jackett_client and source == "rutracker"),
+            show_direct_rutracker=bool(rutracker_client and source == "jackett"),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2331,39 +2604,32 @@ async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def search_expand_jackett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Open Jackett tracker selection for expand-mode (merge with existing results)."""
+    """Kept for backwards-compat; now delegates to search_switch_trackers."""
+    return await search_switch_trackers(update, context)
+
+
+async def search_jackett_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Return from tracker picker to SEARCH_OPTIONS or SEARCH_ADVANCED without searching."""
     query = update.callback_query
     await query.answer()
 
-    if jackett_client is None:
-        await query.answer("Jackett не настроен.", show_alert=True)
-        return SEARCH_RESULTS
+    return_to = context.user_data.get("srch_picker_return_to", "options")
+    base = context.user_data.get("srch_query", "")
+    tracker_label = _tracker_label_from_context(context)
 
-    context.user_data["srch_jackett_mode"] = "expand"
-    search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-    return await _show_jackett_selector(
-        query.edit_message_text,
-        context,
-        header=f"Поиск: «{search_query}»",
+    if return_to == "advanced":
+        settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+        await query.edit_message_text(
+            f"Запрос: «{base}»\nНастройте параметры поиска:",
+            reply_markup=_search_advanced_keyboard(settings, tracker_label),
+        )
+        return SEARCH_ADVANCED
+
+    await query.edit_message_text(
+        f"Запрос: «{base}»",
+        reply_markup=_search_options_keyboard(tracker_label),
     )
-
-
-async def search_jackett_start_direct(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Open Jackett tracker selection for direct-mode (Jackett-only results, no merge)."""
-    query = update.callback_query
-    await query.answer()
-
-    if jackett_client is None:
-        await query.answer("Jackett не настроен.", show_alert=True)
-        return SEARCH_RESULTS
-
-    context.user_data["srch_jackett_mode"] = "direct"
-    search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-    return await _show_jackett_selector(
-        query.edit_message_text,
-        context,
-        header=f"Поиск: «{search_query}»",
-    )
+    return SEARCH_OPTIONS
 
 
 async def search_jackett_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2385,9 +2651,14 @@ async def search_jackett_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 
     indexers = context.user_data.get("srch_jackett_indexers", [])
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
+    return_to = context.user_data.get("srch_picker_return_to", "results")
+    confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
+    show_back = return_to in ("options", "advanced")
     await query.edit_message_text(
         f"Поиск: «{search_query}»\nВыберите трекеры для поиска:",
-        reply_markup=_jackett_select_keyboard(indexers, selected),
+        reply_markup=_jackett_select_keyboard(
+            indexers, selected, confirm_label=confirm_label, show_back=show_back
+        ),
     )
     return SEARCH_JACKETT_SELECT
 
@@ -2406,15 +2677,14 @@ async def _safe_answer(query, text: str = "", *, show_alert: bool = False) -> No
 
 
 async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Run Jackett search with selected indexers.
+    """Confirm tracker selection.
 
-    Behaviour depends on srch_jackett_mode stored in user_data:
-    - "expand"  (default) — merge Jackett results with existing Rutracker results.
-    - "direct"            — show only Jackett results, replacing the previous list.
+    Behaviour depends on srch_picker_return_to stored in user_data:
+    - "options"  → save selection, return to SEARCH_OPTIONS (no search yet)
+    - "advanced" → save selection, return to SEARCH_ADVANCED (no search yet)
+    - "results"  → run search with selected indexers, return to SEARCH_RESULTS
 
-    IMPORTANT: query.answer() is called exactly once per execution path.  Never
-    call it at the top and then again in an error branch — Telegram rejects duplicate
-    answerCallbackQuery calls, which would abort the recovery edit_message_text.
+    IMPORTANT: query.answer() is called exactly once per execution path.
     """
     query = update.callback_query
 
@@ -2425,28 +2695,49 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     selected: set[str] = context.user_data.get("srch_jackett_selected", set())
     if not selected:
-        # Alert shown without prior answer — this is the only answer for this path.
         await query.answer("Выберите хотя бы один трекер.", show_alert=True)
         indexers = context.user_data.get("srch_jackett_indexers", [])
+        return_to_err = context.user_data.get("srch_picker_return_to", "results")
+        confirm_label = "✅ Применить" if return_to_err in ("options", "advanced") else "🔍 Искать"
+        show_back = return_to_err in ("options", "advanced")
         search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
         await query.edit_message_text(
             f"Поиск: «{search_query}»\nВыберите трекеры для поиска:",
-            reply_markup=_jackett_select_keyboard(indexers, selected),
+            reply_markup=_jackett_select_keyboard(
+                indexers, selected, confirm_label=confirm_label, show_back=show_back
+            ),
         )
         return SEARCH_JACKETT_SELECT
 
-    # Normal search path: answer now (dismisses the button spinner) then show loading.
-    await query.answer()
+    return_to = context.user_data.get("srch_picker_return_to", "results")
 
+    # --- Return to options/advanced without searching ---
+    if return_to in ("options", "advanced"):
+        await query.answer()
+        base = context.user_data.get("srch_query", "")
+        tracker_label = _tracker_label_from_context(context)
+        if return_to == "advanced":
+            settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+            await query.edit_message_text(
+                f"Запрос: «{base}»\nНастройте параметры поиска:",
+                reply_markup=_search_advanced_keyboard(settings, tracker_label),
+            )
+            return SEARCH_ADVANCED
+        else:
+            await query.edit_message_text(
+                f"Запрос: «{base}»",
+                reply_markup=_search_options_keyboard(tracker_label),
+            )
+            return SEARCH_OPTIONS
+
+    # --- "results" mode: run search immediately ---
+    await query.answer()
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-    mode = context.user_data.get("srch_jackett_mode", "expand")
 
     try:
         await query.edit_message_text(f"🔍 Ищу «{search_query}» через Jackett…")
     except Exception as exc:
-        logger.warning("search_jackett_do: loading edit failed (msg=%s): %s",
-                       query.message.message_id, exc)
-        # Continue anyway — we'll overwrite whatever is there with results or error.
+        logger.warning("search_jackett_do: loading edit failed: %s", exc)
 
     try:
         j_results_raw = await asyncio.wait_for(
@@ -2459,49 +2750,42 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             timeout=45.0,
         )
     except (JackettError, asyncio.TimeoutError) as e:
-        # Restore previous results (or show error) in the message.
-        # NOTE: query is already answered above — use _safe_answer for the alert.
-        if isinstance(e, asyncio.TimeoutError):
-            raw_err = "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
-        else:
-            raw_err = str(e)
-            # Hint about common XML parse failure (bad credentials / indexer not logged in)
-            if "not well-formed" in raw_err or "разобрать ответ" in raw_err:
-                raw_err += " — возможно, индексер требует авторизации в Jackett"
+        raw_err = (
+            "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
+            if isinstance(e, asyncio.TimeoutError) else str(e)
+        )
+        if "not well-formed" in raw_err or "разобрать ответ" in raw_err:
+            raw_err += " — возможно, индексер требует авторизации в Jackett"
         logger.error("Jackett search failed: %s", raw_err)
         await _safe_answer(query, f"❌ {raw_err}", show_alert=True)
         existing = context.user_data.get("srch_results", [])
         banner = context.user_data.get("srch_banner", "")
-        show_expand = bool(context.user_data.get("srch_source") == "rutracker")
         if existing:
             await query.edit_message_text(
                 _build_results_text(existing, search_query, 0, banner=banner),
                 reply_markup=_search_results_keyboard(
                     existing, page=0,
-                    show_jackett_expand=show_expand,
-                    show_jackett_direct=bool(jackett_client),
+                    show_retry_jackett=True,   # Jackett failed — offer retry, not "direct RT" (already on RT)
+                    show_direct_rutracker=False,
                 ),
                 parse_mode="HTML",
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             return SEARCH_RESULTS
-        await query.edit_message_text(
-            _friendly_error("jackett", raw_err),
-            parse_mode="HTML",
-        )
+        await query.edit_message_text(_friendly_error("jackett", raw_err), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
     if not j_results_raw:
         await _safe_answer(query, "Jackett не нашёл результатов по выбранным трекерам.", show_alert=True)
         existing = context.user_data.get("srch_results", [])
         banner = context.user_data.get("srch_banner", "")
-        show_expand = bool(context.user_data.get("srch_source") == "rutracker")
         await query.edit_message_text(
-            _build_results_text(existing, search_query, 0, banner=banner) if existing else f"По запросу «{search_query}» ничего не найдено.",
+            _build_results_text(existing, search_query, 0, banner=banner) if existing
+            else f"По запросу «{search_query}» ничего не найдено.",
             reply_markup=_search_results_keyboard(
                 existing, page=0,
-                show_jackett_expand=show_expand,
-                show_jackett_direct=bool(jackett_client),
+                show_retry_jackett=True,   # offer retry with different trackers
+                show_direct_rutracker=False,
             ) if existing else None,
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2510,7 +2794,6 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     logger.info("Jackett search returned %d results", len(j_results_raw))
 
-    # Build Jackett result dicts
     j_results_data = []
     for r in j_results_raw:
         ep = _parse_episode_info(r.title)
@@ -2530,44 +2813,14 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "tracker_name": r.tracker,
         })
 
-    mode = context.user_data.get("srch_jackett_mode", "expand")
-
-    if mode == "direct":
-        # Jackett-only: show all fetched results sorted by score, no merge.
-        merged = sorted(j_results_data, key=_score_result, reverse=True)
-        banner = f"🔍 Jackett: {len(merged)} результатов"
-        source = "jackett"
-    else:
-        # Expand: merge Jackett results with existing Rutracker results.
-        existing = context.user_data.get("srch_results", [])
-        existing_titles = {r["title"].lower() for r in existing}
-        new_jackett = [r for r in j_results_data if r["title"].lower() not in existing_titles]
-        merged_raw = existing + new_jackett
-
-        # Cap Jackett share before merging to avoid flooding Rutracker results
-        jk_capped = sorted(
-            [r for r in merged_raw if r.get("source") == "jackett"],
-            key=_score_result, reverse=True,
-        )[:JACKETT_MAX_RESULTS]
-        ru_only = [r for r in merged_raw if r.get("source") != "jackett"]
-
-        # Sort ALL results together so best Jackett razdachas surface on page 0
-        merged = sorted(ru_only + jk_capped, key=_score_result, reverse=True)
-
-        new_count = len(new_jackett)
-        banner = (
-            f"➕ Jackett добавил {new_count} результатов"
-            if new_count > 0 else
-            "ℹ️ Jackett не нашёл новых результатов (уже в списке)"
-        )
-        source = "mixed"
-
+    merged = sorted(j_results_data, key=_score_result, reverse=True)
+    banner = f"🔍 Jackett: {len(merged)} результатов"
     if merged:
         merged[0]["recommended"] = True
 
     context.user_data["srch_results"] = merged
     context.user_data["srch_results_page"] = 0
-    context.user_data["srch_source"] = source
+    context.user_data["srch_source"] = "jackett"
     context.user_data["srch_banner"] = banner
 
     try:
@@ -2575,19 +2828,15 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             _build_results_text(merged, search_query, 0, banner=banner),
             reply_markup=_search_results_keyboard(
                 merged, page=0,
-                show_jackett_expand=False,   # already used Jackett — no need to offer expand again
-                show_jackett_direct=bool(jackett_client),
+                show_switch_trackers=True,
+                show_retry_jackett=False,
+                show_direct_rutracker=bool(rutracker_client),
             ),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception as exc:
-        logger.error(
-            "Jackett results display failed: %s",
-            exc,
-            exc_info=True,
-        )
-        # query is already answered — use _safe_answer to avoid duplicate-answer error.
+        logger.error("Jackett results display failed: %s", exc, exc_info=True)
         await _safe_answer(query, f"Ошибка отображения: {exc}", show_alert=True)
     return SEARCH_RESULTS
 
@@ -2601,7 +2850,7 @@ async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYP
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
         f"Запрос: «{base}»\nНастройте параметры поиска:",
-        reply_markup=_search_advanced_keyboard(settings),
+        reply_markup=_search_advanced_keyboard(settings, _tracker_label_from_context(context)),
     )
     return SEARCH_ADVANCED
 
@@ -2626,7 +2875,7 @@ async def search_toggle_setting(update: Update, context: ContextTypes.DEFAULT_TY
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
         f"Запрос: «{base}»\nНастройте параметры поиска:",
-        reply_markup=_search_advanced_keyboard(settings),
+        reply_markup=_search_advanced_keyboard(settings, _tracker_label_from_context(context)),
     )
     return SEARCH_ADVANCED
 
@@ -2774,22 +3023,95 @@ async def _download_and_add(
     safe_name = _safe_filename(f"{title}.torrent")
     temp_path = _temp_path(safe_name)
     task_id = ""
+    download_method = "torrent-файл"
     tracker_result: TrackerApplyResult | None = None
 
     chat_id = query.message.chat.id if query.message else None
 
+    # Snapshot existing task IDs before any create_magnet call so we can
+    # identify the newly created task when DS doesn't return an ID immediately.
     try:
-        if result.get("magnet_url"):
-            # Jackett result with magnet — submit directly to DS
-            task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+        _before_tasks = await asyncio.to_thread(ds_client.list_tasks)
+        known_task_ids: set[str] = {t["id"] for t in _before_tasks if t.get("id")}
+    except DownloadStationError:
+        known_task_ids = set()
+
+    try:
+        if result.get("torrent_url") and jackett_client:
+            # Jackett result: download via Jackett proxy (uniform for all indexers).
+            # On failure, re-search to get a fresh proxy URL (Jackett re-authenticates
+            # with the tracker as part of the search), then retry once before
+            # falling back to magnet.
+            from jackett import _sanitize_error_text as _jk_sanitize
+            logger.info(
+                "jackett download attempt: %s",
+                _jk_sanitize(result["torrent_url"], jackett_client._api_key),
+            )
+            try:
+                torrent_bytes = await asyncio.to_thread(
+                    jackett_client.download_torrent, result["torrent_url"]
+                )
+                temp_path.write_bytes(torrent_bytes)
+                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            except JackettMagnetRedirect as magnet_redir:
+                # Tracker has no .torrent — its download URL redirects to magnet.
+                magnet = magnet_redir.magnet_url or result.get("magnet_url", "")
+                if not magnet:
+                    raise JackettError("Torrent-файл недоступен и magnet-ссылка отсутствует.") from magnet_redir
+                logger.info("Jackett redirected to magnet — using it directly")
+                task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                if not task_id:
+                    task_id = await _wait_for_magnet_task_id(magnet, known_task_ids, query.message)
+                download_method = "magnet"
+            except JackettError as torrent_err:
+                logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
+                await query.edit_message_text("⏳ Обновляю раздачи, повторяю попытку…")
+                fresh_url = await _refresh_jackett_torrent_url(jackett_client, result, context)
+                if fresh_url:
+                    try:
+                        torrent_bytes = await asyncio.to_thread(
+                            jackett_client.download_torrent, fresh_url
+                        )
+                        temp_path.write_bytes(torrent_bytes)
+                        task_id = await asyncio.to_thread(
+                            ds_client.create_torrent_file, temp_path, safe_name
+                        )
+                    except JackettError as retry_err:
+                        logger.warning("retry also failed (%s), trying magnet", retry_err)
+                        if result.get("magnet_url"):
+                            task_id = await asyncio.to_thread(
+                                ds_client.create_magnet, result["magnet_url"]
+                            )
+                            if not task_id:
+                                task_id = await _wait_for_magnet_task_id(
+                                    result["magnet_url"], known_task_ids, query.message
+                                )
+                            download_method = "magnet"
+                        else:
+                            raise retry_err
+                elif result.get("magnet_url"):
+                    logger.warning("re-search found no fresh URL, falling back to magnet")
+                    task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+                    if not task_id:
+                        task_id = await _wait_for_magnet_task_id(
+                            result["magnet_url"], known_task_ids, query.message
+                        )
+                    download_method = "magnet"
+                else:
+                    raise torrent_err
         elif source == "rutracker" and topic_id and rutracker_client:
+            # Direct Rutracker search result (not via Jackett) — use rutracker_client
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)
             task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
-        elif result.get("torrent_url") and jackett_client:
-            torrent_bytes = await asyncio.to_thread(jackett_client.download_torrent, result["torrent_url"])
-            temp_path.write_bytes(torrent_bytes)
-            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        elif result.get("magnet_url"):
+            # Fallback: magnet link (no .torrent available)
+            task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+            if not task_id:
+                task_id = await _wait_for_magnet_task_id(
+                    result["magnet_url"], known_task_ids, query.message
+                )
+            download_method = "magnet"
         else:
             await query.edit_message_text("Не удалось скачать торрент: нет доступного источника.")
             return ConversationHandler.END
@@ -2801,10 +3123,12 @@ async def _download_and_add(
                 tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
                 _mark_tracker_processed_if_final(task_id, tracker_result)
             else:
+                await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
                 tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
                 _mark_tracker_processed_if_final(task_id, tracker_result)
         else:
             # magnet path — no torrent file to check
+            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
 
@@ -2842,22 +3166,28 @@ async def _download_and_add(
                     )
 
         added_msg = _task_added_message(
-            "torrent-файл", title=title, task_id=task_id, tracker_result=tracker_result
+            download_method, title=title, task_id=task_id, tracker_result=tracker_result
         )
         suffix = "\n\n🔔 Буду следить за новыми сериями." if subscribe else ""
         success_text = f"{added_msg}{suffix}"
 
         series_query = _extract_series_base_query(title)
+        _card_chat_id = _chat_id_from_query(query)
+        _card_msg_id = _message_id_from_message(query.message) if query.message else None
         if series_query:
             context.user_data["srch_series_query"] = series_query
             await query.edit_message_text(
                 success_text, reply_markup=_search_after_add_keyboard(task_id)
             )
             _register_task_card_from_query(query, task_id)
+            if task_id and _card_chat_id and _card_msg_id:
+                _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
             return SEARCH_RESULTS
 
         await query.edit_message_text(success_text, reply_markup=_task_reply_markup(task_id))
         _register_task_card_from_query(query, task_id)
+        if task_id and _card_chat_id and _card_msg_id:
+            _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
     except (RutrackerError, JackettError, DownloadStationError) as e:
         await query.edit_message_text(f"Ошибка: {e}")
     finally:
@@ -2924,10 +3254,32 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
+        "srch_picker_return_to", "srch_jackett_mode",
     ):
         context.user_data.pop(key, None)
 
     return ConversationHandler.END
+
+
+async def search_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Re-run the most recent search. Triggered from error-message buttons (srch:retry).
+
+    Works both as a ConversationHandler entry_point (conversation already ended)
+    and within active states, so the retry button functions in all situations.
+    """
+    query = update.callback_query
+    await query.answer()
+    search_query = (
+        context.user_data.get("srch_search_query")
+        or context.user_data.get("srch_query", "")
+    ).strip()
+    if not search_query:
+        await query.edit_message_text(
+            "Запрос потерян — начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
+        return ConversationHandler.END
+    return await _run_search(search_query, query.edit_message_text, context)
 
 
 async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2948,6 +3300,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
+        "srch_picker_return_to", "srch_jackett_mode",
     ):
         context.user_data.pop(key, None)
 
@@ -3111,6 +3464,200 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+async def _check_jackett_sub_via_rutracker_direct(
+    app: Application,
+    subs: dict,
+    key: str,
+    sub: dict,
+) -> bool:
+    """Check a Jackett subscription directly via Rutracker when possible.
+
+    When the stored ``topic_url`` is a Rutracker topic URL and ``rutracker_client``
+    is available, uses the lightweight ``get_topic_title`` + ``download_torrent``
+    path instead of a full Jackett search.  This is faster, more precise, and
+    avoids Jackett availability issues for known Rutracker topics.
+
+    Returns True  → subscription handled; caller should skip the Jackett-search path.
+    Returns False → Rutracker unavailable/not configured; caller falls back to Jackett.
+    """
+    topic_url = str(sub.get("topic_url") or "")
+    topic_id = _extract_rutracker_topic_id(topic_url)
+    if not topic_id or not rutracker_client:
+        return False
+
+    chat_id = sub.get("chat_id")
+    now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+
+    try:
+        new_title = await asyncio.to_thread(rutracker_client.get_topic_title, topic_id)
+    except RutrackerTopicUnavailable as e:
+        sub["unavailable_at"] = now_text
+        sub["unavailable_reason"] = str(e)
+        short = _format_sub_title(sub.get("title", "")) or topic_url
+        if chat_id:
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ Подписка больше недоступна на Rutracker.\n\n"
+                        f"{short}\n\n"
+                        "Проверка приостановлена."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🗑️ Удалить подписку",
+                            callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                        )
+                    ]]),
+                )
+            except Exception:
+                logger.warning("Failed to notify chat %s about unavailable Jackett/RT sub", chat_id, exc_info=True)
+        logger.info("Jackett/RT sub topic unavailable: key=%s topic=%s", key, topic_id)
+        return True  # handled — stop checking this subscription
+    except RutrackerError as e:
+        logger.warning("Rutracker direct check failed for sub %s (%s) — falling back to Jackett", key, e)
+        return False  # fall through to Jackett search
+
+    # No new-episode info in title → nothing actionable
+    new_info = _parse_episode_info(new_title)
+    sub["last_check"] = now_text
+    if new_info is None:
+        return True
+
+    new_end, new_total = new_info
+    last_end = int(sub.get("last_episode_end") or 0)
+    if new_end <= last_end:
+        return True  # no progress
+
+    # New episodes detected — download torrent directly from Rutracker.
+    safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
+    temp_path = _temp_path(safe_name)
+    task_id = ""
+    try:
+        torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
+        temp_path.write_bytes(torrent_bytes)
+        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        if chat_id and task_id:
+            _remember_task_owner(task_id, chat_id)
+    except (RutrackerError, DownloadStationError) as e:
+        logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+    is_complete = new_end >= new_total
+    short_q = str(sub.get("query") or sub.get("title") or key)
+    short_q = short_q[:40] + "…" if len(short_q) > 40 else short_q
+    progress = f"\nСерии: {last_end} → {new_end} из {new_total}"
+
+    # Update stored state
+    sub["last_episode_end"] = new_end
+    sub["total_episodes"] = new_total
+    sub["title"] = new_title
+    # Remove subscription only when the season is done AND the torrent was
+    # successfully handed off to Download Station.  If the download failed,
+    # keep the subscription so the next check can retry.
+    if is_complete and task_id:
+        subs.pop(key, None)
+
+    # Build notification
+    if task_id and is_complete:
+        text = (
+            f"🔔 Подписка «{short_q}» — сезон завершён! ✅\n"
+            f"{progress}\n"
+            "Торрент обновлён в Download Station. Подписка снята."
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
+        ]])
+    elif task_id:
+        text = (
+            f"🔔 Подписка «{short_q}» обновилась — задача добавлена!\n"
+            f"\n🔎 {new_title}{progress}"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Статус задачи", callback_data=_task_callback("info", task_id)),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+        ]])
+    else:
+        text = (
+            f"🔔 Подписка «{short_q}» обновилась, но скачать не удалось.\n"
+            f"\n🔎 {new_title}{progress}\n\n"
+            "⚠️ Скачайте вручную."
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 Посмотреть и скачать", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}"),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+        ]])
+
+    if chat_id:
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        except Exception:
+            logger.warning("Failed to notify chat %s for Jackett/RT sub update", chat_id, exc_info=True)
+
+    logger.info(
+        "Jackett/RT sub updated via Rutracker direct: key=%s ep=%s→%s/%s task=%s",
+        key, last_end, new_end, new_total, task_id,
+    )
+    return True
+
+
+async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id: int | None) -> str:
+    """Try to download the subscription update and add it to Download Station.
+
+    Returns the task_id string (may be empty if DS didn't return one immediately).
+    Raises on unrecoverable errors so the caller can fall back to notify-only mode.
+    """
+    title = candidate.title
+    safe_name = _safe_filename(f"{title}.torrent")
+    temp_path = _temp_path(safe_name)
+    task_id = ""
+
+    try:
+        if candidate.torrent_url:
+            try:
+                torrent_bytes = await asyncio.to_thread(
+                    jackett_client.download_torrent, candidate.torrent_url
+                )
+                temp_path.write_bytes(torrent_bytes)
+                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                if chat_id and task_id:
+                    _remember_task_owner(task_id, chat_id)
+                # Add public trackers unless private torrent
+                if not _torrent_file_is_private(temp_path):
+                    await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
+                return task_id
+            except JackettMagnetRedirect as redir:
+                magnet = redir.magnet_url or candidate.magnet_url or ""
+                if not magnet:
+                    raise
+                logger.info("Subscription torrent redirected to magnet, using it directly")
+                task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                if chat_id and task_id:
+                    _remember_task_owner(task_id, chat_id)
+                return task_id
+            except (JackettError, DownloadStationError) as e:
+                logger.warning("Subscription torrent_url download failed (%s), trying magnet", e)
+
+        if candidate.magnet_url:
+            task_id = await asyncio.to_thread(ds_client.create_magnet, candidate.magnet_url)
+            if chat_id and task_id:
+                _remember_task_owner(task_id, chat_id)
+            return task_id
+
+        raise JackettError("Нет torrent_url и magnet_url у кандидата")
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
 async def _check_jackett_subscriptions(app: Application) -> None:
     """Check all Jackett query-based subscriptions for new results."""
     if jackett_client is None:
@@ -3126,11 +3673,30 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
     for key, sub in list(jackett_subs.items()):
         try:
+            # Skip subscriptions that have been marked permanently unavailable.
+            if sub.get("unavailable_at"):
+                continue
+
+            # Fast path: if the topic is on Rutracker, use the direct API instead of
+            # a full Jackett text search (cheaper, more reliable).
+            if await _check_jackett_sub_via_rutracker_direct(app, subs, key, sub):
+                changed = True
+                continue
+
             search_query = sub.get("query", "")
             if not search_query:
                 continue
 
-            new_results = await asyncio.to_thread(jackett_client.search, search_query)
+            # Narrow search to the subscription's tracker if known (faster, less noise).
+            tracker_id = str(sub.get("tracker") or "").strip().lower() or None
+            indexers_filter: list[str] | None = [tracker_id] if tracker_id else None
+
+            new_results = await asyncio.to_thread(
+                jackett_client.search,
+                search_query,
+                indexers=indexers_filter,
+                fetch_limit=JACKETT_FETCH_LIMIT,
+            )
             candidate = select_jackett_subscription_candidate(sub, new_results)
             if candidate is None:
                 sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -3139,26 +3705,59 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
             chat_id = sub.get("chat_id")
             short_q = search_query[:40] + "…" if len(search_query) > 40 else search_query
-
             episode_info = _parse_episode_info(candidate.title)
             progress = f"\nСерии: {episode_info[0]} из {episode_info[1]}" if episode_info else ""
-            text = (
-                f"🔔 Найдено обновление Jackett-подписки «{short_q}»:\n"
-                f"\n🔎 {candidate.title}"
-                f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
-                f"{progress}"
-            )
 
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "🔍 Посмотреть и скачать",
-                    callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
-                ),
-                InlineKeyboardButton(
-                    "🔕 Отписаться",
-                    callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
-                ),
-            ]])
+            # Try to auto-download the update (same as Rutracker subscription behaviour).
+            task_id: str | None = None
+            try:
+                task_id = await _jackett_subscription_auto_download(candidate, chat_id)
+                logger.info(
+                    "Subscription auto-download: key=%s task_id=%s title=%s",
+                    key, task_id, candidate.title,
+                )
+            except Exception as dl_err:
+                logger.warning(
+                    "Subscription auto-download failed for %s: %s — sending notify-only",
+                    key, dl_err,
+                )
+
+            # Build notification text depending on whether auto-download succeeded.
+            if task_id is not None:
+                text = (
+                    f"🔔 Подписка «{short_q}» обновилась — задача добавлена в DS!\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}"
+                )
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔄 Статус задачи",
+                        callback_data=_task_callback("info", task_id),
+                    ),
+                    InlineKeyboardButton(
+                        "🔕 Отписаться",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                    ),
+                ]])
+            else:
+                text = (
+                    f"🔔 Найдено обновление подписки «{short_q}»:\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}"
+                    "\n\n⚠️ Авто-загрузка не удалась — скачайте вручную."
+                )
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔍 Посмотреть и скачать",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
+                    ),
+                    InlineKeyboardButton(
+                        "🔕 Отписаться",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                    ),
+                ]])
 
             sent = not chat_id
             if chat_id:
@@ -3994,6 +4593,18 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await query.answer()
 
+    # Fast path: close (delete) the message — no task_id needed.
+    if (query.data or "").startswith(f"{TASK_CALLBACK_PREFIX}:close"):
+        chat_id = _chat_id_from_query(query)
+        try:
+            if query.message:
+                await query.message.delete()
+        except Exception:
+            logger.debug("Failed to delete task message on close", exc_info=True)
+        if chat_id:
+            asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
+        return
+
     try:
         _, action, task_id = query.data.split(":", 2)
     except ValueError:
@@ -4047,17 +4658,9 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         _forget_task_card_message(chat_id, message_id, task_id)
-        await _safe_edit_callback(query, "🔎 Получаю задачу…")
-        try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
-        except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось получить задачу: {e}")
-            return
-
-        task = _find_task(tasks, task_id)
-        title = task.get("title") if task else task_id
+        # Show confirmation immediately — no network fetch needed.
         await query.edit_message_text(
-            f"Удалить задачу из Download Station?\n\n{title}\nID: {task_id}",
+            f"Удалить задачу из Download Station?\nID: {task_id}",
             reply_markup=_delete_confirm_keyboard(task_id),
         )
         return
@@ -4187,7 +4790,22 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             else:
                 await asyncio.to_thread(ds_client.delete_task, task_id)
                 _forget_task_state([task_id])
-                await query.edit_message_text(f"Задача удалена из Download Station.\nID: {task_id}")
+                scope = _normalize_list_scope(task_id, chat_id)
+                del_chat_id = chat_id
+                del_msg_id = query.message.message_id if query.message else None
+                await query.edit_message_text(
+                    f"🗑 Задача удалена.\nID: {task_id}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "📋 К списку загрузок",
+                            callback_data=_task_callback("list", scope),
+                        )
+                    ]]),
+                )
+                if del_chat_id and del_msg_id:
+                    asyncio.create_task(
+                        _delayed_delete_message(context.bot, del_chat_id, del_msg_id, delay=5.0)
+                    )
                 return
         except DownloadStationError as e:
             await query.edit_message_text(f"Не удалось выполнить действие: {e}")
@@ -4281,6 +4899,7 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not task_id:
             task_id = await _wait_for_magnet_task_id(magnet_uri, known_task_ids, progress_message)
         _remember_task_owner(task_id, update.effective_chat.id if update.effective_chat else None)
+        await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
         tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
         _mark_tracker_processed_if_final(task_id, tracker_result)
     except DownloadStationError as e:
@@ -4302,6 +4921,11 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
         task_id,
         fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
     )
+    if task_id:
+        _pm_chat_id = _chat_id_from_message(progress_message)
+        _pm_msg_id = _message_id_from_message(progress_message)
+        if _pm_chat_id and _pm_msg_id:
+            _start_task_card_refresh(context.application, _pm_chat_id, _pm_msg_id, task_id)
 
 
 async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4413,6 +5037,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             _mark_tracker_processed_if_final(task_id, tracker_result)
         else:
             await _safe_edit_message(progress_message, "➕ Добавляю public-трекеры…")
+            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
 
@@ -4431,6 +5056,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             task_id,
             fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
         )
+        if task_id and progress_message:
+            _hd_chat_id = _chat_id_from_message(progress_message)
+            _hd_msg_id = _message_id_from_message(progress_message)
+            if _hd_chat_id and _hd_msg_id:
+                _start_task_card_refresh(context.application, _hd_chat_id, _hd_msg_id, task_id)
 
     except Exception as e:
         logger.exception("Failed to process torrent")
@@ -4564,11 +5194,14 @@ def main() -> None:
                 pattern=rf"^{SUB_CALLBACK_PREFIX}:jackett_view:",
             ),
             CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+$"),
+            # Re-run the last search from an error message (conversation already ended).
+            CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
         ],
             states={
                 SEARCH_OPTIONS: [
                     CallbackQueryHandler(search_quick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quick$"),
                     CallbackQueryHandler(search_show_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:adv$"),
+                    CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
@@ -4577,6 +5210,7 @@ def main() -> None:
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quality:"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:toggle:"),
                     CallbackQueryHandler(search_do, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:do_search$"),
+                    CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
@@ -4587,8 +5221,11 @@ def main() -> None:
                     CallbackQueryHandler(search_results_page, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:res_page:"),
                     CallbackQueryHandler(search_series_entry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:series_base$"),
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),
+                    CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
+                    CallbackQueryHandler(search_direct_rutracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:direct_rt$"),
+                    # Legacy patterns — delegate to new handlers
                     CallbackQueryHandler(search_expand_jackett, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_jackett$"),
-                    CallbackQueryHandler(search_jackett_start_direct, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jackett_direct$"),
+                    CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jackett_direct$"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     CallbackQueryHandler(movie_new_back, pattern=r"^new:back$"),
                     # New text → treat as a fresh query, restarting the flow.
@@ -4610,6 +5247,7 @@ def main() -> None:
                         search_jackett_do,
                         pattern=rf"^{SEARCH_CALLBACK_PREFIX}:{JACKETT_SELECT_PREFIX}_search$",
                     ),
+                    CallbackQueryHandler(search_jackett_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jk_back$"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
                 ],
@@ -4626,6 +5264,7 @@ def main() -> None:
     )
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageReactionHandler(reaction_easter_egg))
     app.add_error_handler(error_handler)
 
     logger.info(

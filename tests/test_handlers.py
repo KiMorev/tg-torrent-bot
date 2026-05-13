@@ -31,6 +31,8 @@ from bot import (
     TASK_CARD_REFRESH_TASKS,
     _ACTIVE_STATUSES,
     _cancel_task_card_refresh,
+    _check_jackett_sub_via_rutracker_direct,
+    _extract_rutracker_topic_id,
     _is_admin_chat,
     _is_allowed,
     _format_movie_discovery_cache,
@@ -53,6 +55,7 @@ from bot import (
     sub_callback,
     status,
 )
+from rutracker import RutrackerError, RutrackerTopicUnavailable
 from state_store import JsonStateStore
 
 
@@ -988,6 +991,272 @@ class PluralTests(unittest.TestCase):
         self.assertEqual(_plural(20, "запись", "записи", "записей"), "записей")
         self.assertEqual(_plural(111, "запись", "записи", "записей"), "записей")
         self.assertEqual(_plural(156, "запись", "записи", "записей"), "записей")
+
+
+class ExtractRutrackerTopicIdTests(unittest.TestCase):
+    def test_standard_viewtopic_url(self) -> None:
+        url = "https://rutracker.org/forum/viewtopic.php?t=1234567"
+        self.assertEqual(_extract_rutracker_topic_id(url), "1234567")
+
+    def test_rutracker_net_domain(self) -> None:
+        url = "https://rutracker.net/forum/viewtopic.php?t=9876543"
+        self.assertEqual(_extract_rutracker_topic_id(url), "9876543")
+
+    def test_extra_query_params(self) -> None:
+        url = "https://rutracker.org/forum/viewtopic.php?p=999&t=555&sid=abc"
+        self.assertEqual(_extract_rutracker_topic_id(url), "555")
+
+    def test_non_rutracker_url_returns_empty(self) -> None:
+        self.assertEqual(_extract_rutracker_topic_id("https://nnmclub.to/forum/viewtopic.php?t=111"), "")
+
+    def test_empty_url_returns_empty(self) -> None:
+        self.assertEqual(_extract_rutracker_topic_id(""), "")
+
+    def test_url_without_t_param_returns_empty(self) -> None:
+        self.assertEqual(_extract_rutracker_topic_id("https://rutracker.org/forum/index.php"), "")
+
+
+# ---------------------------------------------------------------------------
+# _check_jackett_sub_via_rutracker_direct tests
+# ---------------------------------------------------------------------------
+
+
+class CheckJackettSubViaRutrackerDirectTests(unittest.TestCase):
+    """Unit tests for the Rutracker-direct fast path in Jackett subscription checks."""
+
+    def _make_app(self):
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        return app
+
+    def _make_sub(
+        self,
+        topic_url: str = "https://rutracker.org/forum/viewtopic.php?t=123",
+        last_episode_end: int = 8,
+        total_episodes: int = 10,
+        season: int = 1,
+        chat_id: int = 100,
+    ) -> dict:
+        return {
+            "type": "jackett",
+            "version": 2,
+            "query": "Клиника 1080p",
+            "tracker": "rutracker",
+            "topic_url": topic_url,
+            "title": "Клиника / Scrubs / Сезон: 1 / Серии: 1-8 из 10 [WEB-DL]",
+            "season": season,
+            "last_episode_end": last_episode_end,
+            "total_episodes": total_episodes,
+            "chat_id": chat_id,
+        }
+
+    def test_returns_false_for_non_rutracker_url(self):
+        """Non-Rutracker topic_url → return False (fall through to Jackett)."""
+        sub = self._make_sub(topic_url="https://kinozal.tv/details.php?id=999")
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        result = asyncio.run(
+            _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+        )
+
+        self.assertFalse(result)
+        app.bot.send_message.assert_not_called()
+
+    def test_returns_false_when_rutracker_client_is_none(self):
+        """If rutracker_client is None → return False (Rutracker not configured)."""
+        sub = self._make_sub()
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        with patch.object(bot, "rutracker_client", None):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertFalse(result)
+        app.bot.send_message.assert_not_called()
+
+    def test_returns_true_and_marks_unavailable_on_topic_unavailable(self):
+        """RutrackerTopicUnavailable → marks sub unavailable, returns True, notifies user."""
+        sub = self._make_sub()
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.side_effect = RutrackerTopicUnavailable("deleted")
+
+        with patch.object(bot, "rutracker_client", mock_rt):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        self.assertIn("unavailable_at", sub)
+        self.assertIn("unavailable_reason", sub)
+        app.bot.send_message.assert_awaited_once()
+        sent_text = app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("недоступна", sent_text)
+
+    def test_returns_false_on_rutracker_error(self):
+        """RutrackerError (network/auth) → returns False to fall through to Jackett."""
+        sub = self._make_sub()
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.side_effect = RutrackerError("timeout")
+
+        with patch.object(bot, "rutracker_client", mock_rt):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertFalse(result)
+        app.bot.send_message.assert_not_called()
+
+    def test_returns_true_with_no_download_when_no_episode_progress(self):
+        """Same or fewer episodes → return True, no download, no notification."""
+        sub = self._make_sub(last_episode_end=8)
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        # Title with same episode count as stored
+        mock_rt.get_topic_title.return_value = (
+            "Клиника / Scrubs / Сезон: 1 / Серии: 1-8 из 10 [WEB-DL]"
+        )
+
+        with patch.object(bot, "rutracker_client", mock_rt):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        app.bot.send_message.assert_not_called()
+        # last_check should have been updated
+        self.assertIn("last_check", sub)
+
+    def test_returns_true_and_notifies_on_new_episodes(self):
+        """New episode count → download attempted, notification sent, sub state updated."""
+        sub = self._make_sub(last_episode_end=8, total_episodes=10)
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = (
+            "Клиника / Scrubs / Сезон: 1 / Серии: 1-9 из 10 [WEB-DL]"
+        )
+        mock_rt.download_torrent.return_value = b"fake-torrent-bytes"
+
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "new_task_id"
+
+        with (
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_remember_task_owner"),
+        ):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        # Sub state should be updated
+        self.assertEqual(sub["last_episode_end"], 9)
+        self.assertEqual(sub["total_episodes"], 10)
+        # Notification sent
+        app.bot.send_message.assert_awaited_once()
+        sent_text = app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("обновилась", sent_text)
+
+    def test_season_complete_removes_subscription(self):
+        """When last episode equals total, subscription is removed from subs dict."""
+        sub = self._make_sub(last_episode_end=9, total_episodes=10)
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = (
+            "Клиника / Scrubs / Сезон: 1 / Серии: 1-10 из 10 [WEB-DL]"
+        )
+        mock_rt.download_torrent.return_value = b"fake-torrent-bytes"
+
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "final_task_id"
+
+        with (
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_remember_task_owner"),
+        ):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        # Subscription should be removed once season is complete
+        self.assertNotIn("jackett:aaa", subs)
+        # Completion notification sent
+        app.bot.send_message.assert_awaited_once()
+        sent_text = app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("завершён", sent_text)
+
+    def test_season_complete_keeps_subscription_if_download_failed(self):
+        """Season complete but DS error → subscription is NOT removed (retry next check)."""
+        sub = self._make_sub(last_episode_end=9, total_episodes=10)
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = (
+            "Клиника / Scrubs / Сезон: 1 / Серии: 1-10 из 10 [WEB-DL]"
+        )
+        mock_rt.download_torrent.side_effect = RutrackerError("connection failed")
+
+        with (
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", MagicMock()),
+        ):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        # Download failed → subscription must be kept for retry
+        self.assertIn("jackett:aaa", subs)
+        # Notification about failure should still be sent
+        app.bot.send_message.assert_awaited_once()
+        sent_text = app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("вручную", sent_text)
+
+    def test_no_notification_for_missing_chat_id(self):
+        """If sub has no chat_id, download still proceeds but send_message is skipped."""
+        sub = self._make_sub(last_episode_end=8, chat_id=None)
+        sub.pop("chat_id", None)
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = (
+            "Клиника / Scrubs / Сезон: 1 / Серии: 1-9 из 10 [WEB-DL]"
+        )
+        mock_rt.download_torrent.return_value = b"bytes"
+
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "t1"
+
+        with (
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_remember_task_owner"),
+        ):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        app.bot.send_message.assert_not_called()
 
 
 if __name__ == "__main__":

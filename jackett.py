@@ -41,6 +41,18 @@ class JackettError(RuntimeError):
     pass
 
 
+class JackettMagnetRedirect(JackettError):
+    """Raised when Jackett's download proxy redirects to a magnet: URI.
+
+    This means the tracker has no downloadable .torrent file for this result
+    and only provides a magnet link.  The caller should use ``magnet_url``
+    from the search result instead.
+    """
+    def __init__(self, magnet_url: str) -> None:
+        super().__init__(f"Torrent не доступен — трекер редиректит на magnet ({magnet_url[:80]})")
+        self.magnet_url = magnet_url
+
+
 @dataclass
 class JackettResult:
     title: str
@@ -253,13 +265,60 @@ class JackettClient:
 
     @_synchronized
     def download_torrent(self, torrent_url: str) -> bytes:
-        """Download a .torrent file via Jackett's proxy URL."""
+        """Download a .torrent file via Jackett's proxy URL.
+
+        Raises JackettMagnetRedirect when Jackett's proxy redirects to a
+        magnet: URI (tracker has no .torrent file, only a magnet link).
+        Raises JackettError for all other failures.
+        """
         try:
-            resp = self._session.get(torrent_url, timeout=30)
+            # Disable auto-redirect so we can intercept magnet: redirects
+            # before requests raises InvalidSchema trying to follow them.
+            resp = self._session.get(torrent_url, timeout=30, allow_redirects=False)
+
+            # Follow HTTP/HTTPS redirects manually; stop at magnet:
+            visited: set[str] = {torrent_url}
+            while resp.is_redirect:
+                location = resp.headers.get("Location", "")
+                if location.startswith("magnet:"):
+                    raise JackettMagnetRedirect(location)
+                if not location or location in visited or len(visited) > 5:
+                    break  # guard against redirect loops
+                visited.add(location)
+                resp = self._session.get(location, timeout=30, allow_redirects=False)
+
             resp.raise_for_status()
+
+        except JackettMagnetRedirect:
+            raise
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            body_hint = ""
+            if e.response is not None:
+                raw = e.response.text[:300].strip().replace("\n", " ")
+                body_hint = f" | body: {raw!r}"
+            sanitized = _sanitize_error_text(e, self._api_key)
+            logger.debug("download_torrent HTTP %s%s", status, body_hint)
+            raise JackettError(
+                f"Не удалось скачать torrent через Jackett: HTTP {status} — {sanitized}"
+            ) from e
         except requests.RequestException as e:
-            raise JackettError(f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}") from e
+            raise JackettError(
+                f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}"
+            ) from e
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/html" in content_type:
+            html_hint = resp.text[:200].strip().replace("\n", " ")
+            logger.debug("download_torrent returned HTML (session issue?): %r", html_hint)
+            raise JackettError(
+                "Jackett вернул HTML вместо torrent-файла — вероятно, сессия трекера устарела."
+            )
         if len(resp.content) < 20 or not resp.content.startswith(b"d"):
+            logger.debug(
+                "download_torrent: unexpected content type=%r, first bytes=%r",
+                content_type, resp.content[:40],
+            )
             raise JackettError("Полученный файл не является torrent-файлом.")
         return resp.content
 
@@ -358,8 +417,16 @@ class JackettClient:
                 topic_url = (item.get("Details") or item.get("Guid") or "").strip()
                 if not topic_url.startswith("http"):
                     topic_url = ""
-                torrent_url = (item.get("Link") or "").strip() or None
-                magnet_url = (item.get("MagnetUri") or "").strip() or None
+                raw_link = (item.get("Link") or "").strip()
+                raw_magnet = (item.get("MagnetUri") or "").strip()
+                # Guard: some indexers incorrectly put magnet URI in Link.
+                # In that case treat it as magnet, not torrent_url.
+                if raw_link.startswith("magnet:"):
+                    magnet_url: str | None = raw_link or raw_magnet or None
+                    torrent_url: str | None = None
+                else:
+                    torrent_url = raw_link or None
+                    magnet_url = raw_magnet or None
                 published_at = str(item.get("PublishDate") or item.get("FirstSeen") or "").strip()
 
                 results.append(JackettResult(
@@ -426,11 +493,12 @@ class JackettClient:
                 if not topic_url.startswith("http"):
                     topic_url = ""
 
-                torrent_url = (item.findtext("link") or "").strip() or None
                 published_at = (item.findtext("pubDate") or "").strip()
 
                 # torznab:attr elements — namespace-agnostic
                 attrs: dict[str, str] = {}
+                enclosure_url: str = ""
+                enclosure_type: str = ""
                 for child in item:
                     local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                     if local == "attr":
@@ -438,13 +506,36 @@ class JackettClient:
                         value = child.get("value", "")
                         if name and value:
                             attrs[name] = value
+                    elif local == "enclosure":
+                        enclosure_url = child.get("url", "").strip()
+                        enclosure_type = child.get("type", "").strip()
 
                 try:
                     seeders = int(attrs.get("seeders", "0") or "0")
                 except ValueError:
                     seeders = 0
 
-                magnet_url = attrs.get("magneturl") or None
+                # Determine torrent_url and magnet_url from Torznab enclosure and attrs.
+                # Priority: <enclosure type="application/x-bittorrent"> → .torrent URL
+                #           <enclosure type="...magnet..."> or magneturl attr → magnet URL
+                # <link> in RSS is the tracker page URL, not the download URL.
+                attr_magnet = attrs.get("magneturl") or None
+                if enclosure_type and "magnet" in enclosure_type:
+                    torrent_url = None
+                    magnet_url = enclosure_url or attr_magnet
+                elif enclosure_url:
+                    torrent_url = enclosure_url
+                    magnet_url = attr_magnet
+                else:
+                    # Fallback to <link> if no enclosure present (non-standard response)
+                    fallback_link = (item.findtext("link") or "").strip()
+                    if fallback_link.startswith("magnet:"):
+                        torrent_url = None
+                        magnet_url = fallback_link or attr_magnet
+                    else:
+                        torrent_url = fallback_link or None
+                        magnet_url = attr_magnet
+
                 tracker = attrs.get("tracker") or attrs.get("indexer") or attrs.get("trackerId") or ""
 
                 results.append(JackettResult(
