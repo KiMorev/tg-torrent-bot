@@ -224,11 +224,13 @@ class KinopoiskClient:
         # Throttle: every individual HTTP request gets its own mandatory pause
         # so bursting N cards at once never triggers the 429 rate limit.
         time.sleep(_KP_REQUEST_INTERVAL)
-        query = f"{keyword} {year}" if year else keyword
+        # Do not append year to the keyword — the API does a full-text match and
+        # adding a year number often returns zero results (e.g. "Буратино 2026").
+        # Year filtering is already applied client-side below.
         try:
             resp = self._session.get(
                 f"{_API_BASE}/v2.1/films/search-by-keyword",
-                params={"keyword": query, "page": 1},
+                params={"keyword": keyword, "page": 1},
                 timeout=10,
             )
             resp.raise_for_status()
@@ -245,7 +247,10 @@ class KinopoiskClient:
             logger.warning("KP unexpected response for %r: %r", keyword, data)
             return None
 
-        logger.debug("KP search %r → %d results", query, len(films))
+        logger.debug("KP search %r (year filter=%s) → %d results", keyword, year, len(films))
+
+        exact_match: KinopoiskMovieMatch | None = None
+        close_match: KinopoiskMovieMatch | None = None
 
         for item in films[:10]:
             if not isinstance(item, dict):
@@ -290,7 +295,7 @@ class KinopoiskClient:
             except (TypeError, ValueError):
                 kp_id = 0
 
-            match = KinopoiskMovieMatch(
+            candidate = KinopoiskMovieMatch(
                 kp_id=kp_id,
                 title_ru=str(item.get("nameRu") or "").strip(),
                 title_en=str(item.get("nameEn") or "").strip(),
@@ -299,12 +304,33 @@ class KinopoiskClient:
                 rating=rating,
                 genres=genres,
             )
-            if match.kp_id and match.title:
-                logger.debug(
-                    "KP match %r → %s (id=%s year=%s rating=%s)",
-                    keyword, match.title, match.kp_id, match.year, match.rating,
-                )
-                return match
+            if not (candidate.kp_id and candidate.title):
+                continue
+
+            logger.debug(
+                "KP candidate %r → %s (id=%s year=%s rating=%s)",
+                keyword, candidate.title, candidate.kp_id, candidate.year, candidate.rating,
+            )
+            # Prefer exact year match; keep ±1 as fallback for festival-premiere offset.
+            if year and item_year == year:
+                if exact_match is None:
+                    exact_match = candidate
+            else:
+                if close_match is None:
+                    close_match = candidate
+
+            # Stop early once we have an exact match — no need to scan further.
+            if exact_match is not None:
+                break
+
+        result = exact_match or close_match
+        if result:
+            logger.debug(
+                "KP match %r → %s (id=%s year=%s rating=%s%s)",
+                keyword, result.title, result.kp_id, result.year, result.rating,
+                " [exact year]" if result is exact_match else " [±1 year]",
+            )
+            return result
 
         logger.info("KP no match for %r (year=%s, %d films checked)", keyword, year, len(films[:10]))
         return None

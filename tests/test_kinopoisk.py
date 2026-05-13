@@ -190,6 +190,44 @@ class SearchMovieAltTitleTests(unittest.TestCase):
 
         self.assertIsNone(result, "Entry without year must be skipped when year is known")
 
+    @patch("kinopoisk.time.sleep")
+    def test_exact_year_preferred_over_close_year(self, _sleep) -> None:
+        """When API returns both a ±1 and an exact-year match, the exact one wins."""
+
+        def _film(name_ru, film_id, year):
+            return {"filmId": film_id, "nameRu": name_ru, "nameEn": "", "type": "FILM",
+                    "year": str(year), "rating": "7.5", "genres": []}
+
+        def fake_get(url, params=None, timeout=None):
+            return FakeResponse({"films": [
+                _film("Буратино (старый)", 10, 2025),
+                _film("Буратино (новый)", 20, 2026),
+            ]})
+
+        client = self._make_client(fake_get)
+        result = client.search_movie("Буратино", year=2026)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.kp_id, 20, "Exact-year entry must be preferred over ±1 entry")
+        self.assertEqual(result.year, 2026)
+
+    @patch("kinopoisk.time.sleep")
+    def test_close_year_used_as_fallback_when_no_exact_match(self, _sleep) -> None:
+        """±1 match is accepted when there is no exact-year result."""
+
+        def fake_get(url, params=None, timeout=None):
+            return FakeResponse({"films": [
+                {"filmId": 99, "nameRu": "Фильм Фест", "nameEn": "", "type": "FILM",
+                 "year": "2025", "rating": "7.5", "genres": []},
+            ]})
+
+        client = self._make_client(fake_get)
+        result = client.search_movie("Фильм Фест", year=2026)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.kp_id, 99)
+        self.assertEqual(result.year, 2025)
+
 
 if __name__ == "__main__":
     unittest.main()
