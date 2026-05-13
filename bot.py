@@ -250,6 +250,12 @@ PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
+# Seconds to wait after DS task creation before injecting public trackers.
+# DS may not have fully initialised the task metadata immediately after create_torrent_file /
+# create_magnet returns, so attempting tracker injection at t=0 often results in
+# "добавление не подтвердилось".  The background monitor never needs this delay because
+# tasks have been running for at least one check interval by the time it processes them.
+_TRACKER_INJECT_INITIAL_DELAY = 3.0
 # (chat_id, message_id) → running refresh task for that task card
 TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
 # task_id → task-card messages that can be removed after a final notification
@@ -3068,10 +3074,12 @@ async def _download_and_add(
                 tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
                 _mark_tracker_processed_if_final(task_id, tracker_result)
             else:
+                await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
                 tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
                 _mark_tracker_processed_if_final(task_id, tracker_result)
         else:
             # magnet path — no torrent file to check
+            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
 
@@ -4842,6 +4850,7 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not task_id:
             task_id = await _wait_for_magnet_task_id(magnet_uri, known_task_ids, progress_message)
         _remember_task_owner(task_id, update.effective_chat.id if update.effective_chat else None)
+        await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
         tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
         _mark_tracker_processed_if_final(task_id, tracker_result)
     except DownloadStationError as e:
@@ -4979,6 +4988,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             _mark_tracker_processed_if_final(task_id, tracker_result)
         else:
             await _safe_edit_message(progress_message, "➕ Добавляю public-трекеры…")
+            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
 
