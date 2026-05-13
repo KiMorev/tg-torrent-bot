@@ -2246,6 +2246,56 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     return SEARCH_RESULTS
 
 
+async def _refresh_jackett_torrent_url(
+    jackett_client,
+    result: dict,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> str | None:
+    """Re-run Jackett search to obtain a fresh torrent_url for the given result.
+
+    Used when the cached torrent_url returns 404 (Jackett proxy token may have
+    expired or the tracker session was refreshed).  Matches fresh results first
+    by topic URL, then by title + tracker + size.
+
+    Returns a fresh torrent_url string, or None if the result could not be found.
+    """
+    query = (
+        context.user_data.get("srch_search_query")
+        or context.user_data.get("srch_query", "")
+    )
+    if not query:
+        logger.debug("_refresh_jackett_torrent_url: no query in user_data, skipping")
+        return None
+
+    indexers = list(context.user_data.get("srch_jackett_selected") or [])
+    topic_url = result.get("url", "")
+    tracker_name = result.get("tracker_name") or result.get("category", "")
+    title = result.get("title", "")
+    size = result.get("size", "")
+
+    try:
+        fresh = await asyncio.to_thread(jackett_client.search, query, indexers or None)
+    except JackettError as e:
+        logger.warning("_refresh_jackett_torrent_url: re-search failed: %s", e)
+        return None
+
+    # Primary match: same topic URL (unique per tracker post)
+    if topic_url:
+        for r in fresh:
+            if r.topic_url == topic_url and r.torrent_url:
+                logger.debug("_refresh_jackett_torrent_url: matched by topic_url")
+                return r.torrent_url
+
+    # Fallback match: title + tracker + size
+    for r in fresh:
+        if r.title == title and r.tracker == tracker_name and r.size == size and r.torrent_url:
+            logger.debug("_refresh_jackett_torrent_url: matched by title+tracker+size")
+            return r.torrent_url
+
+    logger.debug("_refresh_jackett_torrent_url: no matching result found in %d fresh results", len(fresh))
+    return None
+
+
 async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query: str) -> int:
     """Core search logic shared between callback and text-message entry points.
 
@@ -2907,13 +2957,29 @@ async def _download_and_add(
                 temp_path.write_bytes(torrent_bytes)
                 task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
             except JackettError as torrent_err:
-                # .torrent download failed (e.g. 404 / expired session) — try magnet fallback
-                if result.get("magnet_url"):
-                    logger.warning("torrent_url download failed (%s), falling back to magnet", torrent_err)
+                # .torrent download failed (e.g. 404 / expired Jackett proxy token).
+                # Re-search to get a fresh torrent_url, then retry once.
+                logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
+                await query.edit_message_text("⏳ Обновляю раздачи, повторяю попытку…")
+                fresh_url = await _refresh_jackett_torrent_url(jackett_client, result, context)
+                if fresh_url:
+                    try:
+                        torrent_bytes = await asyncio.to_thread(jackett_client.download_torrent, fresh_url)
+                        temp_path.write_bytes(torrent_bytes)
+                        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                    except JackettError as retry_err:
+                        logger.warning("retry torrent download also failed (%s), trying magnet", retry_err)
+                        if result.get("magnet_url"):
+                            task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+                            download_method = "magnet"
+                        else:
+                            raise retry_err
+                elif result.get("magnet_url"):
+                    logger.warning("re-search found no fresh URL, falling back to magnet")
                     task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
                     download_method = "magnet"
                 else:
-                    raise
+                    raise torrent_err
         elif source == "rutracker" and topic_id and rutracker_client:
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)

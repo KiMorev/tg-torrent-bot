@@ -257,8 +257,16 @@ class JackettClient:
         try:
             resp = self._session.get(torrent_url, timeout=30)
             resp.raise_for_status()
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            sanitized = _sanitize_error_text(e, self._api_key)
+            raise JackettError(
+                f"Не удалось скачать torrent через Jackett: HTTP {status} — {sanitized}"
+            ) from e
         except requests.RequestException as e:
-            raise JackettError(f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}") from e
+            raise JackettError(
+                f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}"
+            ) from e
         if len(resp.content) < 20 or not resp.content.startswith(b"d"):
             raise JackettError("Полученный файл не является torrent-файлом.")
         return resp.content
