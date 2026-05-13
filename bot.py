@@ -4283,11 +4283,14 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Fast path: close (delete) the message — no task_id needed.
     if (query.data or "").startswith(f"{TASK_CALLBACK_PREFIX}:close"):
+        chat_id = _chat_id_from_query(query)
         try:
             if query.message:
                 await query.message.delete()
         except Exception:
             logger.debug("Failed to delete task message on close", exc_info=True)
+        if chat_id:
+            asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
         return
 
     try:
