@@ -1202,6 +1202,34 @@ class CheckJackettSubViaRutrackerDirectTests(unittest.TestCase):
         sent_text = app.bot.send_message.call_args.kwargs["text"]
         self.assertIn("завершён", sent_text)
 
+    def test_season_complete_keeps_subscription_if_download_failed(self):
+        """Season complete but DS error → subscription is NOT removed (retry next check)."""
+        sub = self._make_sub(last_episode_end=9, total_episodes=10)
+        subs = {"jackett:aaa": sub}
+        app = self._make_app()
+
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = (
+            "Клиника / Scrubs / Сезон: 1 / Серии: 1-10 из 10 [WEB-DL]"
+        )
+        mock_rt.download_torrent.side_effect = RutrackerError("connection failed")
+
+        with (
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", MagicMock()),
+        ):
+            result = asyncio.run(
+                _check_jackett_sub_via_rutracker_direct(app, subs, "jackett:aaa", sub)
+            )
+
+        self.assertTrue(result)
+        # Download failed → subscription must be kept for retry
+        self.assertIn("jackett:aaa", subs)
+        # Notification about failure should still be sent
+        app.bot.send_message.assert_awaited_once()
+        sent_text = app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("вручную", sent_text)
+
     def test_no_notification_for_missing_chat_id(self):
         """If sub has no chat_id, download still proceeds but send_message is skipped."""
         sub = self._make_sub(last_episode_end=8, chat_id=None)

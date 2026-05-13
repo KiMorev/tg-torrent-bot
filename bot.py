@@ -3500,7 +3500,10 @@ async def _check_jackett_sub_via_rutracker_direct(
     sub["last_episode_end"] = new_end
     sub["total_episodes"] = new_total
     sub["title"] = new_title
-    if is_complete:
+    # Remove subscription only when the season is done AND the torrent was
+    # successfully handed off to Download Station.  If the download failed,
+    # keep the subscription so the next check can retry.
+    if is_complete and task_id:
         subs.pop(key, None)
 
     # Build notification
