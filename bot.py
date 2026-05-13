@@ -2902,9 +2902,18 @@ async def _download_and_add(
     try:
         if result.get("torrent_url") and jackett_client:
             # Jackett result: prefer .torrent file over magnet
-            torrent_bytes = await asyncio.to_thread(jackett_client.download_torrent, result["torrent_url"])
-            temp_path.write_bytes(torrent_bytes)
-            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            try:
+                torrent_bytes = await asyncio.to_thread(jackett_client.download_torrent, result["torrent_url"])
+                temp_path.write_bytes(torrent_bytes)
+                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            except JackettError as torrent_err:
+                # .torrent download failed (e.g. 404 / expired session) — try magnet fallback
+                if result.get("magnet_url"):
+                    logger.warning("torrent_url download failed (%s), falling back to magnet", torrent_err)
+                    task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+                    download_method = "magnet"
+                else:
+                    raise
         elif source == "rutracker" and topic_id and rutracker_client:
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)
