@@ -364,7 +364,7 @@ def tracker_selection_label(indexers: list[dict], selected_ids: set[str]) -> str
 
 def _search_options_keyboard(tracker_label: str = "") -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("🟢 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick")],
+        [InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick", style="success")],
         [InlineKeyboardButton("⚙️ Доп. параметры", callback_data=f"{SEARCH_CALLBACK_PREFIX}:adv")],
     ]
     if tracker_label:
@@ -403,7 +403,7 @@ def _search_advanced_keyboard(settings: dict, tracker_label: str = "") -> Inline
             f"🌐 Трекер: {tracker_label}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:pick_tracker:advanced",
         )])
-    rows.append([InlineKeyboardButton("🟢 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:do_search")])
+    rows.append([InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:do_search", style="success")])
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")])
     return InlineKeyboardMarkup(rows)
 

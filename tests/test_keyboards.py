@@ -213,8 +213,13 @@ class SearchOptionsKeyboardTests(unittest.TestCase):
     def test_search_and_advanced_always_present(self) -> None:
         keyboard = _search_options_keyboard("Rutracker")
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
-        self.assertIn("🟢 Искать", labels)
+        self.assertIn("🔍 Искать", labels)
         self.assertIn("⚙️ Доп. параметры", labels)
+
+    def test_search_button_has_success_style(self) -> None:
+        keyboard = _search_options_keyboard()
+        buttons = {b.text: b for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🔍 Искать"].style, "success")
 
 
 class SearchAdvancedKeyboardTests(unittest.TestCase):
