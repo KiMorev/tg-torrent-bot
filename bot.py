@@ -2969,6 +2969,11 @@ async def _download_and_add(
             # On failure, re-search to get a fresh proxy URL (Jackett re-authenticates
             # with the tracker as part of the search), then retry once before
             # falling back to magnet.
+            from jackett import _sanitize_error_text as _jk_sanitize
+            logger.info(
+                "jackett download attempt: %s",
+                _jk_sanitize(result["torrent_url"], jackett_client._api_key),
+            )
             try:
                 torrent_bytes = await asyncio.to_thread(
                     jackett_client.download_torrent, result["torrent_url"]
