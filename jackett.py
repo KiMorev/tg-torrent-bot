@@ -41,6 +41,18 @@ class JackettError(RuntimeError):
     pass
 
 
+class JackettMagnetRedirect(JackettError):
+    """Raised when Jackett's download proxy redirects to a magnet: URI.
+
+    This means the tracker has no downloadable .torrent file for this result
+    and only provides a magnet link.  The caller should use ``magnet_url``
+    from the search result instead.
+    """
+    def __init__(self, magnet_url: str) -> None:
+        super().__init__(f"Torrent не доступен — трекер редиректит на magnet ({magnet_url[:80]})")
+        self.magnet_url = magnet_url
+
+
 @dataclass
 class JackettResult:
     title: str
@@ -253,13 +265,34 @@ class JackettClient:
 
     @_synchronized
     def download_torrent(self, torrent_url: str) -> bytes:
-        """Download a .torrent file via Jackett's proxy URL."""
+        """Download a .torrent file via Jackett's proxy URL.
+
+        Raises JackettMagnetRedirect when Jackett's proxy redirects to a
+        magnet: URI (tracker has no .torrent file, only a magnet link).
+        Raises JackettError for all other failures.
+        """
         try:
-            resp = self._session.get(torrent_url, timeout=30)
+            # Disable auto-redirect so we can intercept magnet: redirects
+            # before requests raises InvalidSchema trying to follow them.
+            resp = self._session.get(torrent_url, timeout=30, allow_redirects=False)
+
+            # Follow HTTP/HTTPS redirects manually; stop at magnet:
+            visited: set[str] = {torrent_url}
+            while resp.is_redirect:
+                location = resp.headers.get("Location", "")
+                if location.startswith("magnet:"):
+                    raise JackettMagnetRedirect(location)
+                if not location or location in visited or len(visited) > 5:
+                    break  # guard against redirect loops
+                visited.add(location)
+                resp = self._session.get(location, timeout=30, allow_redirects=False)
+
             resp.raise_for_status()
+
+        except JackettMagnetRedirect:
+            raise
         except requests.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
-            # Log first 300 chars of body to diagnose: login page? JSON error?
             body_hint = ""
             if e.response is not None:
                 raw = e.response.text[:300].strip().replace("\n", " ")
@@ -273,9 +306,9 @@ class JackettClient:
             raise JackettError(
                 f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}"
             ) from e
+
         content_type = resp.headers.get("Content-Type", "")
         if "text/html" in content_type:
-            # Jackett returned a login/error page instead of the torrent
             html_hint = resp.text[:200].strip().replace("\n", " ")
             logger.debug("download_torrent returned HTML (session issue?): %r", html_hint)
             raise JackettError(

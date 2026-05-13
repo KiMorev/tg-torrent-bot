@@ -88,7 +88,7 @@ from keyboards import (
     _task_reply_markup,
     _tasks_keyboard,
 )
-from jackett import JackettError, JackettResult
+from jackett import JackettError, JackettMagnetRedirect, JackettResult
 from jackett_subscriptions import (
     JACKETT_SUBSCRIPTION_SCHEMA,
     apply_jackett_subscription_match,
@@ -2980,6 +2980,16 @@ async def _download_and_add(
                 )
                 temp_path.write_bytes(torrent_bytes)
                 task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            except JackettMagnetRedirect as magnet_redir:
+                # Tracker has no .torrent — its download URL redirects to magnet.
+                # Use the intercepted magnet URL directly (faster than result["magnet_url"]
+                # which may differ slightly, but also fall back to it if empty).
+                magnet = magnet_redir.magnet_url or result.get("magnet_url", "")
+                if not magnet:
+                    raise JackettError("Torrent-файл недоступен и magnet-ссылка отсутствует.") from magnet_redir
+                logger.info("Jackett redirected to magnet — using it directly")
+                task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                download_method = "magnet"
             except JackettError as torrent_err:
                 logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
                 await query.edit_message_text("⏳ Обновляю раздачи, повторяю попытку…")
