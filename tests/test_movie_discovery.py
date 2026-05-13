@@ -390,6 +390,75 @@ class BuildCardsEnricherTests(unittest.TestCase):
         self.assertGreater(score_good, score_bad)
 
 
+class CardScoringTests(unittest.TestCase):
+    """Unit tests for _compute_card_score behaviour."""
+
+    def _make_card(self, *, rating=None, year=2026, seeders=100, quality="1080p", title="Film WEB-DL 1080p") -> dict:
+        from movie_discovery import _finalize_card
+        card = {
+            "title": "Film",
+            "year": year,
+            "releases": [{
+                "title": title,
+                "score": 300,
+                "quality": quality,
+                "seeders": seeders,
+                "tracker": "rutracker",
+                "url": "https://rutracker.org/1",
+                "size_gb": 5.0,
+                "size": 5 * 1024 ** 3,
+            }],
+        }
+        if rating is not None:
+            card["rating"] = rating
+        _finalize_card(card, set())
+        return card
+
+    def test_rated_7_0_outscores_unrated(self) -> None:
+        """A film with rating 7.0 must rank above an unrated film at equal tech/pop."""
+        from movie_discovery import _compute_card_score
+        rated = self._make_card(rating=7.0)
+        rated["rating"] = 7.0
+        unrated = self._make_card()  # no rating → neutral 0.35
+        self.assertGreater(
+            _compute_card_score(rated, 2026),
+            _compute_card_score(unrated, 2026),
+        )
+
+    def test_unrated_conservative_neutral_is_035(self) -> None:
+        """Neutral rating_score for unknown films must be exactly 0.35."""
+        from movie_discovery import _compute_card_score, _WEIGHT_RATING
+        # Build two identical cards; one rated to the 0.35-equivalent, one unrated
+        card = self._make_card()
+        score_unrated = _compute_card_score(card, 2026)
+        # Replace rating with the equivalent of 0.35 * 4.5 + 5.0 = 6.575
+        card["rating"] = 6.575
+        score_neutral_equiv = _compute_card_score(card, 2026)
+        self.assertAlmostEqual(score_unrated, score_neutral_equiv, places=2)
+
+    def test_no_new_bonus_in_score(self) -> None:
+        """is_new flag must not affect the final score (new_bonus removed)."""
+        from movie_discovery import _compute_card_score
+        card_new = self._make_card()
+        card_new["is_new"] = True
+        card_old = self._make_card()
+        card_old["is_new"] = False
+        self.assertEqual(
+            _compute_card_score(card_new, 2026),
+            _compute_card_score(card_old, 2026),
+        )
+
+    def test_score_bounded_0_to_1(self) -> None:
+        """Score must stay within [0, 1] for any realistic input."""
+        from movie_discovery import _compute_card_score
+        perfect = self._make_card(rating=9.5, seeders=500, quality="2160p", title="Film BDRemux 2160p")
+        perfect["rating"] = 9.5
+        worst = self._make_card(rating=5.0, seeders=0, quality="720p", title="Film HDRip 720p")
+        worst["rating"] = 5.0
+        self.assertLessEqual(_compute_card_score(perfect, 2026), 1.0)
+        self.assertGreaterEqual(_compute_card_score(worst, 2026), 0.0)
+
+
 class PruneKpCacheTests(unittest.TestCase):
     def _now(self) -> datetime:
         return datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)

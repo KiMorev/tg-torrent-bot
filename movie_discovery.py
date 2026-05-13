@@ -365,19 +365,21 @@ def prune_seen_fingerprints(
 
 
 def _compute_card_score(card: dict, current_year: int) -> float:
-    """Return a normalised [0, ~1.1] relevance score for a card.
+    """Return a normalised [0, 1] relevance score for a card.
 
     Weights: KP rating 35 %, recency 20 %, popularity 20 %, tech quality 25 %.
-    A small novelty bonus (+0.08) is added for cards not seen before.
+    Cards without a KP rating get a conservative neutral of 0.35 (~6.6 KP equivalent)
+    so they don't silently outrank known rated films.
     """
     best_release = card["releases"][0] if card.get("releases") else {}
 
-    # Rating [0, 1]: maps KP range [5.0, 9.5] → [0, 1]; unknown → neutral 0.5
+    # Rating [0, 1]: maps KP range [5.0, 9.5] → [0, 1]; unknown → conservative 0.35 (~6.6 KP)
+    # Using 0.35 (not 0.5) so unrated cards don't silently outrank rated ones.
     rating = card.get("rating")
     if rating is not None:
         rating_score = max(0.0, min((float(rating) - 5.0) / 4.5, 1.0))
     else:
-        rating_score = 0.5
+        rating_score = 0.35
 
     # Recency: current year = 1.0, previous year = 0.65
     year = card.get("year") or 0
@@ -396,14 +398,11 @@ def _compute_card_score(card: dict, current_year: int) -> float:
     )
     tech_score = q_score * 0.6 + s_score * 0.4
 
-    new_bonus = 0.08 if card.get("is_new") else 0.0
-
     return round(
         rating_score  * _WEIGHT_RATING
         + year_score  * _WEIGHT_RECENCY
         + pop_score   * _WEIGHT_POPULARITY
-        + tech_score  * _WEIGHT_TECH
-        + new_bonus,
+        + tech_score  * _WEIGHT_TECH,
         4,
     )
 

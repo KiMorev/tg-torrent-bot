@@ -194,8 +194,6 @@ class JsonStateStore:
 
             if isinstance(value, dict):
                 status = str(value.get("status", ""))
-                if not status:
-                    continue
                 sent = [str(chat_id) for chat_id in value.get("sent", []) if chat_id]
                 raw_failures = value.get("failures", {})
                 failures = {}
@@ -205,11 +203,16 @@ class JsonStateStore:
                             failures[str(chat_id)] = max(0, int(count))
                         except (TypeError, ValueError):
                             continue
-                tasks[str(task_id)] = {
-                    "status": status,
-                    "sent": sent,
-                    "failures": failures,
-                }
+                subscribers = [
+                    str(s) for s in value.get("subscribers", []) if s
+                ]
+                # Skip entries that carry no useful state at all.
+                if not status and not subscribers:
+                    continue
+                entry: dict = {"status": status, "sent": sent, "failures": failures}
+                if subscribers:
+                    entry["subscribers"] = subscribers
+                tasks[str(task_id)] = entry
             else:
                 tasks[str(task_id)] = str(value)
 

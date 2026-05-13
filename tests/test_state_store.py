@@ -184,5 +184,38 @@ class StateStoreTests(unittest.TestCase):
         )
 
 
+    def test_notified_tasks_preserve_subscribers(self) -> None:
+        """Subscriber lists survive a save/load round-trip."""
+        self.store.save_notified_tasks({
+            "tid2": {
+                "status": "",
+                "sent": [],
+                "failures": {},
+                "subscribers": ["888", "777"],
+            }
+        })
+        loaded = self.store.load_notified_tasks()
+        self.assertIn("tid2", loaded)
+        entry = loaded["tid2"]
+        self.assertEqual(sorted(entry["subscribers"]), ["777", "888"])
+        self.assertEqual(entry["status"], "")
+
+    def test_notified_tasks_subscriber_only_entry_not_dropped(self) -> None:
+        """An entry with no status but with subscribers must not be silently discarded."""
+        self.store.save_notified_tasks({
+            "tid3": {"status": "", "sent": [], "failures": {}, "subscribers": ["999"]},
+        })
+        loaded = self.store.load_notified_tasks()
+        self.assertIn("tid3", loaded)
+
+    def test_notified_tasks_empty_entry_is_dropped(self) -> None:
+        """An entry with no status AND no subscribers is pruned on load."""
+        self.store.save_notified_tasks({
+            "tid4": {"status": "", "sent": [], "failures": {}, "subscribers": []},
+        })
+        loaded = self.store.load_notified_tasks()
+        self.assertNotIn("tid4", loaded)
+
+
 if __name__ == "__main__":
     unittest.main()
