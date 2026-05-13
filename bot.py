@@ -3407,6 +3407,145 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+async def _check_jackett_sub_via_rutracker_direct(
+    app: Application,
+    subs: dict,
+    key: str,
+    sub: dict,
+) -> bool:
+    """Check a Jackett subscription directly via Rutracker when possible.
+
+    When the stored ``topic_url`` is a Rutracker topic URL and ``rutracker_client``
+    is available, uses the lightweight ``get_topic_title`` + ``download_torrent``
+    path instead of a full Jackett search.  This is faster, more precise, and
+    avoids Jackett availability issues for known Rutracker topics.
+
+    Returns True  → subscription handled; caller should skip the Jackett-search path.
+    Returns False → Rutracker unavailable/not configured; caller falls back to Jackett.
+    """
+    topic_url = str(sub.get("topic_url") or "")
+    topic_id = _extract_rutracker_topic_id(topic_url)
+    if not topic_id or not rutracker_client:
+        return False
+
+    chat_id = sub.get("chat_id")
+    now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+
+    try:
+        new_title = await asyncio.to_thread(rutracker_client.get_topic_title, topic_id)
+    except RutrackerTopicUnavailable as e:
+        sub["unavailable_at"] = now_text
+        sub["unavailable_reason"] = str(e)
+        short = _format_sub_title(sub.get("title", "")) or topic_url
+        if chat_id:
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ Подписка больше недоступна на Rutracker.\n\n"
+                        f"{short}\n\n"
+                        "Проверка приостановлена."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🗑️ Удалить подписку",
+                            callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                        )
+                    ]]),
+                )
+            except Exception:
+                logger.warning("Failed to notify chat %s about unavailable Jackett/RT sub", chat_id, exc_info=True)
+        logger.info("Jackett/RT sub topic unavailable: key=%s topic=%s", key, topic_id)
+        return True  # handled — stop checking this subscription
+    except RutrackerError as e:
+        logger.warning("Rutracker direct check failed for sub %s (%s) — falling back to Jackett", key, e)
+        return False  # fall through to Jackett search
+
+    # No new-episode info in title → nothing actionable
+    new_info = _parse_episode_info(new_title)
+    sub["last_check"] = now_text
+    if new_info is None:
+        return True
+
+    new_end, new_total = new_info
+    last_end = int(sub.get("last_episode_end") or 0)
+    if new_end <= last_end:
+        return True  # no progress
+
+    # New episodes detected — download torrent directly from Rutracker.
+    safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
+    temp_path = _temp_path(safe_name)
+    task_id = ""
+    try:
+        torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
+        temp_path.write_bytes(torrent_bytes)
+        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        if chat_id and task_id:
+            _remember_task_owner(task_id, chat_id)
+    except (RutrackerError, DownloadStationError) as e:
+        logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+    is_complete = new_end >= new_total
+    short_q = str(sub.get("query") or sub.get("title") or key)
+    short_q = short_q[:40] + "…" if len(short_q) > 40 else short_q
+    progress = f"\nСерии: {last_end} → {new_end} из {new_total}"
+
+    # Update stored state
+    sub["last_episode_end"] = new_end
+    sub["total_episodes"] = new_total
+    sub["title"] = new_title
+    if is_complete:
+        subs.pop(key, None)
+
+    # Build notification
+    if task_id and is_complete:
+        text = (
+            f"🔔 Подписка «{short_q}» — сезон завершён! ✅\n"
+            f"{progress}\n"
+            "Торрент обновлён в Download Station. Подписка снята."
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
+        ]])
+    elif task_id:
+        text = (
+            f"🔔 Подписка «{short_q}» обновилась — задача добавлена!\n"
+            f"\n🔎 {new_title}{progress}"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Статус задачи", callback_data=_task_callback("info", task_id)),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+        ]])
+    else:
+        text = (
+            f"🔔 Подписка «{short_q}» обновилась, но скачать не удалось.\n"
+            f"\n🔎 {new_title}{progress}\n\n"
+            "⚠️ Скачайте вручную."
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 Посмотреть и скачать", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}"),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+        ]])
+
+    if chat_id:
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        except Exception:
+            logger.warning("Failed to notify chat %s for Jackett/RT sub update", chat_id, exc_info=True)
+
+    logger.info(
+        "Jackett/RT sub updated via Rutracker direct: key=%s ep=%s→%s/%s task=%s",
+        key, last_end, new_end, new_total, task_id,
+    )
+    return True
+
+
 async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id: int | None) -> str:
     """Try to download the subscription update and add it to Download Station.
 
@@ -3474,6 +3613,16 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
     for key, sub in list(jackett_subs.items()):
         try:
+            # Skip subscriptions that have been marked permanently unavailable.
+            if sub.get("unavailable_at"):
+                continue
+
+            # Fast path: if the topic is on Rutracker, use the direct API instead of
+            # a full Jackett text search (cheaper, more reliable).
+            if await _check_jackett_sub_via_rutracker_direct(app, subs, key, sub):
+                changed = True
+                continue
+
             search_query = sub.get("query", "")
             if not search_query:
                 continue
