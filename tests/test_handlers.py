@@ -46,6 +46,7 @@ from bot import (
     admin_command,
     help_command,
     movie_new_close_callback,
+    help_close_callback,
     search_cancel,
     search_timeout,
     setup_bot_commands,
@@ -496,6 +497,43 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
 
         update.callback_query.answer.assert_called_once()
         # Fallback is an auto-delete notification task — edit_message_text must NOT be called
+        update.callback_query.edit_message_text.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# /help close button tests
+# ---------------------------------------------------------------------------
+
+
+class HelpCloseCallbackTests(unittest.TestCase):
+    def test_close_deletes_message(self):
+        update = _make_callback_update(chat_id=100, callback_data="help:close")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            asyncio.run(help_close_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.message.delete.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+
+    def test_close_delete_failure_does_not_raise(self):
+        update = _make_callback_update(chat_id=100, callback_data="help:close")
+        update.callback_query.message.delete.side_effect = Exception("cannot delete")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            asyncio.run(help_close_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
         update.callback_query.edit_message_text.assert_not_called()
 
 

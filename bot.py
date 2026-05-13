@@ -3465,7 +3465,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{movie_lines}"
         f"{admin_lines}"
         "- /ping проверяет связь с ботом;\n"
-        "- /id показывает ваш chat_id"
+        "- /id показывает ваш chat_id",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✖️ Закрыть", callback_data="help:close")]]
+        ),
     )
 
 
@@ -3773,6 +3776,25 @@ async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT
             await query.message.delete()
     except Exception:
         logger.debug("Failed to delete movie discovery message", exc_info=True)
+    if chat_id:
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
+
+
+async def help_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        if query.message:
+            await query.message.delete()
+    except Exception:
+        logger.debug("Failed to delete help message", exc_info=True)
     if chat_id:
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
 
@@ -4525,6 +4547,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(movie_new_refresh_callback, pattern=r"^new:refresh$"))
     app.add_handler(CallbackQueryHandler(movie_new_close_callback, pattern=r"^new:close$"))
+    app.add_handler(CallbackQueryHandler(help_close_callback, pattern=r"^help:close$"))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("subs", subs_command))
     # Always register the ConversationHandler so text_message_entry intercepts
