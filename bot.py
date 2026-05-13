@@ -79,6 +79,7 @@ from keyboards import (
     _no_quality_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
+    tracker_selection_label,
     _season_select_keyboard,
     SEARCH_PAGE_SIZE,
     SUB_CALLBACK_PREFIX,
@@ -2037,9 +2038,24 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await msg.edit_text(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=_search_options_keyboard(),
+        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
     )
     return SEARCH_OPTIONS
+
+
+def _tracker_label_from_context(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Return a human-readable label for the currently selected Jackett trackers.
+
+    Returns an empty string when Jackett is not configured (no tracker button shown).
+    Falls back to 'Rutracker' when no indexer list has been fetched yet.
+    """
+    if jackett_client is None:
+        return ""
+    indexers = context.user_data.get("srch_jackett_indexers", [])
+    selected = context.user_data.get("srch_jackett_selected", set())
+    if not indexers or not selected:
+        return "Rutracker"  # default before first fetch
+    return tracker_selection_label(indexers, selected)
 
 
 async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2053,7 +2069,7 @@ async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["srch_query"] = query_text
     msg = await update.message.reply_text(
         f"Запрос: «{query_text}»",
-        reply_markup=_search_options_keyboard(),
+        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
     )
     context.user_data["srch_ui_msg_id"] = msg.message_id
     context.user_data["srch_ui_chat_id"] = update.effective_chat.id
@@ -2098,11 +2114,16 @@ async def _show_jackett_selector(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     header: str = "",
+    return_to: str = "results",
 ) -> int:
     """Fetch Jackett indexers and show the tracker-selection keyboard.
 
+    return_to controls what happens when the user confirms:
+      "options"  → save selection, return to SEARCH_OPTIONS screen
+      "advanced" → save selection, return to SEARCH_ADVANCED screen
+      "results"  → run search immediately, return to SEARCH_RESULTS
+
     Returns SEARCH_JACKETT_SELECT on success, ConversationHandler.END on failure.
-    header is optional text shown above the keyboard prompt.
     """
     if jackett_client is None:
         await edit_fn("Jackett не настроен.")
@@ -2120,20 +2141,108 @@ async def _show_jackett_selector(
         await edit_fn("🌐 <b>Jackett</b>: нет настроенных индексеров", parse_mode="HTML")
         return ConversationHandler.END
 
-    # Default: select only Rutracker; fallback to all if not found
-    rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
-    selected = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
+    # Keep existing selection if available; otherwise default to Rutracker
+    if "srch_jackett_selected" not in context.user_data:
+        rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
+        context.user_data["srch_jackett_selected"] = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
 
     context.user_data["srch_jackett_indexers"] = indexers
-    context.user_data["srch_jackett_selected"] = selected
+    context.user_data["srch_picker_return_to"] = return_to
+
+    selected = context.user_data["srch_jackett_selected"]
+    confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
+    show_back = return_to in ("options", "advanced")
 
     prompt = (header + "\n" if header else "") + "Выберите трекеры для поиска:"
     try:
-        await edit_fn(prompt, reply_markup=_jackett_select_keyboard(indexers, selected), parse_mode="HTML")
+        await edit_fn(
+            prompt,
+            reply_markup=_jackett_select_keyboard(
+                indexers, selected, confirm_label=confirm_label, show_back=show_back
+            ),
+            parse_mode="HTML",
+        )
     except Exception as exc:
         logger.error("Jackett selector edit failed: %s", exc, exc_info=True)
         raise
     return SEARCH_JACKETT_SELECT
+
+
+async def search_pick_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Open tracker picker from SEARCH_OPTIONS or SEARCH_ADVANCED."""
+    query = update.callback_query
+    await query.answer()
+    # callback_data: srch:pick_tracker:options  or  srch:pick_tracker:advanced
+    parts = (query.data or "").split(":")
+    return_to = parts[2] if len(parts) > 2 else "options"
+    return await _show_jackett_selector(query.edit_message_text, context, return_to=return_to)
+
+
+async def search_switch_trackers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Open tracker picker from SEARCH_RESULTS (will re-run search on confirm)."""
+    query = update.callback_query
+    await query.answer()
+    return await _show_jackett_selector(query.edit_message_text, context, return_to="results")
+
+
+async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Search directly on Rutracker, bypassing Jackett."""
+    query = update.callback_query
+    await query.answer()
+    if rutracker_client is None:
+        await query.answer("Rutracker не настроен.", show_alert=True)
+        return SEARCH_RESULTS
+    search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
+    if not search_query:
+        await query.answer("Запрос потерян. Начните поиск заново.", show_alert=True)
+        return ConversationHandler.END
+    await query.edit_message_text(f"🔍 Ищу «{search_query}» напрямую в Rutracker…")
+    try:
+        rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
+    except RutrackerError as rt_err:
+        await query.edit_message_text(_friendly_error("rutracker", str(rt_err)), parse_mode="HTML")
+        return ConversationHandler.END
+    results_data = []
+    for r in rt_results:
+        ep = _parse_episode_info(r.title)
+        partial = ep is not None and ep[0] < ep[1]
+        results_data.append({
+            "source": "rutracker",
+            "topic_id": r.topic_id,
+            "title": r.title,
+            "url": f"https://rutracker.org/forum/viewtopic.php?t={r.topic_id}",
+            "category": r.category,
+            "size": r.size,
+            "seeders": r.seeders,
+            "partial": partial,
+            "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
+            "magnet_url": None,
+            "torrent_url": None,
+            "tracker_name": "rutracker",
+        })
+    if not results_data:
+        await query.edit_message_text(
+            f"По запросу «{search_query}» ничего не найдено в Rutracker."
+        )
+        return ConversationHandler.END
+    results_data.sort(key=_score_result, reverse=True)
+    results_data[0]["recommended"] = True
+    banner = "🔗 Прямой поиск Rutracker"
+    context.user_data["srch_results"] = results_data
+    context.user_data["srch_results_page"] = 0
+    context.user_data["srch_banner"] = banner
+    context.user_data["srch_source"] = "rutracker"
+    await query.edit_message_text(
+        _build_results_text(results_data, search_query, 0, banner=banner),
+        reply_markup=_search_results_keyboard(
+            results_data, page=0,
+            show_switch_trackers=bool(jackett_client),
+            show_direct_rutracker=False,  # already on direct RT
+        ),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    return SEARCH_RESULTS
 
 
 async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query: str) -> int:
@@ -2161,37 +2270,81 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     edit_fn = loading_msg.edit_text if loading_msg is not None else send_fn
 
     # --- Search: Rutracker first, Jackett as fallback on error ---
-    results = []
+    results_data = []
     banner = ""
     source = "rutracker"
 
-    if rutracker_client:
-        try:
-            results = await asyncio.to_thread(rutracker_client.search, search_query)
-            source = "rutracker"
-        except RutrackerError as rt_err:
-            if jackett_client:
-                header = _friendly_error("rutracker", str(rt_err))
-                return await _show_jackett_selector(edit_fn, context, header=header)
+    if jackett_client:
+        # --- Jackett-first: use pre-selected indexers (default to Rutracker indexer) ---
+        if "srch_jackett_selected" not in context.user_data:
+            try:
+                indexers = await asyncio.to_thread(jackett_client.get_indexers)
+                rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
+                selected = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
+                context.user_data["srch_jackett_indexers"] = indexers
+                context.user_data["srch_jackett_selected"] = selected
+            except JackettError as e:
+                logger.warning("Jackett get_indexers failed at search start: %s", e)
+                if rutracker_client:
+                    banner = f"⚠️ Jackett недоступен, ищу напрямую в Rutracker"
+                    # fall through to Rutracker path below
+                else:
+                    await edit_fn(_friendly_error("jackett", str(e)), parse_mode="HTML")
+                    return ConversationHandler.END
+
+        selected: set[str] = context.user_data.get("srch_jackett_selected", set())
+
+        if selected:  # Jackett search
+            try:
+                j_results_raw = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        jackett_client.search,
+                        search_query,
+                        indexers=list(selected),
+                        fetch_limit=JACKETT_FETCH_LIMIT,
+                    ),
+                    timeout=45.0,
+                )
+            except (JackettError, asyncio.TimeoutError) as e:
+                raw_err = (
+                    "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
+                    if isinstance(e, asyncio.TimeoutError) else str(e)
+                )
+                logger.error("Jackett search failed in _run_search: %s", raw_err)
+                if rutracker_client:
+                    banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
+                    # fall through to Rutracker path
+                else:
+                    await edit_fn(_friendly_error("jackett", raw_err), parse_mode="HTML")
+                    return ConversationHandler.END
             else:
-                await edit_fn(_friendly_error("rutracker", str(rt_err)), parse_mode="HTML")
-                return ConversationHandler.END
-    elif jackett_client:
-        return await _show_jackett_selector(edit_fn, context)
-    else:
-        await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.")
-        return ConversationHandler.END
+                for r in j_results_raw:
+                    ep = _parse_episode_info(r.title)
+                    partial = ep is not None and ep[0] < ep[1]
+                    results_data.append({
+                        "source": "jackett",
+                        "topic_id": "",
+                        "title": r.title,
+                        "url": r.topic_url or "",
+                        "category": r.tracker,
+                        "size": r.size,
+                        "seeders": r.seeders,
+                        "partial": partial,
+                        "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
+                        "magnet_url": r.magnet_url,
+                        "torrent_url": r.torrent_url,
+                        "tracker_name": r.tracker,
+                    })
+                source = "jackett"
 
-    if not results:
-        await edit_fn(
-            f"По запросу «{search_query}» ничего не найдено.\n"
-            "Попробуйте другой запрос."
-        )
-        return ConversationHandler.END
-
-    results_data = []
-    if source == "rutracker":
-        for r in results:
+    if not results_data and rutracker_client:
+        # Direct Rutracker search: either Jackett not configured, or Jackett failed/returned nothing
+        try:
+            rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
+        except RutrackerError as rt_err:
+            await edit_fn(_friendly_error("rutracker", str(rt_err)), parse_mode="HTML")
+            return ConversationHandler.END
+        for r in rt_results:
             ep = _parse_episode_info(r.title)
             partial = ep is not None and ep[0] < ep[1]
             results_data.append({
@@ -2208,33 +2361,26 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "torrent_url": None,
                 "tracker_name": "rutracker",
             })
-    else:  # jackett
-        for r in results:
-            ep = _parse_episode_info(r.title)
-            partial = ep is not None and ep[0] < ep[1]
-            results_data.append({
-                "source": "jackett",
-                "topic_id": "",
-                "title": r.title,
-                "url": r.topic_url or "",
-                "category": r.tracker,
-                "size": r.size,
-                "seeders": r.seeders,
-                "partial": partial,
-                "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
-                "magnet_url": r.magnet_url,
-                "torrent_url": r.torrent_url,
-                "tracker_name": r.tracker,
-            })
+        source = "rutracker"
 
-    # --- Step 1: season filter (only for Rutracker results where titles match) ---
+    if not results_data and not rutracker_client and not jackett_client:
+        await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.")
+        return ConversationHandler.END
+
+    if not results_data:
+        await edit_fn(
+            f"По запросу «{search_query}» ничего не найдено.\n"
+            "Попробуйте другой запрос."
+        )
+        return ConversationHandler.END
+
+    # --- Step 1: season filter ---
     season_num = _extract_season_from_query(search_query)
     if season_num is not None:
         filtered = _filter_by_season(results_data, season_num)
         if filtered:
             results_data = filtered
         else:
-            # Season filter wiped everything — check if quality caused it.
             base_query = context.user_data.get("srch_query", "").strip()
             has_quality = bool(base_query) and base_query.lower() != search_query.lower()
             if has_quality:
@@ -2244,7 +2390,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     reply_markup=_no_quality_keyboard(base_query),
                 )
                 return SEARCH_RESULTS
-            # No quality to drop — just report nothing found.
             await edit_fn(
                 f"По запросу «{search_query}» ничего не найдено.\n"
                 "Попробуйте другой запрос."
@@ -2260,15 +2405,12 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     context.user_data["srch_banner"] = banner
     context.user_data["srch_source"] = source
 
-    show_jackett_expand = bool(jackett_client and source == "rutracker")
-    show_jackett_direct = bool(jackett_client)
-
     await edit_fn(
         _build_results_text(results_data, search_query, 0, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=0,
-            show_jackett_expand=show_jackett_expand,
-            show_jackett_direct=show_jackett_direct,
+            show_switch_trackers=bool(jackett_client),
+            show_direct_rutracker=bool(rutracker_client and source == "jackett"),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2295,15 +2437,14 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
     results_data = context.user_data.get("srch_results", [])
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
     banner = context.user_data.get("srch_banner", "")
-    show_jackett_expand = bool(jackett_client and context.user_data.get("srch_source") == "rutracker")
-    show_jackett_direct = bool(jackett_client)
+    source = context.user_data.get("srch_source", "")
 
     await query.edit_message_text(
         _build_results_text(results_data, search_query, page, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=page,
-            show_jackett_expand=show_jackett_expand,
-            show_jackett_direct=show_jackett_direct,
+            show_switch_trackers=bool(jackett_client),
+            show_direct_rutracker=bool(rutracker_client and source == "jackett"),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2331,39 +2472,32 @@ async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def search_expand_jackett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Open Jackett tracker selection for expand-mode (merge with existing results)."""
+    """Kept for backwards-compat; now delegates to search_switch_trackers."""
+    return await search_switch_trackers(update, context)
+
+
+async def search_jackett_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Return from tracker picker to SEARCH_OPTIONS or SEARCH_ADVANCED without searching."""
     query = update.callback_query
     await query.answer()
 
-    if jackett_client is None:
-        await query.answer("Jackett не настроен.", show_alert=True)
-        return SEARCH_RESULTS
+    return_to = context.user_data.get("srch_picker_return_to", "options")
+    base = context.user_data.get("srch_query", "")
+    tracker_label = _tracker_label_from_context(context)
 
-    context.user_data["srch_jackett_mode"] = "expand"
-    search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-    return await _show_jackett_selector(
-        query.edit_message_text,
-        context,
-        header=f"Поиск: «{search_query}»",
+    if return_to == "advanced":
+        settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+        await query.edit_message_text(
+            f"Запрос: «{base}»\nНастройте параметры поиска:",
+            reply_markup=_search_advanced_keyboard(settings, tracker_label),
+        )
+        return SEARCH_ADVANCED
+
+    await query.edit_message_text(
+        f"Запрос: «{base}»",
+        reply_markup=_search_options_keyboard(tracker_label),
     )
-
-
-async def search_jackett_start_direct(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Open Jackett tracker selection for direct-mode (Jackett-only results, no merge)."""
-    query = update.callback_query
-    await query.answer()
-
-    if jackett_client is None:
-        await query.answer("Jackett не настроен.", show_alert=True)
-        return SEARCH_RESULTS
-
-    context.user_data["srch_jackett_mode"] = "direct"
-    search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-    return await _show_jackett_selector(
-        query.edit_message_text,
-        context,
-        header=f"Поиск: «{search_query}»",
-    )
+    return SEARCH_OPTIONS
 
 
 async def search_jackett_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2385,9 +2519,14 @@ async def search_jackett_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 
     indexers = context.user_data.get("srch_jackett_indexers", [])
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
+    return_to = context.user_data.get("srch_picker_return_to", "results")
+    confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
+    show_back = return_to in ("options", "advanced")
     await query.edit_message_text(
         f"Поиск: «{search_query}»\nВыберите трекеры для поиска:",
-        reply_markup=_jackett_select_keyboard(indexers, selected),
+        reply_markup=_jackett_select_keyboard(
+            indexers, selected, confirm_label=confirm_label, show_back=show_back
+        ),
     )
     return SEARCH_JACKETT_SELECT
 
@@ -2406,15 +2545,14 @@ async def _safe_answer(query, text: str = "", *, show_alert: bool = False) -> No
 
 
 async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Run Jackett search with selected indexers.
+    """Confirm tracker selection.
 
-    Behaviour depends on srch_jackett_mode stored in user_data:
-    - "expand"  (default) — merge Jackett results with existing Rutracker results.
-    - "direct"            — show only Jackett results, replacing the previous list.
+    Behaviour depends on srch_picker_return_to stored in user_data:
+    - "options"  → save selection, return to SEARCH_OPTIONS (no search yet)
+    - "advanced" → save selection, return to SEARCH_ADVANCED (no search yet)
+    - "results"  → run search with selected indexers, return to SEARCH_RESULTS
 
-    IMPORTANT: query.answer() is called exactly once per execution path.  Never
-    call it at the top and then again in an error branch — Telegram rejects duplicate
-    answerCallbackQuery calls, which would abort the recovery edit_message_text.
+    IMPORTANT: query.answer() is called exactly once per execution path.
     """
     query = update.callback_query
 
@@ -2425,28 +2563,49 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     selected: set[str] = context.user_data.get("srch_jackett_selected", set())
     if not selected:
-        # Alert shown without prior answer — this is the only answer for this path.
         await query.answer("Выберите хотя бы один трекер.", show_alert=True)
         indexers = context.user_data.get("srch_jackett_indexers", [])
+        return_to_err = context.user_data.get("srch_picker_return_to", "results")
+        confirm_label = "✅ Применить" if return_to_err in ("options", "advanced") else "🔍 Искать"
+        show_back = return_to_err in ("options", "advanced")
         search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
         await query.edit_message_text(
             f"Поиск: «{search_query}»\nВыберите трекеры для поиска:",
-            reply_markup=_jackett_select_keyboard(indexers, selected),
+            reply_markup=_jackett_select_keyboard(
+                indexers, selected, confirm_label=confirm_label, show_back=show_back
+            ),
         )
         return SEARCH_JACKETT_SELECT
 
-    # Normal search path: answer now (dismisses the button spinner) then show loading.
-    await query.answer()
+    return_to = context.user_data.get("srch_picker_return_to", "results")
 
+    # --- Return to options/advanced without searching ---
+    if return_to in ("options", "advanced"):
+        await query.answer()
+        base = context.user_data.get("srch_query", "")
+        tracker_label = _tracker_label_from_context(context)
+        if return_to == "advanced":
+            settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+            await query.edit_message_text(
+                f"Запрос: «{base}»\nНастройте параметры поиска:",
+                reply_markup=_search_advanced_keyboard(settings, tracker_label),
+            )
+            return SEARCH_ADVANCED
+        else:
+            await query.edit_message_text(
+                f"Запрос: «{base}»",
+                reply_markup=_search_options_keyboard(tracker_label),
+            )
+            return SEARCH_OPTIONS
+
+    # --- "results" mode: run search immediately ---
+    await query.answer()
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-    mode = context.user_data.get("srch_jackett_mode", "expand")
 
     try:
         await query.edit_message_text(f"🔍 Ищу «{search_query}» через Jackett…")
     except Exception as exc:
-        logger.warning("search_jackett_do: loading edit failed (msg=%s): %s",
-                       query.message.message_id, exc)
-        # Continue anyway — we'll overwrite whatever is there with results or error.
+        logger.warning("search_jackett_do: loading edit failed: %s", exc)
 
     try:
         j_results_raw = await asyncio.wait_for(
@@ -2459,49 +2618,42 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             timeout=45.0,
         )
     except (JackettError, asyncio.TimeoutError) as e:
-        # Restore previous results (or show error) in the message.
-        # NOTE: query is already answered above — use _safe_answer for the alert.
-        if isinstance(e, asyncio.TimeoutError):
-            raw_err = "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
-        else:
-            raw_err = str(e)
-            # Hint about common XML parse failure (bad credentials / indexer not logged in)
-            if "not well-formed" in raw_err or "разобрать ответ" in raw_err:
-                raw_err += " — возможно, индексер требует авторизации в Jackett"
+        raw_err = (
+            "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
+            if isinstance(e, asyncio.TimeoutError) else str(e)
+        )
+        if "not well-formed" in raw_err or "разобрать ответ" in raw_err:
+            raw_err += " — возможно, индексер требует авторизации в Jackett"
         logger.error("Jackett search failed: %s", raw_err)
         await _safe_answer(query, f"❌ {raw_err}", show_alert=True)
         existing = context.user_data.get("srch_results", [])
         banner = context.user_data.get("srch_banner", "")
-        show_expand = bool(context.user_data.get("srch_source") == "rutracker")
         if existing:
             await query.edit_message_text(
                 _build_results_text(existing, search_query, 0, banner=banner),
                 reply_markup=_search_results_keyboard(
                     existing, page=0,
-                    show_jackett_expand=show_expand,
-                    show_jackett_direct=bool(jackett_client),
+                    show_switch_trackers=True,
+                    show_direct_rutracker=bool(rutracker_client),
                 ),
                 parse_mode="HTML",
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             return SEARCH_RESULTS
-        await query.edit_message_text(
-            _friendly_error("jackett", raw_err),
-            parse_mode="HTML",
-        )
+        await query.edit_message_text(_friendly_error("jackett", raw_err), parse_mode="HTML")
         return ConversationHandler.END
 
     if not j_results_raw:
         await _safe_answer(query, "Jackett не нашёл результатов по выбранным трекерам.", show_alert=True)
         existing = context.user_data.get("srch_results", [])
         banner = context.user_data.get("srch_banner", "")
-        show_expand = bool(context.user_data.get("srch_source") == "rutracker")
         await query.edit_message_text(
-            _build_results_text(existing, search_query, 0, banner=banner) if existing else f"По запросу «{search_query}» ничего не найдено.",
+            _build_results_text(existing, search_query, 0, banner=banner) if existing
+            else f"По запросу «{search_query}» ничего не найдено.",
             reply_markup=_search_results_keyboard(
                 existing, page=0,
-                show_jackett_expand=show_expand,
-                show_jackett_direct=bool(jackett_client),
+                show_switch_trackers=True,
+                show_direct_rutracker=bool(rutracker_client),
             ) if existing else None,
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2510,7 +2662,6 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     logger.info("Jackett search returned %d results", len(j_results_raw))
 
-    # Build Jackett result dicts
     j_results_data = []
     for r in j_results_raw:
         ep = _parse_episode_info(r.title)
@@ -2530,44 +2681,14 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "tracker_name": r.tracker,
         })
 
-    mode = context.user_data.get("srch_jackett_mode", "expand")
-
-    if mode == "direct":
-        # Jackett-only: show all fetched results sorted by score, no merge.
-        merged = sorted(j_results_data, key=_score_result, reverse=True)
-        banner = f"🔍 Jackett: {len(merged)} результатов"
-        source = "jackett"
-    else:
-        # Expand: merge Jackett results with existing Rutracker results.
-        existing = context.user_data.get("srch_results", [])
-        existing_titles = {r["title"].lower() for r in existing}
-        new_jackett = [r for r in j_results_data if r["title"].lower() not in existing_titles]
-        merged_raw = existing + new_jackett
-
-        # Cap Jackett share before merging to avoid flooding Rutracker results
-        jk_capped = sorted(
-            [r for r in merged_raw if r.get("source") == "jackett"],
-            key=_score_result, reverse=True,
-        )[:JACKETT_MAX_RESULTS]
-        ru_only = [r for r in merged_raw if r.get("source") != "jackett"]
-
-        # Sort ALL results together so best Jackett razdachas surface on page 0
-        merged = sorted(ru_only + jk_capped, key=_score_result, reverse=True)
-
-        new_count = len(new_jackett)
-        banner = (
-            f"➕ Jackett добавил {new_count} результатов"
-            if new_count > 0 else
-            "ℹ️ Jackett не нашёл новых результатов (уже в списке)"
-        )
-        source = "mixed"
-
+    merged = sorted(j_results_data, key=_score_result, reverse=True)
+    banner = f"🔍 Jackett: {len(merged)} результатов"
     if merged:
         merged[0]["recommended"] = True
 
     context.user_data["srch_results"] = merged
     context.user_data["srch_results_page"] = 0
-    context.user_data["srch_source"] = source
+    context.user_data["srch_source"] = "jackett"
     context.user_data["srch_banner"] = banner
 
     try:
@@ -2575,19 +2696,14 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             _build_results_text(merged, search_query, 0, banner=banner),
             reply_markup=_search_results_keyboard(
                 merged, page=0,
-                show_jackett_expand=False,   # already used Jackett — no need to offer expand again
-                show_jackett_direct=bool(jackett_client),
+                show_switch_trackers=True,
+                show_direct_rutracker=bool(rutracker_client),
             ),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception as exc:
-        logger.error(
-            "Jackett results display failed: %s",
-            exc,
-            exc_info=True,
-        )
-        # query is already answered — use _safe_answer to avoid duplicate-answer error.
+        logger.error("Jackett results display failed: %s", exc, exc_info=True)
         await _safe_answer(query, f"Ошибка отображения: {exc}", show_alert=True)
     return SEARCH_RESULTS
 
@@ -2601,7 +2717,7 @@ async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYP
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
         f"Запрос: «{base}»\nНастройте параметры поиска:",
-        reply_markup=_search_advanced_keyboard(settings),
+        reply_markup=_search_advanced_keyboard(settings, _tracker_label_from_context(context)),
     )
     return SEARCH_ADVANCED
 
@@ -2626,7 +2742,7 @@ async def search_toggle_setting(update: Update, context: ContextTypes.DEFAULT_TY
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
         f"Запрос: «{base}»\nНастройте параметры поиска:",
-        reply_markup=_search_advanced_keyboard(settings),
+        reply_markup=_search_advanced_keyboard(settings, _tracker_label_from_context(context)),
     )
     return SEARCH_ADVANCED
 
@@ -2924,6 +3040,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
+        "srch_picker_return_to", "srch_jackett_mode",
     ):
         context.user_data.pop(key, None)
 
@@ -2948,6 +3065,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
+        "srch_picker_return_to", "srch_jackett_mode",
     ):
         context.user_data.pop(key, None)
 
@@ -4569,6 +4687,7 @@ def main() -> None:
                 SEARCH_OPTIONS: [
                     CallbackQueryHandler(search_quick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quick$"),
                     CallbackQueryHandler(search_show_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:adv$"),
+                    CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
@@ -4577,6 +4696,7 @@ def main() -> None:
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quality:"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:toggle:"),
                     CallbackQueryHandler(search_do, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:do_search$"),
+                    CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
@@ -4587,8 +4707,11 @@ def main() -> None:
                     CallbackQueryHandler(search_results_page, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:res_page:"),
                     CallbackQueryHandler(search_series_entry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:series_base$"),
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),
+                    CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
+                    CallbackQueryHandler(search_direct_rutracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:direct_rt$"),
+                    # Legacy patterns — delegate to new handlers
                     CallbackQueryHandler(search_expand_jackett, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_jackett$"),
-                    CallbackQueryHandler(search_jackett_start_direct, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jackett_direct$"),
+                    CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jackett_direct$"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     CallbackQueryHandler(movie_new_back, pattern=r"^new:back$"),
                     # New text → treat as a fresh query, restarting the flow.
@@ -4610,6 +4733,7 @@ def main() -> None:
                         search_jackett_do,
                         pattern=rf"^{SEARCH_CALLBACK_PREFIX}:{JACKETT_SELECT_PREFIX}_search$",
                     ),
+                    CallbackQueryHandler(search_jackett_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jk_back$"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
                 ],

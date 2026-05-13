@@ -345,17 +345,38 @@ def _no_quality_keyboard(base_query: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _search_options_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick")],
-            [InlineKeyboardButton("⚙️ Доп. параметры", callback_data=f"{SEARCH_CALLBACK_PREFIX}:adv")],
-            [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
-        ]
-    )
+def tracker_selection_label(indexers: list[dict], selected_ids: set[str]) -> str:
+    """Human-readable label for the currently selected Jackett tracker set."""
+    if not indexers:
+        return "Rutracker"
+    all_ids = {i["id"] for i in indexers}
+    names = [i.get("name", i["id"]) for i in indexers if i["id"] in selected_ids]
+    if not names:
+        return "нет трекеров"
+    if selected_ids >= all_ids:
+        return "Все трекеры"
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]}, {names[1]}"
+    return f"{names[0]} +{len(names) - 1}"
 
 
-def _search_advanced_keyboard(settings: dict) -> InlineKeyboardMarkup:
+def _search_options_keyboard(tracker_label: str = "") -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick")],
+        [InlineKeyboardButton("⚙️ Доп. параметры", callback_data=f"{SEARCH_CALLBACK_PREFIX}:adv")],
+    ]
+    if tracker_label:
+        rows.append([InlineKeyboardButton(
+            f"🌐 Трекер: {tracker_label}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:pick_tracker:options",
+        )])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _search_advanced_keyboard(settings: dict, tracker_label: str = "") -> InlineKeyboardMarkup:
     quality = settings.get("quality", "1080p")
     audio = settings.get("audio", False)
     subs = settings.get("subs", False)
@@ -372,15 +393,19 @@ def _search_advanced_keyboard(settings: dict) -> InlineKeyboardMarkup:
             f"{prefix}{label}", callback_data=f"{SEARCH_CALLBACK_PREFIX}:toggle:{key}"
         )
 
-    return InlineKeyboardMarkup(
-        [
-            [q_btn(label, val) for label, val in _SRCH_QUALITY_OPTIONS],
-            [toggle_btn("🎵 Оригинальная дорожка", "audio", audio)],
-            [toggle_btn("💬 Субтитры", "subs", subs)],
-            [InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:do_search")],
-            [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
-        ]
-    )
+    rows = [
+        [q_btn(label, val) for label, val in _SRCH_QUALITY_OPTIONS],
+        [toggle_btn("🎵 Оригинальная дорожка", "audio", audio)],
+        [toggle_btn("💬 Субтитры", "subs", subs)],
+    ]
+    if tracker_label:
+        rows.append([InlineKeyboardButton(
+            f"🌐 Трекер: {tracker_label}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:pick_tracker:advanced",
+        )])
+    rows.append([InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:do_search")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")])
+    return InlineKeyboardMarkup(rows)
 
 
 SEARCH_PAGE_SIZE = 5
@@ -389,9 +414,12 @@ SEARCH_PAGE_SIZE = 5
 def _search_results_keyboard(
     results: list[dict],
     page: int = 0,
+    show_switch_trackers: bool = False,
+    show_direct_rutracker: bool = False,
+    show_back_to_discovery: bool = False,
+    # Legacy aliases kept for backwards-compat during transition
     show_jackett_expand: bool = False,
     show_jackett_direct: bool = False,
-    show_back_to_discovery: bool = False,
 ) -> InlineKeyboardMarkup:
     total = len(results)
     total_pages = max(1, (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
@@ -440,18 +468,18 @@ def _search_results_keyboard(
             )
         rows.append(nav_row)
 
-    if show_jackett_expand:
+    if show_switch_trackers or show_jackett_expand or show_jackett_direct:
         rows.append([
             InlineKeyboardButton(
-                "🌐 Расширить поиск (Jackett)",
-                callback_data=f"{SEARCH_CALLBACK_PREFIX}:expand_jackett",
+                "🔄 Сменить трекеры",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:switch_trackers",
             )
         ])
-    if show_jackett_direct:
+    if show_direct_rutracker:
         rows.append([
             InlineKeyboardButton(
-                "🔍 Поиск через Jackett",
-                callback_data=f"{SEARCH_CALLBACK_PREFIX}:jackett_direct",
+                "🔗 Прямой поиск Rutracker",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:direct_rt",
             )
         ])
     if show_back_to_discovery:
@@ -520,8 +548,16 @@ def _season_select_keyboard(total_seasons: int | None) -> InlineKeyboardMarkup:
 def _jackett_select_keyboard(
     indexers: list[dict],   # [{"id": "rutracker", "name": "RuTracker.org"}, ...]
     selected_ids: set[str],
+    *,
+    confirm_label: str = "🔍 Искать",
+    show_back: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Keyboard for choosing which Jackett indexers to search."""
+    """Keyboard for choosing which Jackett indexers to search.
+
+    confirm_label: text for the confirm button ("🔍 Искать" when searching immediately,
+                   "✅ Применить" when returning to the options/advanced screen).
+    show_back:     show a «← Назад» button (used when opened from options/advanced).
+    """
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
 
@@ -543,14 +579,21 @@ def _jackett_select_keyboard(
     if row:
         rows.append(row)
 
-    rows.append([
+    bottom: list[InlineKeyboardButton] = [
         InlineKeyboardButton(
-            "🔍 Искать",
+            confirm_label,
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:{JACKETT_SELECT_PREFIX}_search",
         ),
-        InlineKeyboardButton(
+    ]
+    if show_back:
+        bottom.append(InlineKeyboardButton(
+            "⬅️ Назад",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:jk_back",
+        ))
+    else:
+        bottom.append(InlineKeyboardButton(
             "❌ Отмена",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel",
-        ),
-    ])
+        ))
+    rows.append(bottom)
     return InlineKeyboardMarkup(rows)

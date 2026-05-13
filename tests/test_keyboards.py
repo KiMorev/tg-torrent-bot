@@ -7,7 +7,11 @@ from keyboards import (
     _admin_kp_force_refresh_keyboard,
     _admin_panel_keyboard,
     _final_notification_keyboard,
+    _jackett_select_keyboard,
+    _search_advanced_keyboard,
+    _search_options_keyboard,
     _search_results_keyboard,
+    tracker_selection_label,
 )
 
 
@@ -157,6 +161,127 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         keyboard = _search_results_keyboard([], show_back_to_discovery=True)
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
         self.assertEqual(buttons["🎬 ← Новинки"], "new:back")
+
+    def test_switch_trackers_button_shown_when_requested(self) -> None:
+        keyboard = _search_results_keyboard([], show_switch_trackers=True)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertIn("🔄 Сменить трекеры", buttons)
+        self.assertEqual(buttons["🔄 Сменить трекеры"], "srch:switch_trackers")
+
+    def test_direct_rutracker_button_shown_when_requested(self) -> None:
+        keyboard = _search_results_keyboard([], show_direct_rutracker=True)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertIn("🔗 Прямой поиск Rutracker", buttons)
+        self.assertEqual(buttons["🔗 Прямой поиск Rutracker"], "srch:direct_rt")
+
+    def test_neither_button_shown_by_default(self) -> None:
+        keyboard = _search_results_keyboard([])
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertNotIn("🔄 Сменить трекеры", labels)
+        self.assertNotIn("🔗 Прямой поиск Rutracker", labels)
+
+    def test_legacy_show_jackett_expand_maps_to_switch_trackers(self) -> None:
+        keyboard = _search_results_keyboard([], show_jackett_expand=True)
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("🔄 Сменить трекеры", labels)
+
+
+class SearchOptionsKeyboardTests(unittest.TestCase):
+    def test_no_tracker_button_without_label(self) -> None:
+        keyboard = _search_options_keyboard()
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertNotIn("🌐", "".join(labels[:3]))  # no tracker button
+
+    def test_tracker_button_shown_with_label(self) -> None:
+        keyboard = _search_options_keyboard("Rutracker")
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertIn("🌐 Трекер: Rutracker", buttons)
+        self.assertEqual(buttons["🌐 Трекер: Rutracker"], "srch:pick_tracker:options")
+
+    def test_search_and_advanced_always_present(self) -> None:
+        keyboard = _search_options_keyboard("Rutracker")
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("🔍 Искать", labels)
+        self.assertIn("⚙️ Доп. параметры", labels)
+
+
+class SearchAdvancedKeyboardTests(unittest.TestCase):
+    _settings = {"quality": "1080p", "audio": False, "subs": False}
+
+    def test_no_tracker_button_without_label(self) -> None:
+        keyboard = _search_advanced_keyboard(self._settings)
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertFalse(any("🌐 Трекер:" in lbl for lbl in labels))
+
+    def test_tracker_button_shown_with_label(self) -> None:
+        keyboard = _search_advanced_keyboard(self._settings, "NNMClub")
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertIn("🌐 Трекер: NNMClub", buttons)
+        self.assertEqual(buttons["🌐 Трекер: NNMClub"], "srch:pick_tracker:advanced")
+
+
+class JackettSelectKeyboardTests(unittest.TestCase):
+    _indexers = [
+        {"id": "rutracker", "name": "RuTracker"},
+        {"id": "nnmclub", "name": "NNM-Club"},
+    ]
+
+    def test_default_confirm_label_is_search(self) -> None:
+        keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"})
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("🔍 Искать", labels)
+        self.assertNotIn("✅ Применить", labels)
+
+    def test_apply_confirm_label(self) -> None:
+        keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"}, confirm_label="✅ Применить")
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("✅ Применить", labels)
+        self.assertNotIn("🔍 Искать", labels)
+
+    def test_back_button_shown_when_requested(self) -> None:
+        keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"}, show_back=True)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertIn("⬅️ Назад", buttons)
+        self.assertEqual(buttons["⬅️ Назад"], "srch:jk_back")
+
+    def test_cancel_button_shown_by_default(self) -> None:
+        keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"})
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("❌ Отмена", labels)
+        self.assertNotIn("⬅️ Назад", labels)
+
+
+class TrackerSelectionLabelTests(unittest.TestCase):
+    _indexers = [
+        {"id": "rutracker", "name": "RuTracker"},
+        {"id": "nnmclub", "name": "NNM-Club"},
+        {"id": "kinozal", "name": "Kinozal"},
+    ]
+
+    def test_single_tracker(self) -> None:
+        self.assertEqual(tracker_selection_label(self._indexers, {"rutracker"}), "RuTracker")
+
+    def test_two_trackers(self) -> None:
+        self.assertEqual(
+            tracker_selection_label(self._indexers, {"rutracker", "nnmclub"}),
+            "RuTracker, NNM-Club",
+        )
+
+    def test_all_trackers(self) -> None:
+        all_ids = {"rutracker", "nnmclub", "kinozal"}
+        self.assertEqual(tracker_selection_label(self._indexers, all_ids), "Все трекеры")
+
+    def test_many_trackers_abbreviated(self) -> None:
+        self.assertEqual(
+            tracker_selection_label(self._indexers, {"rutracker", "nnmclub", "kinozal"}),
+            "Все трекеры",
+        )
+
+    def test_empty_indexers_returns_default(self) -> None:
+        self.assertEqual(tracker_selection_label([], {"rutracker"}), "Rutracker")
+
+    def test_no_selected_returns_no_trackers(self) -> None:
+        self.assertEqual(tracker_selection_label(self._indexers, set()), "нет трекеров")
 
 
 if __name__ == "__main__":
