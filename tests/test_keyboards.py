@@ -171,8 +171,20 @@ class SearchResultsKeyboardTests(unittest.TestCase):
     def test_direct_rutracker_button_shown_when_requested(self) -> None:
         keyboard = _search_results_keyboard([], show_direct_rutracker=True)
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
-        self.assertIn("🔗 Прямой поиск Rutracker", buttons)
-        self.assertEqual(buttons["🔗 Прямой поиск Rutracker"], "srch:direct_rt")
+        self.assertIn("🔗 Rutracker напрямую", buttons)
+        self.assertEqual(buttons["🔗 Rutracker напрямую"], "srch:direct_rt")
+
+    def test_retry_jackett_button_shown_when_requested(self) -> None:
+        keyboard = _search_results_keyboard([], show_retry_jackett=True)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertIn("↩️ Повторить через Jackett", buttons)
+        self.assertEqual(buttons["↩️ Повторить через Jackett"], "srch:switch_trackers")
+
+    def test_retry_jackett_and_switch_trackers_are_mutually_exclusive(self) -> None:
+        labels_switch = [b.text for row in _search_results_keyboard([], show_switch_trackers=True).inline_keyboard for b in row]
+        labels_retry = [b.text for row in _search_results_keyboard([], show_retry_jackett=True).inline_keyboard for b in row]
+        self.assertNotIn("↩️ Повторить через Jackett", labels_switch)
+        self.assertNotIn("🔄 Сменить трекеры", labels_retry)
 
     def test_neither_button_shown_by_default(self) -> None:
         keyboard = _search_results_keyboard([])
@@ -201,7 +213,7 @@ class SearchOptionsKeyboardTests(unittest.TestCase):
     def test_search_and_advanced_always_present(self) -> None:
         keyboard = _search_options_keyboard("Rutracker")
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
-        self.assertIn("🔍 Искать", labels)
+        self.assertIn("🟢 Искать", labels)
         self.assertIn("⚙️ Доп. параметры", labels)
 
 

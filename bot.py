@@ -2236,8 +2236,9 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         _build_results_text(results_data, search_query, 0, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=0,
-            show_switch_trackers=bool(jackett_client),
-            show_direct_rutracker=False,  # already on direct RT
+            show_switch_trackers=False,
+            show_retry_jackett=bool(jackett_client),  # offer back to Jackett
+            show_direct_rutracker=False,              # already on direct RT
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2409,7 +2410,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         _build_results_text(results_data, search_query, 0, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=0,
-            show_switch_trackers=bool(jackett_client),
+            show_switch_trackers=bool(jackett_client and source == "jackett"),
+            show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
         ),
         parse_mode="HTML",
@@ -2443,7 +2445,8 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
         _build_results_text(results_data, search_query, page, banner=banner),
         reply_markup=_search_results_keyboard(
             results_data, page=page,
-            show_switch_trackers=bool(jackett_client),
+            show_switch_trackers=bool(jackett_client and source == "jackett"),
+            show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
         ),
         parse_mode="HTML",
@@ -2633,8 +2636,8 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 _build_results_text(existing, search_query, 0, banner=banner),
                 reply_markup=_search_results_keyboard(
                     existing, page=0,
-                    show_switch_trackers=True,
-                    show_direct_rutracker=bool(rutracker_client),
+                    show_retry_jackett=True,   # Jackett failed — offer retry, not "direct RT" (already on RT)
+                    show_direct_rutracker=False,
                 ),
                 parse_mode="HTML",
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2652,8 +2655,8 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             else f"По запросу «{search_query}» ничего не найдено.",
             reply_markup=_search_results_keyboard(
                 existing, page=0,
-                show_switch_trackers=True,
-                show_direct_rutracker=bool(rutracker_client),
+                show_retry_jackett=True,   # offer retry with different trackers
+                show_direct_rutracker=False,
             ) if existing else None,
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -2697,6 +2700,7 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             reply_markup=_search_results_keyboard(
                 merged, page=0,
                 show_switch_trackers=True,
+                show_retry_jackett=False,
                 show_direct_rutracker=bool(rutracker_client),
             ),
             parse_mode="HTML",

@@ -364,7 +364,7 @@ def tracker_selection_label(indexers: list[dict], selected_ids: set[str]) -> str
 
 def _search_options_keyboard(tracker_label: str = "") -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick")],
+        [InlineKeyboardButton("🟢 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick")],
         [InlineKeyboardButton("⚙️ Доп. параметры", callback_data=f"{SEARCH_CALLBACK_PREFIX}:adv")],
     ]
     if tracker_label:
@@ -403,7 +403,7 @@ def _search_advanced_keyboard(settings: dict, tracker_label: str = "") -> Inline
             f"🌐 Трекер: {tracker_label}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:pick_tracker:advanced",
         )])
-    rows.append([InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:do_search")])
+    rows.append([InlineKeyboardButton("🟢 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:do_search")])
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")])
     return InlineKeyboardMarkup(rows)
 
@@ -414,8 +414,9 @@ SEARCH_PAGE_SIZE = 5
 def _search_results_keyboard(
     results: list[dict],
     page: int = 0,
-    show_switch_trackers: bool = False,
-    show_direct_rutracker: bool = False,
+    show_switch_trackers: bool = False,   # source=jackett  → "🔄 Сменить трекеры"
+    show_retry_jackett: bool = False,     # source=rutracker → "↩️ Повторить через Jackett"
+    show_direct_rutracker: bool = False,  # source=jackett  → "🔗 Rutracker напрямую"
     show_back_to_discovery: bool = False,
     # Legacy aliases kept for backwards-compat during transition
     show_jackett_expand: bool = False,
@@ -475,10 +476,17 @@ def _search_results_keyboard(
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:switch_trackers",
             )
         ])
+    if show_retry_jackett:
+        rows.append([
+            InlineKeyboardButton(
+                "↩️ Повторить через Jackett",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:switch_trackers",
+            )
+        ])
     if show_direct_rutracker:
         rows.append([
             InlineKeyboardButton(
-                "🔗 Прямой поиск Rutracker",
+                "🔗 Rutracker напрямую",
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:direct_rt",
             )
         ])
