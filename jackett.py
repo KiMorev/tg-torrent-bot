@@ -417,8 +417,16 @@ class JackettClient:
                 topic_url = (item.get("Details") or item.get("Guid") or "").strip()
                 if not topic_url.startswith("http"):
                     topic_url = ""
-                torrent_url = (item.get("Link") or "").strip() or None
-                magnet_url = (item.get("MagnetUri") or "").strip() or None
+                raw_link = (item.get("Link") or "").strip()
+                raw_magnet = (item.get("MagnetUri") or "").strip()
+                # Guard: some indexers incorrectly put magnet URI in Link.
+                # In that case treat it as magnet, not torrent_url.
+                if raw_link.startswith("magnet:"):
+                    magnet_url: str | None = raw_link or raw_magnet or None
+                    torrent_url: str | None = None
+                else:
+                    torrent_url = raw_link or None
+                    magnet_url = raw_magnet or None
                 published_at = str(item.get("PublishDate") or item.get("FirstSeen") or "").strip()
 
                 results.append(JackettResult(
@@ -485,11 +493,12 @@ class JackettClient:
                 if not topic_url.startswith("http"):
                     topic_url = ""
 
-                torrent_url = (item.findtext("link") or "").strip() or None
                 published_at = (item.findtext("pubDate") or "").strip()
 
                 # torznab:attr elements — namespace-agnostic
                 attrs: dict[str, str] = {}
+                enclosure_url: str = ""
+                enclosure_type: str = ""
                 for child in item:
                     local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                     if local == "attr":
@@ -497,13 +506,36 @@ class JackettClient:
                         value = child.get("value", "")
                         if name and value:
                             attrs[name] = value
+                    elif local == "enclosure":
+                        enclosure_url = child.get("url", "").strip()
+                        enclosure_type = child.get("type", "").strip()
 
                 try:
                     seeders = int(attrs.get("seeders", "0") or "0")
                 except ValueError:
                     seeders = 0
 
-                magnet_url = attrs.get("magneturl") or None
+                # Determine torrent_url and magnet_url from Torznab enclosure and attrs.
+                # Priority: <enclosure type="application/x-bittorrent"> → .torrent URL
+                #           <enclosure type="...magnet..."> or magneturl attr → magnet URL
+                # <link> in RSS is the tracker page URL, not the download URL.
+                attr_magnet = attrs.get("magneturl") or None
+                if enclosure_type and "magnet" in enclosure_type:
+                    torrent_url = None
+                    magnet_url = enclosure_url or attr_magnet
+                elif enclosure_url:
+                    torrent_url = enclosure_url
+                    magnet_url = attr_magnet
+                else:
+                    # Fallback to <link> if no enclosure present (non-standard response)
+                    fallback_link = (item.findtext("link") or "").strip()
+                    if fallback_link.startswith("magnet:"):
+                        torrent_url = None
+                        magnet_url = fallback_link or attr_magnet
+                    else:
+                        torrent_url = fallback_link or None
+                        magnet_url = attr_magnet
+
                 tracker = attrs.get("tracker") or attrs.get("indexer") or attrs.get("trackerId") or ""
 
                 results.append(JackettResult(
