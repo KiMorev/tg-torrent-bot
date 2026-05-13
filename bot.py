@@ -46,8 +46,10 @@ from formatters import (
     _magnet_wait_text,
     _normalize_season_in_query,
     _parse_episode_info,
+    _progress_percent,
     _score_result,
     _short_title,
+    _status_label,
     _tracker_abbr,
 )
 from keyboards import (
@@ -1445,6 +1447,150 @@ def _make_notification_delivery_state(
     }
 
 
+_RU_MONTHS = {
+    1: "янв", 2: "фев", 3: "мар", 4: "апр", 5: "май", 6: "июн",
+    7: "июл", 8: "авг", 9: "сен", 10: "окт", 11: "ноя", 12: "дек",
+}
+
+
+def _format_unix_ts(unix_ts: int | None) -> str:
+    """Format a Unix timestamp as 'D Mon в HH:MM' in the display timezone."""
+    if not unix_ts:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(int(unix_ts), tz=DISPLAY_TIMEZONE)
+        return f"{dt.day} {_RU_MONTHS[dt.month]} в {dt.strftime('%H:%M')}"
+    except Exception:
+        return ""
+
+
+async def _handle_duplicate_task(
+    app: Application,
+    dup_task: dict,
+    all_tasks: list[dict],
+) -> None:
+    """Handle a task that DS rejected as torrent_duplicate.
+
+    Finds the original task already in DS, auto-deletes the rejected duplicate,
+    and sends a context-aware notification to the user who tried to add it.
+    """
+    dup_id = task_id = dup_task.get("id", "")
+    dup_title = dup_task.get("title", "")
+    owner_id = (_load_task_owners() or {}).get(dup_id)
+
+    # Find the original task — same title, different ID, not itself an error.
+    original = next(
+        (t for t in all_tasks
+         if t.get("title") == dup_title
+         and t.get("id") != dup_id
+         and (t.get("status") or "").lower() != "error"),
+        None,
+    )
+
+    # Auto-delete the duplicate task so it doesn't clutter DS.
+    try:
+        await asyncio.to_thread(ds_client.delete_task, dup_id)
+        logger.info("Auto-deleted duplicate task %s (%s)", dup_id, dup_title)
+    except Exception:
+        logger.warning("Failed to auto-delete duplicate task %s", dup_id, exc_info=True)
+
+    if not owner_id:
+        return
+
+    # Build notification text and keyboard based on original task state.
+    if original:
+        orig_id = original.get("id", "")
+        orig_status = (original.get("status") or "").lower()
+        orig_title = original.get("title", dup_title)
+        transfer = original.get("additional", {}).get("transfer", {})
+        detail = original.get("additional", {}).get("detail", {})
+
+        # Owner and date of the original.
+        orig_owner_id = (_load_task_owners() or {}).get(orig_id)
+        orig_owner_name = ""
+        if orig_owner_id and orig_owner_id != owner_id:
+            users = state_store.load_approved_users()
+            orig_owner_name = (users.get(orig_owner_id) or {}).get("name", "")
+        added_at = _format_unix_ts(detail.get("create_time"))
+
+        meta_parts = []
+        if orig_owner_name:
+            meta_parts.append(f"👤 {orig_owner_name}")
+        if added_at:
+            meta_parts.append(f"🕐 {added_at}")
+        meta_line = "  •  ".join(meta_parts)
+
+        if orig_status in {"finished", "seeding"}:
+            size_str = _format_size(original.get("size"))
+            status_str = "раздаётся" if orig_status == "seeding" else "скачан"
+            text = (
+                f"✅ Этот файл уже загружен\n\n"
+                f"🎬 {orig_title}\n"
+                f"📦 {size_str}  •  {status_str}"
+            )
+            if meta_line:
+                text += f"\n{meta_line}"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", orig_id))],
+                [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+            ])
+
+        elif orig_status in {"downloading", "waiting", "finishing", "hash_checking"}:
+            downloaded = transfer.get("size_downloaded", 0)
+            total = original.get("size") or 0
+            percent = _progress_percent(downloaded, total)
+            if percent is not None:
+                progress_str = f"⬇️ {percent:.0f}%  ({_format_size(downloaded)} из {_format_size(total)})"
+            else:
+                progress_str = "⬇️ Скачивается…"
+            text = (
+                f"📌 Этот файл уже скачивается\n\n"
+                f"🎬 {orig_title}\n"
+                f"{progress_str}"
+            )
+            if meta_line:
+                text += f"\n{meta_line}"
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", orig_id)),
+                    InlineKeyboardButton("🔔 Уведомить когда готово", callback_data=_task_callback("sub_notify", orig_id)),
+                ],
+                [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+            ])
+
+        else:
+            # paused / error / unknown
+            status_str = _status_label(orig_status)
+            text = (
+                f"⚠️ Такой файл уже добавлен, но остановлен\n\n"
+                f"🎬 {orig_title}\n"
+                f"Статус: {status_str}"
+            )
+            if meta_line:
+                text += f"\n{meta_line}"
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", orig_id)),
+                    InlineKeyboardButton("▶️ Запустить", callback_data=_task_callback("resume", orig_id)),
+                ],
+                [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+            ])
+    else:
+        # Original not found — it may have been deleted already.
+        text = (
+            f"📌 Такой торрент уже был добавлен ранее\n\n"
+            f"🎬 {dup_title}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        ])
+
+    try:
+        await app.bot.send_message(chat_id=owner_id, text=text, reply_markup=kb)
+    except Exception:
+        logger.warning("Failed to send duplicate notification to %s", owner_id, exc_info=True)
+
+
 async def _run_task_notifications_once(app: Application) -> None:
     if not _task_notifications_enabled():
         return
@@ -1463,6 +1609,24 @@ async def _run_task_notifications_once(app: Application) -> None:
         if not task_id or status not in TASK_NOTIFICATION_STATUSES:
             continue
 
+        # Intercept torrent_duplicate errors before the normal notification flow.
+        error_detail = task.get("additional", {}).get("detail", {}).get("error_detail", "")
+        if status == "error" and error_detail == "torrent_duplicate":
+            raw = notified.get(task_id)
+            already_handled = (
+                raw == "error:torrent_duplicate"
+                or (isinstance(raw, dict) and raw.get("status") == "error:torrent_duplicate")
+            )
+            if not already_handled:
+                await _handle_duplicate_task(app, task, tasks)
+                owner_id = (_load_task_owners() or {}).get(task_id)
+                sent: set[str] = {str(owner_id)} if owner_id else set()
+                notified[task_id] = _make_notification_delivery_state(
+                    "error:torrent_duplicate", sent, {}
+                )
+                changed = True
+            continue
+
         notification_key = _notification_status_key(status)
         sent_recipients, failed_recipients, legacy_done = _notification_delivery_state(
             notified.get(task_id),
@@ -1472,6 +1636,17 @@ async def _run_task_notifications_once(app: Application) -> None:
             continue
 
         recipients = _notification_recipients(task_id)
+
+        # Also notify any users who subscribed via "🔔 Уведомить когда готово".
+        if status in {"finished", "seeding"}:
+            raw_state = notified.get(task_id)
+            if isinstance(raw_state, dict):
+                for sub_id_str in raw_state.get("subscribers", []):
+                    try:
+                        recipients.add(int(sub_id_str))
+                    except (TypeError, ValueError):
+                        pass
+
         if not recipients:
             continue
 
@@ -4767,6 +4942,40 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
         )
         _register_task_card_from_query(query, task_id)
+        return
+
+    if action == "sub_notify":
+        # Subscribe the current user to a "done" notification for this task.
+        notified = _load_notified_tasks()
+        raw = notified.get(task_id)
+        if isinstance(raw, dict):
+            subscribers: list[str] = raw.get("subscribers", [])
+            subscriber_set = set(subscribers)
+            subscriber_set.add(str(chat_id))
+            raw["subscribers"] = sorted(subscriber_set)
+            notified[task_id] = raw
+        else:
+            notified[task_id] = {
+                "status": "",
+                "sent": [],
+                "failures": {},
+                "subscribers": [str(chat_id)],
+            }
+        _save_notified_tasks(notified)
+
+        if chat_id:
+            asyncio.create_task(_send_auto_delete(context.bot, chat_id, "🔔 Уведомлю когда скачается!"))
+
+        # Remove the subscribe button from the message so it can't be pressed again.
+        try:
+            if query.message:
+                new_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", task_id))],
+                    [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+                ])
+                await query.edit_message_reply_markup(reply_markup=new_kb)
+        except Exception:
+            logger.debug("Failed to update keyboard after sub_notify", exc_info=True)
         return
 
     if action in {"resume", "pause", "delete"}:

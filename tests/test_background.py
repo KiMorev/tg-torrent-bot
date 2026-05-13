@@ -426,5 +426,207 @@ class SubscriptionCheckTests(unittest.TestCase):
         self.assertEqual(mock_app.bot.send_message.await_count, 2)
 
 
+class DuplicateDetectionTests(unittest.TestCase):
+    """_run_task_notifications_once detects torrent_duplicate and calls _handle_duplicate_task."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _dup_task(self, *, task_id: str = "dup1", title: str = "Movie.mkv") -> dict:
+        return {
+            "id": task_id,
+            "title": title,
+            "status": "error",
+            "type": "bt",
+            "size": 0,
+            "additional": {
+                "detail": {"error_detail": "torrent_duplicate"},
+            },
+        }
+
+    def test_duplicate_task_triggers_handler(self) -> None:
+        task = self._dup_task()
+        mock_app = MagicMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        mock_handler = AsyncMock()
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"error"}),
+            patch.object(bot, "_handle_duplicate_task", mock_handler),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        mock_handler.assert_awaited_once_with(mock_app, task, [task])
+
+    def test_duplicate_handler_not_called_twice(self) -> None:
+        task = self._dup_task()
+        mock_app = MagicMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        mock_handler = AsyncMock()
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"error"}),
+            patch.object(bot, "_handle_duplicate_task", mock_handler),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertEqual(mock_handler.await_count, 1)
+
+    def test_regular_error_task_is_not_intercepted(self) -> None:
+        task = {
+            "id": "err1",
+            "title": "Movie.mkv",
+            "status": "error",
+            "type": "bt",
+            "size": 0,
+            "additional": {
+                "detail": {"error_detail": "disk_full"},
+            },
+        }
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        mock_handler = AsyncMock()
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"error"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "_handle_duplicate_task", mock_handler),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        # handler not called — normal notification flow used instead
+        mock_handler.assert_not_awaited()
+        mock_app.bot.send_message.assert_awaited_once()
+
+    def test_duplicate_state_saved_with_special_key(self) -> None:
+        task = self._dup_task()
+        mock_app = MagicMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"error"}),
+            patch.object(bot, "_handle_duplicate_task", AsyncMock()),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        notified = self._store.load_notified_tasks()
+        self.assertIn("dup1", notified)
+        self.assertEqual(notified["dup1"]["status"], "error:torrent_duplicate")
+
+
+class SubscriberNotificationTests(unittest.TestCase):
+    """Users who subscribed via sub_notify are notified when the task finishes."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+        bot.TASK_CARD_MESSAGES.clear()
+
+    def tearDown(self) -> None:
+        bot.TASK_CARD_MESSAGES.clear()
+        self._tmp.cleanup()
+
+    def test_subscriber_receives_notification_on_finish(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "Movie", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_app.bot.delete_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        # Subscriber 888 signed up; owner 999 is the regular recipient.
+        self._store.save_notified_tasks({
+            "tid1": {"status": "", "sent": [], "failures": {}, "subscribers": ["888"]},
+        })
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        sent_to = {call.kwargs["chat_id"] for call in mock_app.bot.send_message.call_args_list}
+        self.assertIn(888, sent_to)
+        self.assertIn(999, sent_to)
+
+    def test_subscriber_not_double_notified(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "Movie", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_app.bot.delete_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        # Subscriber who is already a regular recipient too.
+        self._store.save_notified_tasks({
+            "tid1": {"status": "", "sent": [], "failures": {}, "subscribers": ["999"]},
+        })
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertEqual(mock_app.bot.send_message.await_count, 1)
+
+    def test_subscribers_not_notified_for_non_final_status(self) -> None:
+        task = {"id": "tid1", "status": "downloading", "type": "bt", "title": "Movie", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        self._store.save_notified_tasks({
+            "tid1": {"status": "", "sent": [], "failures": {}, "subscribers": ["888"]},
+        })
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"downloading", "finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        sent_to = {call.kwargs["chat_id"] for call in mock_app.bot.send_message.call_args_list}
+        # subscriber 888 should NOT be notified for downloading status
+        self.assertNotIn(888, sent_to)
+
+
 if __name__ == "__main__":
     unittest.main()
