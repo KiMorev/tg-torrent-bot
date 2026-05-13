@@ -43,6 +43,19 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(plex_button.text, "▶️ Открыть Plex (iOS)")
         self.assertEqual(plex_button.url, "plex://")
 
+    def test_final_notification_keyboard_always_has_close_button(self) -> None:
+        """Every final notification must have ✖️ Закрыть — with and without Plex."""
+        for show_plex in (True, False):
+            with self.subTest(show_plex=show_plex):
+                keyboard = _final_notification_keyboard("tid1", show_plex=show_plex)
+                labels = [button.text for row in keyboard.inline_keyboard for button in row]
+                self.assertIn("✖️ Закрыть", labels)
+
+    def test_final_notification_keyboard_close_is_last_row(self) -> None:
+        keyboard = _final_notification_keyboard("tid1", show_plex=True)
+        last_row_label = keyboard.inline_keyboard[-1][0].text
+        self.assertEqual(last_row_label, "✖️ Закрыть")
+
     def test_admin_panel_keyboard_links_core_sections(self) -> None:
         keyboard = _admin_panel_keyboard()
 
