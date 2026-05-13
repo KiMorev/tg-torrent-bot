@@ -3105,16 +3105,22 @@ async def _download_and_add(
         success_text = f"{added_msg}{suffix}"
 
         series_query = _extract_series_base_query(title)
+        _card_chat_id = _chat_id_from_query(query)
+        _card_msg_id = _message_id_from_message(query.message) if query.message else None
         if series_query:
             context.user_data["srch_series_query"] = series_query
             await query.edit_message_text(
                 success_text, reply_markup=_search_after_add_keyboard(task_id)
             )
             _register_task_card_from_query(query, task_id)
+            if task_id and _card_chat_id and _card_msg_id:
+                _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
             return SEARCH_RESULTS
 
         await query.edit_message_text(success_text, reply_markup=_task_reply_markup(task_id))
         _register_task_card_from_query(query, task_id)
+        if task_id and _card_chat_id and _card_msg_id:
+            _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
     except (RutrackerError, JackettError, DownloadStationError) as e:
         await query.edit_message_text(f"Ошибка: {e}")
     finally:
@@ -4561,6 +4567,11 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
         task_id,
         fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
     )
+    if task_id:
+        _pm_chat_id = _chat_id_from_message(progress_message)
+        _pm_msg_id = _message_id_from_message(progress_message)
+        if _pm_chat_id and _pm_msg_id:
+            _start_task_card_refresh(context.application, _pm_chat_id, _pm_msg_id, task_id)
 
 
 async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4690,6 +4701,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             task_id,
             fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
         )
+        if task_id and progress_message:
+            _hd_chat_id = _chat_id_from_message(progress_message)
+            _hd_msg_id = _message_id_from_message(progress_message)
+            if _hd_chat_id and _hd_msg_id:
+                _start_task_card_refresh(context.application, _hd_chat_id, _hd_msg_id, task_id)
 
     except Exception as e:
         logger.exception("Failed to process torrent")
