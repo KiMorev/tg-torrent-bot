@@ -239,6 +239,7 @@ def _tasks_keyboard(
             ]
         )
 
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -271,6 +272,9 @@ def _task_keyboard(
     )
     rows.append(
         [InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))]
+    )
+    rows.append(
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))]
     )
 
     return InlineKeyboardMarkup(rows)
@@ -342,6 +346,17 @@ def _no_quality_keyboard(base_query: str) -> InlineKeyboardMarkup:
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:no_quality",
         )],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
+def _search_error_keyboard() -> InlineKeyboardMarkup:
+    """Shown after a fatal search error (both sources unavailable).
+
+    Gives the user a way to retry the same query or close the message.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry")],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
     ])
 
 

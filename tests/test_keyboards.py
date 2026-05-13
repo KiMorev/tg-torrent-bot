@@ -9,8 +9,11 @@ from keyboards import (
     _final_notification_keyboard,
     _jackett_select_keyboard,
     _search_advanced_keyboard,
+    _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
+    _task_keyboard,
+    _tasks_keyboard,
     tracker_selection_label,
 )
 
@@ -299,6 +302,66 @@ class TrackerSelectionLabelTests(unittest.TestCase):
 
     def test_no_selected_returns_no_trackers(self) -> None:
         self.assertEqual(tracker_selection_label(self._indexers, set()), "нет трекеров")
+
+
+class SearchErrorKeyboardTests(unittest.TestCase):
+    """_search_error_keyboard — always has retry + close."""
+
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+
+    def test_has_retry_button(self) -> None:
+        buttons = self._buttons(_search_error_keyboard())
+        self.assertIn("🔄 Попробовать снова", buttons)
+        self.assertEqual(buttons["🔄 Попробовать снова"], "srch:retry")
+
+    def test_has_close_button(self) -> None:
+        buttons = self._buttons(_search_error_keyboard())
+        self.assertIn("✖️ Закрыть", buttons)
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_has_exactly_two_buttons(self) -> None:
+        all_buttons = [b for row in _search_error_keyboard().inline_keyboard for b in row]
+        self.assertEqual(len(all_buttons), 2)
+
+
+class TasksKeyboardCloseTests(unittest.TestCase):
+    """_tasks_keyboard and _task_keyboard always end with a Close button."""
+
+    def _labels(self, keyboard) -> list[str]:
+        return [b.text for row in keyboard.inline_keyboard for b in row]
+
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+
+    def test_tasks_keyboard_has_close_button(self) -> None:
+        keyboard = _tasks_keyboard([])
+        labels = self._labels(keyboard)
+        self.assertIn("✖️ Закрыть", labels)
+
+    def test_tasks_keyboard_close_is_last_button(self) -> None:
+        keyboard = _tasks_keyboard([])
+        last_row = keyboard.inline_keyboard[-1]
+        self.assertEqual(last_row[0].text, "✖️ Закрыть")
+        self.assertEqual(last_row[0].callback_data, "task:close:")
+
+    def test_task_keyboard_has_close_button(self) -> None:
+        keyboard = _task_keyboard("task_123", status="downloading")
+        buttons = self._buttons(keyboard)
+        self.assertIn("✖️ Закрыть", buttons)
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_task_keyboard_close_is_last_row(self) -> None:
+        keyboard = _task_keyboard("task_123", status="downloading")
+        last_row = keyboard.inline_keyboard[-1]
+        self.assertEqual(last_row[0].text, "✖️ Закрыть")
+
+    def test_tasks_keyboard_with_admin_scope_still_has_close(self) -> None:
+        keyboard = _tasks_keyboard([], scope="all", is_admin=True)
+        labels = self._labels(keyboard)
+        self.assertIn("✖️ Закрыть", labels)
+        self.assertIn("🔄 Обновить", labels)
+        self.assertIn("🙋 Мои загрузки", labels)
 
 
 if __name__ == "__main__":

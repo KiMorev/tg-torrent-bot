@@ -77,6 +77,7 @@ from keyboards import (
     _search_advanced_keyboard,
     _search_after_add_keyboard,
     _no_quality_keyboard,
+    _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
     tracker_selection_label,
@@ -2133,12 +2134,12 @@ async def _show_jackett_selector(
         indexers = await asyncio.to_thread(jackett_client.get_indexers)
     except JackettError as e:
         logger.error("Jackett get_indexers failed: %s", e)
-        await edit_fn(_friendly_error("jackett", str(e)), parse_mode="HTML")
+        await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
     if not indexers:
         logger.warning("Jackett: no indexers configured")
-        await edit_fn("🌐 <b>Jackett</b>: нет настроенных индексеров", parse_mode="HTML")
+        await edit_fn("🌐 <b>Jackett</b>: нет настроенных индексеров", reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
     # Keep existing selection if available; otherwise default to Rutracker
@@ -2200,7 +2201,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     try:
         rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
     except RutrackerError as rt_err:
-        await query.edit_message_text(_friendly_error("rutracker", str(rt_err)), parse_mode="HTML")
+        await query.edit_message_text(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
     results_data = []
     for r in rt_results:
@@ -2354,7 +2355,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     banner = f"⚠️ Jackett недоступен, ищу напрямую в Rutracker"
                     # fall through to Rutracker path below
                 else:
-                    await edit_fn(_friendly_error("jackett", str(e)), parse_mode="HTML")
+                    await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
                     return ConversationHandler.END
 
         selected: set[str] = context.user_data.get("srch_jackett_selected", set())
@@ -2380,7 +2381,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
                     # fall through to Rutracker path
                 else:
-                    await edit_fn(_friendly_error("jackett", raw_err), parse_mode="HTML")
+                    await edit_fn(_friendly_error("jackett", raw_err), reply_markup=_search_error_keyboard(), parse_mode="HTML")
                     return ConversationHandler.END
             else:
                 for r in j_results_raw:
@@ -2407,7 +2408,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         try:
             rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
         except RutrackerError as rt_err:
-            await edit_fn(_friendly_error("rutracker", str(rt_err)), parse_mode="HTML")
+            await edit_fn(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
             return ConversationHandler.END
         for r in rt_results:
             ep = _parse_episode_info(r.title)
@@ -2429,7 +2430,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         source = "rutracker"
 
     if not results_data and not rutracker_client and not jackett_client:
-        await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.")
+        await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.", reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
     if not results_data:
@@ -2707,7 +2708,7 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             return SEARCH_RESULTS
-        await query.edit_message_text(_friendly_error("jackett", raw_err), parse_mode="HTML")
+        await query.edit_message_text(_friendly_error("jackett", raw_err), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
 
     if not j_results_raw:
@@ -3192,6 +3193,27 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         context.user_data.pop(key, None)
 
     return ConversationHandler.END
+
+
+async def search_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Re-run the most recent search. Triggered from error-message buttons (srch:retry).
+
+    Works both as a ConversationHandler entry_point (conversation already ended)
+    and within active states, so the retry button functions in all situations.
+    """
+    query = update.callback_query
+    await query.answer()
+    search_query = (
+        context.user_data.get("srch_search_query")
+        or context.user_data.get("srch_query", "")
+    ).strip()
+    if not search_query:
+        await query.edit_message_text(
+            "Запрос потерян — начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
+        return ConversationHandler.END
+    return await _run_search(search_query, query.edit_message_text, context)
 
 
 async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4259,6 +4281,15 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await query.answer()
 
+    # Fast path: close (delete) the message — no task_id needed.
+    if (query.data or "").startswith(f"{TASK_CALLBACK_PREFIX}:close"):
+        try:
+            if query.message:
+                await query.message.delete()
+        except Exception:
+            logger.debug("Failed to delete task message on close", exc_info=True)
+        return
+
     try:
         _, action, task_id = query.data.split(":", 2)
     except ValueError:
@@ -4312,17 +4343,9 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         _forget_task_card_message(chat_id, message_id, task_id)
-        await _safe_edit_callback(query, "🔎 Получаю задачу…")
-        try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
-        except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось получить задачу: {e}")
-            return
-
-        task = _find_task(tasks, task_id)
-        title = task.get("title") if task else task_id
+        # Show confirmation immediately — no network fetch needed.
         await query.edit_message_text(
-            f"Удалить задачу из Download Station?\n\n{title}\nID: {task_id}",
+            f"Удалить задачу из Download Station?\nID: {task_id}",
             reply_markup=_delete_confirm_keyboard(task_id),
         )
         return
@@ -4839,6 +4862,8 @@ def main() -> None:
                 pattern=rf"^{SUB_CALLBACK_PREFIX}:jackett_view:",
             ),
             CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+$"),
+            # Re-run the last search from an error message (conversation already ended).
+            CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
         ],
             states={
                 SEARCH_OPTIONS: [
