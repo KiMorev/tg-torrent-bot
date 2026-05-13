@@ -2963,6 +2963,14 @@ async def _download_and_add(
 
     chat_id = query.message.chat.id if query.message else None
 
+    # Snapshot existing task IDs before any create_magnet call so we can
+    # identify the newly created task when DS doesn't return an ID immediately.
+    try:
+        _before_tasks = await asyncio.to_thread(ds_client.list_tasks)
+        known_task_ids: set[str] = {t["id"] for t in _before_tasks if t.get("id")}
+    except DownloadStationError:
+        known_task_ids = set()
+
     try:
         if result.get("torrent_url") and jackett_client:
             # Jackett result: download via Jackett proxy (uniform for all indexers).
@@ -2982,13 +2990,13 @@ async def _download_and_add(
                 task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
             except JackettMagnetRedirect as magnet_redir:
                 # Tracker has no .torrent — its download URL redirects to magnet.
-                # Use the intercepted magnet URL directly (faster than result["magnet_url"]
-                # which may differ slightly, but also fall back to it if empty).
                 magnet = magnet_redir.magnet_url or result.get("magnet_url", "")
                 if not magnet:
                     raise JackettError("Torrent-файл недоступен и magnet-ссылка отсутствует.") from magnet_redir
                 logger.info("Jackett redirected to magnet — using it directly")
                 task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                if not task_id:
+                    task_id = await _wait_for_magnet_task_id(magnet, known_task_ids, query.message)
                 download_method = "magnet"
             except JackettError as torrent_err:
                 logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
@@ -3009,12 +3017,20 @@ async def _download_and_add(
                             task_id = await asyncio.to_thread(
                                 ds_client.create_magnet, result["magnet_url"]
                             )
+                            if not task_id:
+                                task_id = await _wait_for_magnet_task_id(
+                                    result["magnet_url"], known_task_ids, query.message
+                                )
                             download_method = "magnet"
                         else:
                             raise retry_err
                 elif result.get("magnet_url"):
                     logger.warning("re-search found no fresh URL, falling back to magnet")
                     task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+                    if not task_id:
+                        task_id = await _wait_for_magnet_task_id(
+                            result["magnet_url"], known_task_ids, query.message
+                        )
                     download_method = "magnet"
                 else:
                     raise torrent_err
@@ -3026,6 +3042,10 @@ async def _download_and_add(
         elif result.get("magnet_url"):
             # Fallback: magnet link (no .torrent available)
             task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+            if not task_id:
+                task_id = await _wait_for_magnet_task_id(
+                    result["magnet_url"], known_task_ids, query.message
+                )
             download_method = "magnet"
         else:
             await query.edit_message_text("Не удалось скачать торрент: нет доступного источника.")
