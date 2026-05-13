@@ -3,6 +3,7 @@ import html as html_module
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -20,6 +21,7 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     filters,
 )
 
@@ -237,7 +239,7 @@ BOT_COMMANDS = [
     BotCommand("id", "Показать мой chat_id"),
     BotCommand("ping", "Проверка связи"),
 ]
-TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"]
+TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query", "message_reaction"]
 DOWNLOAD_PANEL_MESSAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_PAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_SCOPES: dict[int, str] = {}
@@ -1824,6 +1826,53 @@ async def _send_auto_delete(bot, chat_id: int, text: str, delay: float = 3.0) ->
         await msg.delete()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Easter-egg: reaction to download-notification messages
+# ---------------------------------------------------------------------------
+
+_REACTION_EASTER_EGG: dict[str, list[str]] = {
+    "👍": ["Стараюсь! 💪", "Всегда рад помочь 🤖", "На здоровье!"],
+    "❤": ["Тоже тебя люблю 🤖❤️", "Приятно! 😊", "Взаимно!"],
+    "🔥": ["Огонь раздача! 🎉", "Горячий контент 🔥", "Я знаю толк в хороших файлах 😎"],
+    "🤩": ["Согласен, хороший выбор! 🎬", "Я тоже рад за тебя 🤩", "Отличный вкус!"],
+    "👎": ["Ой, что-то не так? 😅", "Попробуй другую раздачу, подберём!", "Понимаю..."],
+    "😂": ["Хорошо качать с хорошим настроением 😄", "Ха! 🤖"],
+    "🎉": ["Ура! Праздник загрузки! 🎊", "Вечеринка началась! 🎬🍿"],
+    "🤔": ["Задумался о жизни? Или о качестве раздачи? 🤖", "Выбор непростой, да?"],
+    "😱": ["Всё хорошо? 😅 Надеюсь в хорошем смысле!", "Я тоже иногда удивляюсь 🤖"],
+    "💯": ["Именно! 💯", "В точку 🎯"],
+    "🫡": ["Есть! Выполнено! 🤖", "Служу верой и правдой 🫡"],
+    "🍿": ["О, кино-вечер намечается? 🎬", "Приятного просмотра! 🍿"],
+    "❤‍🔥": ["Страсть к хорошему кино — это правильно! 🔥❤️"],
+    "🥰": ["Спасибо! 🤖🥰", "Такой приятный пользователь!"],
+    "👏": ["Стараюсь! 👏", "Спасибо, буду и дальше в том же духе!"],
+    "🤖": ["Привет коллеге! 🤖", "Свои! 🤜🤛"],
+}
+_REACTION_EASTER_EGG_DEFAULT = [
+    "Спасибо за реакцию! 🤖",
+    "Приятно получать отзывы 😊",
+    "🤖❤️",
+    "Понял, принял!",
+]
+
+
+async def reaction_easter_egg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Respond to any message reaction with a fun auto-deleting reply."""
+    rct = update.message_reaction
+    if not rct or not rct.new_reaction:
+        return  # reaction removed — skip
+
+    chat_id = rct.chat.id
+    if chat_id not in _all_allowed_chat_ids():
+        return
+
+    first = rct.new_reaction[0]
+    emoji: str = getattr(first, "emoji", "")
+    responses = _REACTION_EASTER_EGG.get(emoji, _REACTION_EASTER_EGG_DEFAULT)
+    text = random.choice(responses)
+    asyncio.create_task(_send_auto_delete(context.bot, chat_id, text, delay=5.0))
 
 
 async def _delayed_delete_message(bot, chat_id: int, message_id: int, delay: float = 4.0) -> None:
@@ -5215,6 +5264,7 @@ def main() -> None:
     )
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageReactionHandler(reaction_easter_egg))
     app.add_error_handler(error_handler)
 
     logger.info(
