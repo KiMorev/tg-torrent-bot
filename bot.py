@@ -2894,22 +2894,25 @@ async def _download_and_add(
     safe_name = _safe_filename(f"{title}.torrent")
     temp_path = _temp_path(safe_name)
     task_id = ""
+    download_method = "torrent-файл"
     tracker_result: TrackerApplyResult | None = None
 
     chat_id = query.message.chat.id if query.message else None
 
     try:
-        if result.get("magnet_url"):
-            # Jackett result with magnet — submit directly to DS
-            task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+        if result.get("torrent_url") and jackett_client:
+            # Jackett result: prefer .torrent file over magnet
+            torrent_bytes = await asyncio.to_thread(jackett_client.download_torrent, result["torrent_url"])
+            temp_path.write_bytes(torrent_bytes)
+            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
         elif source == "rutracker" and topic_id and rutracker_client:
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)
             task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
-        elif result.get("torrent_url") and jackett_client:
-            torrent_bytes = await asyncio.to_thread(jackett_client.download_torrent, result["torrent_url"])
-            temp_path.write_bytes(torrent_bytes)
-            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        elif result.get("magnet_url"):
+            # Fallback: magnet link (no .torrent available)
+            task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+            download_method = "magnet"
         else:
             await query.edit_message_text("Не удалось скачать торрент: нет доступного источника.")
             return ConversationHandler.END
@@ -2962,7 +2965,7 @@ async def _download_and_add(
                     )
 
         added_msg = _task_added_message(
-            "torrent-файл", title=title, task_id=task_id, tracker_result=tracker_result
+            download_method, title=title, task_id=task_id, tracker_result=tracker_result
         )
         suffix = "\n\n🔔 Буду следить за новыми сериями." if subscribe else ""
         success_text = f"{added_msg}{suffix}"
