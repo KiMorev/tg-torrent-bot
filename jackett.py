@@ -259,7 +259,13 @@ class JackettClient:
             resp.raise_for_status()
         except requests.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
+            # Log first 300 chars of body to diagnose: login page? JSON error?
+            body_hint = ""
+            if e.response is not None:
+                raw = e.response.text[:300].strip().replace("\n", " ")
+                body_hint = f" | body: {raw!r}"
             sanitized = _sanitize_error_text(e, self._api_key)
+            logger.debug("download_torrent HTTP %s%s", status, body_hint)
             raise JackettError(
                 f"Не удалось скачать torrent через Jackett: HTTP {status} — {sanitized}"
             ) from e
@@ -267,7 +273,19 @@ class JackettClient:
             raise JackettError(
                 f"Не удалось скачать torrent через Jackett: {_sanitize_error_text(e, self._api_key)}"
             ) from e
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/html" in content_type:
+            # Jackett returned a login/error page instead of the torrent
+            html_hint = resp.text[:200].strip().replace("\n", " ")
+            logger.debug("download_torrent returned HTML (session issue?): %r", html_hint)
+            raise JackettError(
+                "Jackett вернул HTML вместо torrent-файла — вероятно, сессия трекера устарела."
+            )
         if len(resp.content) < 20 or not resp.content.startswith(b"d"):
+            logger.debug(
+                "download_torrent: unexpected content type=%r, first bytes=%r",
+                content_type, resp.content[:40],
+            )
             raise JackettError("Полученный файл не является torrent-файлом.")
         return resp.content
 
