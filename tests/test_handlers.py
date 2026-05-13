@@ -31,6 +31,7 @@ from bot import (
     TASK_CARD_REFRESH_TASKS,
     _ACTIVE_STATUSES,
     _cancel_task_card_refresh,
+    _extract_rutracker_topic_id,
     _is_admin_chat,
     _is_allowed,
     _format_movie_discovery_cache,
@@ -988,6 +989,29 @@ class PluralTests(unittest.TestCase):
         self.assertEqual(_plural(20, "запись", "записи", "записей"), "записей")
         self.assertEqual(_plural(111, "запись", "записи", "записей"), "записей")
         self.assertEqual(_plural(156, "запись", "записи", "записей"), "записей")
+
+
+class ExtractRutrackerTopicIdTests(unittest.TestCase):
+    def test_standard_viewtopic_url(self) -> None:
+        url = "https://rutracker.org/forum/viewtopic.php?t=1234567"
+        self.assertEqual(_extract_rutracker_topic_id(url), "1234567")
+
+    def test_rutracker_net_domain(self) -> None:
+        url = "https://rutracker.net/forum/viewtopic.php?t=9876543"
+        self.assertEqual(_extract_rutracker_topic_id(url), "9876543")
+
+    def test_extra_query_params(self) -> None:
+        url = "https://rutracker.org/forum/viewtopic.php?p=999&t=555&sid=abc"
+        self.assertEqual(_extract_rutracker_topic_id(url), "555")
+
+    def test_non_rutracker_url_returns_empty(self) -> None:
+        self.assertEqual(_extract_rutracker_topic_id("https://nnmclub.to/forum/viewtopic.php?t=111"), "")
+
+    def test_empty_url_returns_empty(self) -> None:
+        self.assertEqual(_extract_rutracker_topic_id(""), "")
+
+    def test_url_without_t_param_returns_empty(self) -> None:
+        self.assertEqual(_extract_rutracker_topic_id("https://rutracker.org/forum/index.php"), "")
 
 
 if __name__ == "__main__":
