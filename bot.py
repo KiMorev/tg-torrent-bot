@@ -1820,6 +1820,15 @@ async def _send_auto_delete(bot, chat_id: int, text: str, delay: float = 3.0) ->
         pass
 
 
+async def _delayed_delete_message(bot, chat_id: int, message_id: int, delay: float = 4.0) -> None:
+    """Delete an existing message after *delay* seconds (fire-and-forget)."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 async def _safe_edit_callback(
     query,
     text: str,
@@ -4478,7 +4487,22 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             else:
                 await asyncio.to_thread(ds_client.delete_task, task_id)
                 _forget_task_state([task_id])
-                await query.edit_message_text(f"Задача удалена из Download Station.\nID: {task_id}")
+                scope = _normalize_list_scope(task_id, chat_id)
+                del_chat_id = chat_id
+                del_msg_id = query.message.message_id if query.message else None
+                await query.edit_message_text(
+                    f"🗑 Задача удалена.\nID: {task_id}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "📋 К списку загрузок",
+                            callback_data=_task_callback("list", scope),
+                        )
+                    ]]),
+                )
+                if del_chat_id and del_msg_id:
+                    asyncio.create_task(
+                        _delayed_delete_message(context.bot, del_chat_id, del_msg_id, delay=5.0)
+                    )
                 return
         except DownloadStationError as e:
             await query.edit_message_text(f"Не удалось выполнить действие: {e}")
