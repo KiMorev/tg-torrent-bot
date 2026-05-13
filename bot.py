@@ -1808,6 +1808,16 @@ async def _safe_edit_message(
             raise
 
 
+async def _send_auto_delete(bot, chat_id: int, text: str, delay: float = 3.0) -> None:
+    """Send *text* to *chat_id* then delete the message after *delay* seconds."""
+    try:
+        msg = await bot.send_message(chat_id=chat_id, text=text)
+        await asyncio.sleep(delay)
+        await msg.delete()
+    except Exception:
+        pass
+
+
 async def _safe_edit_callback(
     query,
     text: str,
@@ -1980,9 +1990,6 @@ async def _build_diagnostics_text() -> str:
         ds_client=ds_client,
         tracker_service=_tracker_service(),
         display_timezone=DISPLAY_TIMEZONE,
-        kinopoisk_enabled=KINOPOISK_ENABLED,
-        plex_enabled=PLEX_ENABLED,
-        plex_url=PLEX_URL,
     )
     return format_diagnostics(report)
 
@@ -2894,29 +2901,22 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     if update.callback_query:
         await update.callback_query.answer()
-        if has_photo:
-            # The current message IS the photo — delete it and send plain text reply
-            try:
-                await update.callback_query.message.delete()
-            except Exception:
-                pass
-            try:
-                await context.bot.send_message(
-                    chat_id=update.callback_query.message.chat_id,
-                    text="Поиск отменен.",
-                )
-            except Exception:
-                pass
-        else:
-            await update.callback_query.edit_message_text("Поиск отменен.")
+        chat_id = update.callback_query.message.chat.id if update.callback_query.message else None
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        if chat_id:
+            asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Отменено"))
     elif update.message:
-        await update.message.reply_text("Поиск отменен.")
+        chat_id = update.message.chat.id
         # If a photo confirm card is still open in the chat, delete it
         if has_photo and photo_msg_id and photo_chat_id:
             try:
                 await context.bot.delete_message(chat_id=photo_chat_id, message_id=photo_msg_id)
             except Exception:
                 pass
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Отменено"))
 
     for key in (
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
@@ -3500,14 +3500,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     action = parts[1] if len(parts) > 1 else "home"
 
     if action == "close":
+        chat_id = query.message.chat.id if query.message else None
         try:
             if query.message:
                 await query.message.delete()
-            return
         except Exception:
             logger.debug("Failed to delete admin panel message", exc_info=True)
-            await _safe_edit_callback(query, "Админ-панель закрыта.")
-            return
+        if chat_id:
+            asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
+        return
 
     if action == "diagnostics":
         await _safe_edit_callback(query, "🧭 Проверяю сервисы…")
@@ -3766,14 +3767,14 @@ async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     await query.answer()
+    chat_id = query.message.chat.id if query.message else None
     try:
         if query.message:
             await query.message.delete()
-            return
     except Exception:
         logger.debug("Failed to delete movie discovery message", exc_info=True)
-
-    await _safe_edit_callback(query, "Новинки закрыты.")
+    if chat_id:
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
 
 
 async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

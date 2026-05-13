@@ -73,9 +73,6 @@ class DiagnosticsTests(unittest.TestCase):
             ds_client=FakeDownloadStation([{"id": "1"}, {"id": "2"}]),
             tracker_service=FakeTrackerService(trackers=["udp://one", "udp://two"]),
             display_timezone=timezone.utc,
-            kinopoisk_enabled=True,
-            plex_enabled=True,
-            plex_url="https://plex.example/app",
         )
 
         text = format_diagnostics(report)
@@ -85,11 +82,10 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("✅ 🔎 <b>Rutracker</b>: подключен", text)
         self.assertIn("✅ 🌐 <b>Jackett</b>: подключен", text)
         self.assertIn("Индексеры: Rutracker, NNMClub", text)
-        self.assertIn("✅ 🎬 <b>Кинопоиск</b>: настроен", text)
         self.assertIn("✅ ➕ <b>Public-трекеры</b>: кэш готов", text)
         self.assertIn("Доступно: 2", text)
-        self.assertIn("✅ ▶️ <b>Plex</b>: кнопка включена", text)
-        self.assertIn("URL: https://plex.example/app", text)
+        self.assertNotIn("Кинопоиск", text)
+        self.assertNotIn("Plex", text)
 
     def test_run_diagnostics_reports_disabled_optional_services(self) -> None:
         report = run_diagnostics(
@@ -98,18 +94,15 @@ class DiagnosticsTests(unittest.TestCase):
             ds_client=FakeDownloadStation(),
             tracker_service=FakeTrackerService(enabled=False),
             display_timezone=timezone.utc,
-            kinopoisk_enabled=False,
-            plex_enabled=False,
-            plex_url="https://app.plex.tv",
         )
 
         text = format_diagnostics(report)
 
         self.assertIn("Rutracker</b>: не настроен", text)
         self.assertIn("Jackett</b>: не настроен", text)
-        self.assertIn("Кинопоиск</b>: выключен", text)
         self.assertIn("Public-трекеры</b>: выключены", text)
-        self.assertIn("Plex</b>: кнопка выключена", text)
+        self.assertNotIn("Кинопоиск", text)
+        self.assertNotIn("Plex", text)
 
     def test_stale_tracker_cache_reports_ok_not_warning(self) -> None:
         """A stale but non-empty cache is still functional — must show ✅, not ⚠️."""
@@ -119,9 +112,6 @@ class DiagnosticsTests(unittest.TestCase):
             ds_client=FakeDownloadStation(),
             tracker_service=FakeTrackerService(trackers=["udp://stale"], fresh_trackers=[]),
             display_timezone=timezone.utc,
-            kinopoisk_enabled=False,
-            plex_enabled=False,
-            plex_url="https://app.plex.tv",
         )
 
         text = format_diagnostics(report)
@@ -138,9 +128,6 @@ class DiagnosticsTests(unittest.TestCase):
             ds_client=FakeDownloadStation(),
             tracker_service=FakeTrackerService(trackers=[], fresh_trackers=[]),
             display_timezone=timezone.utc,
-            kinopoisk_enabled=False,
-            plex_enabled=False,
-            plex_url="https://app.plex.tv",
         )
 
         text = format_diagnostics(report)
@@ -155,9 +142,6 @@ class DiagnosticsTests(unittest.TestCase):
             ds_client=FakeDownloadStation(exc=DownloadStationError("DSM API вернул ошибку 119")),
             tracker_service=FakeTrackerService(exc=OSError("disk full")),
             display_timezone=timezone.utc,
-            kinopoisk_enabled=False,
-            plex_enabled=False,
-            plex_url="https://app.plex.tv",
         )
 
         text = format_diagnostics(report)

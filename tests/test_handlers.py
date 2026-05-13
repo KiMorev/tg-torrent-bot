@@ -415,7 +415,8 @@ class AdminPanelTests(unittest.TestCase):
         update.callback_query.message.delete.assert_awaited_once()
         update.callback_query.edit_message_text.assert_not_called()
 
-    def test_admin_close_callback_falls_back_to_edit(self):
+    def test_admin_close_callback_delete_failure_does_not_raise(self):
+        """If the message cannot be deleted, close still completes without editing."""
         update = _make_callback_update(chat_id=300, callback_data="admin:close")
         update.callback_query.message.delete.side_effect = Exception("cannot delete")
         context = _make_context()
@@ -424,11 +425,8 @@ class AdminPanelTests(unittest.TestCase):
             asyncio.run(admin_callback(update, context))
 
         update.callback_query.answer.assert_called_once()
-        update.callback_query.edit_message_text.assert_called_once_with(
-            "Админ-панель закрыта.",
-            reply_markup=None,
-            parse_mode=None,
-        )
+        # Fallback is an auto-delete notification task — edit_message_text must NOT be called
+        update.callback_query.edit_message_text.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +481,8 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         update.callback_query.message.delete.assert_awaited_once()
         update.callback_query.edit_message_text.assert_not_called()
 
-    def test_movie_discovery_close_falls_back_to_edit(self):
+    def test_movie_discovery_close_delete_failure_does_not_raise(self):
+        """If the message cannot be deleted, close still completes without editing the message."""
         update = _make_callback_update(chat_id=100, callback_data="new:close")
         update.callback_query.message.delete.side_effect = Exception("cannot delete")
         context = _make_context()
@@ -496,11 +495,8 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
             asyncio.run(movie_new_close_callback(update, context))
 
         update.callback_query.answer.assert_called_once()
-        update.callback_query.edit_message_text.assert_called_once_with(
-            "Новинки закрыты.",
-            reply_markup=None,
-            parse_mode=None,
-        )
+        # Fallback is an auto-delete notification task — edit_message_text must NOT be called
+        update.callback_query.edit_message_text.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -607,15 +603,16 @@ class StatusCommandTests(unittest.TestCase):
 
 
 class SearchCancelCallbackTests(unittest.TestCase):
-    def test_no_photo_edits_message_text(self):
+    def test_callback_deletes_message(self):
+        """Cancel via button must delete the search UI message, never edit it."""
         update = _make_callback_update()
         context = _make_context()
         asyncio.run(search_cancel(update, context))
-        update.callback_query.edit_message_text.assert_called_once_with("Поиск отменен.")
-        update.callback_query.message.delete.assert_not_called()
-        context.bot.send_message.assert_not_called()
+        update.callback_query.message.delete.assert_called_once()
+        update.callback_query.edit_message_text.assert_not_called()
 
-    def test_with_photo_deletes_message_and_sends_text(self):
+    def test_with_photo_deletes_message(self):
+        """Photo confirm card: the callback message is deleted; edit_message_text not called."""
         update = _make_callback_update()
         context = _make_context(user_data={
             "srch_confirm_has_photo": True,
@@ -624,8 +621,6 @@ class SearchCancelCallbackTests(unittest.TestCase):
         })
         asyncio.run(search_cancel(update, context))
         update.callback_query.message.delete.assert_called_once()
-        context.bot.send_message.assert_called_once()
-        # edit_message_text must NOT be called on a photo message
         update.callback_query.edit_message_text.assert_not_called()
 
     def test_clears_all_srch_keys(self):
@@ -647,11 +642,12 @@ class SearchCancelCallbackTests(unittest.TestCase):
 
 
 class SearchCancelCommandTests(unittest.TestCase):
-    def test_replies_with_text(self):
+    def test_does_not_use_reply_text(self):
+        """Command cancel sends notification via bot.send_message (auto-delete task), not reply_text."""
         update = _make_command_update()
         context = _make_context()
         asyncio.run(search_cancel(update, context))
-        update.message.reply_text.assert_called_once()
+        update.message.reply_text.assert_not_called()
 
     def test_deletes_photo_message_when_present(self):
         update = _make_command_update()
@@ -661,7 +657,8 @@ class SearchCancelCommandTests(unittest.TestCase):
             "srch_confirm_chat_id": 100,
         })
         asyncio.run(search_cancel(update, context))
-        update.message.reply_text.assert_called_once()
+        # reply_text is NOT called; notification goes via auto-delete task
+        update.message.reply_text.assert_not_called()
         context.bot.delete_message.assert_called_once_with(chat_id=100, message_id=77)
 
     def test_no_delete_when_no_photo(self):

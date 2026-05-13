@@ -219,24 +219,6 @@ def _public_trackers_diagnostic(tracker_service, display_timezone: tzinfo) -> Se
     return ServiceDiagnostic("Public trackers", "ok", _summary("ok", "➕", "Public-трекеры", "кэш готов"), details)
 
 
-def _kinopoisk_diagnostic(enabled: bool) -> ServiceDiagnostic:
-    if enabled:
-        return ServiceDiagnostic("Kinopoisk", "ok", _summary("ok", "🎬", "Кинопоиск", "настроен"))
-    return ServiceDiagnostic("Kinopoisk", "disabled", _summary("disabled", "🎬", "Кинопоиск", "выключен"))
-
-
-def _plex_diagnostic(enabled: bool, url: str) -> ServiceDiagnostic:
-    if not enabled:
-        return ServiceDiagnostic("Plex", "disabled", _summary("disabled", "▶️", "Plex", "кнопка выключена"))
-
-    return ServiceDiagnostic(
-        "Plex",
-        "ok",
-        _summary("ok", "▶️", "Plex", "кнопка включена"),
-        [f"   URL: {html.escape(url)}"],
-    )
-
-
 def run_diagnostics(
     *,
     rutracker_client,
@@ -244,18 +226,13 @@ def run_diagnostics(
     ds_client,
     tracker_service,
     display_timezone: tzinfo,
-    kinopoisk_enabled: bool,
-    plex_enabled: bool,
-    plex_url: str,
 ) -> DiagnosticsReport:
     return DiagnosticsReport(
         [
             _download_station_diagnostic(ds_client),
             _rutracker_diagnostic(rutracker_client),
             _jackett_diagnostic(jackett_client),
-            _kinopoisk_diagnostic(kinopoisk_enabled),
             _public_trackers_diagnostic(tracker_service, display_timezone),
-            _plex_diagnostic(plex_enabled, plex_url),
         ]
     )
 
