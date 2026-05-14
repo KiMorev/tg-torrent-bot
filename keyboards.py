@@ -105,6 +105,7 @@ def _admin_panel_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
             ],
+            [InlineKeyboardButton("🎬 Трекеры новинок", callback_data=_admin_callback("movie_trackers"))],
             [
                 InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
                 InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
@@ -620,4 +621,49 @@ def _jackett_select_keyboard(
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel",
         ))
     rows.append(bottom)
+    return InlineKeyboardMarkup(rows)
+
+
+def users_keyboard(
+    approved_users: dict,
+    *,
+    back_to_admin: bool = True,
+) -> InlineKeyboardMarkup:
+    """Keyboard for the users management panel."""
+    rows = [
+        [InlineKeyboardButton(
+            f"🚫 {info.get('name', '') or uid}",
+            callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove:{uid}",
+        )]
+        for uid, info in approved_users.items()
+    ]
+    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
+    if back_to_admin:
+        rows.append([InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home")])
+    else:
+        rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def movie_trackers_keyboard(
+    all_trackers: list[dict],
+    enabled_ids: set[str] | None,
+) -> InlineKeyboardMarkup:
+    """Keyboard for selecting which Jackett trackers participate in /new rating."""
+    def _sort_key(idx: dict) -> tuple:
+        is_off = enabled_ids is not None and idx.get("id", "") not in enabled_ids
+        return (1 if is_off else 0, idx.get("name", idx.get("id", "")))
+
+    rows = []
+    for idx in sorted(all_trackers, key=_sort_key):
+        id_ = idx.get("id", "")
+        name = idx.get("name", id_)
+        is_on = enabled_ids is None or id_ in enabled_ids
+        check = "✅ " if is_on else "☐ "
+        rows.append([InlineKeyboardButton(
+            f"{check}{name}",
+            callback_data=_admin_callback(f"tracker_toggle:{id_}"),
+        )])
+    rows.append([InlineKeyboardButton("✅ Включить все", callback_data=_admin_callback("tracker_enable_all"))])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home"))])
     return InlineKeyboardMarkup(rows)

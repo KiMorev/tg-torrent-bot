@@ -79,6 +79,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertTrue(settings.movie_discovery_enabled)
         self.assertEqual(settings.movie_discovery_interval_hours, 12)
         self.assertEqual(settings.movie_discovery_cache_file, Path("/tmp/tg_torrent_drop/movie_discovery.json"))
+        self.assertEqual(settings.movie_discovery_settings_file, Path("/tmp/tg_torrent_drop/movie_discovery_settings.json"))
         self.assertEqual(settings.movie_discovery_debug_file, Path("/tmp/tg_torrent_drop/movie_discovery_debug.json"))
         self.assertEqual(settings.movie_discovery_rutracker_tm, 32)
         self.assertTrue(settings.movie_discovery_jackett_require_date)
@@ -247,6 +248,13 @@ class DockerfileCoverageTest(unittest.TestCase):
         )
 
 
+def _config_py_env_keys() -> set[str]:
+    """Имена переменных окружения, которые читает config.py (паттерн env.get / env_int / env_bool / env_float / required_env)."""
+    path = _project_root() / "config.py"
+    content = path.read_text(encoding="utf-8")
+    return set(re.findall(r'(?:env\.get|env_int|env_bool|env_float|required_env|optional_secret_pair)\s*\(\s*env\s*,\s*"([A-Z_]+)"', content))
+
+
 class ComposeEnvCoverageTest(unittest.TestCase):
     """Каждая переменная из .env.example должна быть объявлена в compose.yaml.
     Этот тест поймает ситуацию, когда новая переменная добавлена в .env.example
@@ -266,6 +274,18 @@ class ComposeEnvCoverageTest(unittest.TestCase):
         self.assertFalse(
             extra,
             f"Переменные есть в compose.yaml, но отсутствуют в .env.example: {sorted(extra)}",
+        )
+
+    def test_env_example_covers_all_config_py_variables(self) -> None:
+        """Все переменные окружения, читаемые config.py, должны быть в .env.example.
+        Ловит ситуацию, когда новое поле добавлено в AppSettings/load_settings,
+        но забыто в .env.example (и значит в compose.yaml тоже)."""
+        config_keys = _config_py_env_keys()
+        example_keys = _env_example_keys()
+        missing = config_keys - example_keys
+        self.assertFalse(
+            missing,
+            f"Переменные читаются в config.py, но отсутствуют в .env.example: {sorted(missing)}",
         )
 
 

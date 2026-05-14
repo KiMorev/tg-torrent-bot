@@ -35,6 +35,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         notified_tasks_file=settings.notified_tasks_file,
         auto_delete_tasks_file=settings.auto_delete_tasks_file,
         movie_discovery_cache_file=settings.movie_discovery_cache_file,
+        movie_discovery_settings_file=settings.movie_discovery_settings_file,
         topic_subscriptions_file=settings.topic_subscriptions_file,
     )
     rutracker_client = (

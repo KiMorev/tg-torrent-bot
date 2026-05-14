@@ -10,11 +10,13 @@ from movie_discovery import (
     discovery_years,
     evaluate_result,
     extract_alt_title,
+    fingerprint,
     is_recent_published_at,
     normalize_movie_title,
     parse_published_at,
     prune_kp_cache,
     prune_seen_fingerprints,
+    prune_tracker_data,
     release_from_result,
 )
 
@@ -863,6 +865,72 @@ class PruneKpCachePerEntryTtlTests(unittest.TestCase):
         ts_stale = (self._now() - timedelta(days=15)).isoformat()
         cache_stale = {"film|2026": {"kp_id": 1, "title": "Film", "cached_at": ts_stale}}
         self.assertNotIn("film|2026", prune_kp_cache(cache_stale, now=self._now()))
+
+
+class PruneTrackerDataTests(unittest.TestCase):
+    def _make_release(self, tracker: str, source: str = "jackett", topic_id: str = "1") -> dict:
+        return {
+            "source": source,
+            "tracker": tracker,
+            "topic_id": topic_id,
+            "topic_url": "",
+            "title": f"Film 2026 1080p web-dl",
+            "size": "10 GB",
+            "size_gb": 10.0,
+            "seeders": 50,
+            "quality": "1080p",
+            "movie_title": "Film",
+            "alt_title": "",
+            "year": 2026,
+            "url": "",
+            "magnet_url": None,
+            "torrent_url": None,
+            "published_at": "",
+            "score": 100,
+        }
+
+    def _make_card(self, releases: list[dict]) -> dict:
+        return {"title": "Film", "year": 2026, "releases": releases, "key": "2026:film"}
+
+    def test_empty_removed_ids_returns_unchanged(self) -> None:
+        r = self._make_release("kinozal")
+        card = self._make_card([r])
+        fps = {fingerprint(r): "2026-01-01"}
+        cards_out, fps_out = prune_tracker_data([card], fps, set())
+        self.assertEqual(len(cards_out), 1)
+        self.assertEqual(fps_out, fps)
+
+    def test_removes_releases_from_deleted_tracker(self) -> None:
+        r1 = self._make_release("kinozal", topic_id="1")
+        r2 = self._make_release("rutracker", source="rutracker", topic_id="2")
+        card = self._make_card([r1, r2])
+        fps = {fingerprint(r1): "t1", fingerprint(r2): "t2"}
+        cards_out, fps_out = prune_tracker_data([card], fps, {"kinozal"})
+        self.assertEqual(len(cards_out), 1)
+        self.assertEqual(len(cards_out[0]["releases"]), 1)
+        self.assertEqual(cards_out[0]["releases"][0]["tracker"], "rutracker")
+        self.assertNotIn(fingerprint(r1), fps_out)
+        self.assertIn(fingerprint(r2), fps_out)
+
+    def test_card_without_remaining_releases_is_dropped(self) -> None:
+        r = self._make_release("kinozal")
+        card = self._make_card([r])
+        fps = {fingerprint(r): "ts"}
+        cards_out, fps_out = prune_tracker_data([card], fps, {"kinozal"})
+        self.assertEqual(cards_out, [])
+        self.assertEqual(fps_out, {})
+
+    def test_fingerprints_pruned_by_tracker_field(self) -> None:
+        r = self._make_release("torrenty", topic_id="5")
+        fps = {fingerprint(r): "ts"}
+        _, fps_out = prune_tracker_data([], fps, {"torrenty"})
+        self.assertEqual(fps_out, {})
+
+    def test_fingerprints_from_other_trackers_kept(self) -> None:
+        r = self._make_release("kinozal", topic_id="3")
+        fps = {fingerprint(r): "ts"}
+        _, fps_out = prune_tracker_data([], fps, {"torrenty"})
+        self.assertEqual(fps_out, fps)
 
 
 if __name__ == "__main__":
