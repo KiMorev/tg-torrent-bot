@@ -35,7 +35,14 @@ from bot import (
     _extract_rutracker_topic_id,
     _is_admin_chat,
     _is_allowed,
+    _enrich_cards_with_plex,
     _format_movie_discovery_cache,
+    _plex_find_by_ds_title,
+    _plex_is_series,
+    _plex_poll_after_finish,
+    _plex_pre_check,
+    _plex_confirm_text,
+    _plex_quality_from_title,
     _movie_discovery_keyboard,
     _notification_keyboard,
     _plural,
@@ -549,6 +556,347 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         lpo = last_kwargs.get("link_preview_options")
         self.assertIsNotNone(lpo, "link_preview_options must be set on refresh")
         self.assertTrue(lpo.is_disabled, "link preview must be disabled after refresh")
+
+
+# ---------------------------------------------------------------------------
+# _enrich_cards_with_plex + _format_movie_discovery_cache (Plex badge)
+# ---------------------------------------------------------------------------
+
+
+class PlexEnrichmentTests(unittest.TestCase):
+    """Tests for _enrich_cards_with_plex() and ✅ badge rendering in /new."""
+
+    def _make_movie(self, title: str, year: int, resolution: str = "1080"):
+        """Return a minimal PlexMovie-like object (real import avoided — use MagicMock)."""
+        m = MagicMock()
+        m.title = title
+        m.year = year
+        m.resolution = resolution
+        return m
+
+    def test_enrich_sets_in_plex_true_when_found(self):
+        """Card matching a Plex title should get in_plex=True."""
+        cards = [{"title": "Dune", "alt_title": "", "year": 2021}]
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune", 2021): self._make_movie("Dune", 2021)}),
+        ):
+            _enrich_cards_with_plex(cards)
+
+        self.assertTrue(cards[0]["in_plex"])
+        self.assertEqual(cards[0]["plex_resolution"], "1080")
+
+    def test_enrich_sets_in_plex_false_when_not_found(self):
+        """Card not present in Plex library should get in_plex=False and plex_resolution=None."""
+        # Library is non-empty (has a different movie) but not this one
+        cards = [{"title": "Unknown Film", "alt_title": "", "year": 2024}]
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("other movie", 2020): self._make_movie("Other Movie", 2020)}),
+        ):
+            _enrich_cards_with_plex(cards)
+
+        self.assertFalse(cards[0]["in_plex"])
+        self.assertIsNone(cards[0]["plex_resolution"])
+
+    def test_enrich_falls_back_to_alt_title(self):
+        """When main title misses, alt_title is tried."""
+        cards = [{"title": "Дюна", "alt_title": "Dune", "year": 2021}]
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune", 2021): self._make_movie("Dune", 2021)}),
+        ):
+            _enrich_cards_with_plex(cards)
+
+        self.assertTrue(cards[0]["in_plex"])
+
+    def test_enrich_no_op_when_plex_disabled(self):
+        """_enrich_cards_with_plex must be a no-op when PLEX_ENABLED is False."""
+        cards = [{"title": "Dune", "alt_title": "", "year": 2021}]
+        with (
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_plex_library", {("dune", 2021): self._make_movie("Dune", 2021)}),
+        ):
+            _enrich_cards_with_plex(cards)
+
+        self.assertNotIn("in_plex", cards[0])
+
+    def test_format_shows_plex_badge_with_resolution(self):
+        """Formatted /new text must include ✅ 1080 for a Plex-matched card."""
+        cache = {
+            "updated_at": "2026-05-14 12:00",
+            "cards": [{
+                "title": "Dune",
+                "year": 2021,
+                "in_plex": True,
+                "plex_resolution": "1080",
+                "best_quality": "1080p",
+                "best_size": "12 GB",
+                "best_seeders": 50,
+                "release_count": 2,
+            }],
+        }
+        text = _format_movie_discovery_cache(cache)
+        self.assertIn("✅ 1080", text)
+
+    def test_format_shows_plex_badge_without_resolution(self):
+        """When plex_resolution is empty, just ✅ appears (no extra text)."""
+        cache = {
+            "updated_at": "2026-05-14 12:00",
+            "cards": [{
+                "title": "Dune",
+                "year": 2021,
+                "in_plex": True,
+                "plex_resolution": "",
+                "best_quality": "1080p",
+                "best_size": "12 GB",
+                "best_seeders": 50,
+                "release_count": 2,
+            }],
+        }
+        text = _format_movie_discovery_cache(cache)
+        self.assertIn("✅", text)
+        self.assertNotIn("✅ ", text.split("Dune")[1].split("\n")[0])  # no trailing space+resolution
+
+    def test_format_no_plex_badge_when_not_in_plex(self):
+        """Card without Plex match must NOT contain ✅."""
+        cache = {
+            "updated_at": "2026-05-14 12:00",
+            "cards": [{
+                "title": "Some Film",
+                "year": 2025,
+                "in_plex": False,
+                "plex_resolution": None,
+                "best_quality": "720p",
+                "best_size": "4 GB",
+                "best_seeders": 5,
+                "release_count": 1,
+            }],
+        }
+        text = _format_movie_discovery_cache(cache)
+        self.assertNotIn("✅", text)
+
+
+# ---------------------------------------------------------------------------
+# Plex pre-download check helpers
+# ---------------------------------------------------------------------------
+
+
+class PlexPreDownloadCheckTests(unittest.TestCase):
+    """Tests for _plex_is_series, _plex_pre_check, _plex_confirm_text."""
+
+    def _make_movie(self, resolution: str = "1080"):
+        m = MagicMock()
+        m.title = "Dune"
+        m.year = 2021
+        m.resolution = resolution
+        return m
+
+    # --- _plex_is_series ---
+
+    def test_series_detected_by_s01e01(self):
+        self.assertTrue(_plex_is_series("Loki S01E02 2021 1080p"))
+
+    def test_series_detected_by_season_cyrillic(self):
+        self.assertTrue(_plex_is_series("Игра в кальмара Сезон 2"))
+
+    def test_movie_not_detected_as_series(self):
+        self.assertFalse(_plex_is_series("Dune.Part.Two.2024.1080p"))
+
+    # --- _plex_quality_from_title ---
+
+    def test_quality_from_title_1080p(self):
+        self.assertEqual(_plex_quality_from_title("Dune.2021.1080p.BluRay"), "1080")
+
+    def test_quality_from_title_4k(self):
+        self.assertEqual(_plex_quality_from_title("Avatar 2 4K HDR"), "4k")
+
+    def test_quality_from_title_unknown(self):
+        self.assertEqual(_plex_quality_from_title("some.title.without.quality"), "")
+
+    # --- _plex_pre_check ---
+
+    def test_pre_check_returns_none_when_plex_disabled(self):
+        with patch.object(bot, "PLEX_ENABLED", False):
+            result = _plex_pre_check("Dune", 2021, "1080")
+        self.assertIsNone(result)
+
+    def test_pre_check_returns_none_for_series(self):
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune s01", 2021): self._make_movie()}),
+        ):
+            result = _plex_pre_check("Dune S01E01", 2021, "1080")
+        self.assertIsNone(result)
+
+    def test_pre_check_returns_none_when_not_found(self):
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("other movie", 2020): self._make_movie()}),
+        ):
+            result = _plex_pre_check("Dune", 2021, "1080")
+        self.assertIsNone(result)
+
+    def test_pre_check_returns_result_when_found(self):
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune", 2021): self._make_movie("1080")}),
+        ):
+            result = _plex_pre_check("Dune", 2021, "1080")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "warn_same")
+
+    def test_pre_check_offer_upgrade_when_plex_has_lower_quality(self):
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune", 2021): self._make_movie("720")}),
+        ):
+            result = _plex_pre_check("Dune", 2021, "1080")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "offer_upgrade")
+
+    def test_pre_check_warn_better_when_plex_has_higher_quality(self):
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune", 2021): self._make_movie("4k")}),
+        ):
+            result = _plex_pre_check("Dune", 2021, "1080")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "warn_better")
+
+    # --- _plex_confirm_text ---
+
+    def test_confirm_text_warn_same(self):
+        movie = self._make_movie("1080")
+        check = MagicMock()
+        check.plex_movie = movie
+        check.action = "warn_same"
+        text = _plex_confirm_text(check, "Dune", "1080")
+        self.assertIn("Dune", text)
+        self.assertIn("уже есть в Plex", text)
+        self.assertIn("1080", text)
+
+    def test_confirm_text_offer_upgrade(self):
+        movie = self._make_movie("720")
+        check = MagicMock()
+        check.plex_movie = movie
+        check.action = "offer_upgrade"
+        text = _plex_confirm_text(check, "Dune", "1080")
+        self.assertIn("720", text)
+        self.assertIn("1080", text)
+
+    def test_confirm_text_has_download_hint(self):
+        movie = self._make_movie("1080")
+        check = MagicMock()
+        check.plex_movie = movie
+        check.action = "warn_same"
+        text = _plex_confirm_text(check, "Dune", "1080")
+        self.assertIn("Скачать всё равно?", text)
+
+
+# ---------------------------------------------------------------------------
+# Plex post-download polling helpers
+# ---------------------------------------------------------------------------
+
+
+class PlexPollingTests(unittest.TestCase):
+    """Tests for _plex_find_by_ds_title and _plex_poll_after_finish."""
+
+    def _make_plex_movie(self, title: str, year: int, file_paths: list[str], resolution: str = "1080"):
+        m = MagicMock()
+        m.title = title
+        m.year = year
+        m.rating_key = "42"
+        m.resolution = resolution
+        m.file_paths = file_paths
+        return m
+
+    def test_find_by_ds_title_matches_file_path(self):
+        movie = self._make_plex_movie(
+            "Dune", 2021,
+            ["/video/Movies/Dune (2021)/Dune.2021.1080p.BluRay.mkv"],
+        )
+        with patch.object(bot, "_plex_library", {("dune", 2021): movie}):
+            result = _plex_find_by_ds_title("Dune.2021.1080p.BluRay")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.title, "Dune")
+
+    def test_find_by_ds_title_returns_none_when_no_match(self):
+        movie = self._make_plex_movie(
+            "Avatar", 2009,
+            ["/video/Movies/Avatar (2009)/Avatar.2009.mkv"],
+        )
+        with patch.object(bot, "_plex_library", {("avatar", 2009): movie}):
+            result = _plex_find_by_ds_title("Dune.2021.1080p.BluRay")
+        self.assertIsNone(result)
+
+    def test_find_by_ds_title_empty_title_returns_none(self):
+        with patch.object(bot, "_plex_library", {}):
+            self.assertIsNone(_plex_find_by_ds_title(""))
+            self.assertIsNone(_plex_find_by_ds_title("   "))
+
+    def test_poll_after_finish_sends_found_notification(self):
+        """Polling should send a found-notification when the movie appears in Plex."""
+        movie = self._make_plex_movie(
+            "Dune", 2021,
+            ["/video/Dune.2021.1080p.mkv"],
+        )
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {("dune", 2021): movie}),
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=movie),
+            patch.object(bot, "_plex_machine_id", "abc123"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Dune.2021.1080p", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        call_kwargs = fake_app.bot.send_message.call_args.kwargs
+        self.assertEqual(call_kwargs["chat_id"], 100)
+        self.assertIn("✅", call_kwargs["text"])
+        self.assertIn("Dune.2021.1080p", call_kwargs["text"])
+
+    def test_poll_after_finish_sends_timeout_notification_when_not_found(self):
+        """Polling should send a timeout-notification when exhausted without finding the movie."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {}),
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Some.Movie.2024", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        call_kwargs = fake_app.bot.send_message.call_args.kwargs
+        self.assertIn("⚠️", call_kwargs["text"])
+        self.assertIn("Some.Movie.2024", call_kwargs["text"])
+
+    def test_poll_after_finish_cleans_up_task_entry(self):
+        """After completing (found or not), the task_id must be removed from _PLEX_POLLING_TASKS."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        tasks_dict = {"task1": MagicMock()}
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_PLEX_POLLING_TASKS", tasks_dict),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Movie", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        self.assertNotIn("task1", tasks_dict)
 
 
 # ---------------------------------------------------------------------------

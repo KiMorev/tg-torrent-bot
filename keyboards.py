@@ -281,6 +281,16 @@ def _task_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _plex_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for the Plex pre-download duplicate warning dialog."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⬇️ Скачать", callback_data="plex:confirm"),
+            InlineKeyboardButton("✖️ Отмена", callback_data="plex:cancel"),
+        ]
+    ])
+
+
 def _final_notification_keyboard(
     task_id: str,
     *,

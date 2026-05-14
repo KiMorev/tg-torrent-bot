@@ -76,6 +76,7 @@ from keyboards import (
     _download_list_keyboard,
     _final_notification_keyboard,
     _finished_task_ids,
+    _plex_confirm_keyboard,
     _jackett_select_keyboard,
     _new_task_keyboard,
     _search_advanced_keyboard,
@@ -103,12 +104,16 @@ from jackett_subscriptions import (
     select_jackett_subscription_candidate,
 )
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
+from plex import PlexMovie, check_before_download as _plex_check_before_download, _normalise_resolution as _plex_normalise_resolution
 from movie_discovery import (
     build_cards as _movie_build_cards,
+    detect_quality as _movie_detect_quality,
     discovery_queries as _movie_discovery_queries,
     discovery_years as _movie_discovery_years,
     evaluate_result as _movie_evaluate_result,
+    extract_year as _movie_extract_year,
     is_recent_published_at as _movie_is_recent_published_at,
+    normalize_movie_title as _normalize_movie_title,
     parse_published_at as _movie_parse_published_at,
     parse_qualities as _movie_parse_qualities,
     prune_kp_cache as _movie_prune_kp_cache,
@@ -212,6 +217,7 @@ KINOPOISK_API_KEY = settings.kinopoisk_api_key
 KINOPOISK_ENABLED = settings.kinopoisk_enabled
 PLEX_ENABLED = settings.plex_enabled
 PLEX_URL = settings.plex_url
+PLEX_TOKEN = settings.plex_token
 TOPIC_SUBSCRIPTIONS_FILE = settings.topic_subscriptions_file
 SUBSCRIPTION_CHECK_INTERVAL_HOURS = settings.subscription_check_interval_hours
 JACKETT_URL = settings.jackett_url
@@ -237,6 +243,7 @@ _KP_MAX_STALE_REFRESH = 15
 
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
+SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate warning
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("status", "Список загрузок"),
@@ -307,6 +314,20 @@ state_store = app_context.state_store
 rutracker_client = app_context.rutracker_client
 jackett_client = app_context.jackett_client
 kinopoisk_client = app_context.kinopoisk_client
+plex_client = app_context.plex_client
+
+# In-memory Plex library cache: (normalized_title, year) → PlexMovie
+# Updated every 30 minutes by _plex_cache_background_loop.
+_plex_library: dict[tuple[str, int], "PlexMovie"] = {}
+_plex_library_updated_at: float = 0.0
+_PLEX_CACHE_INTERVAL = 30 * 60  # seconds
+
+# Plex server machine identifier — fetched once at startup, used in deep links.
+_plex_machine_id: str = ""
+
+# Polling tasks waiting for a downloaded file to appear in Plex
+# task_id → asyncio.Task
+_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None]"] = {}
 
 
 def _tracker_config() -> TrackerConfig:
@@ -1131,10 +1152,15 @@ def _format_movie_discovery_cache(cache: dict) -> str:
         kp_url = card.get("kp_url")
         kp_text = f"\n   <a href=\"{html_module.escape(str(kp_url))}\">Кинопоиск</a>" if kp_url else ""
         new_mark = " 🆕" if card.get("is_new") else ""
+        if card.get("in_plex"):
+            plex_res = card.get("plex_resolution") or ""
+            plex_mark = f" ✅ {html_module.escape(plex_res)}" if plex_res else " ✅"
+        else:
+            plex_mark = ""
         tracker_labels = _movie_card_tracker_labels(card)
         tracker_text = f" · {html_module.escape(tracker_labels)}" if tracker_labels else ""
         lines.append(
-            f"\n{index}. <b>{title}</b>{new_mark}\n"
+            f"\n{index}. <b>{title}</b>{plex_mark}{new_mark}\n"
             f"   {year}{rating_text}\n"
             f"   Лучшее: {html_module.escape(str(card.get('best_quality') or '?'))}, "
             f"{html_module.escape(str(card.get('best_size') or '?'))}, "
@@ -1277,6 +1303,7 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         kp_cache=prev_kp_cache,
         max_stale_refresh=max_stale_kp_refresh,
     )
+    _enrich_cards_with_plex(cache.get("cards") or [])
     cache["all_releases"] = all_releases
 
     # Accumulate daily KP API search counter
@@ -1368,6 +1395,7 @@ async def _recompute_movie_discovery_from_cache() -> None:
         kp_cache=prev_kp_cache,
         max_stale_refresh=0,
     )
+    _enrich_cards_with_plex(new_cache.get("cards") or [])
     new_cache["all_releases"] = all_releases
     new_cache["kp_api_stats"] = cache.get("kp_api_stats")
     _save_movie_discovery_cache(new_cache)
@@ -1428,6 +1456,252 @@ async def _movie_discovery_loop() -> None:
 
 def _find_task(tasks: list[dict], task_id: str) -> dict | None:
     return _view_find_task(tasks, task_id)
+
+
+# ---------------------------------------------------------------------------
+# Plex library cache helpers
+# ---------------------------------------------------------------------------
+
+def _plex_cache_key(title: str, year: int) -> tuple[str, int]:
+    return (_normalize_movie_title(title).lower(), year)
+
+
+def _plex_library_find(title: str, year: int) -> "PlexMovie | None":
+    """Look up a movie in the in-memory Plex cache with ±1 year tolerance."""
+    norm = _normalize_movie_title(title).lower()
+    for dy in (0, 1, -1):
+        hit = _plex_library.get((norm, year + dy))
+        if hit is not None:
+            return hit
+    return None
+
+
+def _plex_cache_info() -> dict:
+    """Return metadata dict for diagnostics."""
+    import time
+    updated = _plex_library_updated_at
+    if updated:
+        import datetime
+        dt = datetime.datetime.fromtimestamp(updated).strftime("%Y-%m-%d %H:%M")
+    else:
+        dt = ""
+    return {"count": len(_plex_library), "updated_at": dt}
+
+
+async def _refresh_plex_library() -> None:
+    """Fetch all movies from Plex and rebuild the in-memory cache."""
+    global _plex_library, _plex_library_updated_at, _plex_machine_id
+    import time
+    if plex_client is None:
+        return
+    try:
+        movies = await asyncio.to_thread(plex_client.get_all_movies)
+    except Exception:
+        logger.warning("Failed to refresh Plex library cache", exc_info=True)
+        return
+
+    new_cache: dict[tuple[str, int], PlexMovie] = {}
+    for movie in movies:
+        key = _plex_cache_key(movie.title, movie.year)
+        new_cache[key] = movie
+
+    _plex_library = new_cache
+    _plex_library_updated_at = time.time()
+    logger.info("Plex library cache refreshed: %d movies", len(_plex_library))
+
+    # Fetch machine ID once (for deep links)
+    if not _plex_machine_id:
+        try:
+            _plex_machine_id = await asyncio.to_thread(plex_client.get_machine_id)
+            logger.info("Plex machine ID: %s", _plex_machine_id)
+        except Exception:
+            logger.debug("Failed to fetch Plex machine ID", exc_info=True)
+
+
+async def _plex_cache_loop() -> None:
+    if plex_client is None:
+        logger.info("Plex not configured — cache loop disabled")
+        return
+    try:
+        await _run_background_step("initial Plex library cache", _refresh_plex_library)
+        while True:
+            await asyncio.sleep(_PLEX_CACHE_INTERVAL)
+            await _run_background_step("Plex library cache refresh", _refresh_plex_library)
+    except asyncio.CancelledError:
+        logger.info("Plex cache loop stopped")
+        raise
+
+
+def _enrich_cards_with_plex(cards: list[dict]) -> None:
+    """Add ``in_plex`` and ``plex_resolution`` fields to each card in-place.
+
+    Checks both ``title`` (Russian) and ``alt_title`` (English).
+    No-op when Plex is not configured or the cache is empty.
+    """
+    if not PLEX_ENABLED or not _plex_library:
+        return
+    for card in cards:
+        year = int(card.get("year") or 0)
+        match = _plex_library_find(str(card.get("title") or ""), year)
+        if match is None and card.get("alt_title"):
+            match = _plex_library_find(str(card["alt_title"]), year)
+        card["in_plex"] = match is not None
+        card["plex_resolution"] = match.resolution if match else None
+
+
+_SERIES_RE = re.compile(r"[Ss]\d+[Ee]\d+|\d+x\d+|[Сс]езон\s*\d+", re.I)
+
+
+def _plex_is_series(title: str) -> bool:
+    """Return True if *title* looks like a TV series episode (skip Plex check for those)."""
+    return bool(_SERIES_RE.search(title))
+
+
+def _plex_quality_from_result(result: dict) -> str:
+    """Return a Plex-normalised quality string from a search result dict."""
+    q = result.get("quality") or ""
+    if q:
+        return _plex_normalise_resolution(q)
+    return _plex_normalise_resolution(_movie_detect_quality(result.get("title") or "") or "")
+
+
+def _plex_quality_from_title(title: str) -> str:
+    """Return a Plex-normalised quality string extracted from a raw file/torrent name."""
+    return _plex_normalise_resolution(_movie_detect_quality(title) or "")
+
+
+def _plex_pre_check(title: str, year: int, requested_quality: str) -> "PlexCheckResult | None":
+    """Return a PlexCheckResult when a Plex duplicate is found, else None.
+
+    Returns None when:
+    - Plex integration is disabled
+    - The Plex library cache is empty (not yet loaded)
+    - The title looks like a TV series
+    - The movie is not found in the Plex cache
+    """
+    if not PLEX_ENABLED or not _plex_library:
+        return None
+    if _plex_is_series(title):
+        return None
+    match = _plex_library_find(title, year)
+    if match is None:
+        return None
+    return _plex_check_before_download(match, requested_quality)
+
+
+def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
+    """Find a Plex movie that contains *ds_title* in one of its file paths.
+
+    Uses the global in-memory library; no network call.
+    Returns the first matching PlexMovie or None.
+    """
+    name = ds_title.strip()
+    if not name:
+        return None
+    for movie in _plex_library.values():
+        if any(name in fp for fp in movie.file_paths):
+            return movie
+    return None
+
+
+async def _plex_poll_after_finish(
+    app: "Application",
+    task_id: str,
+    task_title: str,
+    chat_ids: list[int],
+    *,
+    max_attempts: int = 20,
+    interval_seconds: float = 30.0,
+) -> None:
+    """Poll Plex after a DS task finishes. Sends a push notification when found.
+
+    Polls every *interval_seconds* for up to *max_attempts* (default: 10 min).
+    Sends a NEW message (not edit) so iOS users get a push notification.
+    """
+    logger.info("Plex polling started task_id=%s title=%r chat_ids=%s", task_id, task_title, chat_ids)
+    try:
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                await asyncio.sleep(interval_seconds)
+
+            # Refresh Plex library, then look for the file
+            await _refresh_plex_library()
+            plex_movie = _plex_find_by_ds_title(task_title)
+
+            if plex_movie is not None:
+                # Build deep link
+                machine_id = _plex_machine_id
+                deep_link = (
+                    f"plex://preplay/?metadataKey=/library/metadata/{plex_movie.rating_key}"
+                    f"&metadataType=1&server={machine_id}"
+                ) if machine_id and plex_movie.rating_key else ""
+
+                text = f"✅ <b>{html_module.escape(task_title)}</b> добавлен в Plex."
+                keyboard = (
+                    InlineKeyboardMarkup([[
+                        InlineKeyboardButton("▶️ Открыть в Plex (iOS)", url=deep_link)
+                    ]])
+                    if deep_link else None
+                )
+                for cid in chat_ids:
+                    try:
+                        await app.bot.send_message(
+                            chat_id=cid,
+                            text=text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Plex poll: failed to send found-notification chat_id=%s", cid, exc_info=True
+                        )
+                logger.info(
+                    "Plex polling: found %r after %d attempt(s)", task_title, attempt + 1
+                )
+                return
+
+        # Exhausted all attempts
+        timeout_min = int(max_attempts * interval_seconds // 60)
+        text = (
+            f"⚠️ <b>{html_module.escape(task_title)}</b> скачан, "
+            f"но не появился в Plex за {timeout_min} мин."
+        )
+        for cid in chat_ids:
+            try:
+                await app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
+            except Exception:
+                logger.warning(
+                    "Plex poll: failed to send timeout-notification chat_id=%s", cid, exc_info=True
+                )
+        logger.info(
+            "Plex polling: gave up on %r after %d attempt(s)", task_title, max_attempts
+        )
+    except asyncio.CancelledError:
+        logger.info("Plex polling task cancelled for task_id=%s", task_id)
+        raise
+    finally:
+        _PLEX_POLLING_TASKS.pop(task_id, None)
+
+
+def _plex_confirm_text(check: "PlexCheckResult", display_title: str, requested_quality: str) -> str:
+    """Format the pre-download Plex warning message (HTML)."""
+    plex_res = check.plex_movie.resolution
+    plex_res_display = plex_res.upper() if plex_res else "неизвестное качество"
+    title_esc = html_module.escape(display_title)
+
+    if check.action == "warn_same":
+        verb = f"уже есть в Plex ({plex_res_display})"
+    elif check.action == "warn_better":
+        req_display = requested_quality.upper() if requested_quality else "неизвестное качество"
+        verb = f"уже есть в Plex в лучшем качестве ({plex_res_display} &gt; {req_display})"
+    else:  # offer_upgrade
+        req_display = requested_quality.upper() if requested_quality else "неизвестное качество"
+        verb = f"есть в Plex в худшем качестве ({plex_res_display}), запрошено {req_display}"
+
+    return (
+        f"⚠️ <b>{title_esc}</b> {verb}.\n"
+        "Скачать всё равно?"
+    )
 
 
 def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
@@ -1779,6 +2053,18 @@ async def _run_task_notifications_once(app: Application) -> None:
             continue
 
         recipients = _notification_recipients(task_id)
+
+        # Start Plex polling for newly-finished movie tasks (once per task_id)
+        if (
+            PLEX_ENABLED
+            and status == "finished"
+            and task_id not in _PLEX_POLLING_TASKS
+            and not _plex_is_series(task.get("title") or "")
+            and recipients
+        ):
+            _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
+                _plex_poll_after_finish(app, task_id, task.get("title") or "", sorted(recipients))
+            )
 
         # Also notify any users who subscribed via "🔔 Уведомить когда готово".
         if status in {"finished", "seeding"}:
@@ -2386,6 +2672,8 @@ async def _build_diagnostics_text() -> str:
         ds_client=ds_client,
         tracker_service=_tracker_service(),
         display_timezone=DISPLAY_TIMEZONE,
+        plex_client=plex_client,
+        plex_cache_info=_plex_cache_info() if plex_client else None,
     )
     return format_diagnostics(report)
 
@@ -3330,6 +3618,7 @@ async def _download_and_add(
     index: int,
     *,
     subscribe: bool = False,
+    _skip_plex_check: bool = False,
 ) -> int:
     """Shared implementation for direct-download and direct-subscribe from the results list.
 
@@ -3346,6 +3635,26 @@ async def _download_and_add(
     context.user_data["srch_picked"] = index
     topic_id = result.get("topic_id", "")
     source = result.get("source", "rutracker")
+
+    # --- Plex duplicate check ---
+    if not _skip_plex_check and PLEX_ENABLED:
+        raw_title = result.get("movie_title") or result.get("title") or ""
+        raw_year = result.get("year") or _movie_extract_year(raw_title) or 0
+        req_quality = _plex_quality_from_result(result)
+        plex_check = _plex_pre_check(raw_title, int(raw_year), req_quality)
+        if plex_check is not None:
+            display_title = result.get("title") or raw_title
+            context.user_data["plex_pending"] = {
+                "type": "search",
+                "index": index,
+                "subscribe": subscribe,
+            }
+            await query.edit_message_text(
+                _plex_confirm_text(plex_check, display_title, req_quality),
+                reply_markup=_plex_confirm_keyboard(),
+                parse_mode="HTML",
+            )
+            return SEARCH_PLEX_CONFIRM
 
     await query.edit_message_text("⏳ Скачиваю torrent-файл…")
 
@@ -3552,6 +3861,99 @@ async def search_direct_subscribe(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Ошибка при разборе запроса.")
         return ConversationHandler.END
     return await _download_and_add(query, context, index, subscribe=True)
+
+
+async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User confirmed downloading despite Plex duplicate warning."""
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.pop("plex_pending", None)
+    if not pending:
+        await query.edit_message_text("Данные потеряны — начните загрузку заново.")
+        return ConversationHandler.END
+
+    if pending["type"] == "search":
+        return await _download_and_add(
+            query, context, pending["index"],
+            subscribe=pending.get("subscribe", False),
+            _skip_plex_check=True,
+        )
+
+    # magnet / torrent — handled via global plex_confirm_standalone below
+    await query.edit_message_text("Неизвестный тип ожидания.")
+    return ConversationHandler.END
+
+
+async def plex_cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User cancelled download from Plex duplicate warning dialog (inside search flow)."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("plex_pending", None)
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    if chat_id:
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Отменено"))
+    return ConversationHandler.END
+
+
+async def plex_confirm_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plex:confirm for magnet/torrent uploads (outside ConversationHandler)."""
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.pop("plex_pending", None)
+    if not pending:
+        await query.edit_message_text("Данные потеряны — пришлите файл или ссылку заново.")
+        return
+
+    chat_id = query.message.chat.id if query.message else None
+
+    if pending["type"] == "magnet":
+        magnet_uri = pending.get("magnet_uri", "")
+        if not magnet_uri:
+            await query.edit_message_text("Магнет-ссылка потеряна — пришлите её заново.")
+            return
+        await _do_process_magnet(query.message, context, magnet_uri, chat_id=chat_id)
+
+    elif pending["type"] == "torrent":
+        temp_path_str = pending.get("temp_path", "")
+        safe_name = pending.get("safe_name", "download.torrent")
+        temp_path = Path(temp_path_str)
+        if not temp_path_str or not temp_path.exists():
+            await query.edit_message_text("Torrent-файл не найден — пришлите его заново.")
+            return
+        await _do_process_torrent(query.message, context, temp_path, safe_name, chat_id=chat_id)
+
+    else:
+        await query.edit_message_text("Неизвестный тип ожидания.")
+
+
+async def plex_cancel_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plex:cancel for magnet/torrent uploads (outside ConversationHandler)."""
+    query = update.callback_query
+    await query.answer()
+    pending = context.user_data.pop("plex_pending", None)
+
+    # Clean up temp file if it was a torrent
+    if pending and pending.get("type") == "torrent":
+        temp_path_str = pending.get("temp_path", "")
+        if temp_path_str:
+            try:
+                Path(temp_path_str).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    if chat_id:
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Отменено"))
 
 
 async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -5269,12 +5671,18 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _safe_edit_message(progress_message, f"Команда запуска отправлена для {task_id}.")
 
 
-async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE, magnet_uri: str) -> None:
-    """Add a magnet-link task to Download Station. Shared by handle_text and text_message_entry."""
-    progress_message = await update.message.reply_text(_magnet_wait_text(0, 8))
+async def _do_process_magnet(
+    progress_message,
+    context: ContextTypes.DEFAULT_TYPE,
+    magnet_uri: str,
+    chat_id: int | None = None,
+) -> None:
+    """Core Download Station logic for adding a magnet link.
 
+    *progress_message* is the message to edit with status updates.
+    Used by both _process_magnet_uri and plex_confirm_standalone.
+    """
     try:
-        logger.info("Creating Download Station task from magnet chat_id=%s", _chat_id(update))
         try:
             before_tasks = await asyncio.to_thread(ds_client.list_tasks)
             known_task_ids = {task["id"] for task in before_tasks if task.get("id")}
@@ -5285,7 +5693,7 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
         task_id = await asyncio.to_thread(ds_client.create_magnet, magnet_uri)
         if not task_id:
             task_id = await _wait_for_magnet_task_id(magnet_uri, known_task_ids, progress_message)
-        _remember_task_owner(task_id, update.effective_chat.id if update.effective_chat else None)
+        _remember_task_owner(task_id, chat_id)
         await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
         tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
         _mark_tracker_processed_if_final(task_id, tracker_result)
@@ -5306,13 +5714,104 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
     _register_task_card_from_message(
         progress_message,
         task_id,
-        fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
+        fallback_chat_id=chat_id,
     )
     if task_id:
         _pm_chat_id = _chat_id_from_message(progress_message)
         _pm_msg_id = _message_id_from_message(progress_message)
         if _pm_chat_id and _pm_msg_id:
             _start_task_card_refresh(context.application, _pm_chat_id, _pm_msg_id, task_id)
+
+
+async def _do_process_torrent(
+    progress_message,
+    context: ContextTypes.DEFAULT_TYPE,
+    temp_path: Path,
+    safe_name: str,
+    chat_id: int | None = None,
+) -> None:
+    """Core Download Station logic for adding a torrent file.
+
+    *progress_message* is the message to edit with status updates.
+    Used by both handle_doc and plex_confirm_standalone.
+    Cleans up *temp_path* on exit.
+    """
+    try:
+        logger.info("Creating Download Station task from torrent file %s", safe_name)
+        await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
+        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        _remember_task_owner(task_id, chat_id)
+        if _torrent_file_is_private(temp_path):
+            tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
+            _mark_tracker_processed_if_final(task_id, tracker_result)
+        else:
+            await _safe_edit_message(progress_message, "➕ Добавляю public-трекеры…")
+            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
+            tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
+            _mark_tracker_processed_if_final(task_id, tracker_result)
+
+        await _safe_edit_message(
+            progress_message,
+            _task_added_message(
+                "torrent-файл",
+                title=safe_name,
+                task_id=task_id,
+                tracker_result=tracker_result,
+            ),
+            reply_markup=_task_reply_markup(task_id),
+        )
+        _register_task_card_from_message(progress_message, task_id, fallback_chat_id=chat_id)
+        if task_id and progress_message:
+            _hd_chat_id = _chat_id_from_message(progress_message)
+            _hd_msg_id = _message_id_from_message(progress_message)
+            if _hd_chat_id and _hd_msg_id:
+                _start_task_card_refresh(context.application, _hd_chat_id, _hd_msg_id, task_id)
+    except Exception as e:
+        logger.exception("Failed to process torrent")
+        error_text = f"Ошибка при обработке .torrent: {type(e).__name__}: {e}"
+        await _safe_edit_message(progress_message, error_text)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE, magnet_uri: str) -> None:
+    """Add a magnet-link task to Download Station. Shared by handle_text and text_message_entry."""
+    chat_id = update.effective_chat.id if update.effective_chat else None
+
+    # --- Plex duplicate check (best-effort: extract title + year from magnet dn= param) ---
+    if PLEX_ENABLED:
+        dn_raw = ""
+        import urllib.parse
+        try:
+            qs = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(magnet_uri).query))
+            dn_raw = urllib.parse.unquote_plus(qs.get("dn", ""))
+        except Exception:
+            pass
+        if dn_raw:
+            raw_year = _movie_extract_year(dn_raw) or 0
+            req_quality = _plex_quality_from_title(dn_raw)
+            plex_check = _plex_pre_check(dn_raw, int(raw_year), req_quality)
+            if plex_check is not None:
+                progress_message = await update.message.reply_text(_magnet_wait_text(0, 8))
+                context.user_data["plex_pending"] = {
+                    "type": "magnet",
+                    "magnet_uri": magnet_uri,
+                }
+                await _safe_edit_message(
+                    progress_message,
+                    _plex_confirm_text(plex_check, dn_raw, req_quality),
+                    reply_markup=_plex_confirm_keyboard(),
+                    parse_mode="HTML",
+                )
+                return
+
+    progress_message = await update.message.reply_text(_magnet_wait_text(0, 8))
+    logger.info("Creating Download Station task from magnet chat_id=%s", _chat_id(update))
+    await _do_process_magnet(progress_message, context, magnet_uri, chat_id=chat_id)
 
 
 async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -5385,6 +5884,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     temp_path = None
     progress_message = None
+    chat_id = update.effective_chat.id if update.effective_chat else None
 
     try:
         doc = update.message.document
@@ -5415,39 +5915,27 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await _safe_edit_message(progress_message, "Файл не похож на настоящий .torrent.")
             return
 
-        logger.info("Creating Download Station task from torrent file %s", safe_name)
-        await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
-        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
-        _remember_task_owner(task_id, update.effective_chat.id if update.effective_chat else None)
-        if _torrent_file_is_private(temp_path):
-            tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
-            _mark_tracker_processed_if_final(task_id, tracker_result)
-        else:
-            await _safe_edit_message(progress_message, "➕ Добавляю public-трекеры…")
-            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
-            tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
-            _mark_tracker_processed_if_final(task_id, tracker_result)
+        # --- Plex duplicate check (best-effort: use torrent filename) ---
+        if PLEX_ENABLED:
+            raw_year = _movie_extract_year(safe_name) or 0
+            req_quality = _plex_quality_from_title(safe_name)
+            plex_check = _plex_pre_check(safe_name, int(raw_year), req_quality)
+            if plex_check is not None:
+                context.user_data["plex_pending"] = {
+                    "type": "torrent",
+                    "temp_path": str(temp_path),
+                    "safe_name": safe_name,
+                }
+                await _safe_edit_message(
+                    progress_message,
+                    _plex_confirm_text(plex_check, original_name, req_quality),
+                    reply_markup=_plex_confirm_keyboard(),
+                    parse_mode="HTML",
+                )
+                return  # temp_path kept — will be cleaned up by confirm/cancel/timeout
 
-        await _safe_edit_message(
-            progress_message,
-            _task_added_message(
-                "torrent-файл",
-                title=safe_name,
-                task_id=task_id,
-                tracker_result=tracker_result,
-            ),
-            reply_markup=_task_reply_markup(task_id),
-        )
-        _register_task_card_from_message(
-            progress_message,
-            task_id,
-            fallback_chat_id=update.effective_chat.id if update.effective_chat else None,
-        )
-        if task_id and progress_message:
-            _hd_chat_id = _chat_id_from_message(progress_message)
-            _hd_msg_id = _message_id_from_message(progress_message)
-            if _hd_chat_id and _hd_msg_id:
-                _start_task_card_refresh(context.application, _hd_chat_id, _hd_msg_id, task_id)
+        await _do_process_torrent(progress_message, context, temp_path, safe_name, chat_id=chat_id)
+        temp_path = None  # _do_process_torrent owns cleanup now
 
     except Exception as e:
         logger.exception("Failed to process torrent")
@@ -5536,6 +6024,10 @@ async def setup_bot_commands(app: Application) -> None:
     if _movie_discovery_enabled():
         MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop())
         logger.info("Movie discovery loop started, interval=%sh", MOVIE_DISCOVERY_INTERVAL_HOURS)
+
+    if PLEX_ENABLED:
+        app.create_task(_plex_cache_loop())
+        logger.info("Plex library cache loop started, interval=%ss", _PLEX_CACHE_INTERVAL)
 
 
 def main() -> None:
@@ -5638,6 +6130,10 @@ def main() -> None:
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
                 ],
+                SEARCH_PLEX_CONFIRM: [
+                    CallbackQueryHandler(plex_confirm_download, pattern=r"^plex:confirm$"),
+                    CallbackQueryHandler(plex_cancel_download, pattern=r"^plex:cancel$"),
+                ],
                 ConversationHandler.TIMEOUT: [
                     MessageHandler(filters.ALL, search_timeout),
                     CallbackQueryHandler(search_timeout),
@@ -5651,6 +6147,9 @@ def main() -> None:
     )
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Global Plex confirmation handlers (for magnet/torrent, outside ConversationHandler)
+    app.add_handler(CallbackQueryHandler(plex_confirm_standalone, pattern=r"^plex:confirm$"))
+    app.add_handler(CallbackQueryHandler(plex_cancel_standalone, pattern=r"^plex:cancel$"))
     app.add_handler(MessageReactionHandler(reaction_easter_egg))
     app.add_error_handler(error_handler)
 

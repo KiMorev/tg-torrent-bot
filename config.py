@@ -122,6 +122,8 @@ class AppSettings:
     kinopoisk_enabled: bool
     plex_enabled: bool
     plex_url: str
+    plex_token: str
+    plex_movie_section: str
     topic_subscriptions_file: Path
     subscription_check_interval_hours: int
     jackett_url: str
@@ -218,8 +220,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         rutracker_max_results=max(1, min(50, env_int(env, "RUTRACKER_MAX_RESULTS", 50))),
         kinopoisk_api_key=env.get("KINOPOISK_API_KEY", "").strip(),
         kinopoisk_enabled=bool(env.get("KINOPOISK_API_KEY", "").strip()),
-        plex_enabled=env_bool(env, "PLEX_ENABLED", True),
-        plex_url=(env.get("PLEX_URL", "plex://").strip() or "plex://"),
+        plex_token=env.get("PLEX_TOKEN", "").strip(),
+        plex_url=(env.get("PLEX_URL", "").strip() or ""),
+        plex_enabled=bool(env.get("PLEX_URL", "").strip() and env.get("PLEX_TOKEN", "").strip()),
+        plex_movie_section=env.get("PLEX_MOVIE_SECTION", "").strip(),
         topic_subscriptions_file=Path(
             env.get("TOPIC_SUBSCRIPTIONS_FILE", str(state_dir / "topic_subscriptions.json"))
         ),

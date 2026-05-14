@@ -87,8 +87,10 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.movie_discovery_limit, 20)
         self.assertEqual(settings.movie_discovery_min_kp_rating, 6.0)
         self.assertEqual(settings.movie_discovery_qualities, "1080p")
-        self.assertTrue(settings.plex_enabled)
-        self.assertEqual(settings.plex_url, "plex://")
+        self.assertFalse(settings.plex_enabled)
+        self.assertEqual(settings.plex_url, "")
+        self.assertEqual(settings.plex_token, "")
+        self.assertEqual(settings.plex_movie_section, "")
 
     def test_load_settings_accepts_overrides_and_clamps_values(self) -> None:
         env = {
@@ -115,8 +117,8 @@ class ConfigParsingTests(unittest.TestCase):
             "MOVIE_DISCOVERY_LIMIT": "500",
             "MOVIE_DISCOVERY_MIN_KP_RATING": "7.2",
             "MOVIE_DISCOVERY_QUALITIES": "2160p",
-            "PLEX_ENABLED": "true",
             "PLEX_URL": "https://example.com/plex",
+            "PLEX_TOKEN": "myplextoken",
         }
 
         settings = load_settings(env)
@@ -145,6 +147,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.movie_discovery_qualities, "2160p")
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "https://example.com/plex")
+        self.assertEqual(settings.plex_token, "myplextoken")
 
     def test_load_settings_enables_jackett_only_with_complete_credentials(self) -> None:
         settings = load_settings({
