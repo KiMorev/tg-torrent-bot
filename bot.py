@@ -1387,6 +1387,11 @@ async def _movie_trackers_panel() -> tuple[str, "InlineKeyboardMarkup"]:
     known_ids: list[str] = settings.get("jackett_trackers_known") or []
     if not all_trackers and known_ids:
         all_trackers = [{"id": t, "name": _tracker_abbr(t)} for t in known_ids]
+    elif all_trackers:
+        fresh_ids = sorted(t.get("id", "") for t in all_trackers if t.get("id"))
+        if fresh_ids != known_ids:
+            settings["jackett_trackers_known"] = fresh_ids
+            _save_movie_discovery_settings(settings)
 
     enabled_ids_raw = settings.get("jackett_trackers_enabled")
     enabled_ids: set[str] | None = set(enabled_ids_raw) if enabled_ids_raw is not None else None

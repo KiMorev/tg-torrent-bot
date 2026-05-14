@@ -504,6 +504,75 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _movie_trackers_panel tests
+# ---------------------------------------------------------------------------
+
+
+class MovieTrackersPanelTests(unittest.TestCase):
+    """Tests for _movie_trackers_panel() in bot.py."""
+
+    def _make_store(self, tmp_dir: str) -> JsonStateStore:
+        d = Path(tmp_dir)
+        return JsonStateStore(
+            approved_chat_ids_file=d / "approved.json",
+            tracker_processed_file=d / "tracker.json",
+            task_owners_file=d / "owners.json",
+            notified_tasks_file=d / "notified.json",
+            auto_delete_tasks_file=d / "auto_delete.json",
+            movie_discovery_settings_file=d / "md_settings.json",
+        )
+
+    def test_fresh_jackett_trackers_saved_to_known(self) -> None:
+        """When Jackett returns fresh trackers, jackett_trackers_known must be persisted."""
+        from bot import _movie_trackers_panel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._make_store(tmp)
+            fake_jackett = MagicMock()
+            fake_jackett.get_indexers.return_value = [
+                {"id": "kinozal", "name": "Kinozal"},
+                {"id": "rutracker", "name": "RuTracker"},
+            ]
+            with (
+                patch.object(bot, "jackett_client", fake_jackett),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_load_movie_discovery_settings",
+                             lambda: store.load_movie_discovery_settings()),
+                patch.object(bot, "_save_movie_discovery_settings",
+                             lambda s: store.save_movie_discovery_settings(s)),
+            ):
+                asyncio.run(_movie_trackers_panel())
+
+            saved = store.load_movie_discovery_settings()
+            self.assertEqual(sorted(saved.get("jackett_trackers_known", [])),
+                             ["kinozal", "rutracker"])
+
+    def test_known_not_overwritten_when_jackett_unavailable(self) -> None:
+        """When Jackett fails, existing jackett_trackers_known must not be erased."""
+        from bot import _movie_trackers_panel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._make_store(tmp)
+            store.save_movie_discovery_settings({"jackett_trackers_known": ["kinozal", "rutracker"]})
+
+            fake_jackett = MagicMock()
+            fake_jackett.get_indexers.side_effect = Exception("timeout")
+            with (
+                patch.object(bot, "jackett_client", fake_jackett),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_load_movie_discovery_settings",
+                             lambda: store.load_movie_discovery_settings()),
+                patch.object(bot, "_save_movie_discovery_settings",
+                             lambda s: store.save_movie_discovery_settings(s)),
+            ):
+                asyncio.run(_movie_trackers_panel())
+
+            saved = store.load_movie_discovery_settings()
+            self.assertEqual(sorted(saved.get("jackett_trackers_known", [])),
+                             ["kinozal", "rutracker"])
+
+
+# ---------------------------------------------------------------------------
 # /help close button tests
 # ---------------------------------------------------------------------------
 

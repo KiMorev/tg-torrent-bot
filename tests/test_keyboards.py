@@ -442,11 +442,17 @@ class MovieTrackersKeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["✅ Kinozal"], "admin:tracker_toggle:kinozal")
         self.assertEqual(buttons["✅ Rutracker"], "admin:tracker_toggle:rutracker")
 
-    def test_enable_all_button_present(self) -> None:
+    def test_enable_all_button_present_when_some_disabled(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"kinozal"})
         buttons = self._buttons(kb)
         self.assertIn("✅ Включить все", buttons)
         self.assertEqual(buttons["✅ Включить все"], "admin:tracker_enable_all")
+
+    def test_enable_all_button_hidden_when_all_enabled(self) -> None:
+        """When enabled_ids is None (= all enabled), «Включить все» must not appear."""
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
+        buttons = self._buttons(kb)
+        self.assertNotIn("✅ Включить все", buttons)
 
     def test_back_button_goes_to_admin_home(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
