@@ -22,19 +22,32 @@ COLLECTION_RE = re.compile(r"\b(collection|сборник|коллекци[яи]
 EXTRA_RE = re.compile(r"\b(trailer|sample|extras?|bonus|трейлер|сэмпл|sample)\b", re.I)
 # Sports events, leagues and recurring broadcast shows that are not movies
 SPORTS_EVENT_RE = re.compile(
-    # Well-known sports leagues / organisations
-    r"\b(NBA|NFL|NHL|MLS|UFC|WWE|WWF|FIFA|UEFA|KHL|IPL|F1|MotoGP|WTA|ATP|Champions\s+League)\b"
+    # Well-known sports leagues / organisations (Latin)
+    r"\b(NBA|NFL|NHL|MLS|UFC|WWE|WWF|AEW|NJPW|FIFA|UEFA|KHL|IPL|F1|MotoGP|WTA|ATP"
+    r"|Champions\s+League|Premier\s+League|Serie\s+A|Bundesliga|La\s+Liga|Ligue\s+1)\b"
+    # Cyrillic abbreviations for the same organisations
+    r"|\b(КХЛ|НБА|НХЛ|НФЛ|МЛС|АТФ|ВТА|УЕФА|ФИФА|РПЛ|КПЛ)\b"
     # Russian "Championship of [country / league]"
     r"|\bЧемпионат\s+(Польши|Чехии|Испании|Германии|Франции|Италии|Англии|России|Украины"
-    r"|Португалии|Шотландии|Нидерландов|Бельгии|Турции|Греции|Австрии|мира|Европы|Азии|Африки)\b"
+    r"|Португалии|Шотландии|Нидерландов|Бельгии|Турции|Греции|Австрии|Бразилии|Аргентины"
+    r"|Саудовской\s+Аравии|Японии|Кореи|Китая|США|Австралии"
+    r"|мира|Европы|Азии|Африки|Америки)\b"
+    # Russian "Cup of [country]"
+    r"|\bКубок\s+(Польши|Чехии|Испании|Германии|Франции|Италии|Англии|России|Украины"
+    r"|Португалии|Нидерландов|Турции|Греции|Бразилии|Аргентины|Саудовской\s+Аравии"
+    r"|мира|Европы|УЕФА|лиги|стран|конфедераций|Стэнли|Гагарина)\b"
     # Russian league / cup names
     r"|\bЕдиная\s+лига\s+ВТБ\b"
-    r"|\b(Евролига|Еврокубок)\b"
+    r"|\b(Евролига|Еврокубок|Лига\s+чемпионов|Лига\s+Европы|Лига\s+конференций)\b"
     # Recurring broadcast shows with date stamps (e.g. "WWE Raw 11 05", "SmackDown 05 09")
-    r"|\b(SmackDown|Raw|Dynamite|Rampage|Nitro)\b\s+\d{1,2}\s+\d{2}\b"
+    r"|\b(SmackDown|Raw|Dynamite|Rampage|Nitro|Impact|Collision|Elevation)\b"
+    r"(\s+\d{1,2}\s+\d{2})?\b"
     # Generic sports-event keywords that almost never appear in movie titles
     r"|\bPlayoffs?\b"
-    r"|\bГран[-\s]?[Пп]ри\b",
+    r"|\bГран[-\s]?[Пп]ри\b"
+    # Numbered sports seasons / rounds (e.g. "КХЛ 25", "Serie A 24/25")
+    r"|\b(Тур|Этап|Раунд|Матч|Игра|Сезон)\s+\d+\b"
+    r"|\b\d{1,2}[-/]\d{2}\s*(сезон|season)\b",
     re.I,
 )
 YEAR_RE = re.compile(r"\b(20[2-9]\d|19\d{2})\b")
@@ -719,8 +732,11 @@ def build_cards(
                         card["genres"] = match.genres
                         card["title"] = match.title
 
-            # Apply rating filter only when we have a confirmed rating
+            # Apply rating filter: reject if rating is below threshold,
+            # or if no KP data at all when filter is active (sports, shows, etc.)
             if card.get("rating") is not None and card["rating"] < min_kp_rating:
+                continue
+            if card.get("rating") is None and min_kp_rating > 0:
                 continue
 
         cards.append(card)

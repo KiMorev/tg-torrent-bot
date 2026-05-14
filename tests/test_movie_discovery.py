@@ -108,11 +108,29 @@ class MovieDiscoveryTests(unittest.TestCase):
 
     def test_sports_events_are_rejected(self) -> None:
         cases = [
+            # Latin abbreviations (existing)
             "NBA Playoffs (2026) WEB-DL 1080p",
             "WWE Raw 11 05 (2026) HDTV 1080p",
             "Чемпионат Польши (2026) WEB-DL 1080p",
             "Чемпионат Испании (2026) 1080p",
             "UEFA Champions League (2026) WEB-DL 1080p",
+            # Cyrillic abbreviations (new)
+            "КХЛ 25 (2026) WEB-DL 1080p",
+            "НБА (2026) 1080p",
+            "РПЛ (2026) WEB-DL 1080p",
+            # Cup patterns (new)
+            "Кубок Италии (2026) WEB-DL 1080p",
+            "Кубок Саудовской Аравии (2026) 1080p",
+            "Кубок Стэнли (2026) WEB-DL 1080p",
+            # Countries not previously covered (new)
+            "Чемпионат Саудовской Аравии (2026) 1080p",
+            "Чемпионат Бразилии (2026) WEB-DL 1080p",
+            # Wrestling shows without date (new)
+            "AEW Dynamite (2026) HDTV 1080p",
+            "AEW Dynamite 13 05 (2026) HDTV 1080p",
+            # Russian cup/league names (new)
+            "Лига чемпионов (2026) WEB-DL 1080p",
+            "Лига Европы (2026) WEB-DL 1080p",
         ]
         for title in cases:
             with self.subTest(title=title):
@@ -277,8 +295,8 @@ class BuildCardsEnricherTests(unittest.TestCase):
             "score": 500,
         }
 
-    def test_film_not_found_in_kp_is_kept_in_cards(self) -> None:
-        """KP enricher: missing KP match must not drop the card."""
+    def test_film_not_found_in_kp_is_dropped_when_filter_active(self) -> None:
+        """KP enricher: missing KP match must drop the card when min_kp_rating > 0."""
         releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
         kp = SimpleNamespace(search_movie=lambda title, year, **kw: None)
 
@@ -291,8 +309,43 @@ class BuildCardsEnricherTests(unittest.TestCase):
             kinopoisk_client=kp,
         )
 
-        self.assertEqual(len(cache["cards"]), 1)
-        self.assertIsNone(cache["cards"][0].get("rating"))
+        self.assertEqual(len(cache["cards"]), 0,
+                         "No KP data + active filter must drop the card")
+
+    def test_film_without_kp_data_dropped_when_filter_active(self) -> None:
+        """When min_kp_rating > 0, releases with no KP match must be filtered out."""
+        releases = [self._make_release("КХЛ 25 (2026) WEB-DL 1080p")]
+        # Simulate KP returning None (no match found)
+        kp = SimpleNamespace(search_movie=lambda title, year, **kw: None)
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=6.0,
+            kinopoisk_client=kp,
+        )
+
+        self.assertEqual(len(cache["cards"]), 0,
+                         "Release with no KP data must be dropped when min_kp_rating > 0")
+
+    def test_film_without_kp_data_allowed_when_filter_zero(self) -> None:
+        """When min_kp_rating=0, releases with no KP match should still pass through."""
+        releases = [self._make_release("Нечто (2026) WEB-DL 1080p")]
+        kp = SimpleNamespace(search_movie=lambda title, year, **kw: None)
+
+        cache = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=kp,
+        )
+
+        self.assertEqual(len(cache["cards"]), 1,
+                         "Release with no KP data must be allowed when min_kp_rating=0")
 
     def test_film_with_low_kp_rating_is_dropped(self) -> None:
         releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
