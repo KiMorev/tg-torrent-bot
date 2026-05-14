@@ -5490,6 +5490,7 @@ async def setup_bot_commands(app: Application) -> None:
         commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
         BotCommand("admin", "Админ-панель"),
+        BotCommand("users", "Управление доступом пользователей"),
     ]
     for admin_id in ADMIN_CHAT_IDS:
         try:
