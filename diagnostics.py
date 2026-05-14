@@ -219,6 +219,35 @@ def _public_trackers_diagnostic(tracker_service, display_timezone: tzinfo) -> Se
     return ServiceDiagnostic("Public trackers", "ok", _summary("ok", "➕", "Public-трекеры", "кэш готов"), details)
 
 
+def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagnostic:
+    """Diagnostic for Plex Media Server integration."""
+    if plex_client is None:
+        return ServiceDiagnostic("Plex", "disabled", _summary("disabled", "🎬", "Plex", "не настроен — задайте PLEX_URL и PLEX_TOKEN в .env"))
+
+    try:
+        healthy = plex_client.is_healthy()
+    except Exception as exc:
+        return ServiceDiagnostic(
+            "Plex", "error",
+            _summary("error", "🎬", "Plex", "недоступен"),
+            [_raw_detail(str(exc))],
+        )
+
+    if not healthy:
+        return ServiceDiagnostic("Plex", "error", _summary("error", "🎬", "Plex", "не отвечает"))
+
+    details = []
+    if plex_cache_info:
+        movie_count = plex_cache_info.get("count")
+        updated_at = plex_cache_info.get("updated_at")
+        if movie_count is not None:
+            details.append(f"   Фильмов в библиотеке: {movie_count}")
+        if updated_at:
+            details.append(f"   Кэш обновлён: {updated_at}")
+
+    return ServiceDiagnostic("Plex", "ok", _summary("ok", "🎬", "Plex", "подключен"), details)
+
+
 def run_diagnostics(
     *,
     rutracker_client,
@@ -226,6 +255,8 @@ def run_diagnostics(
     ds_client,
     tracker_service,
     display_timezone: tzinfo,
+    plex_client=None,
+    plex_cache_info: dict | None = None,
 ) -> DiagnosticsReport:
     return DiagnosticsReport(
         [
@@ -233,6 +264,7 @@ def run_diagnostics(
             _rutracker_diagnostic(rutracker_client),
             _jackett_diagnostic(jackett_client),
             _public_trackers_diagnostic(tracker_service, display_timezone),
+            _plex_diagnostic(plex_client, plex_cache_info),
         ]
     )
 

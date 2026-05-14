@@ -85,7 +85,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("✅ ➕ <b>Public-трекеры</b>: кэш готов", text)
         self.assertIn("Доступно: 2", text)
         self.assertNotIn("Кинопоиск", text)
-        self.assertNotIn("Plex", text)
+        # Plex disabled when plex_client=None (default)
+        self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
 
     def test_run_diagnostics_reports_disabled_optional_services(self) -> None:
         report = run_diagnostics(
@@ -102,7 +103,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("Jackett</b>: не настроен", text)
         self.assertIn("Public-трекеры</b>: выключены", text)
         self.assertNotIn("Кинопоиск", text)
-        self.assertNotIn("Plex", text)
+        self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
 
     def test_stale_tracker_cache_reports_ok_not_warning(self) -> None:
         """A stale but non-empty cache is still functional — must show ✅, not ⚠️."""
@@ -158,6 +159,57 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertIn("boom &lt;secret&gt;", text)
         self.assertNotIn("boom <secret>", text)
+
+    # --- Plex diagnostics ---
+
+    def test_plex_disabled_when_client_is_none(self) -> None:
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=None,
+        )
+        text = format_diagnostics(report)
+        self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
+
+    def test_plex_ok_when_healthy(self) -> None:
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = True
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc,
+            plex_client=plex,
+            plex_cache_info={"count": 42, "updated_at": "2026-05-14 22:00"},
+        )
+        text = format_diagnostics(report)
+        self.assertIn("✅ 🎬 <b>Plex</b>: подключен", text)
+        self.assertIn("Фильмов в библиотеке: 42", text)
+        self.assertIn("Кэш обновлён: 2026-05-14 22:00", text)
+
+    def test_plex_error_when_unhealthy(self) -> None:
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = False
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+        )
+        text = format_diagnostics(report)
+        self.assertIn("❌ 🎬 <b>Plex</b>: не отвечает", text)
+
+    def test_plex_error_on_exception(self) -> None:
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.side_effect = Exception("connection refused")
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+        )
+        text = format_diagnostics(report)
+        self.assertIn("❌ 🎬 <b>Plex</b>: недоступен", text)
 
 
 if __name__ == "__main__":
