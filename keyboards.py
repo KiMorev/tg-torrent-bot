@@ -664,7 +664,10 @@ def movie_trackers_keyboard(
             f"{check}{name}",
             callback_data=_admin_callback(f"tracker_toggle:{id_}"),
         )])
-    if enabled_ids is not None:
+    some_disabled = enabled_ids is not None and any(
+        idx.get("id", "") not in enabled_ids for idx in all_trackers
+    )
+    if some_disabled:
         rows.append([InlineKeyboardButton("✅ Включить все", callback_data=_admin_callback("tracker_enable_all"))])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home"))])
     return InlineKeyboardMarkup(rows)

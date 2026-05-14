@@ -454,6 +454,13 @@ class MovieTrackersKeyboardTests(unittest.TestCase):
         buttons = self._buttons(kb)
         self.assertNotIn("✅ Включить все", buttons)
 
+    def test_enable_all_button_hidden_when_all_explicitly_enabled(self) -> None:
+        """When all trackers are explicitly in enabled_ids, button must not appear."""
+        all_ids = {t["id"] for t in self._trackers()}
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids=all_ids)
+        buttons = self._buttons(kb)
+        self.assertNotIn("✅ Включить все", buttons)
+
     def test_back_button_goes_to_admin_home(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
         buttons = self._buttons(kb)
