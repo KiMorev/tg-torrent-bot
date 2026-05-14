@@ -2128,9 +2128,15 @@ async def _safe_edit_message(
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None = None,
+    link_preview_options: "LinkPreviewOptions | None" = None,
 ) -> None:
     try:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            link_preview_options=link_preview_options,
+        )
     except BadRequest as e:
         if not _is_message_not_modified(e):
             raise
@@ -2207,9 +2213,15 @@ async def _safe_edit_callback(
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None = None,
+    link_preview_options: "LinkPreviewOptions | None" = None,
 ) -> None:
     try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            link_preview_options=link_preview_options,
+        )
     except BadRequest as e:
         if not _is_message_not_modified(e):
             raise
@@ -4679,6 +4691,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             _format_movie_discovery_cache(cache),
             reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
             parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
@@ -4706,6 +4719,7 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
         _format_movie_discovery_cache(cache),
         reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
         parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 

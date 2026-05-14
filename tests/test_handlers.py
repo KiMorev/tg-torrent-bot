@@ -48,6 +48,8 @@ from bot import (
     admin_command,
     help_command,
     movie_new_close_callback,
+    movie_new_command,
+    movie_new_refresh_callback,
     help_close_callback,
     search_cancel,
     search_timeout,
@@ -501,6 +503,52 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         update.callback_query.answer.assert_called_once()
         # Fallback is an auto-delete notification task — edit_message_text must NOT be called
         update.callback_query.edit_message_text.assert_not_called()
+
+    def test_movie_new_command_disables_link_preview(self):
+        """/new reply must have link preview disabled."""
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        fake_cache = {
+            "cards": [{"title": "Тест", "year": 2026, "score": 0.8}],
+            "updated_at": "2026-05-14 22:00",
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_movie_discovery_enabled", return_value=True),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=fake_cache),
+        ):
+            asyncio.run(movie_new_command(update, context))
+
+        call_kwargs = update.message.reply_text.call_args.kwargs
+        lpo = call_kwargs.get("link_preview_options")
+        self.assertIsNotNone(lpo, "link_preview_options must be set")
+        self.assertTrue(lpo.is_disabled, "link preview must be disabled in /new")
+
+    def test_movie_new_refresh_callback_disables_link_preview(self):
+        """«Обновить» callback must have link preview disabled."""
+        update = _make_callback_update(chat_id=100, callback_data="new:refresh")
+        context = _make_context()
+        fake_cache = {
+            "cards": [{"title": "Тест", "year": 2026, "score": 0.8}],
+            "updated_at": "2026-05-14 22:00",
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_movie_discovery_enabled", return_value=True),
+            patch.object(bot, "_refresh_movie_discovery_cache", AsyncMock(return_value=fake_cache)),
+        ):
+            asyncio.run(movie_new_refresh_callback(update, context))
+
+        edit_calls = update.callback_query.edit_message_text.call_args_list
+        # Last call is the final result (not the «Обновляю…» intermediate)
+        last_kwargs = edit_calls[-1].kwargs
+        lpo = last_kwargs.get("link_preview_options")
+        self.assertIsNotNone(lpo, "link_preview_options must be set on refresh")
+        self.assertTrue(lpo.is_disabled, "link preview must be disabled after refresh")
 
 
 # ---------------------------------------------------------------------------
