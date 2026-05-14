@@ -4,6 +4,7 @@ from config import AppSettings
 from download_station import DownloadStationClient
 from jackett import JackettClient
 from kinopoisk import KinopoiskClient
+from plex import PlexClient
 from rutracker import RutrackerClient
 from state_store import JsonStateStore
 
@@ -16,6 +17,7 @@ class AppContext:
     rutracker_client: RutrackerClient | None
     jackett_client: JackettClient | None
     kinopoisk_client: KinopoiskClient | None
+    plex_client: PlexClient | None
 
 
 def build_app_context(settings: AppSettings) -> AppContext:
@@ -62,6 +64,15 @@ def build_app_context(settings: AppSettings) -> AppContext:
         if settings.kinopoisk_enabled
         else None
     )
+    plex_client = (
+        PlexClient(
+            settings.plex_url,
+            settings.plex_token,
+            movie_section_id=settings.plex_movie_section or None,
+        )
+        if settings.plex_enabled
+        else None
+    )
 
     return AppContext(
         settings=settings,
@@ -70,4 +81,5 @@ def build_app_context(settings: AppSettings) -> AppContext:
         rutracker_client=rutracker_client,
         jackett_client=jackett_client,
         kinopoisk_client=kinopoisk_client,
+        plex_client=plex_client,
     )

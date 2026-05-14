@@ -62,7 +62,7 @@ class PlexCheckResult:
 def _normalise_resolution(raw: str) -> str:
     """Normalise Plex videoResolution value to a canonical string."""
     r = (raw or "").strip().lower()
-    if r in ("4k", "2160", "uhd"):
+    if r in ("4k", "2160", "2160p", "uhd"):
         return "4k"
     if r in ("1080", "1080p", "1080i"):
         return "1080"
