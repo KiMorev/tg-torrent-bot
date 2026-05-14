@@ -92,6 +92,8 @@ from keyboards import (
     _task_keyboard,
     _task_reply_markup,
     _tasks_keyboard,
+    users_keyboard,
+    movie_trackers_keyboard,
 )
 from jackett import JackettError, JackettMagnetRedirect, JackettResult
 from jackett_subscriptions import (
@@ -111,6 +113,7 @@ from movie_discovery import (
     parse_qualities as _movie_parse_qualities,
     prune_kp_cache as _movie_prune_kp_cache,
     prune_seen_fingerprints as _movie_prune_seen_fingerprints,
+    prune_tracker_data as _movie_prune_tracker_data,
 )
 from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
 from task_policies import (
@@ -845,6 +848,22 @@ def _format_admin_movie_discovery_line() -> str:
     ]
     if kp_stats_line:
         lines.append(kp_stats_line)
+
+    # Tracker rating status
+    md_settings = _load_movie_discovery_settings()
+    known_ids: list[str] = md_settings.get("jackett_trackers_known") or []
+    if known_ids:
+        enabled_ids_raw = md_settings.get("jackett_trackers_enabled")
+        enabled_set = set(enabled_ids_raw) if enabled_ids_raw is not None else set(known_ids)
+        enabled_sorted = sorted(t for t in known_ids if t in enabled_set)
+        disabled_sorted = sorted(t for t in known_ids if t not in enabled_set)
+        tracker_parts = [f"🟢 {_tracker_abbr(t)}" for t in enabled_sorted]
+        tracker_parts += [f"🔴 {_tracker_abbr(t)}" for t in disabled_sorted]
+        tracker_line = " ".join(tracker_parts)
+        if enabled_ids_raw is not None:
+            tracker_line += f" ({len(enabled_sorted)}/{len(known_ids)})"
+        lines.append(f"• Трекеры рейтинга: {tracker_line}")
+
     return "\n".join(lines)
 
 
@@ -968,6 +987,14 @@ def _load_movie_discovery_cache() -> dict:
 
 def _save_movie_discovery_cache(cache: dict) -> None:
     state_store.save_movie_discovery_cache(cache)
+
+
+def _load_movie_discovery_settings() -> dict:
+    return state_store.load_movie_discovery_settings()
+
+
+def _save_movie_discovery_settings(settings: dict) -> None:
+    state_store.save_movie_discovery_settings(settings)
 
 
 def _save_movie_discovery_debug(report: dict) -> None:
@@ -1121,6 +1148,35 @@ def _format_movie_discovery_cache(cache: dict) -> str:
 async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
+
+    # --- Tracker monitoring: detect removed Jackett trackers ---
+    md_settings = _load_movie_discovery_settings()
+    known_tracker_ids: set[str] = set(md_settings.get("jackett_trackers_known") or [])
+    current_tracker_ids: set[str] = set()
+    if jackett_client is not None:
+        try:
+            indexers = await asyncio.to_thread(jackett_client.get_indexers)
+            current_tracker_ids = {idx["id"] for idx in indexers if idx.get("id")}
+        except Exception:
+            logger.warning("Failed to get Jackett indexers for tracker monitoring", exc_info=True)
+            current_tracker_ids = known_tracker_ids
+    removed_tracker_ids = known_tracker_ids - current_tracker_ids
+    if removed_tracker_ids:
+        logger.info("Jackett trackers removed, pruning: %s", removed_tracker_ids)
+        enabled = md_settings.get("jackett_trackers_enabled")
+        if enabled is not None:
+            updated_enabled = [t for t in enabled if t not in removed_tracker_ids]
+            md_settings["jackett_trackers_enabled"] = updated_enabled if updated_enabled else None
+    if current_tracker_ids or known_tracker_ids:
+        md_settings["jackett_trackers_known"] = sorted(current_tracker_ids or known_tracker_ids)
+        _save_movie_discovery_settings(md_settings)
+
+    enabled_ids: set[str] | None = (
+        set(md_settings["jackett_trackers_enabled"])
+        if md_settings.get("jackett_trackers_enabled") is not None
+        else None
+    )
+
     qualities = _movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES)
     allowed_years = _movie_discovery_years(now)
     queries = _movie_discovery_queries(now, qualities)
@@ -1187,6 +1243,8 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         key = "|".join(str(release.get(part, "") or "") for part in ("source", "tracker", "topic_id", "topic_url", "title", "size"))
         by_fingerprint[key] = release
 
+    all_releases = list(by_fingerprint.values())
+
     previous = _load_movie_discovery_cache()
     # Migrate legacy list format → dict[fingerprint, timestamp]
     raw_seen = previous.get("seen_fingerprints", [])
@@ -1194,13 +1252,23 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         {fp: "" for fp in raw_seen} if isinstance(raw_seen, list) else dict(raw_seen)
     )
     known = _movie_prune_seen_fingerprints(known, now=now)
+    # Prune fingerprints for removed trackers
+    if removed_tracker_ids:
+        _, known = _movie_prune_tracker_data([], known, removed_tracker_ids)
     prev_kp_cache: dict = (
         previous["kp_cache"] if isinstance(previous.get("kp_cache"), dict) else {}
     )
     prev_kp_cache = _movie_prune_kp_cache(prev_kp_cache, now=now)
+
+    # Filter releases for card building by enabled trackers
+    if enabled_ids is not None:
+        build_releases = [r for r in all_releases if r.get("source") != "jackett" or r.get("tracker") in enabled_ids]
+    else:
+        build_releases = all_releases
+
     cache = await asyncio.to_thread(
         _movie_build_cards,
-        list(by_fingerprint.values()),
+        build_releases,
         now_text=now_text,
         known_fingerprints=known,
         limit=MOVIE_DISCOVERY_LIMIT,
@@ -1209,6 +1277,7 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         kp_cache=prev_kp_cache,
         max_stale_refresh=max_stale_kp_refresh,
     )
+    cache["all_releases"] = all_releases
 
     # Accumulate daily KP API search counter
     kp_searches_this_run = int(cache.get("kp_searches") or 0)
@@ -1265,6 +1334,75 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     _save_movie_discovery_debug(debug_report)
     logger.info("Movie discovery refreshed: cards=%d releases=%d", len(cache.get("cards", [])), len(releases))
     return cache
+
+
+async def _recompute_movie_discovery_from_cache() -> None:
+    """Rebuild movie cards from stored releases using current tracker settings (no network calls)."""
+    cache = _load_movie_discovery_cache()
+    all_releases = cache.get("all_releases")
+    if not isinstance(all_releases, list):
+        return
+
+    settings = _load_movie_discovery_settings()
+    enabled_ids_raw = settings.get("jackett_trackers_enabled")
+    if enabled_ids_raw is not None:
+        enabled_ids: set[str] | None = set(enabled_ids_raw)
+        build_releases = [r for r in all_releases if r.get("source") != "jackett" or r.get("tracker") in enabled_ids]
+    else:
+        build_releases = all_releases
+
+    now = datetime.now(DISPLAY_TIMEZONE)
+    now_text = cache.get("updated_at") or now.strftime("%Y-%m-%d %H:%M")
+    raw_seen = cache.get("seen_fingerprints", {})
+    known = dict(raw_seen) if isinstance(raw_seen, dict) else {}
+    prev_kp_cache = cache.get("kp_cache") if isinstance(cache.get("kp_cache"), dict) else {}
+
+    new_cache = await asyncio.to_thread(
+        _movie_build_cards,
+        build_releases,
+        now_text=now_text,
+        known_fingerprints=known,
+        limit=MOVIE_DISCOVERY_LIMIT,
+        min_kp_rating=MOVIE_DISCOVERY_MIN_KP_RATING,
+        kinopoisk_client=kinopoisk_client,
+        kp_cache=prev_kp_cache,
+        max_stale_refresh=0,
+    )
+    new_cache["all_releases"] = all_releases
+    new_cache["kp_api_stats"] = cache.get("kp_api_stats")
+    _save_movie_discovery_cache(new_cache)
+    logger.info("Movie discovery recomputed from cache: cards=%d", len(new_cache.get("cards", [])))
+
+
+async def _movie_trackers_panel() -> tuple[str, "InlineKeyboardMarkup"]:
+    """Build text + keyboard for the tracker selection admin screen."""
+    all_trackers: list[dict] = []
+    if jackett_client is not None:
+        try:
+            all_trackers = await asyncio.to_thread(jackett_client.get_indexers)
+        except Exception:
+            logger.warning("Failed to get Jackett indexers for admin panel", exc_info=True)
+
+    settings = _load_movie_discovery_settings()
+    known_ids: list[str] = settings.get("jackett_trackers_known") or []
+    if not all_trackers and known_ids:
+        all_trackers = [{"id": t, "name": _tracker_abbr(t)} for t in known_ids]
+
+    enabled_ids_raw = settings.get("jackett_trackers_enabled")
+    enabled_ids: set[str] | None = set(enabled_ids_raw) if enabled_ids_raw is not None else None
+
+    total = len(all_trackers)
+    if total == 0:
+        text = "🎬 Трекеры новинок\n\nJackett не настроен или нет доступных трекеров."
+    else:
+        selected = total if enabled_ids is None else sum(1 for t in all_trackers if t.get("id") in enabled_ids)
+        text = (
+            f"🎬 Трекеры новинок\n\n"
+            f"Выбраны: {selected} из {total}\n\n"
+            f"Отмеченные трекеры участвуют в рейтинге /new."
+        )
+
+    return text, movie_trackers_keyboard(all_trackers, enabled_ids)
 
 
 async def _movie_discovery_loop() -> None:
@@ -4423,6 +4561,37 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if action == "movie_trackers":
+        text, keyboard = await _movie_trackers_panel()
+        await _safe_edit_callback(query, text, reply_markup=keyboard)
+        return
+
+    if action.startswith("tracker_toggle:"):
+        tracker_id = action.split(":", 1)[1]
+        settings = _load_movie_discovery_settings()
+        known_ids: list[str] = settings.get("jackett_trackers_known") or []
+        enabled_raw = settings.get("jackett_trackers_enabled")
+        enabled_set: set[str] = set(enabled_raw) if enabled_raw is not None else set(known_ids)
+        if tracker_id in enabled_set:
+            enabled_set.discard(tracker_id)
+        else:
+            enabled_set.add(tracker_id)
+        settings["jackett_trackers_enabled"] = sorted(enabled_set) if enabled_set else None
+        _save_movie_discovery_settings(settings)
+        asyncio.create_task(_recompute_movie_discovery_from_cache())
+        text, keyboard = await _movie_trackers_panel()
+        await _safe_edit_callback(query, text, reply_markup=keyboard)
+        return
+
+    if action == "tracker_enable_all":
+        settings = _load_movie_discovery_settings()
+        settings["jackett_trackers_enabled"] = None
+        _save_movie_discovery_settings(settings)
+        asyncio.create_task(_recompute_movie_discovery_from_cache())
+        text, keyboard = await _movie_trackers_panel()
+        await _safe_edit_callback(query, text, reply_markup=keyboard)
+        return
+
     await _safe_edit_callback(query, "🛠️ Обновляю админ-панель…")
     await _safe_edit_callback(
         query,
@@ -4635,7 +4804,7 @@ async def movie_new_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-def _format_users_panel() -> tuple[str, InlineKeyboardMarkup]:
+def _format_users_panel(*, back_to_admin: bool = True) -> tuple[str, InlineKeyboardMarkup]:
     admins = sorted(ADMIN_CHAT_IDS)
     permanent = sorted(ALLOWED_CHAT_IDS - ADMIN_CHAT_IDS)
     approved_users = {
@@ -4670,17 +4839,7 @@ def _format_users_panel() -> tuple[str, InlineKeyboardMarkup]:
     else:
         lines.append("  (нет)")
 
-    rows = [
-        [InlineKeyboardButton(
-            f"🚫 {info.get('name', '') or uid}",
-            callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove:{uid}",
-        )]
-        for uid, info in approved_users.items()
-    ]
-    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
-    rows.append([InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home")])
-
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
+    return "\n".join(lines), users_keyboard(approved_users, back_to_admin=back_to_admin)
 
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4688,7 +4847,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not _is_admin_chat(chat_id):
         return
 
-    text, keyboard = _format_users_panel()
+    text, keyboard = _format_users_panel(back_to_admin=False)
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
@@ -5331,7 +5490,6 @@ async def setup_bot_commands(app: Application) -> None:
         commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
         BotCommand("admin", "Админ-панель"),
-        BotCommand("users", "Управление доступом пользователей"),
     ]
     for admin_id in ADMIN_CHAT_IDS:
         try:

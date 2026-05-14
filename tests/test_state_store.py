@@ -217,5 +217,52 @@ class StateStoreTests(unittest.TestCase):
         self.assertNotIn("tid4", loaded)
 
 
+class MovieDiscoverySettingsStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.store = JsonStateStore(
+            approved_chat_ids_file=d / "approved.json",
+            tracker_processed_file=d / "tracker.json",
+            task_owners_file=d / "owners.json",
+            notified_tasks_file=d / "notified.json",
+            auto_delete_tasks_file=d / "auto_delete.json",
+            movie_discovery_settings_file=d / "md_settings.json",
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_load_returns_empty_dict_when_no_file(self) -> None:
+        result = self.store.load_movie_discovery_settings()
+        self.assertEqual(result, {})
+
+    def test_roundtrip_settings(self) -> None:
+        settings = {
+            "jackett_trackers_enabled": ["kinozal", "rutracker"],
+            "jackett_trackers_known": ["kinozal", "rutracker", "torrenty"],
+        }
+        self.store.save_movie_discovery_settings(settings)
+        loaded = self.store.load_movie_discovery_settings()
+        self.assertEqual(loaded["jackett_trackers_enabled"], ["kinozal", "rutracker"])
+        self.assertEqual(loaded["jackett_trackers_known"], ["kinozal", "rutracker", "torrenty"])
+
+    def test_save_none_enabled_roundtrips(self) -> None:
+        settings = {"jackett_trackers_enabled": None, "jackett_trackers_known": ["kinozal"]}
+        self.store.save_movie_discovery_settings(settings)
+        loaded = self.store.load_movie_discovery_settings()
+        self.assertIsNone(loaded["jackett_trackers_enabled"])
+
+    def test_load_returns_empty_when_no_file_configured(self) -> None:
+        store_no_file = JsonStateStore(
+            approved_chat_ids_file=Path(self._tmp.name) / "a.json",
+            tracker_processed_file=Path(self._tmp.name) / "b.json",
+            task_owners_file=Path(self._tmp.name) / "c.json",
+            notified_tasks_file=Path(self._tmp.name) / "d.json",
+            auto_delete_tasks_file=Path(self._tmp.name) / "e.json",
+        )
+        self.assertEqual(store_no_file.load_movie_discovery_settings(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

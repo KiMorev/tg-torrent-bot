@@ -133,6 +133,7 @@ class AppSettings:
     movie_discovery_enabled: bool
     movie_discovery_interval_hours: int
     movie_discovery_cache_file: Path
+    movie_discovery_settings_file: Path
     movie_discovery_debug_file: Path
     movie_discovery_rutracker_tm: int
     movie_discovery_jackett_require_date: bool
@@ -233,6 +234,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         movie_discovery_interval_hours=max(1, env_int(env, "MOVIE_DISCOVERY_INTERVAL_HOURS", 12)),
         movie_discovery_cache_file=Path(
             env.get("MOVIE_DISCOVERY_CACHE_FILE", str(state_dir / "movie_discovery.json"))
+        ),
+        movie_discovery_settings_file=Path(
+            env.get("MOVIE_DISCOVERY_SETTINGS_FILE", str(state_dir / "movie_discovery_settings.json"))
         ),
         movie_discovery_debug_file=Path(
             env.get("MOVIE_DISCOVERY_DEBUG_FILE", str(state_dir / "movie_discovery_debug.json"))

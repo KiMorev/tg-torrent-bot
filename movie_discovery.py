@@ -327,6 +327,30 @@ def _parse_timestamp(ts: str) -> datetime | None:
     return parse_published_at(ts)
 
 
+def prune_tracker_data(
+    cards: list[dict],
+    seen_fingerprints: dict[str, str],
+    removed_tracker_ids: set[str],
+) -> tuple[list[dict], dict[str, str]]:
+    """Remove releases from removed_tracker_ids. Cards without remaining releases are dropped."""
+    if not removed_tracker_ids:
+        return cards, seen_fingerprints
+
+    pruned_cards = []
+    for card in cards:
+        filtered = [r for r in card.get("releases", []) if r.get("tracker") not in removed_tracker_ids]
+        if filtered:
+            card = dict(card)
+            card["releases"] = filtered
+            pruned_cards.append(card)
+
+    pruned_fps = {
+        fp: ts for fp, ts in seen_fingerprints.items()
+        if fp.split("|", 2)[1] not in removed_tracker_ids
+    }
+    return pruned_cards, pruned_fps
+
+
 def prune_seen_fingerprints(
     seen: dict[str, str],
     *,

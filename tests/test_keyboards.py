@@ -15,6 +15,8 @@ from keyboards import (
     _task_keyboard,
     _tasks_keyboard,
     tracker_selection_label,
+    users_keyboard,
+    movie_trackers_keyboard,
 )
 
 
@@ -375,6 +377,96 @@ class TasksKeyboardCloseTests(unittest.TestCase):
         self.assertIn("✖️ Закрыть", labels)
         self.assertIn("🔄 Обновить", labels)
         self.assertIn("🙋 Мои загрузки", labels)
+
+
+class UsersKeyboardTests(unittest.TestCase):
+    def _buttons(self, kb) -> dict:
+        return {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
+
+    def test_back_to_admin_true_shows_admin_panel_button(self) -> None:
+        kb = users_keyboard({}, back_to_admin=True)
+        buttons = self._buttons(kb)
+        self.assertIn("⬅️ Админ-панель", buttons)
+        self.assertEqual(buttons["⬅️ Админ-панель"], "admin:home")
+        self.assertNotIn("✖️ Закрыть", buttons)
+
+    def test_back_to_admin_false_shows_close_button(self) -> None:
+        kb = users_keyboard({}, back_to_admin=False)
+        buttons = self._buttons(kb)
+        self.assertIn("✖️ Закрыть", buttons)
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+        self.assertNotIn("⬅️ Админ-панель", buttons)
+
+    def test_approved_users_get_remove_buttons(self) -> None:
+        approved = {12345: {"name": "Alice", "added_at": ""}}
+        kb = users_keyboard(approved)
+        buttons = self._buttons(kb)
+        self.assertIn("🚫 Alice", buttons)
+        self.assertEqual(buttons["🚫 Alice"], "access:remove:12345")
+
+    def test_refresh_button_always_present(self) -> None:
+        kb = users_keyboard({})
+        buttons = self._buttons(kb)
+        self.assertIn("🔄 Обновить", buttons)
+        self.assertEqual(buttons["🔄 Обновить"], "access:users_refresh")
+
+
+class MovieTrackersKeyboardTests(unittest.TestCase):
+    def _buttons(self, kb) -> dict:
+        return {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
+
+    def _trackers(self) -> list[dict]:
+        return [
+            {"id": "kinozal", "name": "Kinozal"},
+            {"id": "rutracker", "name": "Rutracker"},
+            {"id": "torrenty", "name": "Torrenty"},
+        ]
+
+    def test_all_enabled_when_none(self) -> None:
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
+        buttons = self._buttons(kb)
+        self.assertIn("✅ Kinozal", buttons)
+        self.assertIn("✅ Rutracker", buttons)
+        self.assertIn("✅ Torrenty", buttons)
+
+    def test_disabled_trackers_show_unchecked(self) -> None:
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"kinozal"})
+        buttons = self._buttons(kb)
+        self.assertIn("✅ Kinozal", buttons)
+        self.assertIn("☐ Rutracker", buttons)
+        self.assertIn("☐ Torrenty", buttons)
+
+    def test_toggle_callback_data(self) -> None:
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
+        buttons = self._buttons(kb)
+        self.assertEqual(buttons["✅ Kinozal"], "admin:tracker_toggle:kinozal")
+        self.assertEqual(buttons["✅ Rutracker"], "admin:tracker_toggle:rutracker")
+
+    def test_enable_all_button_present(self) -> None:
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"kinozal"})
+        buttons = self._buttons(kb)
+        self.assertIn("✅ Включить все", buttons)
+        self.assertEqual(buttons["✅ Включить все"], "admin:tracker_enable_all")
+
+    def test_back_button_goes_to_admin_home(self) -> None:
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
+        buttons = self._buttons(kb)
+        self.assertIn("⬅️ Назад", buttons)
+        self.assertEqual(buttons["⬅️ Назад"], "admin:home")
+
+    def test_enabled_trackers_sorted_first(self) -> None:
+        kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"torrenty"})
+        rows = kb.inline_keyboard[:-2]  # Exclude enable-all and back buttons
+        first_label = rows[0][0].text
+        self.assertTrue(first_label.startswith("✅"), f"Expected enabled tracker first, got {first_label!r}")
+
+
+class AdminPanelKeyboardMovieTrackersTests(unittest.TestCase):
+    def test_admin_panel_has_movie_trackers_button(self) -> None:
+        kb = _admin_panel_keyboard()
+        buttons = {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
+        self.assertIn("🎬 Трекеры новинок", buttons)
+        self.assertEqual(buttons["🎬 Трекеры новинок"], "admin:movie_trackers")
 
 
 if __name__ == "__main__":
