@@ -547,6 +547,7 @@ def _kp_cache_store(
             "title": match.title,
             "year": match.year,
             "rating": match.rating,
+            "votes": match.votes,
             "genres": match.genres,
             "url": match.url,
             "cached_at": now_iso,
@@ -680,6 +681,7 @@ def build_cards(
                     card["kp_id"] = cached["kp_id"]
                     card["kp_url"] = cached.get("url", "")
                     card["rating"] = cached.get("rating")
+                    card["kp_votes"] = cached.get("votes")
                     card["genres"] = cached.get("genres", [])
                     card["title"] = cached.get("title") or search_title
                     logger.debug("KP cache hit for %r → kp_id=%s", search_title, cached["kp_id"])
@@ -702,6 +704,7 @@ def build_cards(
                             card["kp_id"] = match.kp_id
                             card["kp_url"] = match.url
                             card["rating"] = match.rating
+                            card["kp_votes"] = match.votes
                             card["genres"] = match.genres
                             card["title"] = match.title
                 else:
@@ -711,6 +714,7 @@ def build_cards(
                         card["kp_id"] = cached["kp_id"]
                         card["kp_url"] = cached.get("url", "")
                         card["rating"] = cached.get("rating")
+                        card["kp_votes"] = cached.get("votes")
                         card["genres"] = cached.get("genres", [])
                         card["title"] = cached.get("title") or search_title
                     # cached with kp_id=None: silently skip
@@ -729,6 +733,7 @@ def build_cards(
                         card["kp_id"] = match.kp_id
                         card["kp_url"] = match.url
                         card["rating"] = match.rating
+                        card["kp_votes"] = match.votes
                         card["genres"] = match.genres
                         card["title"] = match.title
 

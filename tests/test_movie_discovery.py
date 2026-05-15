@@ -218,6 +218,7 @@ class MovieDiscoveryTests(unittest.TestCase):
             year=2026,
             rating=7.1,
             genres=["ужасы"],
+            votes=None,
         )
         kp = SimpleNamespace(search_movie=lambda title, year, **kw: match)
 
@@ -349,7 +350,7 @@ class BuildCardsEnricherTests(unittest.TestCase):
 
     def test_film_with_low_kp_rating_is_dropped(self) -> None:
         releases = [self._make_release("Тест (2026) WEB-DL 1080p")]
-        match = SimpleNamespace(kp_id=1, title="Тест", url="", year=2026, rating=4.5, genres=[])
+        match = SimpleNamespace(kp_id=1, title="Тест", url="", year=2026, rating=4.5, genres=[], votes=None)
         kp = SimpleNamespace(search_movie=lambda title, year, **kw: match)
 
         cache = build_cards(
@@ -418,10 +419,10 @@ class BuildCardsEnricherTests(unittest.TestCase):
         releases_bad = [self._make_release("Тест (2026) WEB-DL 1080p", tracker="bad", topic_url="https://b.com/1")]
 
         def _kp_good(title, year, **kw):
-            return SimpleNamespace(kp_id=1, title=title, url="", year=year, rating=8.5, genres=[])
+            return SimpleNamespace(kp_id=1, title=title, url="", year=year, rating=8.5, genres=[], votes=None)
 
         def _kp_bad(title, year, **kw):
-            return SimpleNamespace(kp_id=2, title=title, url="", year=year, rating=6.0, genres=[])
+            return SimpleNamespace(kp_id=2, title=title, url="", year=year, rating=6.0, genres=[], votes=None)
 
         cache_good = build_cards(
             releases_good,
@@ -643,7 +644,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
     def test_cache_miss_calls_api_and_stores_result(self) -> None:
         """On a cache miss the API is called and the result is stored in the returned cache."""
         releases = [self._make_release()]
-        match = SimpleNamespace(kp_id=42, title="Тест", url="", year=2026, rating=8.0, genres=[])
+        match = SimpleNamespace(kp_id=42, title="Тест", url="", year=2026, rating=8.0, genres=[], votes=None)
         kp = SimpleNamespace(search_movie=lambda title, year, **kw: match)
 
         result = build_cards(
@@ -690,7 +691,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
     def test_returned_cache_is_independent_copy(self) -> None:
         """The kp_cache dict returned in the result must contain the new entry."""
         releases = [self._make_release()]
-        match = SimpleNamespace(kp_id=7, title="X", url="", year=2026, rating=7.0, genres=[])
+        match = SimpleNamespace(kp_id=7, title="X", url="", year=2026, rating=7.0, genres=[], votes=None)
         initial_cache: dict = {}
 
         result = build_cards(
@@ -708,7 +709,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
     def test_ttl_jitter_stored_in_found_entry(self) -> None:
         """A newly stored found entry must include ttl_days in the valid jitter range."""
         releases = [self._make_release()]
-        match = SimpleNamespace(kp_id=5, title="Тест", url="", year=2026, rating=7.0, genres=[])
+        match = SimpleNamespace(kp_id=5, title="Тест", url="", year=2026, rating=7.0, genres=[], votes=None)
 
         result = build_cards(
             releases,
@@ -755,7 +756,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
         releases[1]["movie_title"] = "Фильм Б"
         releases[1]["topic_url"] = "https://example.com/b"
 
-        match = SimpleNamespace(kp_id=1, title="A", url="", year=2026, rating=7.0, genres=[])
+        match = SimpleNamespace(kp_id=1, title="A", url="", year=2026, rating=7.0, genres=[], votes=None)
 
         result = build_cards(
             releases,
@@ -823,7 +824,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
 
         def refreshed_match(title, year, **kw):
             call_count["n"] += 1
-            return SimpleNamespace(kp_id=99, title=title, url="", year=year, rating=9.0, genres=[])
+            return SimpleNamespace(kp_id=99, title=title, url="", year=year, rating=9.0, genres=[], votes=None)
 
         result = build_cards(
             releases,
@@ -862,7 +863,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
 
         def spy(title, year, **kw):
             call_count["n"] += 1
-            return SimpleNamespace(kp_id=99, title=title, url="", year=year, rating=9.0, genres=[])
+            return SimpleNamespace(kp_id=99, title=title, url="", year=year, rating=9.0, genres=[], votes=None)
 
         result = build_cards(
             releases,

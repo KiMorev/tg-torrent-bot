@@ -1126,6 +1126,17 @@ def _movie_card_tracker_labels(card: dict) -> str:
     return ", ".join(labels)
 
 
+def _format_kp_votes(votes: int | None) -> str:
+    """Format KP vote count as a compact string: 1 234 → '1.2K', 1 500 000 → '1.5M'."""
+    if votes is None or not isinstance(votes, int) or votes <= 0:
+        return ""
+    if votes >= 1_000_000:
+        return f"{votes / 1_000_000:.1f}M"
+    if votes >= 1_000:
+        return f"{votes / 1_000:.0f}K"
+    return str(votes)
+
+
 def _format_movie_discovery_cache(cache: dict) -> str:
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     updated_at = cache.get("updated_at") or "—"
@@ -1146,7 +1157,9 @@ def _format_movie_discovery_cache(cache: dict) -> str:
         title = f"{main_title} / {alt_title}" if alt_title else main_title
         year = html_module.escape(str(card.get("year") or ""))
         rating = card.get("rating")
-        rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
+        votes_fmt = _format_kp_votes(card.get("kp_votes"))
+        votes_text = f" ({votes_fmt})" if votes_fmt else ""
+        rating_text = f" · КП {rating:.1f}{votes_text}" if isinstance(rating, (int, float)) else ""
         genres = ", ".join(card.get("genres") or [])
         genres_text = f"\n   Жанры: {html_module.escape(genres)}" if genres else ""
         kp_url = card.get("kp_url")

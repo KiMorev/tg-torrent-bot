@@ -36,6 +36,7 @@ from bot import (
     _is_admin_chat,
     _is_allowed,
     _enrich_cards_with_plex,
+    _format_kp_votes,
     _format_movie_discovery_cache,
     _plex_find_by_ds_title,
     _plex_is_series,
@@ -675,6 +676,64 @@ class PlexEnrichmentTests(unittest.TestCase):
         }
         text = _format_movie_discovery_cache(cache)
         self.assertNotIn("✅", text)
+
+    def test_format_shows_vote_count_next_to_rating(self):
+        """Vote count appears in parentheses right after the KP rating."""
+        cache = {
+            "updated_at": "2026-05-14 12:00",
+            "cards": [{
+                "title": "Дюна",
+                "year": 2021,
+                "rating": 7.8,
+                "kp_votes": 125_000,
+                "best_quality": "1080p",
+                "best_size": "10 GB",
+                "best_seeders": 30,
+                "release_count": 1,
+            }],
+        }
+        text = _format_movie_discovery_cache(cache)
+        self.assertIn("КП 7.8 (125K)", text)
+
+    def test_format_no_vote_count_when_votes_is_none(self):
+        """When kp_votes is absent, only the rating appears without parentheses."""
+        cache = {
+            "updated_at": "2026-05-14 12:00",
+            "cards": [{
+                "title": "Дюна",
+                "year": 2021,
+                "rating": 7.8,
+                "kp_votes": None,
+                "best_quality": "1080p",
+                "best_size": "10 GB",
+                "best_seeders": 30,
+                "release_count": 1,
+            }],
+        }
+        text = _format_movie_discovery_cache(cache)
+        self.assertIn("КП 7.8", text)
+        self.assertNotIn("(", text.split("КП 7.8")[1].split("\n")[0])
+
+
+class KpVoteFormatterTests(unittest.TestCase):
+    """Tests for _format_kp_votes helper."""
+
+    def test_none_returns_empty(self):
+        self.assertEqual(_format_kp_votes(None), "")
+
+    def test_zero_returns_empty(self):
+        self.assertEqual(_format_kp_votes(0), "")
+
+    def test_small_number_returned_as_is(self):
+        self.assertEqual(_format_kp_votes(500), "500")
+
+    def test_thousands_formatted_as_K(self):
+        self.assertEqual(_format_kp_votes(125_000), "125K")
+        self.assertEqual(_format_kp_votes(1_500), "2K")
+
+    def test_millions_formatted_as_M(self):
+        self.assertEqual(_format_kp_votes(1_500_000), "1.5M")
+        self.assertEqual(_format_kp_votes(2_000_000), "2.0M")
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,7 @@ class KinopoiskMovieMatch:
     media_type: str
     rating: float | None
     genres: list[str]
+    votes: int | None = None
 
     @property
     def title(self) -> str:
@@ -295,6 +296,12 @@ class KinopoiskClient:
             except (TypeError, ValueError):
                 kp_id = 0
 
+            try:
+                votes_raw = item.get("ratingVoteCount")
+                votes: int | None = int(votes_raw) if votes_raw is not None else None
+            except (TypeError, ValueError):
+                votes = None
+
             candidate = KinopoiskMovieMatch(
                 kp_id=kp_id,
                 title_ru=str(item.get("nameRu") or "").strip(),
@@ -303,6 +310,7 @@ class KinopoiskClient:
                 media_type=media_type,
                 rating=rating,
                 genres=genres,
+                votes=votes,
             )
             if not (candidate.kp_id and candidate.title):
                 continue
