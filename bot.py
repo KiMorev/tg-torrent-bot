@@ -264,6 +264,7 @@ TRACKER_BACKGROUND_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
+MOVIE_NOTIFY_PENDING_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # Seconds to wait after DS task creation before injecting public trackers.
 # DS may not have fully initialised the task metadata immediately after create_torrent_file /
@@ -322,6 +323,10 @@ plex_client = app_context.plex_client
 _plex_library: dict[tuple[str, int], "PlexMovie"] = {}
 _plex_library_updated_at: float = 0.0
 _PLEX_CACHE_INTERVAL = 30 * 60  # seconds
+
+# Quiet hours: /new notifications are deferred outside [START, END) window (local display timezone)
+_NOTIFY_WINDOW_START_HOUR = 9   # 09:00 inclusive
+_NOTIFY_WINDOW_END_HOUR = 22    # 22:00 exclusive
 
 # Plex server machine identifier — fetched once at startup, used in deep links.
 _plex_machine_id: str = ""
@@ -1484,10 +1489,77 @@ async def _movie_trackers_panel() -> tuple[str, "InlineKeyboardMarkup"]:
     return text, movie_trackers_keyboard(all_trackers, enabled_ids)
 
 
-async def _run_movie_discovery_notifications(cache: dict, app: "Application") -> None:
-    """Send push notifications to /new subscribers about newly appeared top-10 films."""
+def _is_in_notification_window() -> bool:
+    """Return True when current local time is within the quiet-hours window."""
+    hour = datetime.now(DISPLAY_TIMEZONE).hour
+    return _NOTIFY_WINDOW_START_HOUR <= hour < _NOTIFY_WINDOW_END_HOUR
+
+
+def _movie_notification_stub(card: dict) -> dict:
+    """Minimal snapshot of a card for pending-notification storage."""
+    return {
+        "title": card.get("title") or "",
+        "alt_title": card.get("alt_title") or "",
+        "year": card.get("year"),
+        "rating": card.get("rating"),
+    }
+
+
+def _merge_notification_stubs(existing: list, new: list) -> list:
+    """Merge two stub lists, deduplicating by title+year. Preserves insertion order."""
+    seen: set[str] = {f"{c.get('title')}|{c.get('year')}" for c in existing}
+    merged = list(existing)
+    for stub in new:
+        key = f"{stub.get('title')}|{stub.get('year')}"
+        if key not in seen:
+            seen.add(key)
+            merged.append(stub)
+    return merged
+
+
+async def _send_movie_notification_push(cards: list, subs: dict, app: "Application") -> None:
+    """Format and send a /new notification to all subscribers."""
     import html as _html
 
+    lines = ["🎬 <b>Новые фильмы в /new:</b>", ""]
+    for card in cards[:5]:
+        title_str = _html.escape(str(card.get("title") or ""))
+        alt = card.get("alt_title") or ""
+        if alt:
+            title_str = f"{title_str} / {_html.escape(str(alt))}"
+        year = card.get("year") or ""
+        rating = card.get("rating")
+        rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
+        lines.append(f"• {title_str} ({year}){rating_text}")
+    if len(cards) > 5:
+        lines.append(f"и ещё {len(cards) - 5}…")
+
+    text = "\n".join(lines)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
+        InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
+    ]])
+
+    for chat_id_str in list(subs.keys()):
+        try:
+            await app.bot.send_message(
+                chat_id=int(chat_id_str),
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            logger.info("Sent /new notification to chat_id=%s (%d films)", chat_id_str, len(cards))
+        except Exception as exc:
+            logger.warning("Failed to send /new notification to %s: %s", chat_id_str, exc)
+
+
+async def _run_movie_discovery_notifications(cache: dict, app: "Application") -> None:
+    """Send push notifications to /new subscribers about newly appeared top-10 films.
+
+    Respects the quiet-hours window (_NOTIFY_WINDOW_START_HOUR – _NOTIFY_WINDOW_END_HOUR).
+    Outside the window, new-film stubs are saved to ``movie_notify_pending`` in settings and
+    delivered the next time the window opens (see ``_flush_pending_movie_notifications``).
+    """
     top_cards = (cache.get("cards") or [])[:10]
     settings = _load_movie_discovery_settings()
     last_run_at: str = settings.get("movie_notify_last_run_at") or ""
@@ -1507,7 +1579,7 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
         if str(card.get("first_seen_at") or "") > last_run_at
     ]
 
-    # Always advance the marker so stale cards are never re-notified
+    # Always advance the marker so stale cards are never re-notified on the next run
     now_str = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
     settings["movie_notify_last_run_at"] = now_str
     _save_movie_discovery_settings(settings)
@@ -1519,37 +1591,73 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
     if not subs:
         return
 
-    # Build notification text
-    lines = ["🎬 <b>Новые фильмы в /new:</b>", ""]
-    for card in new_cards[:5]:
-        title_str = _html.escape(str(card.get("title") or ""))
-        alt = card.get("alt_title") or ""
-        if alt:
-            title_str = f"{title_str} / {_html.escape(str(alt))}"
-        year = card.get("year") or ""
-        rating = card.get("rating")
-        rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
-        lines.append(f"• {title_str} ({year}){rating_text}")
-    if len(new_cards) > 5:
-        lines.append(f"и ещё {len(new_cards) - 5}…")
+    if _is_in_notification_window():
+        # Merge any previously deferred stubs with the freshly-found cards and send now.
+        pending_stubs: list = settings.get("movie_notify_pending") or []
+        new_stubs = [_movie_notification_stub(c) for c in new_cards]
+        all_stubs = _merge_notification_stubs(pending_stubs, new_stubs)
 
-    text = "\n".join(lines)
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
-        InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
-    ]])
+        await _send_movie_notification_push(all_stubs, subs, app)
 
-    for chat_id_str in list(subs.keys()):
-        try:
-            await app.bot.send_message(
-                chat_id=int(chat_id_str),
-                text=text,
-                parse_mode="HTML",
-                reply_markup=keyboard,
+        # Clear the pending queue now that it has been flushed
+        settings["movie_notify_pending"] = []
+        _save_movie_discovery_settings(settings)
+    else:
+        # Outside quiet hours: queue stubs for the next window opening
+        pending_stubs = settings.get("movie_notify_pending") or []
+        new_stubs = [_movie_notification_stub(c) for c in new_cards]
+        settings["movie_notify_pending"] = _merge_notification_stubs(pending_stubs, new_stubs)
+        _save_movie_discovery_settings(settings)
+        logger.debug(
+            "Out of notification window — deferred %d new film(s) to pending queue",
+            len(new_cards),
+        )
+
+
+async def _flush_pending_movie_notifications(app: "Application") -> None:
+    """Deliver any pending /new notifications that were deferred outside quiet hours."""
+    settings = _load_movie_discovery_settings()
+    pending_stubs: list = settings.get("movie_notify_pending") or []
+    if not pending_stubs:
+        return
+
+    subs: dict = settings.get("movie_subscriptions") or {}
+    # Clear pending regardless — even if there are no subscribers — so stale entries
+    # don't accumulate indefinitely.
+    settings["movie_notify_pending"] = []
+    _save_movie_discovery_settings(settings)
+
+    if not subs:
+        return
+
+    await _send_movie_notification_push(pending_stubs, subs, app)
+
+
+async def _movie_notification_pending_loop(app: "Application") -> None:
+    """Background loop that wakes up at the start of the notification window (09:00 local)
+    and flushes any /new notifications that were deferred during quiet hours.
+    """
+    try:
+        while True:
+            now = datetime.now(DISPLAY_TIMEZONE)
+            # Target: next 09:00 in local time
+            target = now.replace(
+                hour=_NOTIFY_WINDOW_START_HOUR, minute=0, second=0, microsecond=0
             )
-            logger.info("Sent /new notification to chat_id=%s (%d new films)", chat_id_str, len(new_cards))
-        except Exception as exc:
-            logger.warning("Failed to send /new notification to %s: %s", chat_id_str, exc)
+            if target <= now:
+                # Already past 09:00 today — aim for 09:00 tomorrow
+                target += timedelta(days=1)
+            sleep_seconds = (target - now).total_seconds()
+            logger.debug(
+                "Pending notification loop: sleeping %.0fs until %s",
+                sleep_seconds,
+                target.strftime("%Y-%m-%d %H:%M"),
+            )
+            await asyncio.sleep(sleep_seconds)
+            await _flush_pending_movie_notifications(app)
+    except asyncio.CancelledError:
+        logger.info("Movie notification pending loop stopped")
+        raise
 
 
 async def _movie_discovery_loop(app: "Application") -> None:
@@ -6228,8 +6336,11 @@ async def setup_bot_commands(app: Application) -> None:
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
 
     if _movie_discovery_enabled():
+        global MOVIE_NOTIFY_PENDING_TASK
         MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop(app))
         logger.info("Movie discovery loop started, interval=%sh", MOVIE_DISCOVERY_INTERVAL_HOURS)
+        MOVIE_NOTIFY_PENDING_TASK = app.create_task(_movie_notification_pending_loop(app))
+        logger.info("Movie notification pending loop started")
 
     if PLEX_ENABLED:
         app.create_task(_plex_cache_loop())
