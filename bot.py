@@ -561,7 +561,7 @@ async def _run_tracker_background_once() -> None:
 
         task_id = task["id"]
         result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
-        logger.info(
+        logger.debug(
             "Background trackers for %s: added=%s available=%s skipped=%s",
             task_id,
             result.added_count,
@@ -1520,7 +1520,7 @@ async def _refresh_plex_library() -> None:
 
     _plex_library = new_cache
     _plex_library_updated_at = time.time()
-    logger.info("Plex library cache refreshed: %d movies", len(_plex_library))
+    logger.debug("Plex library cache refreshed: %d movies", len(_plex_library))
 
     # Fetch machine ID once (for deep links)
     if not _plex_machine_id:
@@ -4413,7 +4413,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
     if not jackett_subs:
         return
 
-    logger.info("Checking %d Jackett subscription(s)", len(jackett_subs))
+    logger.debug("Checking %d Jackett subscription(s)", len(jackett_subs))
     changed = False
 
     for key, sub in list(jackett_subs.items()):
@@ -4654,7 +4654,7 @@ async def _check_subscriptions(app: Application) -> None:
         await _check_jackett_subscriptions(app)
         return
 
-    logger.info("Checking %d topic subscription(s)", len(subs))
+    logger.debug("Checking %d topic subscription(s)", len(subs))
     changed = False
 
     for topic_id, sub in list(subs.items()):

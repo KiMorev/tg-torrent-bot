@@ -20,7 +20,7 @@ from xml.etree import ElementTree
 
 import requests
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("tg_torrent_drop")
 
 # Seconds before an HTTP request to Plex times out.
 _REQUEST_TIMEOUT = 10

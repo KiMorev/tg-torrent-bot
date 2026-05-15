@@ -340,7 +340,7 @@ class KinopoiskClient:
             )
             return result
 
-        logger.info("KP no match for %r (year=%s, %d films checked)", keyword, year, len(films[:10]))
+        logger.debug("KP no match for %r (year=%s, %d films checked)", keyword, year, len(films[:10]))
         return None
 
     def _get_director(self, kp_id: int) -> str:
