@@ -1837,6 +1837,7 @@ async def _plex_poll_after_finish(
     task_title: str,
     chat_ids: list[int],
     *,
+    hint_msg_ids: dict[int, int] | None = None,
     max_attempts: int = 20,
     interval_seconds: float = 30.0,
 ) -> None:
@@ -1844,7 +1845,16 @@ async def _plex_poll_after_finish(
 
     Polls every *interval_seconds* for up to *max_attempts* (default: 10 min).
     Sends a NEW message (not edit) so iOS users get a push notification.
+    When done (found or timeout), deletes the hint messages sent earlier so the
+    chat doesn't accumulate stale «indexing…» banners.
     """
+    async def _delete_hint_messages() -> None:
+        for cid, mid in (hint_msg_ids or {}).items():
+            try:
+                await app.bot.delete_message(chat_id=cid, message_id=mid)
+            except Exception:
+                pass
+
     logger.info("Plex polling started task_id=%s title=%r chat_ids=%s", task_id, task_title, chat_ids)
     try:
         for attempt in range(max_attempts):
@@ -1866,10 +1876,11 @@ async def _plex_poll_after_finish(
                 text = f"✅ <b>{html_module.escape(task_title)}</b> добавлен в Plex."
                 keyboard = (
                     InlineKeyboardMarkup([[
-                        InlineKeyboardButton("▶️ Открыть в Plex (iOS)", url=deep_link)
+                        InlineKeyboardButton("▶️ Смотреть в Plex (iOS)", url=deep_link)
                     ]])
                     if deep_link else None
                 )
+                await _delete_hint_messages()
                 for cid in chat_ids:
                     try:
                         await app.bot.send_message(
@@ -1893,6 +1904,7 @@ async def _plex_poll_after_finish(
             f"⚠️ <b>{html_module.escape(task_title)}</b> скачан, "
             f"но не появился в Plex за {timeout_min} мин."
         )
+        await _delete_hint_messages()
         for cid in chat_ids:
             try:
                 await app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
@@ -1904,6 +1916,7 @@ async def _plex_poll_after_finish(
             "Plex polling: gave up on %r after %d attempt(s)", task_title, max_attempts
         )
     except asyncio.CancelledError:
+        await _delete_hint_messages()
         logger.info("Plex polling task cancelled for task_id=%s", task_id)
         raise
     finally:
@@ -2285,18 +2298,6 @@ async def _run_task_notifications_once(app: Application) -> None:
 
         recipients = _notification_recipients(task_id)
 
-        # Start Plex polling for newly-finished movie tasks (once per task_id)
-        if (
-            PLEX_ENABLED
-            and status == "finished"
-            and task_id not in _PLEX_POLLING_TASKS
-            and not _plex_is_series(task.get("title") or "")
-            and recipients
-        ):
-            _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
-                _plex_poll_after_finish(app, task_id, task.get("title") or "", sorted(recipients))
-            )
-
         # Also notify any users who subscribed via "🔔 Уведомить когда готово".
         if status in {"finished", "seeding"}:
             raw_state = notified.get(task_id)
@@ -2310,7 +2311,18 @@ async def _run_task_notifications_once(app: Application) -> None:
         if not recipients:
             continue
 
+        # Determine if Plex polling should start for this task.
+        # Deferred to after the notification loop so we can collect hint message IDs
+        # and pass them to _plex_poll_after_finish for cleanup.
+        plex_should_poll = (
+            PLEX_ENABLED
+            and status == "finished"
+            and task_id not in _PLEX_POLLING_TASKS
+            and not _plex_is_series(task.get("title") or "")
+        )
+
         task_changed = False
+        plex_hint_msgs: dict[int, int] = {}
         for chat_id in sorted(recipients):
             recipient_key = str(chat_id)
             if recipient_key in sent_recipients:
@@ -2328,6 +2340,16 @@ async def _run_task_notifications_once(app: Application) -> None:
                 sent_recipients.add(recipient_key)
                 failed_recipients.pop(recipient_key, None)
                 task_changed = True
+                # Send an indexing-in-progress hint so the user knows Plex polling started.
+                if plex_should_poll:
+                    try:
+                        hint = await app.bot.send_message(
+                            chat_id=chat_id,
+                            text="🔄 Ищем файл в библиотеке Plex — пришлём ссылку как только появится.",
+                        )
+                        plex_hint_msgs[chat_id] = hint.message_id
+                    except Exception:
+                        pass
             except Exception:
                 failure_count = failed_recipients.get(recipient_key, 0) + 1
                 failed_recipients[recipient_key] = failure_count
@@ -2348,6 +2370,18 @@ async def _run_task_notifications_once(app: Application) -> None:
                 failed_recipients,
             )
             changed = True
+
+        # Start Plex polling after sending notifications so hint_msg_ids are available.
+        if plex_should_poll:
+            _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
+                _plex_poll_after_finish(
+                    app,
+                    task_id,
+                    task.get("title") or "",
+                    sorted(recipients),
+                    hint_msg_ids=plex_hint_msgs,
+                )
+            )
 
     if changed:
         _save_notified_tasks(notified)

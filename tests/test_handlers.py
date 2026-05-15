@@ -1319,6 +1319,61 @@ class PlexPollingTests(unittest.TestCase):
 
         self.assertNotIn("task1", tasks_dict)
 
+    def test_poll_after_finish_deletes_hint_messages_when_found(self):
+        """Hint messages must be deleted before the found-notification is sent."""
+        movie = self._make_plex_movie("Dune", 2021, ["/video/Dune.2021.mkv"])
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        fake_app.bot.delete_message = AsyncMock()
+        deleted_before_send: list[tuple[int, int]] = []
+
+        async def _track_delete(chat_id, message_id):
+            deleted_before_send.append((chat_id, message_id))
+
+        fake_app.bot.delete_message.side_effect = _track_delete
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=movie),
+            patch.object(bot, "_plex_machine_id", "abc123"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Dune.2021.1080p", [100],
+                hint_msg_ids={100: 999},
+                max_attempts=1,
+                interval_seconds=0,
+            ))
+
+        # Hint message should be deleted
+        self.assertIn((100, 999), deleted_before_send)
+        # Found notification should also be sent
+        fake_app.bot.send_message.assert_awaited_once()
+        self.assertIn("✅", fake_app.bot.send_message.call_args.kwargs["text"])
+
+    def test_poll_after_finish_deletes_hint_messages_on_timeout(self):
+        """Hint messages must be deleted even when Plex polling times out."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        fake_app.bot.delete_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Some.Movie.2024", [100],
+                hint_msg_ids={100: 888},
+                max_attempts=1,
+                interval_seconds=0,
+            ))
+
+        fake_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=888)
+        # Timeout notification should also be sent
+        fake_app.bot.send_message.assert_awaited_once()
+        self.assertIn("⚠️", fake_app.bot.send_message.call_args.kwargs["text"])
+
 
 # ---------------------------------------------------------------------------
 # _movie_trackers_panel tests
