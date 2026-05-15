@@ -1941,7 +1941,11 @@ def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> 
 
 def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
     if (status or "").lower() in {"finished", "seeding"}:
-        return _final_notification_keyboard(task_id, show_plex=PLEX_ENABLED, plex_url=PLEX_URL)
+        # Use plex:// scheme so the button opens the iOS/Android Plex app directly
+        # rather than an HTTP URL that opens in the browser.  The specific deep-link
+        # (plex://preplay/…) is sent later by _plex_poll_after_finish once Plex
+        # has indexed the downloaded file.
+        return _final_notification_keyboard(task_id, show_plex=PLEX_ENABLED, plex_url="plex://")
 
     return _make_task_keyboard(task_id, status, task_type)
 

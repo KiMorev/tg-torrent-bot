@@ -1435,11 +1435,11 @@ class NotificationKeyboardTests(unittest.TestCase):
     def _labels(self, keyboard):
         return [button.text for row in keyboard.inline_keyboard for button in row]
 
+    def _urls(self, keyboard):
+        return {btn.text: btn.url for row in keyboard.inline_keyboard for btn in row if btn.url}
+
     def test_plex_button_appears_only_for_final_download_statuses(self):
-        with (
-            patch.object(bot, "PLEX_ENABLED", True),
-            patch.object(bot, "PLEX_URL", "plex://"),
-        ):
+        with patch.object(bot, "PLEX_ENABLED", True):
             finished_labels = self._labels(_notification_keyboard("tid1", "finished", "bt"))
             seeding_labels = self._labels(_notification_keyboard("tid1", "seeding", "bt"))
             error_labels = self._labels(_notification_keyboard("tid1", "error", "bt"))
@@ -1447,6 +1447,17 @@ class NotificationKeyboardTests(unittest.TestCase):
         self.assertIn("▶️ Открыть Plex (iOS)", finished_labels)
         self.assertIn("▶️ Открыть Plex (iOS)", seeding_labels)
         self.assertNotIn("▶️ Открыть Plex (iOS)", error_labels)
+
+    def test_plex_button_uses_plex_scheme_not_http(self):
+        """Кнопка должна открывать Plex-приложение (plex://), а не HTTP URL в браузере."""
+        with patch.object(bot, "PLEX_ENABLED", True):
+            keyboard = _notification_keyboard("tid1", "finished", "bt")
+        urls = self._urls(keyboard)
+        plex_url = urls.get("▶️ Открыть Plex (iOS)", "")
+        self.assertTrue(
+            plex_url.startswith("plex://"),
+            f"Ожидался plex:// URL, получен: {plex_url!r}",
+        )
 
 
 # ---------------------------------------------------------------------------
