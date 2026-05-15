@@ -6161,13 +6161,21 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # If we're re-entering from an active search state, delete the previous
     # search UI message so it doesn't clutter the chat.
+    # Exception: if the message is a task card (download was triggered from the
+    # search results and the message was edited in-place into a task card), do NOT
+    # delete it — the background monitor still needs it to show progress updates.
     old_msg_id = context.user_data.pop("srch_ui_msg_id", None)
     old_chat_id = context.user_data.pop("srch_ui_chat_id", None)
     if old_msg_id and old_chat_id:
-        try:
-            await context.bot.delete_message(chat_id=old_chat_id, message_id=old_msg_id)
-        except Exception:
-            pass  # message may already be deleted or too old — ignore
+        is_task_card = any(
+            (old_chat_id, old_msg_id) in msgs
+            for msgs in TASK_CARD_MESSAGES.values()
+        )
+        if not is_task_card:
+            try:
+                await context.bot.delete_message(chat_id=old_chat_id, message_id=old_msg_id)
+            except Exception:
+                pass  # message may already be deleted or too old — ignore
 
     return await search_got_query(update, context)
 

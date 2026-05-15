@@ -71,6 +71,8 @@ from bot import (
     setup_bot_commands,
     sub_callback,
     status,
+    text_message_entry,
+    TASK_CARD_MESSAGES,
 )
 from rutracker import RutrackerError, RutrackerTopicUnavailable
 from state_store import JsonStateStore
@@ -1636,6 +1638,77 @@ class SearchTimeoutTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Task-card auto-refresh tests
 # ---------------------------------------------------------------------------
+
+
+class TextMessageEntryTaskCardPreservationTests(unittest.IsolatedAsyncioTestCase):
+    """text_message_entry must NOT delete a message that is a live task card.
+
+    Scenario: user starts a download from search results → the search UI message
+    is edited in-place into a task card and registered in TASK_CARD_MESSAGES.
+    srch_ui_msg_id still points to that message_id.  When the user types a new
+    search query, the old message must be preserved so the background monitor can
+    update it to a progress card.
+    """
+
+    def setUp(self):
+        TASK_CARD_MESSAGES.clear()
+
+    def tearDown(self):
+        TASK_CARD_MESSAGES.clear()
+
+    def _make_update(self, text: str = "Дюна", chat_id: int = 100):
+        chat = MagicMock()
+        chat.id = chat_id
+        msg = MagicMock()
+        msg.text = text
+        msg.chat_id = chat_id
+        update = MagicMock()
+        update.effective_chat = chat
+        update.effective_user = MagicMock()
+        update.effective_user.id = chat_id
+        update.message = msg
+        update.callback_query = None
+        return update
+
+    def _make_context(self, msg_id: int, chat_id: int = 100):
+        context = MagicMock()
+        context.user_data = {
+            "srch_ui_msg_id": msg_id,
+            "srch_ui_chat_id": chat_id,
+        }
+        context.bot = AsyncMock()
+        context.bot.delete_message = AsyncMock()
+        return context
+
+    async def test_does_not_delete_task_card_message(self):
+        """If srch_ui_msg_id points to a task card, it must NOT be deleted."""
+        TASK_CARD_MESSAGES["task-1"] = {(100, 999)}
+        update = self._make_update()
+        context = self._make_context(msg_id=999, chat_id=100)
+
+        with (
+            patch("bot._is_allowed", return_value=True),
+            patch("bot.rutracker_client", new=MagicMock()),
+            patch("bot.search_got_query", new=AsyncMock(return_value=3)),
+        ):
+            await text_message_entry(update, context)
+
+        context.bot.delete_message.assert_not_called()
+
+    async def test_deletes_stale_search_message_when_not_a_task_card(self):
+        """If srch_ui_msg_id does NOT belong to a task card, it should be deleted."""
+        # TASK_CARD_MESSAGES is empty — no task card registered
+        update = self._make_update()
+        context = self._make_context(msg_id=888, chat_id=100)
+
+        with (
+            patch("bot._is_allowed", return_value=True),
+            patch("bot.rutracker_client", new=MagicMock()),
+            patch("bot.search_got_query", new=AsyncMock(return_value=3)),
+        ):
+            await text_message_entry(update, context)
+
+        context.bot.delete_message.assert_called_once_with(chat_id=100, message_id=888)
 
 
 class CancelTaskCardRefreshTests(unittest.TestCase):
