@@ -246,6 +246,7 @@ SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JA
 SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate warning
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
+    BotCommand("subs", "Подписки на обновления"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
@@ -870,6 +871,11 @@ def _format_admin_movie_discovery_line() -> str:
     if kp_stats_line:
         lines.append(kp_stats_line)
 
+    # Subscriber count
+    movie_sub_count = len(_get_movie_subscriptions())
+    if movie_sub_count:
+        lines.append(f"• Подписок на /new: {movie_sub_count}")
+
     # Tracker rating status
     md_settings = _load_movie_discovery_settings()
     known_ids: list[str] = md_settings.get("jackett_trackers_known") or []
@@ -1018,6 +1024,29 @@ def _save_movie_discovery_settings(settings: dict) -> None:
     state_store.save_movie_discovery_settings(settings)
 
 
+# --- Movie discovery subscription helpers ---
+
+def _get_movie_subscriptions() -> dict:
+    """Return {chat_id_str: {subscribed_at: str}} dict of /new subscribers."""
+    return _load_movie_discovery_settings().get("movie_subscriptions") or {}
+
+
+def _is_movie_subscribed(chat_id: int) -> bool:
+    return str(chat_id) in _get_movie_subscriptions()
+
+
+def _set_movie_subscription(chat_id: int, subscribed: bool) -> None:
+    settings = _load_movie_discovery_settings()
+    subs = settings.setdefault("movie_subscriptions", {})
+    if subscribed:
+        subs[str(chat_id)] = {
+            "subscribed_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
+        }
+    else:
+        subs.pop(str(chat_id), None)
+    _save_movie_discovery_settings(settings)
+
+
 def _save_movie_discovery_debug(report: dict) -> None:
     state_store.save_json_file(MOVIE_DISCOVERY_DEBUG_FILE, report, "movie discovery debug")
 
@@ -1092,7 +1121,7 @@ def _movie_discovery_audit_row(search_query: str, source: str, result, release: 
     }
 
 
-def _movie_discovery_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
+def _movie_discovery_keyboard(cards: list[dict], chat_id: int | None = None) -> InlineKeyboardMarkup:
     rows = []
     for index, card in enumerate(cards[:10], 1):
         main = str(card.get("title") or "Новинка")
@@ -1103,6 +1132,10 @@ def _movie_discovery_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
             f"🎬 {index}. {title}",
             callback_data=f"new:show:{index - 1}",
         )])
+    is_subscribed = chat_id is not None and _is_movie_subscribed(chat_id)
+    sub_label = "🔕 Отписаться от /new" if is_subscribed else "🔔 Подписаться на /new"
+    sub_cb = "new:unsubscribe" if is_subscribed else "new:subscribe"
+    rows.append([InlineKeyboardButton(sub_label, callback_data=sub_cb)])
     rows.append([
         InlineKeyboardButton("🔄 Обновить", callback_data="new:refresh"),
         InlineKeyboardButton("✖️ Закрыть", callback_data="new:close"),
@@ -1451,17 +1484,90 @@ async def _movie_trackers_panel() -> tuple[str, "InlineKeyboardMarkup"]:
     return text, movie_trackers_keyboard(all_trackers, enabled_ids)
 
 
-async def _movie_discovery_loop() -> None:
+async def _run_movie_discovery_notifications(cache: dict, app: "Application") -> None:
+    """Send push notifications to /new subscribers about newly appeared top-10 films."""
+    import html as _html
+
+    top_cards = (cache.get("cards") or [])[:10]
+    settings = _load_movie_discovery_settings()
+    last_run_at: str = settings.get("movie_notify_last_run_at") or ""
+
+    # First run: baseline the timestamp so we don't spam with all existing films
+    if not last_run_at:
+        settings["movie_notify_last_run_at"] = (
+            cache.get("updated_at") or datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+        )
+        _save_movie_discovery_settings(settings)
+        return
+
+    # Find cards whose first_seen_at is strictly after the last notification run.
+    # Both timestamps use "%Y-%m-%d %H:%M" format so lexicographic comparison is safe.
+    new_cards = [
+        card for card in top_cards
+        if str(card.get("first_seen_at") or "") > last_run_at
+    ]
+
+    # Always advance the marker so stale cards are never re-notified
+    now_str = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    settings["movie_notify_last_run_at"] = now_str
+    _save_movie_discovery_settings(settings)
+
+    if not new_cards:
+        return
+
+    subs: dict = settings.get("movie_subscriptions") or {}
+    if not subs:
+        return
+
+    # Build notification text
+    lines = ["🎬 <b>Новые фильмы в /new:</b>", ""]
+    for card in new_cards[:5]:
+        title_str = _html.escape(str(card.get("title") or ""))
+        alt = card.get("alt_title") or ""
+        if alt:
+            title_str = f"{title_str} / {_html.escape(str(alt))}"
+        year = card.get("year") or ""
+        rating = card.get("rating")
+        rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
+        lines.append(f"• {title_str} ({year}){rating_text}")
+    if len(new_cards) > 5:
+        lines.append(f"и ещё {len(new_cards) - 5}…")
+
+    text = "\n".join(lines)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
+        InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
+    ]])
+
+    for chat_id_str in list(subs.keys()):
+        try:
+            await app.bot.send_message(
+                chat_id=int(chat_id_str),
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            logger.info("Sent /new notification to chat_id=%s (%d new films)", chat_id_str, len(new_cards))
+        except Exception as exc:
+            logger.warning("Failed to send /new notification to %s: %s", chat_id_str, exc)
+
+
+async def _movie_discovery_loop(app: "Application") -> None:
     if not _movie_discovery_enabled():
         logger.info("Movie discovery disabled")
         return
 
     interval = MOVIE_DISCOVERY_INTERVAL_HOURS * 3600
+
+    async def _refresh_and_notify() -> None:
+        cache = await _refresh_movie_discovery_cache()
+        await _run_movie_discovery_notifications(cache, app)
+
     try:
-        await _run_background_step("initial movie discovery refresh", _refresh_movie_discovery_cache)
+        await _run_background_step("movie discovery refresh", _refresh_and_notify)
         while True:
             await asyncio.sleep(interval)
-            await _run_background_step("movie discovery refresh", _refresh_movie_discovery_cache)
+            await _run_background_step("movie discovery refresh", _refresh_and_notify)
     except asyncio.CancelledError:
         logger.info("Movie discovery loop stopped")
         raise
@@ -4106,11 +4212,12 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if v.get("type") == "jackett" and (is_admin or v.get("chat_id") == chat_id)
     }
 
-    if not my_subs and not jackett_subs_all:
+    is_movie_sub = _is_movie_subscribed(chat_id) if chat_id else False
+    if not my_subs and not jackett_subs_all and not is_movie_sub:
         await update.message.reply_text("📭 Активных подписок нет.")
         return
 
-    total_count = len(my_subs) + len(jackett_subs_all)
+    total_count = len(my_subs) + len(jackett_subs_all) + (1 if is_movie_sub else 0)
     lines = [f"🔔 Активные подписки ({total_count}):"]
     rows = []
 
@@ -4143,6 +4250,15 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             InlineKeyboardButton("🗑️", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ])
 
+    if is_movie_sub:
+        lines.append("\n🎬 <b>Подписка на новинки:</b> включена")
+        rows.append([
+            InlineKeyboardButton(
+                "🔕 Отписаться от /new",
+                callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub",
+            )
+        ])
+
     if _next_subscription_check_at is not None:
         next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
         lines.append(f"\n🕐 Следующая проверка: {next_dt.strftime('%H:%M')}")
@@ -4158,12 +4274,22 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     parts = query.data.split(":", 2)
-    if len(parts) < 3:
+    if len(parts) < 2:
         return
 
     action = parts[1]
     topic_id = parts[2] if len(parts) > 2 else ""
     chat_id = query.message.chat.id if query.message else None
+
+    if action == "new_unsub":
+        if chat_id:
+            _set_movie_subscription(chat_id, False)
+        await query.edit_message_reply_markup(reply_markup=None)
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "🔕 Уведомления о новинках отключены"))
+        return
+
+    if len(parts) < 3:
+        return
 
     if action == "unsub":
         subs = state_store.load_topic_subscriptions()
@@ -5097,6 +5223,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Новинки недоступны: не настроен Rutracker или Jackett.")
         return
 
+    chat_id = update.effective_chat.id if update.effective_chat else None
     cache = _load_movie_discovery_cache()
     if not cache.get("cards"):
         progress = await update.message.reply_text("🎬 Собираю новинки…")
@@ -5104,7 +5231,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _safe_edit_message(
             progress,
             _format_movie_discovery_cache(cache),
-            reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
+            reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
@@ -5116,7 +5243,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text(
         _format_movie_discovery_cache(cache),
-        reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
+        reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
@@ -5130,13 +5257,14 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Недоступно", show_alert=True)
         return
 
+    chat_id = query.message.chat.id if query.message else None
     await query.answer()
     await _safe_edit_callback(query, "🎬 Обновляю новинки…")
     cache = await _refresh_movie_discovery_cache()
     await _safe_edit_callback(
         query,
         _format_movie_discovery_cache(cache),
-        reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
+        reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
@@ -5159,6 +5287,68 @@ async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT
         logger.debug("Failed to delete movie discovery message", exc_info=True)
     if chat_id:
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
+
+
+async def movie_new_subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    chat_id = query.message.chat.id if query.message else None
+    if chat_id:
+        _set_movie_subscription(chat_id, True)
+    await query.answer("Подписан на обновления 🔔")
+    # Redraw keyboard so the button reflects the new state
+    cache = _load_movie_discovery_cache()
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+        )
+    except Exception:
+        pass
+
+
+async def movie_new_unsubscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    chat_id = query.message.chat.id if query.message else None
+    if chat_id:
+        _set_movie_subscription(chat_id, False)
+    await query.answer("Отписан от обновлений")
+    cache = _load_movie_discovery_cache()
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+        )
+    except Exception:
+        pass
+
+
+async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback for the '🎬 Открыть /new' button in movie discovery notifications."""
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    cache = _load_movie_discovery_cache()
+    _enrich_cards_with_plex(cache.get("cards") or [])
+    await _safe_edit_callback(
+        query,
+        _format_movie_discovery_cache(cache),
+        reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 async def help_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5226,13 +5416,14 @@ async def movie_new_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     if not query:
         return ConversationHandler.END
+    chat_id = query.message.chat.id if query.message else None
     await query.answer()
     cache = _load_movie_discovery_cache()
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     try:
         await query.edit_message_text(
             _format_movie_discovery_cache(cache),
-            reply_markup=_movie_discovery_keyboard(cards),
+            reply_markup=_movie_discovery_keyboard(cards, chat_id=chat_id),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
@@ -6010,8 +6201,6 @@ async def setup_bot_commands(app: Application) -> None:
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
-    if RUTRACKER_ENABLED or JACKETT_ENABLED:
-        commands.append(BotCommand("subs", "Подписки на обновления серий"))
     admin_commands = commands + [
         BotCommand("admin", "Админ-панель"),
         BotCommand("users", "Управление доступом пользователей"),
@@ -6039,7 +6228,7 @@ async def setup_bot_commands(app: Application) -> None:
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
 
     if _movie_discovery_enabled():
-        MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop())
+        MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop(app))
         logger.info("Movie discovery loop started, interval=%sh", MOVIE_DISCOVERY_INTERVAL_HOURS)
 
     if PLEX_ENABLED:
@@ -6073,6 +6262,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(movie_new_refresh_callback, pattern=r"^new:refresh$"))
     app.add_handler(CallbackQueryHandler(movie_new_close_callback, pattern=r"^new:close$"))
+    app.add_handler(CallbackQueryHandler(movie_new_subscribe_callback, pattern=r"^new:subscribe$"))
+    app.add_handler(CallbackQueryHandler(movie_new_unsubscribe_callback, pattern=r"^new:unsubscribe$"))
+    app.add_handler(CallbackQueryHandler(movie_new_open_callback, pattern=r"^new:open$"))
     app.add_handler(CallbackQueryHandler(help_close_callback, pattern=r"^help:close$"))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("subs", subs_command))

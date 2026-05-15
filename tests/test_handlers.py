@@ -38,6 +38,10 @@ from bot import (
     _enrich_cards_with_plex,
     _format_kp_votes,
     _format_movie_discovery_cache,
+    _get_movie_subscriptions,
+    _is_movie_subscribed,
+    _set_movie_subscription,
+    _run_movie_discovery_notifications,
     _plex_find_by_ds_title,
     _plex_is_series,
     _plex_poll_after_finish,
@@ -734,6 +738,213 @@ class KpVoteFormatterTests(unittest.TestCase):
     def test_millions_formatted_as_M(self):
         self.assertEqual(_format_kp_votes(1_500_000), "1.5M")
         self.assertEqual(_format_kp_votes(2_000_000), "2.0M")
+
+
+# ---------------------------------------------------------------------------
+# Movie discovery subscription feature
+# ---------------------------------------------------------------------------
+
+import bot as _bot_module  # noqa: E402  (needed for monkeypatching settings)
+
+
+class MovieSubscriptionStorageTests(unittest.TestCase):
+    """Unit tests for _get/_is/_set_movie_subscription helpers."""
+
+    def setUp(self):
+        # Patch _load/_save to use an in-memory dict
+        self._settings: dict = {}
+        self._orig_load = _bot_module._load_movie_discovery_settings
+        self._orig_save = _bot_module._save_movie_discovery_settings
+        _bot_module._load_movie_discovery_settings = lambda: self._settings
+        _bot_module._save_movie_discovery_settings = lambda s: self._settings.update(s)
+
+    def tearDown(self):
+        _bot_module._load_movie_discovery_settings = self._orig_load
+        _bot_module._save_movie_discovery_settings = self._orig_save
+
+    def test_not_subscribed_by_default(self):
+        self.assertFalse(_is_movie_subscribed(12345))
+
+    def test_subscribe_adds_entry(self):
+        _set_movie_subscription(12345, True)
+        self.assertTrue(_is_movie_subscribed(12345))
+        subs = _get_movie_subscriptions()
+        self.assertIn("12345", subs)
+        self.assertIn("subscribed_at", subs["12345"])
+
+    def test_unsubscribe_removes_entry(self):
+        _set_movie_subscription(12345, True)
+        _set_movie_subscription(12345, False)
+        self.assertFalse(_is_movie_subscribed(12345))
+
+    def test_multiple_subscribers_independent(self):
+        _set_movie_subscription(100, True)
+        _set_movie_subscription(200, True)
+        _set_movie_subscription(100, False)
+        self.assertFalse(_is_movie_subscribed(100))
+        self.assertTrue(_is_movie_subscribed(200))
+
+
+class MovieSubscriptionKeyboardTests(unittest.TestCase):
+    """Tests for subscribe/unsubscribe button in _movie_discovery_keyboard."""
+
+    def _make_cards(self):
+        return [{"title": "Тест", "year": 2026}]
+
+    def test_subscribe_button_shown_when_not_subscribed(self):
+        import bot as _bot_module
+        orig = _bot_module._is_movie_subscribed
+        _bot_module._is_movie_subscribed = lambda cid: False
+        try:
+            kb = _movie_discovery_keyboard(self._make_cards(), chat_id=999)
+            buttons = {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
+            self.assertIn("🔔 Подписаться на /new", buttons)
+            self.assertEqual(buttons["🔔 Подписаться на /new"], "new:subscribe")
+        finally:
+            _bot_module._is_movie_subscribed = orig
+
+    def test_unsubscribe_button_shown_when_subscribed(self):
+        import bot as _bot_module
+        orig = _bot_module._is_movie_subscribed
+        _bot_module._is_movie_subscribed = lambda cid: True
+        try:
+            kb = _movie_discovery_keyboard(self._make_cards(), chat_id=999)
+            buttons = {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
+            self.assertIn("🔕 Отписаться от /new", buttons)
+            self.assertEqual(buttons["🔕 Отписаться от /new"], "new:unsubscribe")
+        finally:
+            _bot_module._is_movie_subscribed = orig
+
+    def test_no_sub_button_when_chat_id_is_none(self):
+        kb = _movie_discovery_keyboard(self._make_cards(), chat_id=None)
+        buttons = {btn.text for row in kb.inline_keyboard for btn in row}
+        # Without chat_id: subscribe defaults to False (not subscribed)
+        self.assertIn("🔔 Подписаться на /new", buttons)
+
+
+class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for _run_movie_discovery_notifications."""
+
+    def _patch_settings(self, settings: dict):
+        import bot as _bot_module
+        self._orig_load = _bot_module._load_movie_discovery_settings
+        self._orig_save = _bot_module._save_movie_discovery_settings
+        _bot_module._load_movie_discovery_settings = lambda: settings
+        _bot_module._save_movie_discovery_settings = lambda s: settings.update(s)
+
+    def tearDown(self):
+        import bot as _bot_module
+        if hasattr(self, "_orig_load"):
+            _bot_module._load_movie_discovery_settings = self._orig_load
+            _bot_module._save_movie_discovery_settings = self._orig_save
+
+    def _make_card(self, title: str, first_seen_at: str) -> dict:
+        return {
+            "title": title,
+            "year": 2026,
+            "first_seen_at": first_seen_at,
+            "rating": 7.5,
+        }
+
+    async def test_initialises_baseline_on_first_run_without_notifying(self):
+        settings: dict = {}
+        self._patch_settings(settings)
+        app = MagicMock()
+        cache = {
+            "updated_at": "2026-05-15 10:00",
+            "cards": [self._make_card("Фильм", "2026-05-14 08:00")],
+        }
+        await _run_movie_discovery_notifications(cache, app)
+        # Should NOT send any messages
+        app.bot.send_message.assert_not_called()
+        # Should set baseline timestamp
+        self.assertEqual(settings["movie_notify_last_run_at"], "2026-05-15 10:00")
+
+    async def test_sends_notifications_for_new_cards(self):
+        settings = {
+            "movie_notify_last_run_at": "2026-05-14 12:00",
+            "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "updated_at": "2026-05-15 12:00",
+            "cards": [
+                self._make_card("Старый фильм", "2026-05-13 10:00"),  # before last_run_at
+                self._make_card("Новый фильм", "2026-05-15 10:00"),   # after last_run_at
+            ],
+        }
+        await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_called_once()
+        call_kwargs = app.bot.send_message.call_args
+        self.assertEqual(call_kwargs.kwargs["chat_id"], 100)
+        self.assertIn("Новый фильм", call_kwargs.kwargs["text"])
+        self.assertNotIn("Старый фильм", call_kwargs.kwargs["text"])
+
+    async def test_only_top10_cards_are_considered(self):
+        """Cards beyond position 10 must not trigger notifications."""
+        settings = {
+            "movie_notify_last_run_at": "2026-05-14 12:00",
+            "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        # 12 cards — only first 10 count; card 11+ is "new" but should be ignored
+        cards = [self._make_card(f"Старый {i}", "2026-05-13 10:00") for i in range(10)]
+        cards.append(self._make_card("Новый вне топ10", "2026-05-15 10:00"))
+        cards.append(self._make_card("Тоже вне топ10", "2026-05-15 10:00"))
+        cache = {"updated_at": "2026-05-15 12:00", "cards": cards}
+        await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_not_called()
+
+    async def test_no_notification_when_no_subscribers(self):
+        settings = {
+            "movie_notify_last_run_at": "2026-05-14 12:00",
+            "movie_subscriptions": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "updated_at": "2026-05-15 12:00",
+            "cards": [self._make_card("Новый фильм", "2026-05-15 10:00")],
+        }
+        await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_not_called()
+
+    async def test_notification_keyboard_has_open_and_unsub_buttons(self):
+        settings = {
+            "movie_notify_last_run_at": "2026-05-14 12:00",
+            "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "updated_at": "2026-05-15 12:00",
+            "cards": [self._make_card("Новый фильм", "2026-05-15 10:00")],
+        }
+        await _run_movie_discovery_notifications(cache, app)
+        call_kwargs = app.bot.send_message.call_args.kwargs
+        keyboard = call_kwargs["reply_markup"]
+        buttons = {btn.text: btn.callback_data for row in keyboard.inline_keyboard for btn in row}
+        self.assertIn("🎬 Открыть /new", buttons)
+        self.assertEqual(buttons["🎬 Открыть /new"], "new:open")
+        self.assertIn("🔕 Отписаться", buttons)
+        self.assertTrue(buttons["🔕 Отписаться"].endswith(":new_unsub"))
+
+    async def test_updates_last_run_at_after_sending(self):
+        settings = {
+            "movie_notify_last_run_at": "2026-05-14 12:00",
+            "movie_subscriptions": {"100": {}},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "updated_at": "2026-05-15 12:00",
+            "cards": [self._make_card("Новый фильм", "2026-05-15 10:00")],
+        }
+        await _run_movie_discovery_notifications(cache, app)
+        # last_run_at must be updated to current time (not the card's time)
+        self.assertGreater(settings["movie_notify_last_run_at"], "2026-05-14 12:00")
 
 
 # ---------------------------------------------------------------------------
