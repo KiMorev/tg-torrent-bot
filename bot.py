@@ -1355,6 +1355,18 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         kp_cache=prev_kp_cache,
         max_stale_refresh=max_stale_kp_refresh,
     )
+    # Restore first_seen_at from the previous cache for cards that already existed.
+    # build_cards always stamps first_seen_at=now, so without this patch every bot restart
+    # would make all existing top-10 films look "new" to the push-notification logic.
+    prev_first_seen: dict[str, str] = {
+        c["key"]: str(c["first_seen_at"])
+        for c in (previous.get("cards") or [])
+        if c.get("key") and c.get("first_seen_at")
+    }
+    for card in cache.get("cards") or []:
+        old_ts = prev_first_seen.get(card.get("key") or "")
+        if old_ts:
+            card["first_seen_at"] = old_ts
     _enrich_cards_with_plex(cache.get("cards") or [])
     cache["all_releases"] = all_releases
 
