@@ -6292,9 +6292,14 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         # --- Plex duplicate check (best-effort: use torrent filename) ---
         if PLEX_ENABLED:
-            raw_year = _movie_extract_year(safe_name) or 0
-            req_quality = _plex_quality_from_title(safe_name)
-            plex_check = _plex_pre_check(safe_name, int(raw_year), req_quality)
+            # safe_name has underscores instead of spaces (safe_filename strips non-ASCII
+            # and replaces separators). Convert back so normalize_movie_title can parse it:
+            # "____They_Will_Kill_You___2026_____" → "They Will Kill You 2026"
+            plex_title = re.sub(r"[_.]", " ", safe_name.removesuffix(".torrent"))
+            plex_title = re.sub(r"\s{2,}", " ", plex_title).strip()
+            raw_year = _movie_extract_year(plex_title) or 0
+            req_quality = _plex_quality_from_title(plex_title)
+            plex_check = _plex_pre_check(plex_title, int(raw_year), req_quality)
             if plex_check is not None:
                 context.user_data["plex_pending"] = {
                     "type": "torrent",
