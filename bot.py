@@ -5097,6 +5097,10 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    # Re-apply Plex badges from current in-memory library (cheap, no network).
+    # Needed after restart: JSON cache may have stale in_plex values.
+    _enrich_cards_with_plex(cache.get("cards") or [])
+
     await update.message.reply_text(
         _format_movie_discovery_cache(cache),
         reply_markup=_movie_discovery_keyboard(cache.get("cards", [])),
