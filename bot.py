@@ -1934,6 +1934,7 @@ async def _plex_poll_after_finish(
         raise
     finally:
         _PLEX_POLLING_TASKS[task_id] = None  # Mark as done; key stays to prevent re-launch
+        _mark_plex_poll_done(task_id)  # Persist so restart doesn't re-launch polling
 
 
 def _plex_confirm_text(check: "PlexCheckResult", display_title: str, requested_quality: str) -> str:
@@ -1998,6 +1999,24 @@ def _load_notified_tasks() -> dict[str, object]:
 
 def _save_notified_tasks(tasks: dict[str, object]) -> None:
     state_store.save_notified_tasks(tasks)
+
+
+def _mark_plex_poll_done(task_id: str) -> None:
+    """Persist a plex_done marker so polling is not restarted after a bot restart."""
+    notified = _load_notified_tasks()
+    raw = notified.get(task_id)
+    if isinstance(raw, dict):
+        raw["plex_done"] = True
+    else:
+        # No existing entry yet — create a minimal one just to hold the marker.
+        notified[task_id] = {"status": "", "sent": [], "failures": {}, "plex_done": True}
+    _save_notified_tasks(notified)
+
+
+def _plex_poll_is_done(task_id: str, notified: dict) -> bool:
+    """Return True if Plex polling already completed for *task_id* (persisted marker)."""
+    raw = notified.get(task_id)
+    return isinstance(raw, dict) and bool(raw.get("plex_done"))
 
 
 def _load_auto_delete_tasks() -> dict[str, float]:
@@ -2332,6 +2351,7 @@ async def _run_task_notifications_once(app: Application) -> None:
             and status == "finished"
             and task_id not in _PLEX_POLLING_TASKS
             and not _plex_is_series(task.get("title") or "")
+            and not _plex_poll_is_done(task_id, notified)
         )
 
         task_changed = False

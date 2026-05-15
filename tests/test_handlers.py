@@ -1377,6 +1377,37 @@ class PlexPollingTests(unittest.TestCase):
         fake_app.bot.send_message.assert_awaited_once()
         self.assertIn("⚠️", fake_app.bot.send_message.call_args.kwargs["text"])
 
+    def test_poll_after_finish_persists_plex_done_marker(self):
+        """After polling completes, plex_done must be saved so restart doesn't re-poll."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        saved: dict = {}
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_load_notified_tasks", return_value={}),
+            patch.object(bot, "_save_notified_tasks", side_effect=saved.update),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Movie", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        # _save_notified_tasks must have been called with plex_done=True for task1
+        self.assertIn("task1", saved)
+        self.assertTrue(saved["task1"].get("plex_done"))
+
+    def test_plex_poll_is_done_blocks_restart_after_reboot(self):
+        """plex_poll_is_done() must return True when the persisted marker is present,
+        preventing a second poll from starting after a bot restart."""
+        from bot import _plex_poll_is_done
+        notified_with_marker = {"task1": {"status": "done", "sent": ["100"], "plex_done": True}}
+        notified_without_marker = {"task1": {"status": "done", "sent": ["100"]}}
+        self.assertTrue(_plex_poll_is_done("task1", notified_with_marker))
+        self.assertFalse(_plex_poll_is_done("task1", notified_without_marker))
+        self.assertFalse(_plex_poll_is_done("unknown", notified_with_marker))
+
 
 # ---------------------------------------------------------------------------
 # _movie_trackers_panel tests

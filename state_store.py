@@ -208,12 +208,15 @@ class JsonStateStore:
                 subscribers = [
                     str(s) for s in value.get("subscribers", []) if s
                 ]
+                plex_done: bool = bool(value.get("plex_done"))
                 # Skip entries that carry no useful state at all.
-                if not status and not subscribers:
+                if not status and not subscribers and not plex_done:
                     continue
                 entry: dict = {"status": status, "sent": sent, "failures": failures}
                 if subscribers:
                     entry["subscribers"] = subscribers
+                if plex_done:
+                    entry["plex_done"] = True
                 tasks[str(task_id)] = entry
             else:
                 tasks[str(task_id)] = str(value)
