@@ -331,9 +331,10 @@ _NOTIFY_WINDOW_END_HOUR = 22    # 22:00 exclusive
 # Plex server machine identifier — fetched once at startup, used in deep links.
 _plex_machine_id: str = ""
 
-# Polling tasks waiting for a downloaded file to appear in Plex
-# task_id → asyncio.Task
-_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None]"] = {}
+# Polling tasks waiting for a downloaded file to appear in Plex.
+# task_id → asyncio.Task while polling is active; → None after polling completed.
+# Keeping the key (even as None) prevents re-launching a second poll after the first finishes.
+_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
 
 
 def _tracker_config() -> TrackerConfig:
@@ -1920,7 +1921,7 @@ async def _plex_poll_after_finish(
         logger.info("Plex polling task cancelled for task_id=%s", task_id)
         raise
     finally:
-        _PLEX_POLLING_TASKS.pop(task_id, None)
+        _PLEX_POLLING_TASKS[task_id] = None  # Mark as done; key stays to prevent re-launch
 
 
 def _plex_confirm_text(check: "PlexCheckResult", display_title: str, requested_quality: str) -> str:

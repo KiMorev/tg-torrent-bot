@@ -1302,8 +1302,9 @@ class PlexPollingTests(unittest.TestCase):
         self.assertIn("⚠️", call_kwargs["text"])
         self.assertIn("Some.Movie.2024", call_kwargs["text"])
 
-    def test_poll_after_finish_cleans_up_task_entry(self):
-        """After completing (found or not), the task_id must be removed from _PLEX_POLLING_TASKS."""
+    def test_poll_after_finish_marks_task_done_not_removed(self):
+        """After completing, task_id stays in _PLEX_POLLING_TASKS with value None.
+        This prevents the notification loop from re-launching a second poll."""
         fake_app = MagicMock()
         fake_app.bot.send_message = AsyncMock()
         tasks_dict = {"task1": MagicMock()}
@@ -1317,7 +1318,9 @@ class PlexPollingTests(unittest.TestCase):
                 fake_app, "task1", "Movie", [100], max_attempts=1, interval_seconds=0
             ))
 
-        self.assertNotIn("task1", tasks_dict)
+        # Key must remain so the guard `task_id not in _PLEX_POLLING_TASKS` stays False.
+        self.assertIn("task1", tasks_dict)
+        self.assertIsNone(tasks_dict["task1"])
 
     def test_poll_after_finish_deletes_hint_messages_when_found(self):
         """Hint messages must be deleted before the found-notification is sent."""
