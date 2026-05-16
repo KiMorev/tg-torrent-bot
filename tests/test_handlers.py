@@ -42,8 +42,6 @@ from bot import (
     _is_movie_subscribed,
     _set_movie_subscription,
     _run_movie_discovery_notifications,
-    _flush_pending_movie_notifications,
-    _merge_notification_stubs,
     _is_in_notification_window,
     _plex_find_by_ds_title,
     _plex_is_series,
@@ -828,7 +826,7 @@ class MovieSubscriptionKeyboardTests(unittest.TestCase):
 
 
 class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
-    """Tests for _run_movie_discovery_notifications."""
+    """Tests for _run_movie_discovery_notifications — per-user seen semantics."""
 
     def _patch_settings(self, settings: dict):
         import bot as _bot_module
@@ -843,116 +841,141 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             _bot_module._load_movie_discovery_settings = self._orig_load
             _bot_module._save_movie_discovery_settings = self._orig_save
 
-    def _make_card(self, title: str, first_seen_at: str) -> dict:
-        return {
-            "title": title,
-            "year": 2026,
-            "first_seen_at": first_seen_at,
-            "rating": 7.5,
-        }
+    def _make_card(self, title: str, kp_id: int | None = None, year: int = 2026) -> dict:
+        card = {"title": title, "year": year, "rating": 7.5}
+        if kp_id is not None:
+            card["kp_id"] = kp_id
+        return card
 
-    async def test_initialises_baseline_on_first_run_without_notifying(self):
-        settings: dict = {}
-        self._patch_settings(settings)
-        app = MagicMock()
-        cache = {
-            "updated_at": "2026-05-15 10:00",
-            "cards": [self._make_card("Фильм", "2026-05-14 08:00")],
-        }
-        await _run_movie_discovery_notifications(cache, app)
-        # Should NOT send any messages
-        app.bot.send_message.assert_not_called()
-        # Should set baseline timestamp
-        self.assertEqual(settings["movie_notify_last_run_at"], "2026-05-15 10:00")
-
-    async def test_sends_notifications_for_new_cards(self):
+    async def test_sends_notification_only_for_unseen_films(self):
+        """A subscriber gets push only for cards whose IDs aren't in their seen-set."""
         settings = {
-            "movie_notify_last_run_at": "2026-05-14 12:00",
             "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
+            "movie_seen_by_user": {
+                "100": {"2026:старый фильм": "2026-05-14 10:00"},
+            },
         }
         self._patch_settings(settings)
         app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 12:00",
-            "cards": [
-                self._make_card("Старый фильм", "2026-05-13 10:00"),  # before last_run_at
-                self._make_card("Новый фильм", "2026-05-15 10:00"),   # after last_run_at
-            ],
-        }
+        cache = {"cards": [
+            self._make_card("Старый фильм"),
+            self._make_card("Новый фильм"),
+        ]}
         with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
             await _run_movie_discovery_notifications(cache, app)
         app.bot.send_message.assert_called_once()
-        call_kwargs = app.bot.send_message.call_args
-        self.assertEqual(call_kwargs.kwargs["chat_id"], 100)
-        self.assertIn("Новый фильм", call_kwargs.kwargs["text"])
-        self.assertNotIn("Старый фильм", call_kwargs.kwargs["text"])
+        kwargs = app.bot.send_message.call_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 100)
+        self.assertIn("Новый фильм", kwargs["text"])
+        self.assertNotIn("Старый фильм", kwargs["text"])
 
-    async def test_only_top10_cards_are_considered(self):
-        """Cards beyond position 10 must not trigger notifications."""
+    async def test_marks_films_as_seen_after_successful_push(self):
+        """After successful send, the pushed films' IDs go into the user's seen-set."""
         settings = {
-            "movie_notify_last_run_at": "2026-05-14 12:00",
-            "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
         }
         self._patch_settings(settings)
         app = AsyncMock()
-        # 12 cards — only first 10 count; card 11+ is "new" but should be ignored
-        cards = [self._make_card(f"Старый {i}", "2026-05-13 10:00") for i in range(10)]
-        cards.append(self._make_card("Новый вне топ10", "2026-05-15 10:00"))
-        cards.append(self._make_card("Тоже вне топ10", "2026-05-15 10:00"))
-        cache = {"updated_at": "2026-05-15 12:00", "cards": cards}
-        await _run_movie_discovery_notifications(cache, app)
-        app.bot.send_message.assert_not_called()
+        cache = {"cards": [self._make_card("Совсем новый", kp_id=42)]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        seen = settings.get("movie_seen_by_user", {}).get("100", {})
+        self.assertIn("kp:42", seen)
+
+    async def test_first_time_subscriber_gets_initial_summary(self):
+        """A subscriber with empty seen-set receives all current top-10 as new."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [
+            self._make_card("Фильм 1", kp_id=1),
+            self._make_card("Фильм 2", kp_id=2),
+        ]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        kwargs = app.bot.send_message.call_args.kwargs
+        self.assertIn("Фильм 1", kwargs["text"])
+        self.assertIn("Фильм 2", kwargs["text"])
+
+    async def test_only_top10_cards_are_considered(self):
+        """Cards beyond position 10 must NOT trigger notifications."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        # 12 cards — only first 10 are notification candidates
+        cards = [self._make_card(f"Старый {i}", kp_id=i) for i in range(10)]
+        cards.append(self._make_card("Вне топ10 #1", kp_id=100))
+        cards.append(self._make_card("Вне топ10 #2", kp_id=101))
+        cache = {"cards": cards}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        kwargs = app.bot.send_message.call_args.kwargs
+        # The cards outside top-10 should not be in the message
+        self.assertNotIn("Вне топ10", kwargs["text"])
 
     async def test_no_notification_when_no_subscribers(self):
         settings = {
-            "movie_notify_last_run_at": "2026-05-14 12:00",
             "movie_subscriptions": {},
+            "movie_seen_by_user": {},
         }
         self._patch_settings(settings)
         app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 12:00",
-            "cards": [self._make_card("Новый фильм", "2026-05-15 10:00")],
-        }
+        cache = {"cards": [self._make_card("Новый", kp_id=1)]}
         await _run_movie_discovery_notifications(cache, app)
         app.bot.send_message.assert_not_called()
 
+    async def test_quiet_hours_skips_push_and_does_not_mark_seen(self):
+        """Outside quiet hours we don't push AND don't mark seen — so next
+        in-window refresh will deliver the same diff naturally."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [self._make_card("Новый", kp_id=1)]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=False):
+            await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_not_called()
+        # Seen set must remain empty — film will be delivered later
+        self.assertEqual(settings.get("movie_seen_by_user", {}).get("100", {}), {})
+
     async def test_notification_keyboard_has_open_and_unsub_buttons(self):
         settings = {
-            "movie_notify_last_run_at": "2026-05-14 12:00",
-            "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
         }
         self._patch_settings(settings)
         app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 12:00",
-            "cards": [self._make_card("Новый фильм", "2026-05-15 10:00")],
-        }
+        cache = {"cards": [self._make_card("Новый", kp_id=1)]}
         with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
             await _run_movie_discovery_notifications(cache, app)
-        call_kwargs = app.bot.send_message.call_args.kwargs
-        keyboard = call_kwargs["reply_markup"]
+        keyboard = app.bot.send_message.call_args.kwargs["reply_markup"]
         buttons = {btn.text: btn.callback_data for row in keyboard.inline_keyboard for btn in row}
-        self.assertIn("🎬 Открыть /new", buttons)
         self.assertEqual(buttons["🎬 Открыть /new"], "new:open")
-        self.assertIn("🔕 Отписаться", buttons)
         self.assertTrue(buttons["🔕 Отписаться"].endswith(":new_unsub"))
 
-    async def test_updates_last_run_at_after_sending(self):
+    async def test_different_users_have_independent_seen_sets(self):
+        """User A has seen film X (no push); user B hasn't (gets push for X)."""
         settings = {
-            "movie_notify_last_run_at": "2026-05-14 12:00",
-            "movie_subscriptions": {"100": {}},
+            "movie_subscriptions": {"100": {}, "200": {}},
+            "movie_seen_by_user": {"100": {"kp:42": "old-ts"}},
         }
         self._patch_settings(settings)
         app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 12:00",
-            "cards": [self._make_card("Новый фильм", "2026-05-15 10:00")],
-        }
+        cache = {"cards": [self._make_card("X", kp_id=42)]}
         with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
             await _run_movie_discovery_notifications(cache, app)
-        # last_run_at must be updated to current time (not the card's time)
-        self.assertGreater(settings["movie_notify_last_run_at"], "2026-05-14 12:00")
+        # Only user 200 gets a push (user 100 already seen)
+        recipient_ids = [call.kwargs["chat_id"] for call in app.bot.send_message.await_args_list]
+        self.assertEqual(recipient_ids, [200])
 
 
 class RestoreFirstSeenFromPreviousTests(unittest.TestCase):
@@ -1548,149 +1571,6 @@ class MovieSeenByUserHelpersTests(unittest.TestCase):
             # The second call: identifiers exist with the same timestamp (just written),
             # so save_movie_discovery_settings should NOT be called again.
             self.assertEqual(st.save_movie_discovery_settings.call_count, first_call_count)
-
-
-class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
-    """Tests for time-window logic: deferred/pending notifications and flush."""
-
-    def _patch_settings(self, settings: dict):
-        import bot as _bot_module
-        self._orig_load = _bot_module._load_movie_discovery_settings
-        self._orig_save = _bot_module._save_movie_discovery_settings
-        _bot_module._load_movie_discovery_settings = lambda: settings
-        _bot_module._save_movie_discovery_settings = lambda s: settings.update(s)
-
-    def tearDown(self):
-        import bot as _bot_module
-        if hasattr(self, "_orig_load"):
-            _bot_module._load_movie_discovery_settings = self._orig_load
-            _bot_module._save_movie_discovery_settings = self._orig_save
-
-    def _make_card(self, title: str, first_seen_at: str) -> dict:
-        return {"title": title, "year": 2026, "first_seen_at": first_seen_at, "rating": 7.0}
-
-    # -- _merge_notification_stubs --
-
-    def test_merge_stubs_deduplicates_by_title_year(self):
-        existing = [{"title": "Фильм А", "year": 2026}, {"title": "Фильм Б", "year": 2025}]
-        new = [{"title": "Фильм А", "year": 2026}, {"title": "Фильм В", "year": 2024}]
-        result = _merge_notification_stubs(existing, new)
-        titles = [s["title"] for s in result]
-        self.assertEqual(titles, ["Фильм А", "Фильм Б", "Фильм В"])
-
-    def test_merge_stubs_preserves_insertion_order(self):
-        existing = [{"title": "A", "year": 2026}]
-        new = [{"title": "B", "year": 2025}, {"title": "C", "year": 2024}]
-        result = _merge_notification_stubs(existing, new)
-        self.assertEqual([s["title"] for s in result], ["A", "B", "C"])
-
-    # -- out-of-window deferral --
-
-    async def test_out_of_window_defers_to_pending(self):
-        """When outside quiet hours, new cards are added to pending and NOT sent."""
-        settings = {
-            "movie_notify_last_run_at": "2026-05-14 12:00",
-            "movie_subscriptions": {"100": {}},
-        }
-        self._patch_settings(settings)
-        app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 02:00",
-            "cards": [self._make_card("Ночной фильм", "2026-05-15 01:00")],
-        }
-        with unittest.mock.patch("bot._is_in_notification_window", return_value=False):
-            await _run_movie_discovery_notifications(cache, app)
-
-        app.bot.send_message.assert_not_called()
-        pending = settings.get("movie_notify_pending") or []
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["title"], "Ночной фильм")
-
-    async def test_out_of_window_accumulates_pending_without_duplicates(self):
-        """Multiple out-of-window refreshes must deduplicate pending stubs."""
-        settings = {
-            "movie_notify_last_run_at": "2026-05-14 23:00",
-            "movie_notify_pending": [{"title": "Старый Pending", "year": 2026}],
-            "movie_subscriptions": {"100": {}},
-        }
-        self._patch_settings(settings)
-        app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 02:00",
-            "cards": [
-                self._make_card("Старый Pending", "2026-05-15 00:00"),
-                self._make_card("Новый фильм", "2026-05-15 01:00"),
-            ],
-        }
-        with unittest.mock.patch("bot._is_in_notification_window", return_value=False):
-            await _run_movie_discovery_notifications(cache, app)
-
-        pending = settings.get("movie_notify_pending") or []
-        titles = [s["title"] for s in pending]
-        self.assertIn("Старый Pending", titles)
-        self.assertIn("Новый фильм", titles)
-        # No duplicates
-        self.assertEqual(len(titles), len(set(titles)))
-
-    async def test_in_window_sends_pending_plus_new_and_clears(self):
-        """Inside quiet hours: pending stubs + new cards are sent together, pending cleared."""
-        settings = {
-            "movie_notify_last_run_at": "2026-05-14 23:00",
-            "movie_notify_pending": [{"title": "Отложенный фильм", "year": 2025, "rating": 6.5}],
-            "movie_subscriptions": {"200": {}},
-        }
-        self._patch_settings(settings)
-        app = AsyncMock()
-        cache = {
-            "updated_at": "2026-05-15 09:30",
-            "cards": [self._make_card("Утренний фильм", "2026-05-15 09:00")],
-        }
-        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
-            await _run_movie_discovery_notifications(cache, app)
-
-        app.bot.send_message.assert_called_once()
-        text = app.bot.send_message.call_args.kwargs["text"]
-        self.assertIn("Отложенный фильм", text)
-        self.assertIn("Утренний фильм", text)
-        # Pending must be cleared after send
-        self.assertEqual(settings.get("movie_notify_pending"), [])
-
-    # -- _flush_pending_movie_notifications --
-
-    async def test_flush_sends_pending_and_clears(self):
-        settings = {
-            "movie_notify_pending": [{"title": "Ожидающий фильм", "year": 2026, "rating": 8.0}],
-            "movie_subscriptions": {"300": {}},
-        }
-        self._patch_settings(settings)
-        app = AsyncMock()
-        await _flush_pending_movie_notifications(app)
-
-        app.bot.send_message.assert_called_once()
-        text = app.bot.send_message.call_args.kwargs["text"]
-        self.assertIn("Ожидающий фильм", text)
-        self.assertEqual(settings.get("movie_notify_pending"), [])
-
-    async def test_flush_does_nothing_when_no_pending(self):
-        settings = {
-            "movie_notify_pending": [],
-            "movie_subscriptions": {"300": {}},
-        }
-        self._patch_settings(settings)
-        app = AsyncMock()
-        await _flush_pending_movie_notifications(app)
-        app.bot.send_message.assert_not_called()
-
-    async def test_flush_clears_pending_even_with_no_subscribers(self):
-        settings = {
-            "movie_notify_pending": [{"title": "Фильм", "year": 2026}],
-            "movie_subscriptions": {},
-        }
-        self._patch_settings(settings)
-        app = AsyncMock()
-        await _flush_pending_movie_notifications(app)
-        app.bot.send_message.assert_not_called()
-        self.assertEqual(settings.get("movie_notify_pending"), [])
 
 
 # ---------------------------------------------------------------------------

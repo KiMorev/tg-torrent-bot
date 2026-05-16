@@ -282,7 +282,6 @@ TRACKER_BACKGROUND_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
-MOVIE_NOTIFY_PENDING_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # Seconds to wait after DS task creation before injecting public trackers.
 # DS may not have fully initialised the task metadata immediately after create_torrent_file /
@@ -1770,32 +1769,9 @@ def _is_in_notification_window() -> bool:
     return _NOTIFY_WINDOW_START_HOUR <= hour < _NOTIFY_WINDOW_END_HOUR
 
 
-def _movie_notification_stub(card: dict) -> dict:
-    """Minimal snapshot of a card for pending-notification storage."""
-    return {
-        "title": card.get("title") or "",
-        "alt_title": card.get("alt_title") or "",
-        "year": card.get("year"),
-        "rating": card.get("rating"),
-    }
-
-
-def _merge_notification_stubs(existing: list, new: list) -> list:
-    """Merge two stub lists, deduplicating by title+year. Preserves insertion order."""
-    seen: set[str] = {f"{c.get('title')}|{c.get('year')}" for c in existing}
-    merged = list(existing)
-    for stub in new:
-        key = f"{stub.get('title')}|{stub.get('year')}"
-        if key not in seen:
-            seen.add(key)
-            merged.append(stub)
-    return merged
-
-
-async def _send_movie_notification_push(cards: list, subs: dict, app: "Application") -> None:
-    """Format and send a /new notification to all subscribers."""
+def _format_movie_notification_text(cards: list) -> str:
+    """Build the HTML message body for a /new notification."""
     import html as _html
-
     lines = ["🎬 <b>Новые фильмы в /new:</b>", ""]
     for card in cards[:5]:
         title_str = _html.escape(str(card.get("title") or ""))
@@ -1808,131 +1784,79 @@ async def _send_movie_notification_push(cards: list, subs: dict, app: "Applicati
         lines.append(f"• {title_str} ({year}){rating_text}")
     if len(cards) > 5:
         lines.append(f"и ещё {len(cards) - 5}…")
+    return "\n".join(lines)
 
-    text = "\n".join(lines)
-    keyboard = InlineKeyboardMarkup([[
+
+def _movie_notification_keyboard() -> "InlineKeyboardMarkup":
+    return InlineKeyboardMarkup([[
         InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
         InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
     ]])
 
-    for chat_id_str in list(subs.keys()):
-        try:
-            await app.bot.send_message(
-                chat_id=int(chat_id_str),
-                text=text,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-            logger.info("Sent /new notification to chat_id=%s (%d films)", chat_id_str, len(cards))
-        except Exception as exc:
-            logger.warning("Failed to send /new notification to %s: %s", chat_id_str, exc)
+
+async def _send_movie_notification_push_to_user(
+    cards: list, chat_id: int, app: "Application",
+) -> bool:
+    """Send a /new notification to a specific subscriber. Returns True on success."""
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=_format_movie_notification_text(cards),
+            parse_mode="HTML",
+            reply_markup=_movie_notification_keyboard(),
+        )
+        logger.info("Sent /new notification to chat_id=%s (%d films)", chat_id, len(cards))
+        return True
+    except Exception as exc:
+        logger.warning("Failed to send /new notification to %s: %s", chat_id, exc)
+        return False
 
 
 async def _run_movie_discovery_notifications(cache: dict, app: "Application") -> None:
-    """Send push notifications to /new subscribers about newly appeared top-10 films.
+    """Send /new notifications to subscribers about films they haven't seen yet.
 
-    Respects the quiet-hours window (_NOTIFY_WINDOW_START_HOUR – _NOTIFY_WINDOW_END_HOUR).
-    Outside the window, new-film stubs are saved to ``movie_notify_pending`` in settings and
-    delivered the next time the window opens (see ``_flush_pending_movie_notifications``).
+    Per-user semantics: each subscriber has their own ``movie_seen_by_user`` set.
+    A film is sent in a push iff none of its identifiers are in the subscriber's
+    seen-set. After a successful push the film's IDs are added to that set — so
+    the same film is never sent twice to the same person.
+
+    Quiet hours (_NOTIFY_WINDOW_START_HOUR – _NOTIFY_WINDOW_END_HOUR): outside
+    the window we DON'T mark anything as seen. The diff against seen-set self-heals
+    on the next in-window refresh — no separate pending queue needed.
+
+    Replaces the legacy global ``movie_notify_last_run_at`` + ``first_seen_at``
+    logic which had two issues: (1) false positives when films oscillated between
+    positions 11+ and the top-10, and (2) inability to bring new subscribers
+    up-to-date on existing top-10 films.
     """
     top_cards = (cache.get("cards") or [])[:10]
-    settings = _load_movie_discovery_settings()
-    last_run_at: str = settings.get("movie_notify_last_run_at") or ""
-
-    # First run: baseline the timestamp so we don't spam with all existing films
-    if not last_run_at:
-        settings["movie_notify_last_run_at"] = (
-            cache.get("updated_at") or datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
-        )
-        _save_movie_discovery_settings(settings)
+    if not top_cards:
         return
 
-    # Find cards whose first_seen_at is strictly after the last notification run.
-    # Both timestamps use "%Y-%m-%d %H:%M" format so lexicographic comparison is safe.
-    new_cards = [
-        card for card in top_cards
-        if str(card.get("first_seen_at") or "") > last_run_at
-    ]
-
-    # Always advance the marker so stale cards are never re-notified on the next run
-    now_str = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
-    settings["movie_notify_last_run_at"] = now_str
-    _save_movie_discovery_settings(settings)
-
-    if not new_cards:
-        return
-
-    subs: dict = settings.get("movie_subscriptions") or {}
+    subs = _get_movie_subscriptions()
     if not subs:
         return
 
-    if _is_in_notification_window():
-        # Merge any previously deferred stubs with the freshly-found cards and send now.
-        pending_stubs: list = settings.get("movie_notify_pending") or []
-        new_stubs = [_movie_notification_stub(c) for c in new_cards]
-        all_stubs = _merge_notification_stubs(pending_stubs, new_stubs)
-
-        await _send_movie_notification_push(all_stubs, subs, app)
-
-        # Clear the pending queue now that it has been flushed
-        settings["movie_notify_pending"] = []
-        _save_movie_discovery_settings(settings)
-    else:
-        # Outside quiet hours: queue stubs for the next window opening
-        pending_stubs = settings.get("movie_notify_pending") or []
-        new_stubs = [_movie_notification_stub(c) for c in new_cards]
-        settings["movie_notify_pending"] = _merge_notification_stubs(pending_stubs, new_stubs)
-        _save_movie_discovery_settings(settings)
-        logger.debug(
-            "Out of notification window — deferred %d new film(s) to pending queue",
-            len(new_cards),
-        )
-
-
-async def _flush_pending_movie_notifications(app: "Application") -> None:
-    """Deliver any pending /new notifications that were deferred outside quiet hours."""
-    settings = _load_movie_discovery_settings()
-    pending_stubs: list = settings.get("movie_notify_pending") or []
-    if not pending_stubs:
+    if not _is_in_notification_window():
+        # Quiet hours — don't push and don't mark anything seen. The next in-window
+        # refresh will compute the same (or larger) diff and deliver naturally.
+        logger.debug("Out of notification window — skipping /new push (will retry next window)")
         return
 
-    subs: dict = settings.get("movie_subscriptions") or {}
-    # Clear pending regardless — even if there are no subscribers — so stale entries
-    # don't accumulate indefinitely.
-    settings["movie_notify_pending"] = []
-    _save_movie_discovery_settings(settings)
+    for chat_id_str in list(subs.keys()):
+        try:
+            chat_id = int(chat_id_str)
+        except (TypeError, ValueError):
+            continue
 
-    if not subs:
-        return
+        user_seen = _get_user_seen_ids(chat_id)
+        new_for_user = [c for c in top_cards if not _is_card_seen(c, user_seen)]
+        if not new_for_user:
+            continue
 
-    await _send_movie_notification_push(pending_stubs, subs, app)
-
-
-async def _movie_notification_pending_loop(app: "Application") -> None:
-    """Background loop that wakes up at the start of the notification window (09:00 local)
-    and flushes any /new notifications that were deferred during quiet hours.
-    """
-    try:
-        while True:
-            now = datetime.now(DISPLAY_TIMEZONE)
-            # Target: next 09:00 in local time
-            target = now.replace(
-                hour=_NOTIFY_WINDOW_START_HOUR, minute=0, second=0, microsecond=0
-            )
-            if target <= now:
-                # Already past 09:00 today — aim for 09:00 tomorrow
-                target += timedelta(days=1)
-            sleep_seconds = (target - now).total_seconds()
-            logger.debug(
-                "Pending notification loop: sleeping %.0fs until %s",
-                sleep_seconds,
-                target.strftime("%Y-%m-%d %H:%M"),
-            )
-            await asyncio.sleep(sleep_seconds)
-            await _flush_pending_movie_notifications(app)
-    except asyncio.CancelledError:
-        logger.info("Movie notification pending loop stopped")
-        raise
+        sent = await _send_movie_notification_push_to_user(new_for_user, chat_id, app)
+        if sent:
+            _mark_user_seen(chat_id, new_for_user)
 
 
 async def _movie_discovery_loop(app: "Application") -> None:
@@ -7597,11 +7521,11 @@ async def setup_bot_commands(app: Application) -> None:
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
 
     if _movie_discovery_enabled():
-        global MOVIE_NOTIFY_PENDING_TASK
         MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop(app))
         logger.info("Movie discovery loop started, interval=%sh", MOVIE_DISCOVERY_INTERVAL_HOURS)
-        MOVIE_NOTIFY_PENDING_TASK = app.create_task(_movie_notification_pending_loop(app))
-        logger.info("Movie notification pending loop started")
+        # Note: separate pending-loop is no longer needed — the per-user 'seen'
+        # diff is naturally self-healing: outside quiet hours we just skip the
+        # push; next in-window refresh delivers everything still unseen.
 
     if PLEX_ENABLED:
         app.create_task(_plex_cache_loop(app))
