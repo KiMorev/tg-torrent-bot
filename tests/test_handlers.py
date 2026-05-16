@@ -1170,6 +1170,199 @@ class PlexUnmatchedSettingsTests(unittest.TestCase):
         self.assertEqual(store["plex_unmatched_seen"], {"movies": ["k1"], "shows": []})
 
 
+class PlexUnmatchedDetectionTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for _check_plex_unmatched_against_seen — diff-based push logic."""
+
+    def _make_movie(self, key: str, guid: str = "local://x") -> "object":
+        from plex import PlexMovie
+        return PlexMovie(title="M", year=2024, rating_key=key,
+                         resolution="1080", added_at=0, file_paths=[f"/m/{key}.mkv"], guid=guid)
+
+    def _make_show(self, key: str, guid: str = "local://s") -> "object":
+        from plex import PlexShow
+        return PlexShow(title="S", year=2024, rating_key=key, seasons={}, guid=guid)
+
+    async def test_first_enable_sends_initial_summary(self):
+        """Empty seen + non-empty unmatched + toggle ON → initial-kind push."""
+        from bot import _check_plex_unmatched_against_seen
+        store: dict = {"plex_unmatched_notify_enabled": True}
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {("m", 2024): self._make_movie("m1")}),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {500}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            await _check_plex_unmatched_against_seen(app=fake_app)
+            # Spawned tasks run on the event loop; wait one tick
+            await asyncio.sleep(0)
+
+        fake_app.bot.send_message.assert_awaited()
+        text = fake_app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("Включены уведомления", text)
+
+    async def test_no_push_when_toggle_off(self):
+        from bot import _check_plex_unmatched_against_seen
+        store: dict = {"plex_unmatched_notify_enabled": False}
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {("m", 2024): self._make_movie("m1")}),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {500}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            await _check_plex_unmatched_against_seen(app=fake_app)
+            await asyncio.sleep(0)
+
+        fake_app.bot.send_message.assert_not_called()
+        # But the snapshot is still saved (so off→on later doesn't dump everything)
+        self.assertEqual(store["plex_unmatched_seen"]["movies"], ["m1"])
+
+    async def test_only_new_files_trigger_push(self):
+        """Already-seen files in snapshot must NOT re-trigger push.
+        Only the diff (current - seen) goes out."""
+        from bot import _check_plex_unmatched_against_seen
+        store: dict = {
+            "plex_unmatched_notify_enabled": True,
+            "plex_unmatched_seen": {"movies": ["m1", "m2"], "shows": []},
+        }
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {
+                ("a", 2024): self._make_movie("m1"),
+                ("b", 2024): self._make_movie("m2"),
+                ("c", 2024): self._make_movie("m3"),  # this one is new
+            }),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {500}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            await _check_plex_unmatched_against_seen(app=fake_app)
+            await asyncio.sleep(0)
+
+        fake_app.bot.send_message.assert_awaited()
+        text = fake_app.bot.send_message.call_args.kwargs["text"]
+        # The message should reference '1' new file, not 3
+        self.assertIn("новые несматченные файлы (1)", text)
+        # Body contains the new file, not the previously-seen ones
+        self.assertIn("m3.mkv", text)
+        self.assertNotIn("m1.mkv", text)
+
+    async def test_no_diff_means_no_push(self):
+        """Current == seen → silent run, no message."""
+        from bot import _check_plex_unmatched_against_seen
+        store: dict = {
+            "plex_unmatched_notify_enabled": True,
+            "plex_unmatched_seen": {"movies": ["m1"], "shows": []},
+        }
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {("a", 2024): self._make_movie("m1")}),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {500}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            await _check_plex_unmatched_against_seen(app=fake_app)
+            await asyncio.sleep(0)
+
+        fake_app.bot.send_message.assert_not_called()
+
+    async def test_seen_snapshot_updated_even_when_toggle_off(self):
+        """Off→on later must not flood the user — relies on snapshot accruing
+        in the background regardless of toggle state."""
+        from bot import _check_plex_unmatched_against_seen, _load_plex_unmatched_seen
+        store: dict = {"plex_unmatched_notify_enabled": False}
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {
+                ("a", 2024): self._make_movie("m1"),
+                ("b", 2024): self._make_movie("m2"),
+            }),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {500}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            await _check_plex_unmatched_against_seen(app=fake_app)
+
+        self.assertEqual(set(store["plex_unmatched_seen"]["movies"]), {"m1", "m2"})
+
+    async def test_no_app_means_silent_but_snapshot_still_saved(self):
+        """When called without an app reference (early in startup), updates the
+        snapshot but doesn't try to push (push would crash on None.bot)."""
+        from bot import _check_plex_unmatched_against_seen
+        store: dict = {"plex_unmatched_notify_enabled": True}
+        with (
+            patch.object(bot, "_plex_library", {("a", 2024): self._make_movie("m1")}),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {500}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            await _check_plex_unmatched_against_seen(app=None)
+            await asyncio.sleep(0)
+
+        # No crash + snapshot saved
+        self.assertEqual(store["plex_unmatched_seen"]["movies"], ["m1"])
+
+
+class PlexUnmatchedFormattingTests(unittest.TestCase):
+    """Tests for _format_unmatched_push — push message formatting."""
+
+    def _make_movie(self, filename: str) -> "object":
+        from plex import PlexMovie
+        return PlexMovie(title="", year=0, rating_key="r", resolution="",
+                         added_at=0, file_paths=[f"/movies/{filename}"], guid="local://r")
+
+    def test_initial_kind_has_specific_header(self):
+        from bot import _format_unmatched_push
+        text = _format_unmatched_push([self._make_movie("X.mkv")], [], kind="initial")
+        self.assertIn("Включены уведомления", text)
+        self.assertIn("1 файл", text)
+
+    def test_new_kind_has_specific_header(self):
+        from bot import _format_unmatched_push
+        text = _format_unmatched_push([self._make_movie("X.mkv")], [], kind="new")
+        self.assertIn("появились новые несматченные", text)
+
+    def test_truncates_to_five_with_overflow_count(self):
+        from bot import _format_unmatched_push
+        movies = [self._make_movie(f"file{i}.mkv") for i in range(8)]
+        text = _format_unmatched_push(movies, [], kind="new")
+        # First 5 listed, then "…и ещё 3"
+        for i in range(5):
+            self.assertIn(f"file{i}.mkv", text)
+        self.assertIn("ещё 3", text)
+        # The 6th–8th should NOT appear inline
+        self.assertNotIn("file5.mkv", text)
+
+    def test_shows_section_only_when_shows_present(self):
+        from bot import _format_unmatched_push
+        text_movies_only = _format_unmatched_push([self._make_movie("X.mkv")], [], kind="new")
+        self.assertNotIn("📺", text_movies_only)
+        self.assertIn("🎬", text_movies_only)
+
+
 class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
     """Tests for time-window logic: deferred/pending notifications and flush."""
 

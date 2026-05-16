@@ -290,6 +290,46 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("Фильмов в библиотеке: 100", text)
         self.assertIn("Шоу: 25", text)
 
+    def test_plex_ok_shows_unmatched_line_when_any_unmatched(self) -> None:
+        """When at least one Plex entry is unmatched, /admin renders a 'Не сматчено' line."""
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = True
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+            plex_cache_info={
+                "count": 100, "show_count": 25,
+                "consecutive_failures": 0,
+                "unmatched_movies": 3,
+                "unmatched_shows": 1,
+            },
+        )
+        text = format_diagnostics(report)
+        self.assertIn("Не сматчено", text)
+        self.assertIn("3 фильма", text)
+        self.assertIn("1 шоу", text)
+
+    def test_plex_ok_hides_unmatched_line_when_all_matched(self) -> None:
+        """Don't add noise when there's nothing to report — all matched."""
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = True
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+            plex_cache_info={
+                "count": 100, "show_count": 25,
+                "consecutive_failures": 0,
+                "unmatched_movies": 0,
+                "unmatched_shows": 0,
+            },
+        )
+        text = format_diagnostics(report)
+        self.assertNotIn("Не сматчено", text)
+
 
 if __name__ == "__main__":
     unittest.main()

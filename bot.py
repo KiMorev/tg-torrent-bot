@@ -119,6 +119,7 @@ from plex import (
     PlexParseError,
     check_before_download as _plex_check_before_download,
     check_before_download_season as _plex_check_before_download_season,
+    is_unmatched as _plex_is_unmatched,
     _normalise_resolution as _plex_normalise_resolution,
 )
 from movie_discovery import (
@@ -1936,6 +1937,43 @@ async def _plex_ensure_show_seasons(show: "PlexShow") -> dict[int, "PlexSeason"]
     return seasons
 
 
+def _get_plex_unmatched_lists() -> tuple[list[PlexMovie], list[PlexShow]]:
+    """Return current unmatched movies + shows from the in-memory caches.
+
+    'Unmatched' = Plex couldn't match the file with any metadata agent
+    (guid starts with 'local://' or is empty). Used both for the /admin
+    pull view and as the source for diff-based push notifications.
+    """
+    movies = [m for m in _plex_library.values() if _plex_is_unmatched(m)]
+    shows  = [s for s in _plex_shows_library.values() if _plex_is_unmatched(s)]
+    return movies, shows
+
+
+def _get_plex_unmatched_counts() -> dict:
+    """Return ``{"movies": N, "shows": M, "total": N+M}`` for /admin badges."""
+    movies, shows = _get_plex_unmatched_lists()
+    return {"movies": len(movies), "shows": len(shows), "total": len(movies) + len(shows)}
+
+
+def _format_unmatched_short_label(entry) -> str:
+    """Return a short human-readable label for an unmatched Plex entry.
+
+    Picks the last component of ``file_paths[0]`` when available (it's the
+    real filename Plex couldn't match), falling back to title or rating_key.
+    """
+    file_paths = getattr(entry, "file_paths", None) or []
+    if file_paths:
+        first = file_paths[0]
+        # Strip path separator (works for both / and \)
+        last = re.split(r"[\\/]", first)[-1]
+        if last:
+            return last
+    title = getattr(entry, "title", "") or ""
+    if title:
+        return title
+    return f"#{getattr(entry, 'rating_key', '?')}"
+
+
 def _plex_cache_info() -> dict:
     """Return metadata dict for diagnostics, including health state."""
     import time, datetime
@@ -1943,6 +1981,7 @@ def _plex_cache_info() -> dict:
     def _fmt(ts: float) -> str:
         return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
 
+    unmatched_counts = _get_plex_unmatched_counts()
     return {
         "count": len(_plex_library),
         "show_count": len(_plex_shows_library),
@@ -1953,6 +1992,8 @@ def _plex_cache_info() -> dict:
         "last_error_at": _fmt(_plex_last_error_at),
         "last_success_at": _fmt(_plex_last_success_at),
         "consecutive_failures": _plex_consecutive_failures,
+        "unmatched_movies": unmatched_counts["movies"],
+        "unmatched_shows": unmatched_counts["shows"],
     }
 
 
@@ -1982,7 +2023,7 @@ def _record_plex_success() -> None:
     _plex_consecutive_failures = 0
 
 
-async def _refresh_plex_library() -> None:
+async def _refresh_plex_library(app: "Application | None" = None) -> None:
     """Fetch all movies from Plex and rebuild the in-memory cache.
 
     Single-flight: serialised by ``_plex_refresh_lock`` so concurrent callers
@@ -2060,16 +2101,130 @@ async def _refresh_plex_library() -> None:
             _plex_shows_updated_at = time.time()
             logger.debug("Plex shows cache refreshed: %d shows", len(_plex_shows_library))
 
+        # Admin radar: check for newly-appeared unmatched files. Runs after both
+        # movie and show caches are fresh so the diff is consistent. The seen
+        # snapshot is updated unconditionally — that way an off→on toggle later
+        # doesn't dump every existing unmatched file at once.
+        await _check_plex_unmatched_against_seen(app=app)
 
-async def _plex_cache_loop() -> None:
+
+async def _check_plex_unmatched_against_seen(app: "Application | None") -> None:
+    """Compare current unmatched lists to the persisted ``plex_unmatched_seen``
+    snapshot and, when the toggle is on, schedule a push to admins about either
+    the initial inventory (first enable) or the newly-appeared entries.
+
+    ``app`` is passed when the caller has the bot instance handy (e.g. from the
+    notification loop). When called inside ``_refresh_plex_library`` we don't
+    have ``app`` — push is skipped in that case, but the snapshot is still
+    updated. Once the wired-up scheduler in main passes its app reference, the
+    push path will be exercised.
+    """
+    movies, shows = _get_plex_unmatched_lists()
+    current_movies = {m.rating_key for m in movies if m.rating_key}
+    current_shows  = {s.rating_key for s in shows  if s.rating_key}
+
+    seen = _load_plex_unmatched_seen()
+    prev_movies = set(seen["movies"])
+    prev_shows  = set(seen["shows"])
+
+    if app is not None and _is_plex_unmatched_notify_enabled():
+        if not prev_movies and not prev_shows and (current_movies or current_shows):
+            asyncio.create_task(_notify_admins_unmatched(app, movies, shows, kind="initial"))
+        else:
+            new_movies_list = [m for m in movies if m.rating_key in current_movies - prev_movies]
+            new_shows_list  = [s for s in shows  if s.rating_key in current_shows  - prev_shows]
+            if new_movies_list or new_shows_list:
+                asyncio.create_task(
+                    _notify_admins_unmatched(app, new_movies_list, new_shows_list, kind="new")
+                )
+
+    _save_plex_unmatched_seen({
+        "movies": sorted(current_movies),
+        "shows":  sorted(current_shows),
+    })
+
+
+async def _notify_admins_unmatched(
+    app: "Application",
+    movies: list,
+    shows: list,
+    *,
+    kind: str,
+) -> None:
+    """Push a Telegram message to every ADMIN_CHAT_IDS about unmatched files.
+
+    ``kind`` is either ``"initial"`` (sent once when the toggle is first enabled
+    and the seen-snapshot is empty) or ``"new"`` (sent on every refresh that
+    discovers files not in the previous snapshot).
+    """
+    if not ADMIN_CHAT_IDS:
+        return
+    text = _format_unmatched_push(movies, shows, kind=kind)
+    for chat_id in sorted(ADMIN_CHAT_IDS):
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception:
+            logger.warning(
+                "Plex-unmatched notification failed for admin chat_id=%s", chat_id, exc_info=True
+            )
+
+
+def _format_unmatched_push(movies: list, shows: list, *, kind: str) -> str:
+    """Build the HTML body for an admin push about unmatched Plex files.
+
+    Shows up to 5 of each kind; longer lists fall back to a 'и ещё K' suffix
+    and a hint to open ``/admin → 📋 Несматчено`` for the full picture.
+    """
+    total = len(movies) + len(shows)
+    if kind == "initial":
+        head = (
+            f"📋 <b>Включены уведомления о несматченных в Plex</b>\n"
+            f"Сейчас в библиотеке {total} {_plural(total, 'файл', 'файла', 'файлов')}:"
+        )
+    else:
+        head = (
+            f"⚠️ <b>В Plex появились новые несматченные файлы ({total})</b>"
+        )
+
+    def _bullets(items: list, limit: int = 5) -> str:
+        head_part = "\n".join(
+            f"• <code>{html_module.escape(_format_unmatched_short_label(x))}</code>"
+            for x in items[:limit]
+        )
+        extra = len(items) - limit
+        if extra > 0:
+            head_part += f"\n• …и ещё {extra}"
+        return head_part
+
+    lines: list[str] = [head]
+    if movies:
+        lines.append("")
+        lines.append(f"🎬 <b>Фильмы ({len(movies)}):</b>")
+        lines.append(_bullets(movies))
+    if shows:
+        lines.append("")
+        lines.append(f"📺 <b>Шоу ({len(shows)}):</b>")
+        lines.append(_bullets(shows))
+    lines.append("")
+    lines.append("Полный список: /admin → 📋 Несматчено")
+    return "\n".join(lines)
+
+
+async def _plex_cache_loop(app: "Application | None" = None) -> None:
     if plex_client is None:
         logger.info("Plex not configured — cache loop disabled")
         return
     try:
-        await _run_background_step("initial Plex library cache", _refresh_plex_library)
+        await _run_background_step(
+            "initial Plex library cache",
+            lambda: _refresh_plex_library(app),
+        )
         while True:
             await asyncio.sleep(_PLEX_CACHE_INTERVAL)
-            await _run_background_step("Plex library cache refresh", _refresh_plex_library)
+            await _run_background_step(
+                "Plex library cache refresh",
+                lambda: _refresh_plex_library(app),
+            )
     except asyncio.CancelledError:
         logger.info("Plex cache loop stopped")
         raise
@@ -2322,8 +2477,10 @@ async def _plex_poll_after_finish(
             if attempt > 0:
                 await asyncio.sleep(interval_seconds)
 
-            # Refresh Plex library, then look for the file
-            await _refresh_plex_library()
+            # Refresh Plex library, then look for the file. Passing app so any
+            # newly-appeared unmatched files trigger an admin push during the
+            # 10-min poll window — same channel the background loop uses.
+            await _refresh_plex_library(app)
             # Heuristic: if the global failure counter is at 0,
             # this refresh succeeded.
             if _plex_consecutive_failures == 0:
@@ -7286,7 +7443,7 @@ async def setup_bot_commands(app: Application) -> None:
         logger.info("Movie notification pending loop started")
 
     if PLEX_ENABLED:
-        app.create_task(_plex_cache_loop())
+        app.create_task(_plex_cache_loop(app))
         logger.info("Plex library cache loop started, interval=%ss", _PLEX_CACHE_INTERVAL)
 
 

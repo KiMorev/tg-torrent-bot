@@ -290,7 +290,32 @@ def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagno
     if updated_at:
         details.append(f"   Кэш обновлён: {updated_at}")
 
+    # Unmatched radar: only render the line when at least one entry is unmatched
+    # so a healthy library doesn't add noise.
+    unmatched_movies = int(info.get("unmatched_movies") or 0)
+    unmatched_shows = int(info.get("unmatched_shows") or 0)
+    if unmatched_movies or unmatched_shows:
+        parts = []
+        if unmatched_movies:
+            parts.append(f"{unmatched_movies} {_plural_ru(unmatched_movies, 'фильм', 'фильма', 'фильмов')}")
+        if unmatched_shows:
+            parts.append(f"{unmatched_shows} {_plural_ru(unmatched_shows, 'шоу', 'шоу', 'шоу')}")
+        details.append(f"   Не сматчено: {', '.join(parts)}")
+
     return ServiceDiagnostic("Plex", "ok", _summary("ok", "🎬", "Plex", "подключен"), details)
+
+
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Russian plural picker: 1 фильм / 2 фильма / 5 фильмов."""
+    n_abs = abs(n) % 100
+    if 10 < n_abs < 20:
+        return many
+    last_digit = n_abs % 10
+    if last_digit == 1:
+        return one
+    if 2 <= last_digit <= 4:
+        return few
+    return many
 
 
 def run_diagnostics(
