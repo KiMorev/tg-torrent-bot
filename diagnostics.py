@@ -283,10 +283,10 @@ def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagno
     if movie_count is not None:
         line = f"   Фильмов в библиотеке: {movie_count}"
         if show_count:
-            line += f" · Шоу: {show_count}"
+            line += f" · Сериалов: {show_count}"
         details.append(line)
     elif show_count:
-        details.append(f"   Шоу в библиотеке: {show_count}")
+        details.append(f"   Сериалов в библиотеке: {show_count}")
     if updated_at:
         details.append(f"   Кэш обновлён: {updated_at}")
 
@@ -299,7 +299,7 @@ def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagno
         if unmatched_movies:
             parts.append(f"{unmatched_movies} {_plural_ru(unmatched_movies, 'фильм', 'фильма', 'фильмов')}")
         if unmatched_shows:
-            parts.append(f"{unmatched_shows} {_plural_ru(unmatched_shows, 'шоу', 'шоу', 'шоу')}")
+            parts.append(f"{unmatched_shows} {_plural_ru(unmatched_shows, 'сериал', 'сериала', 'сериалов')}")
         details.append(f"   Не сматчено: {', '.join(parts)}")
 
     return ServiceDiagnostic("Plex", "ok", _summary("ok", "🎬", "Plex", "подключен"), details)

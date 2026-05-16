@@ -271,7 +271,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("✅ 🎬 <b>Plex</b>: подключен", text)
 
     def test_plex_ok_shows_show_count_alongside_movies(self) -> None:
-        """When the TV-shows cache is populated, /admin shows a 'Шоу: M' counter."""
+        """When the TV-shows cache is populated, /admin shows a 'Сериалов: M' counter."""
         from unittest.mock import MagicMock
         plex = MagicMock()
         plex.is_healthy.return_value = True
@@ -288,7 +288,7 @@ class DiagnosticsTests(unittest.TestCase):
         )
         text = format_diagnostics(report)
         self.assertIn("Фильмов в библиотеке: 100", text)
-        self.assertIn("Шоу: 25", text)
+        self.assertIn("Сериалов: 25", text)
 
     def test_plex_ok_shows_unmatched_line_when_any_unmatched(self) -> None:
         """When at least one Plex entry is unmatched, /admin renders a 'Не сматчено' line."""
@@ -309,7 +309,7 @@ class DiagnosticsTests(unittest.TestCase):
         text = format_diagnostics(report)
         self.assertIn("Не сматчено", text)
         self.assertIn("3 фильма", text)
-        self.assertIn("1 шоу", text)
+        self.assertIn("1 сериал", text)
 
     def test_plex_ok_hides_unmatched_line_when_all_matched(self) -> None:
         """Don't add noise when there's nothing to report — all matched."""

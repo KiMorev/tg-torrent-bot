@@ -2216,7 +2216,7 @@ def _format_unmatched_list(movies: list, shows: list) -> str:
     if shows:
         if movies:
             lines.append("")
-        lines.append(f"📺 <b>Шоу ({len(shows)})</b>")
+        lines.append(f"📺 <b>Сериалы ({len(shows)})</b>")
         lines.extend(_bullets(shows))
     return "\n".join(lines)
 
@@ -2255,7 +2255,7 @@ def _format_unmatched_push(movies: list, shows: list, *, kind: str) -> str:
         lines.append(_bullets(movies))
     if shows:
         lines.append("")
-        lines.append(f"📺 <b>Шоу ({len(shows)}):</b>")
+        lines.append(f"📺 <b>Сериалы ({len(shows)}):</b>")
         lines.append(_bullets(shows))
     lines.append("")
     lines.append("Полный список: /admin → 📋 Несматчено")
