@@ -304,6 +304,40 @@ def _filter_by_season(results: list[dict], season_num: int) -> list[dict]:
     return [r for r in results if pattern.search(r.get("title", ""))]
 
 
+def _quality_to_query_suffix(normalised_quality: str) -> str:
+    """Convert a normalised Plex quality string into a search-query suffix.
+
+    Used to carry the quality the user actually picked from a season's release
+    into the next season's search, so the bot doesn't drop the filter.
+
+    Examples:
+        "1080" → " 1080p"
+        "4k"   → " 2160p"
+        "720"  → " 720p"
+        "480"  → " 480p"
+        ""     → "" (unknown quality → search unfiltered)
+    """
+    return {
+        "4k": " 2160p",
+        "1080": " 1080p",
+        "720": " 720p",
+        "480": " 480p",
+    }.get(normalised_quality, "")
+
+
+def _seasons_available_in_results(results: list[dict]) -> list[int]:
+    """Extract every season number mentioned in result titles, sorted ascending.
+
+    Used when a season-specific search returns 0 hits — we tell the user which
+    seasons the tracker *does* have so they don't keep guessing.
+    """
+    found: set[int] = set()
+    for r in results:
+        for m in re.finditer(r"[Сс]езон[:\s]+(\d+)", r.get("title") or ""):
+            found.add(int(m.group(1)))
+    return sorted(found)
+
+
 def _format_sub_title(title: str) -> str:
     """Extract a short display name from a full Rutracker series title.
 

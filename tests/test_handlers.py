@@ -1603,6 +1603,56 @@ class PlexRefreshSingleFlightTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Series quality / season-discovery helpers (formatters.py)
+# ---------------------------------------------------------------------------
+
+
+class SeriesHelpersTests(unittest.TestCase):
+    """Tests for _quality_to_query_suffix and _seasons_available_in_results."""
+
+    def test_quality_to_suffix_maps_known_qualities(self):
+        from formatters import _quality_to_query_suffix
+        self.assertEqual(_quality_to_query_suffix("1080"), " 1080p")
+        self.assertEqual(_quality_to_query_suffix("4k"), " 2160p")
+        self.assertEqual(_quality_to_query_suffix("720"), " 720p")
+        self.assertEqual(_quality_to_query_suffix("480"), " 480p")
+
+    def test_quality_to_suffix_empty_for_unknown_quality(self):
+        """Empty/unknown quality must return "" so the search is unfiltered."""
+        from formatters import _quality_to_query_suffix
+        self.assertEqual(_quality_to_query_suffix(""), "")
+        self.assertEqual(_quality_to_query_suffix("sd"), "")  # not in the map
+        self.assertEqual(_quality_to_query_suffix("garbage"), "")
+
+    def test_seasons_available_extracts_unique_sorted_numbers(self):
+        from formatters import _seasons_available_in_results
+        results = [
+            {"title": "Клиника / Scrubs / Сезон: 3 / Серии 1-22 [BDRip]"},
+            {"title": "Клиника Сезон 1 1080p WEB-DL"},
+            {"title": "Клиника · Сезон:5 (полный)"},
+            {"title": "Клиника Сезон 3 4K"},  # duplicate season 3
+        ]
+        self.assertEqual(_seasons_available_in_results(results), [1, 3, 5])
+
+    def test_seasons_available_returns_empty_for_no_season_marker(self):
+        from formatters import _seasons_available_in_results
+        results = [
+            {"title": "Some Movie 2024 1080p"},
+            {"title": "Another.Film.2023.BluRay"},
+        ]
+        self.assertEqual(_seasons_available_in_results(results), [])
+
+    def test_seasons_available_handles_empty_input(self):
+        from formatters import _seasons_available_in_results
+        self.assertEqual(_seasons_available_in_results([]), [])
+
+    def test_seasons_available_tolerates_missing_title_field(self):
+        from formatters import _seasons_available_in_results
+        results = [{"title": None}, {"other": "x"}]
+        self.assertEqual(_seasons_available_in_results(results), [])
+
+
+# ---------------------------------------------------------------------------
 # _movie_trackers_panel tests
 # ---------------------------------------------------------------------------
 

@@ -47,6 +47,8 @@ from formatters import (
     _normalize_season_in_query,
     _parse_episode_info,
     _progress_percent,
+    _quality_to_query_suffix,
+    _seasons_available_in_results,
     _score_result,
     _short_title,
     _status_label,
@@ -3994,14 +3996,26 @@ async def search_series_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
             return await _execute_search(query, context, series_query)
 
         season_count_label = f" ({total_seasons} сез.)" if total_seasons else ""
+        quality_hint = _series_quality_hint(context.user_data.get("srch_picked_quality", ""))
         await query.edit_message_text(
-            f"📺 Сериал: «{series_query}»{season_count_label}\nВыберите сезон:",
+            f"📺 Сериал: «{series_query}»{season_count_label}\n{quality_hint}Выберите сезон:",
             reply_markup=_season_select_keyboard(total_seasons),
         )
         return SEARCH_SEASON_SELECT
 
     # No KinoPoisk — go straight to search.
     return await _execute_search(query, context, series_query)
+
+
+def _series_quality_hint(picked_quality: str) -> str:
+    """Return a short, human-readable line for the season picker when a quality
+    was inherited from the previously picked release. Empty string if unknown."""
+    if not picked_quality:
+        return ""
+    pretty = {"4k": "2160p (4K)", "1080": "1080p", "720": "720p", "480": "480p"}.get(picked_quality, "")
+    if not pretty:
+        return ""
+    return f"Будет искать в качестве {pretty} (по выбранному торренту).\n"
 
 
 async def search_season_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4019,7 +4033,8 @@ async def search_season_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Запрос потерян. Начните поиск заново.")
         return ConversationHandler.END
 
-    search_query = _normalize_season_in_query(f"{base} Сезон {season_num}")
+    quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
+    search_query = _normalize_season_in_query(f"{base} Сезон {season_num}{quality_suffix}")
     return await _execute_search(query, context, search_query)
 
 
@@ -4033,7 +4048,8 @@ async def search_season_skip(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Запрос потерян. Начните поиск заново.")
         return ConversationHandler.END
 
-    return await _execute_search(query, context, base)
+    quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
+    return await _execute_search(query, context, f"{base}{quality_suffix}".strip())
 
 
 async def search_season_input_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4064,7 +4080,8 @@ async def search_season_got_input(update: Update, context: ContextTypes.DEFAULT_
         return SEARCH_SEASON_SELECT
 
     season_num = int(text)
-    search_query = _normalize_season_in_query(f"{base} Сезон {season_num}")
+    quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
+    search_query = _normalize_season_in_query(f"{base} Сезон {season_num}{quality_suffix}")
     return await _run_search(update.message.reply_text, context, search_query)
 
 
@@ -4271,6 +4288,13 @@ async def _download_and_add(
         _card_msg_id = _message_id_from_message(query.message) if query.message else None
         if series_query:
             context.user_data["srch_series_query"] = series_query
+            # Remember the quality of the release the user actually picked so the
+            # next-season search can suggest the same filter.
+            context.user_data["srch_picked_quality"] = _plex_quality_from_result(result)
+            # Remember the success message + task_id so the season picker can offer
+            # a "⬅️ Назад" button that restores this view instead of force-cancelling.
+            context.user_data["srch_series_success_text"] = success_text
+            context.user_data["srch_series_success_task_id"] = task_id
             await query.edit_message_text(
                 success_text, reply_markup=_search_after_add_keyboard(task_id)
             )
@@ -4440,6 +4464,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
+        "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
@@ -4491,6 +4516,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
+        "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
@@ -6399,6 +6425,15 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # the user moved on (sent a new search/magnet/link), clean up the abandoned
     # temp .torrent file before processing the new request.
     _cleanup_plex_pending(context.user_data.pop("plex_pending", None))
+
+    # If a 'series added' offer was sitting in user_data and the user switched
+    # to a new search/torrent/link instead of tapping "🔎 Другой сезон", drop
+    # the stale series state so it doesn't leak across unrelated flows.
+    for stale_key in (
+        "srch_series_query", "srch_series_success_text", "srch_series_success_task_id",
+        "srch_picked_quality",
+    ):
+        context.user_data.pop(stale_key, None)
 
     # 1. Magnet link — handle immediately, don't start a search conversation.
     magnet_uri = _find_magnet(text)
