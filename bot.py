@@ -1915,7 +1915,15 @@ def _plex_pre_check(title: str, year: int, requested_quality: str) -> "PlexCheck
 
 
 def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
-    """Find a Plex movie that contains *ds_title* in one of its file paths.
+    """Find a Plex movie whose file path has *ds_title* as a complete component.
+
+    A "complete component" means the DS task title equals either:
+      • a full folder/file name in the path (between separators), OR
+      • the same name with its file extension stripped.
+
+    This avoids the substring-collision pitfall of naïve ``name in fp``
+    matching — e.g. a DS title ``Movie.2024`` no longer matches
+    ``/archive/Movie.2024.backup/whatever.mkv``.
 
     Uses the global in-memory library; no network call.
     Returns the first matching PlexMovie or None.
@@ -1923,9 +1931,25 @@ def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
     name = ds_title.strip()
     if not name:
         return None
-    for movie in _plex_library.values():
-        if any(name in fp for fp in movie.file_paths):
-            return movie
+    # Snapshot the dict ref to avoid mid-iteration replacement by a concurrent refresh.
+    library_snapshot = _plex_library
+    for movie in library_snapshot.values():
+        for fp in movie.file_paths:
+            # Split on both POSIX and Windows separators so behaviour is the same
+            # whether Plex is on Linux/Synology or running on Windows.
+            parts = [p for p in re.split(r"[\\/]", fp) if p]
+            if not parts:
+                continue
+            # Full-component match anywhere in the path (folder or file name).
+            if name in parts:
+                return movie
+            # Also allow matching the filename with extension stripped — but ONLY
+            # for the last component (the file), since folder names like
+            # "Movie.2024.backup" must not be reduced to "Movie.2024".
+            file_part = parts[-1]
+            file_stem = re.sub(r"\.[^.]+$", "", file_part)
+            if name == file_stem:
+                return movie
     return None
 
 
@@ -1962,6 +1986,15 @@ async def _plex_poll_after_finish(
             # Refresh Plex library, then look for the file
             await _refresh_plex_library()
             plex_movie = _plex_find_by_ds_title(task_title)
+            if plex_movie is None:
+                # Fallback: Plex agent (TMDb/TVDb) may have renamed the file, or the
+                # metadata is indexed but file_paths is still empty. Try matching by
+                # extracted title+year against the same library that pre-check uses.
+                year = _movie_extract_year(task_title) or 0
+                fallback_title = re.sub(r"[_.]+", " ", task_title)
+                fallback_title = re.sub(r"\s{2,}", " ", fallback_title).strip()
+                if fallback_title:
+                    plex_movie = _plex_library_find(fallback_title, year)
 
             if plex_movie is not None:
                 # Build deep link

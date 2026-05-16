@@ -1235,12 +1235,42 @@ class PlexPollingTests(unittest.TestCase):
     def test_find_by_ds_title_matches_file_path(self):
         movie = self._make_plex_movie(
             "Dune", 2021,
-            ["/video/Movies/Dune (2021)/Dune.2021.1080p.BluRay.mkv"],
+            ["/video/Movies/Dune.2021.1080p.BluRay/Dune.2021.1080p.BluRay.mkv"],
         )
         with patch.object(bot, "_plex_library", {("dune", 2021): movie}):
             result = _plex_find_by_ds_title("Dune.2021.1080p.BluRay")
         self.assertIsNotNone(result)
         self.assertEqual(result.title, "Dune")
+
+    def test_find_by_ds_title_does_not_match_substring_inside_other_name(self):
+        """Safe substring: 'Movie.2024' must NOT match '.../Movie.2024.backup/...'.
+        Regression for #7 from the Plex audit plan."""
+        other_movie = self._make_plex_movie(
+            "Movie 2024 Backup Collection", 2024,
+            ["/archive/Movie.2024.backup/some.file.mkv"],
+        )
+        with patch.object(bot, "_plex_library", {("movie 2024 backup collection", 2024): other_movie}):
+            self.assertIsNone(_plex_find_by_ds_title("Movie.2024"))
+
+    def test_find_by_ds_title_matches_filename_without_extension(self):
+        """Task title without extension should match Plex file `Title.mkv`."""
+        movie = self._make_plex_movie(
+            "Inception", 2010,
+            ["/movies/Inception.2010.1080p.mkv"],
+        )
+        with patch.object(bot, "_plex_library", {("inception", 2010): movie}):
+            result = _plex_find_by_ds_title("Inception.2010.1080p")
+        self.assertIsNotNone(result)
+
+    def test_find_by_ds_title_matches_windows_path_separator(self):
+        """Should work for Windows-style backslash paths from Plex."""
+        movie = self._make_plex_movie(
+            "Tenet", 2020,
+            ["C:\\Plex\\Movies\\Tenet.2020.4K\\Tenet.2020.4K.mkv"],
+        )
+        with patch.object(bot, "_plex_library", {("tenet", 2020): movie}):
+            result = _plex_find_by_ds_title("Tenet.2020.4K")
+        self.assertIsNotNone(result)
 
     def test_find_by_ds_title_returns_none_when_no_match(self):
         movie = self._make_plex_movie(
@@ -1255,6 +1285,30 @@ class PlexPollingTests(unittest.TestCase):
         with patch.object(bot, "_plex_library", {}):
             self.assertIsNone(_plex_find_by_ds_title(""))
             self.assertIsNone(_plex_find_by_ds_title("   "))
+
+    def test_poll_after_finish_falls_back_to_title_year_when_substring_misses(self):
+        """If _plex_find_by_ds_title returns None (e.g. Plex renamed the file or
+        file_paths is empty), the poller must try _plex_library_find(title, year).
+        Regression for #8 from the Plex audit plan."""
+        movie = self._make_plex_movie("Dune", 2021, [])  # empty file_paths!
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "_plex_library", {("dune", 2021): movie}),
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),  # substring miss
+            patch.object(bot, "_plex_library_find", return_value=movie),     # fallback hit
+            patch.object(bot, "_plex_machine_id", "abc123"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Dune.Part.Two.2021.2160p", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        # Found notification should still be sent thanks to the fallback
+        fake_app.bot.send_message.assert_awaited_once()
+        self.assertIn("✅", fake_app.bot.send_message.call_args.kwargs["text"])
 
     def test_poll_after_finish_sends_found_notification(self):
         """Polling should send a found-notification when the movie appears in Plex."""
