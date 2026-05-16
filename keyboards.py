@@ -557,13 +557,21 @@ def _season_back_to_picker_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def _season_select_keyboard(total_seasons: int | None) -> InlineKeyboardMarkup:
+def _season_select_keyboard(
+    total_seasons: int | None,
+    plex_seasons: set[int] | None = None,
+) -> InlineKeyboardMarkup:
     """Keyboard for choosing which season to search for.
 
     When *total_seasons* is known (2–20) numbered buttons are shown 5 per row,
     so the user can tap a season directly. Always includes 'Enter manually',
-    'No filter' (search the whole series), and 'Cancel'.
+    'No filter' (search the whole series), 'Back' and 'Cancel'.
+
+    When *plex_seasons* is provided, season buttons that already exist in the
+    user's Plex library are prefixed with a '✅ ' marker — the callback_data
+    is unchanged, so the user can still tap to re-download.
     """
+    in_plex = plex_seasons or set()
     rows: list[list[InlineKeyboardButton]] = []
 
     if total_seasons and 1 < total_seasons <= 20:
@@ -571,7 +579,7 @@ def _season_select_keyboard(total_seasons: int | None) -> InlineKeyboardMarkup:
         for i in range(0, len(nums), 5):
             rows.append([
                 InlineKeyboardButton(
-                    str(n),
+                    f"✅ {n}" if n in in_plex else str(n),
                     callback_data=f"{SEARCH_CALLBACK_PREFIX}:season:{n}",
                 )
                 for n in nums[i : i + 5]

@@ -1929,6 +1929,56 @@ class PlexSeriesConfirmTextTests(unittest.TestCase):
         self.assertIn("720", text)
 
 
+class SeriesPlexSeasonsLineTests(unittest.TestCase):
+    def test_empty_when_no_plex_seasons(self):
+        from bot import _series_plex_seasons_line
+        self.assertEqual(_series_plex_seasons_line(None, 5), "")
+        self.assertEqual(_series_plex_seasons_line(set(), 5), "")
+
+    def test_lists_sorted_seasons(self):
+        from bot import _series_plex_seasons_line
+        text = _series_plex_seasons_line({3, 1, 2}, 5)
+        self.assertEqual(text, "В Plex: 1, 2, 3\n")
+
+    def test_says_all_seasons_when_complete(self):
+        from bot import _series_plex_seasons_line
+        text = _series_plex_seasons_line({1, 2, 3}, 3)
+        self.assertIn("Все сезоны", text)
+
+    def test_no_total_seasons_falls_back_to_list(self):
+        from bot import _series_plex_seasons_line
+        text = _series_plex_seasons_line({1, 2}, None)
+        self.assertEqual(text, "В Plex: 1, 2\n")
+
+
+class GetPlexSeasonsForSeriesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_empty_when_plex_disabled(self):
+        from bot import _get_plex_seasons_for_series
+        with patch.object(bot, "PLEX_ENABLED", False):
+            self.assertEqual(await _get_plex_seasons_for_series("X"), set())
+
+    async def test_returns_empty_when_show_not_found(self):
+        from bot import _get_plex_seasons_for_series
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {}),
+        ):
+            self.assertEqual(await _get_plex_seasons_for_series("X"), set())
+
+    async def test_returns_season_numbers_from_plex(self):
+        from bot import _get_plex_seasons_for_series
+        from plex import PlexShow, PlexSeason
+        show = PlexShow(
+            "X", 2020, "1",
+            seasons={1: PlexSeason("a", 1, 10, [], "1080"), 2: PlexSeason("b", 2, 8, [], "1080")},
+        )
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("x", 2020): show}),
+        ):
+            self.assertEqual(await _get_plex_seasons_for_series("X"), {1, 2})
+
+
 class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tests for search_season_back — the '⬅️ Назад' button in the season picker."""
 

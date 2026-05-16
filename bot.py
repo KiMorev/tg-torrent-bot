@@ -4273,11 +4273,16 @@ async def search_series_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Single season — skip the selector and search directly.
             return await _execute_search(query, context, series_query)
 
+        plex_seasons = await _get_plex_seasons_for_series(series_query)
+        context.user_data["srch_plex_seasons"] = plex_seasons
+
         season_count_label = f" ({total_seasons} сез.)" if total_seasons else ""
         quality_hint = _series_quality_hint(context.user_data.get("srch_picked_quality", ""))
+        plex_line = _series_plex_seasons_line(plex_seasons, total_seasons)
         await query.edit_message_text(
-            f"📺 Сериал: «{series_query}»{season_count_label}\n{quality_hint}Выберите сезон:",
-            reply_markup=_season_select_keyboard(total_seasons),
+            f"📺 Сериал: «{series_query}»{season_count_label}\n"
+            f"{plex_line}{quality_hint}Выберите сезон:",
+            reply_markup=_season_select_keyboard(total_seasons, plex_seasons=plex_seasons),
         )
         return SEARCH_SEASON_SELECT
 
@@ -4294,6 +4299,30 @@ def _series_quality_hint(picked_quality: str) -> str:
     if not pretty:
         return ""
     return f"Будет искать в качестве {pretty} (по выбранному торренту).\n"
+
+
+def _series_plex_seasons_line(plex_seasons: set[int] | None, total_seasons: int | None) -> str:
+    """Return a 'В Plex: 1, 2, 3' line (or 'Все сезоны уже в Plex') for the picker.
+
+    Empty string when no information to show.
+    """
+    if not plex_seasons:
+        return ""
+    sorted_seasons = sorted(plex_seasons)
+    if total_seasons and len(sorted_seasons) >= total_seasons:
+        return "Все сезоны уже в Plex.\n"
+    return f"В Plex: {', '.join(str(n) for n in sorted_seasons)}\n"
+
+
+async def _get_plex_seasons_for_series(series_query: str) -> set[int]:
+    """Return the set of season numbers this show has in Plex. Empty set if disabled/unknown."""
+    if not PLEX_ENABLED or not series_query:
+        return set()
+    show = _plex_show_find(series_query)
+    if show is None:
+        return set()
+    seasons = await _plex_ensure_show_seasons(show)
+    return set(seasons.keys())
 
 
 async def search_season_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4348,9 +4377,17 @@ async def search_season_back_to_picker(update: Update, context: ContextTypes.DEF
     total_seasons = context.user_data.get("srch_total_seasons")
     season_count_label = f" ({total_seasons} сез.)" if total_seasons else ""
     quality_hint = _series_quality_hint(context.user_data.get("srch_picked_quality", ""))
+    # Reuse the cached set if we already populated it on first picker entry —
+    # avoids redundant Plex API calls when bouncing back from a 0-results screen.
+    plex_seasons = context.user_data.get("srch_plex_seasons")
+    if plex_seasons is None:
+        plex_seasons = await _get_plex_seasons_for_series(base)
+        context.user_data["srch_plex_seasons"] = plex_seasons
+    plex_line = _series_plex_seasons_line(plex_seasons, total_seasons)
     await query.edit_message_text(
-        f"📺 Сериал: «{base}»{season_count_label}\n{quality_hint}Выберите сезон:",
-        reply_markup=_season_select_keyboard(total_seasons),
+        f"📺 Сериал: «{base}»{season_count_label}\n"
+        f"{plex_line}{quality_hint}Выберите сезон:",
+        reply_markup=_season_select_keyboard(total_seasons, plex_seasons=plex_seasons),
     )
     return SEARCH_SEASON_SELECT
 
@@ -4817,6 +4854,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
+        "srch_plex_seasons",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
@@ -4869,6 +4907,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
+        "srch_plex_seasons",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
@@ -6812,7 +6851,7 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # the stale series state so it doesn't leak across unrelated flows.
     for stale_key in (
         "srch_series_query", "srch_series_success_text", "srch_series_success_task_id",
-        "srch_picked_quality",
+        "srch_picked_quality", "srch_plex_seasons",
     ):
         context.user_data.pop(stale_key, None)
 

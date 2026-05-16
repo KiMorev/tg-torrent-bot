@@ -138,6 +138,28 @@ class SeasonSelectKeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["⬅️ К выбору сезона"], "srch:season_back_to_picker")
         self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
 
+    def test_plex_seasons_get_check_mark_prefix(self) -> None:
+        """Seasons present in Plex must be prefixed with '✅ ' but keep the same callback."""
+        keyboard = _season_select_keyboard(total_seasons=5, plex_seasons={1, 3})
+        buttons = self._buttons(keyboard)
+        # Seasons 1 and 3 have checkmark
+        self.assertEqual(buttons["✅ 1"], "srch:season:1")
+        self.assertEqual(buttons["✅ 3"], "srch:season:3")
+        # Seasons 2, 4, 5 don't
+        self.assertEqual(buttons["2"], "srch:season:2")
+        self.assertEqual(buttons["4"], "srch:season:4")
+        self.assertEqual(buttons["5"], "srch:season:5")
+        # No bare-number version of season 1 / 3 (proves the check-mark prefix is the only label)
+        self.assertNotIn("1", buttons)
+        self.assertNotIn("3", buttons)
+
+    def test_plex_seasons_none_means_no_markers(self) -> None:
+        """Default behaviour (no plex_seasons passed) must show bare numbers."""
+        buttons = self._buttons(_season_select_keyboard(total_seasons=3))
+        self.assertEqual(buttons["1"], "srch:season:1")
+        self.assertEqual(buttons["2"], "srch:season:2")
+        self.assertEqual(buttons["3"], "srch:season:3")
+
 
 class AdminKpCacheKeyboardTests(unittest.TestCase):
     def _buttons(self, keyboard) -> dict[str, str]:
