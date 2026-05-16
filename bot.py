@@ -104,7 +104,16 @@ from jackett_subscriptions import (
     select_jackett_subscription_candidate,
 )
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
-from plex import PlexMovie, check_before_download as _plex_check_before_download, _normalise_resolution as _plex_normalise_resolution
+from plex import (
+    PlexMovie,
+    PlexAPIError,
+    PlexAuthError,
+    PlexTimeoutError,
+    PlexConnectionError,
+    PlexParseError,
+    check_before_download as _plex_check_before_download,
+    _normalise_resolution as _plex_normalise_resolution,
+)
 from movie_discovery import (
     build_cards as _movie_build_cards,
     detect_quality as _movie_detect_quality,
@@ -335,6 +344,20 @@ _plex_machine_id: str = ""
 # task_id → asyncio.Task while polling is active; → None after polling completed.
 # Keeping the key (even as None) prevents re-launching a second poll after the first finishes.
 _PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
+
+# Single-flight refresh: serialise concurrent `_refresh_plex_library` calls so
+# the 30-min background loop + N polling loops don't hit Plex API in parallel.
+# Created lazily inside the function to avoid binding to a stale event loop.
+_plex_refresh_lock: "asyncio.Lock | None" = None
+# Coalesce window — if a refresh completed less than this many seconds ago, skip the next one.
+_PLEX_REFRESH_COALESCE_SECONDS = 5.0
+
+# Plex health tracking — shown in /admin diagnostics.
+_plex_last_error_kind: str = ""        # "auth"/"timeout"/"network"/"xml"/"http"/"other"/""
+_plex_last_error_message: str = ""
+_plex_last_error_at: float = 0.0
+_plex_last_success_at: float = 0.0
+_plex_consecutive_failures: int = 0
 
 
 def _tracker_config() -> TrackerConfig:
@@ -1717,45 +1740,107 @@ def _plex_library_find(title: str, year: int) -> "PlexMovie | None":
 
 
 def _plex_cache_info() -> dict:
-    """Return metadata dict for diagnostics."""
+    """Return metadata dict for diagnostics, including health state."""
+    import time, datetime
+
+    def _fmt(ts: float) -> str:
+        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
+
+    return {
+        "count": len(_plex_library),
+        "updated_at": _fmt(_plex_library_updated_at),
+        "last_error_kind": _plex_last_error_kind,
+        "last_error_message": _plex_last_error_message,
+        "last_error_at": _fmt(_plex_last_error_at),
+        "last_success_at": _fmt(_plex_last_success_at),
+        "consecutive_failures": _plex_consecutive_failures,
+    }
+
+
+def _classify_plex_exception(exc: BaseException) -> tuple[str, str]:
+    """Return (error_kind, short_message) for an exception raised during a Plex call."""
+    if isinstance(exc, PlexAPIError):
+        return exc.error_kind, str(exc) or exc.__class__.__name__
+    # Fallback for any unexpected exception type
+    return "other", f"{exc.__class__.__name__}: {exc}"
+
+
+def _record_plex_failure(error_kind: str, message: str) -> None:
+    global _plex_last_error_kind, _plex_last_error_message, _plex_last_error_at, _plex_consecutive_failures
     import time
-    updated = _plex_library_updated_at
-    if updated:
-        import datetime
-        dt = datetime.datetime.fromtimestamp(updated).strftime("%Y-%m-%d %H:%M")
-    else:
-        dt = ""
-    return {"count": len(_plex_library), "updated_at": dt}
+    _plex_last_error_kind = error_kind
+    _plex_last_error_message = message
+    _plex_last_error_at = time.time()
+    _plex_consecutive_failures += 1
+
+
+def _record_plex_success() -> None:
+    global _plex_last_error_kind, _plex_last_error_message, _plex_last_success_at, _plex_consecutive_failures
+    import time
+    _plex_last_error_kind = ""
+    _plex_last_error_message = ""
+    _plex_last_success_at = time.time()
+    _plex_consecutive_failures = 0
 
 
 async def _refresh_plex_library() -> None:
-    """Fetch all movies from Plex and rebuild the in-memory cache."""
-    global _plex_library, _plex_library_updated_at, _plex_machine_id
+    """Fetch all movies from Plex and rebuild the in-memory cache.
+
+    Single-flight: serialised by ``_plex_refresh_lock`` so concurrent callers
+    (the 30-min background loop and N polling loops) don't bombard Plex with
+    parallel ``get_all_movies`` calls. If a refresh completed less than
+    ``_PLEX_REFRESH_COALESCE_SECONDS`` ago, subsequent callers skip the actual
+    fetch and reuse the freshly-loaded cache.
+    """
+    global _plex_library, _plex_library_updated_at, _plex_machine_id, _plex_refresh_lock
     import time
+
     if plex_client is None:
         return
-    try:
-        movies = await asyncio.to_thread(plex_client.get_all_movies)
-    except Exception:
-        logger.warning("Failed to refresh Plex library cache", exc_info=True)
-        return
 
-    new_cache: dict[tuple[str, int], PlexMovie] = {}
-    for movie in movies:
-        key = _plex_cache_key(movie.title, movie.year)
-        new_cache[key] = movie
+    # Create the lock lazily on the active event loop (avoids "got Future attached
+    # to a different loop" issues in tests that recreate the loop).
+    if _plex_refresh_lock is None:
+        _plex_refresh_lock = asyncio.Lock()
 
-    _plex_library = new_cache
-    _plex_library_updated_at = time.time()
-    logger.debug("Plex library cache refreshed: %d movies", len(_plex_library))
+    async with _plex_refresh_lock:
+        # Coalesce: if another caller just refreshed the cache, reuse it.
+        now = time.time()
+        if _plex_library_updated_at and now - _plex_library_updated_at < _PLEX_REFRESH_COALESCE_SECONDS:
+            return
 
-    # Fetch machine ID once (for deep links)
-    if not _plex_machine_id:
         try:
-            _plex_machine_id = await asyncio.to_thread(plex_client.get_machine_id)
-            logger.info("Plex machine ID: %s", _plex_machine_id)
-        except Exception:
-            logger.debug("Failed to fetch Plex machine ID", exc_info=True)
+            movies = await asyncio.to_thread(plex_client.get_all_movies)
+        except Exception as exc:
+            kind, msg = _classify_plex_exception(exc)
+            _record_plex_failure(kind, msg)
+            logger.warning(
+                "Plex library refresh failed (kind=%s): %s",
+                kind,
+                msg,
+                exc_info=isinstance(exc, PlexAPIError) is False,  # only full trace for unexpected types
+            )
+            return
+
+        new_cache: dict[tuple[str, int], PlexMovie] = {}
+        for movie in movies:
+            key = _plex_cache_key(movie.title, movie.year)
+            new_cache[key] = movie
+
+        _plex_library = new_cache
+        _plex_library_updated_at = time.time()
+        _record_plex_success()
+        logger.debug("Plex library cache refreshed: %d movies", len(_plex_library))
+
+        # Fetch machine ID — retry on every refresh while empty (lightweight call).
+        if not _plex_machine_id:
+            try:
+                _plex_machine_id = await asyncio.to_thread(plex_client.get_machine_id)
+                if _plex_machine_id:
+                    logger.info("Plex machine ID: %s", _plex_machine_id)
+            except Exception as exc:
+                # Non-fatal — deep-link button won't appear until next successful fetch.
+                logger.debug("Failed to fetch Plex machine ID: %s", exc)
 
 
 async def _plex_cache_loop() -> None:
@@ -2343,9 +2428,12 @@ async def _run_task_notifications_once(app: Application) -> None:
         if not recipients:
             continue
 
-        # Determine if Plex polling should start for this task.
-        # Deferred to after the notification loop so we can collect hint message IDs
-        # and pass them to _plex_poll_after_finish for cleanup.
+        # Determine if Plex polling should start for this task. We must atomically
+        # reserve the _PLEX_POLLING_TASKS slot BEFORE the first await below — otherwise
+        # two overlapping _run_task_notifications_once() invocations could both see
+        # `task_id not in _PLEX_POLLING_TASKS` and spawn duplicate polling tasks.
+        # The check-and-reserve here runs synchronously (no awaits between them),
+        # so it's safe under cooperative concurrency.
         plex_should_poll = (
             PLEX_ENABLED
             and status == "finished"
@@ -2353,6 +2441,8 @@ async def _run_task_notifications_once(app: Application) -> None:
             and not _plex_is_series(task.get("title") or "")
             and not _plex_poll_is_done(task_id, notified)
         )
+        if plex_should_poll:
+            _PLEX_POLLING_TASKS[task_id] = None  # placeholder; real task assigned below
 
         task_changed = False
         plex_hint_msgs: dict[int, int] = {}

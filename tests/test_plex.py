@@ -4,10 +4,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 from xml.etree import ElementTree
 
+import requests
+
 from plex import (
     PlexClient,
     PlexMovie,
     PlexCheckResult,
+    PlexAPIError,
+    PlexAuthError,
+    PlexTimeoutError,
+    PlexConnectionError,
+    PlexParseError,
     _normalise_resolution,
     _parse_video,
     check_before_download,
@@ -155,6 +162,63 @@ class PlexClientHealthTests(unittest.TestCase):
         with patch.object(client._session, "get",
                           side_effect=Exception("connection refused")):
             self.assertFalse(client.is_healthy())
+
+
+# ---------------------------------------------------------------------------
+# PlexClient — error classification (_get behavior)
+# ---------------------------------------------------------------------------
+
+class PlexClientErrorClassificationTests(unittest.TestCase):
+    """Verify _get raises specific PlexAPIError subclasses for each failure mode."""
+
+    def test_http_401_raises_plex_auth_error(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 401
+        resp.ok = False
+        with patch.object(client._session, "get", return_value=resp):
+            with self.assertRaises(PlexAuthError) as ctx:
+                client._get("/identity")
+        self.assertEqual(ctx.exception.error_kind, "auth")
+
+    def test_timeout_raises_plex_timeout_error(self):
+        client = _make_client()
+        with patch.object(client._session, "get",
+                          side_effect=requests.Timeout("timed out")):
+            with self.assertRaises(PlexTimeoutError) as ctx:
+                client._get("/identity")
+        self.assertEqual(ctx.exception.error_kind, "timeout")
+
+    def test_connection_error_raises_plex_connection_error(self):
+        client = _make_client()
+        with patch.object(client._session, "get",
+                          side_effect=requests.ConnectionError("refused")):
+            with self.assertRaises(PlexConnectionError) as ctx:
+                client._get("/identity")
+        self.assertEqual(ctx.exception.error_kind, "network")
+
+    def test_malformed_xml_raises_plex_parse_error(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        resp.content = b"<html>this is not xml</html"  # malformed
+        with patch.object(client._session, "get", return_value=resp):
+            with self.assertRaises(PlexParseError) as ctx:
+                client._get("/identity")
+        self.assertEqual(ctx.exception.error_kind, "xml")
+
+    def test_non_2xx_http_raises_generic_plex_api_error(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 503
+        resp.ok = False
+        with patch.object(client._session, "get", return_value=resp):
+            with self.assertRaises(PlexAPIError) as ctx:
+                client._get("/identity")
+        # 503 is not 401, so falls into generic "http" category
+        self.assertEqual(ctx.exception.error_kind, "http")
+        self.assertNotIsInstance(ctx.exception, PlexAuthError)
 
 
 # ---------------------------------------------------------------------------

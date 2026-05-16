@@ -219,11 +219,53 @@ def _public_trackers_diagnostic(tracker_service, display_timezone: tzinfo) -> Se
     return ServiceDiagnostic("Public trackers", "ok", _summary("ok", "➕", "Public-трекеры", "кэш готов"), details)
 
 
+_PLEX_ERROR_HEADINGS = {
+    "auth": "ошибка авторизации — проверьте PLEX_TOKEN",
+    "timeout": "таймаут запроса — сервер медленно отвечает или недоступен",
+    "network": "не удалось подключиться — проверьте PLEX_URL и сеть",
+    "xml": "некорректный ответ — сервер вернул не XML (возможно, страница ошибки)",
+    "http": "сервер вернул ошибку HTTP",
+    "other": "неизвестная ошибка",
+}
+
+
 def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagnostic:
-    """Diagnostic for Plex Media Server integration."""
+    """Diagnostic for Plex Media Server integration.
+
+    Uses ``plex_cache_info`` health fields (last_error_kind, consecutive_failures,
+    last_success_at) when available — gives a richer picture than a one-off
+    ``is_healthy`` ping, since refresh runs every 30 min and we know its history.
+    """
     if plex_client is None:
         return ServiceDiagnostic("Plex", "disabled", _summary("disabled", "🎬", "Plex", "не настроен — задайте PLEX_URL и PLEX_TOKEN в .env"))
 
+    info = plex_cache_info or {}
+    failures = int(info.get("consecutive_failures") or 0)
+    last_kind = str(info.get("last_error_kind") or "")
+    last_msg = str(info.get("last_error_message") or "")
+    last_success = str(info.get("last_success_at") or "")
+    last_error = str(info.get("last_error_at") or "")
+    movie_count = info.get("count")
+    updated_at = str(info.get("updated_at") or "")
+
+    # If we have a recent failure trail from the refresh loop, trust it over a fresh ping.
+    if failures > 0 and last_kind:
+        heading = _PLEX_ERROR_HEADINGS.get(last_kind, "недоступен")
+        details: list[str] = []
+        if last_msg:
+            details.append(_raw_detail(last_msg))
+        details.append(f"   Подряд неудач: {failures}")
+        if last_error:
+            details.append(f"   Последняя ошибка: {last_error}")
+        if last_success:
+            details.append(f"   Последний успешный refresh: {last_success}")
+        return ServiceDiagnostic(
+            "Plex", "error",
+            _summary("error", "🎬", "Plex", heading),
+            details,
+        )
+
+    # No tracked failures yet (or stats not available) — do a live ping.
     try:
         healthy = plex_client.is_healthy()
     except Exception as exc:
@@ -237,13 +279,10 @@ def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagno
         return ServiceDiagnostic("Plex", "error", _summary("error", "🎬", "Plex", "не отвечает"))
 
     details = []
-    if plex_cache_info:
-        movie_count = plex_cache_info.get("count")
-        updated_at = plex_cache_info.get("updated_at")
-        if movie_count is not None:
-            details.append(f"   Фильмов в библиотеке: {movie_count}")
-        if updated_at:
-            details.append(f"   Кэш обновлён: {updated_at}")
+    if movie_count is not None:
+        details.append(f"   Фильмов в библиотеке: {movie_count}")
+    if updated_at:
+        details.append(f"   Кэш обновлён: {updated_at}")
 
     return ServiceDiagnostic("Plex", "ok", _summary("ok", "🎬", "Plex", "подключен"), details)
 

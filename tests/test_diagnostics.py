@@ -211,6 +211,65 @@ class DiagnosticsTests(unittest.TestCase):
         text = format_diagnostics(report)
         self.assertIn("❌ 🎬 <b>Plex</b>: недоступен", text)
 
+    # --- Refresh-loop-based error reporting (Phase 1.4) ---
+
+    def test_plex_shows_auth_error_from_refresh_state(self) -> None:
+        """When the refresh loop has been failing with auth errors, /admin must show
+        the auth-specific message — not run a fresh is_healthy ping."""
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = True  # ping would succeed, but state says otherwise
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+            plex_cache_info={
+                "count": 0,
+                "updated_at": "",
+                "last_error_kind": "auth",
+                "last_error_message": "Invalid Plex token (HTTP 401)",
+                "last_error_at": "2026-05-15 10:00",
+                "last_success_at": "2026-05-14 22:00",
+                "consecutive_failures": 5,
+            },
+        )
+        text = format_diagnostics(report)
+        self.assertIn("ошибка авторизации", text)
+        self.assertIn("PLEX_TOKEN", text)
+        # is_healthy should NOT have been called — state takes priority
+        plex.is_healthy.assert_not_called()
+
+    def test_plex_shows_timeout_error_kind(self) -> None:
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+            plex_cache_info={
+                "count": 0, "last_error_kind": "timeout",
+                "last_error_message": "Timeout connecting to /library",
+                "consecutive_failures": 3,
+            },
+        )
+        text = format_diagnostics(report)
+        self.assertIn("таймаут запроса", text)
+
+    def test_plex_ok_when_no_failures_in_state(self) -> None:
+        """When consecutive_failures == 0, fall back to live ping (existing behaviour)."""
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = True
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+            plex_cache_info={"count": 100, "updated_at": "2026-05-15 12:00",
+                             "consecutive_failures": 0},
+        )
+        text = format_diagnostics(report)
+        self.assertIn("✅ 🎬 <b>Plex</b>: подключен", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1410,6 +1410,66 @@ class PlexPollingTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Plex refresh single-flight / error classification tests (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class PlexRefreshSingleFlightTests(unittest.IsolatedAsyncioTestCase):
+    """Verify _refresh_plex_library serialises concurrent callers and coalesces
+    rapid successive calls. Without these, polling loops + the 30-min cache
+    loop could fire 6+ concurrent get_all_movies() calls at Plex."""
+
+    async def test_concurrent_refreshes_coalesce_into_one_api_call(self):
+        # Fake plex_client whose get_all_movies just counts invocations.
+        fake_plex = MagicMock()
+        fake_plex.get_all_movies = MagicMock(return_value=[])
+        fake_plex.get_machine_id = MagicMock(return_value="abc123")
+
+        with (
+            patch.object(bot, "plex_client", fake_plex),
+            patch.object(bot, "_plex_library", {}),
+            patch.object(bot, "_plex_library_updated_at", 0.0),
+            patch.object(bot, "_plex_refresh_lock", None),
+            patch.object(bot, "_plex_machine_id", ""),
+        ):
+            # Fire 5 concurrent refreshes
+            await asyncio.gather(*[bot._refresh_plex_library() for _ in range(5)])
+
+        # First call does the work, subsequent ones see fresh cache and skip via coalesce.
+        # We allow up to 2 calls — first does the work, the next four enter the lock
+        # one-by-one and see the fresh _plex_library_updated_at, so 1 real call total.
+        self.assertEqual(fake_plex.get_all_movies.call_count, 1,
+                         "concurrent refreshes must coalesce to a single Plex API call")
+
+    async def test_classify_plex_exception_routes_by_type(self):
+        from plex import PlexAuthError, PlexTimeoutError, PlexConnectionError, PlexParseError
+        from bot import _classify_plex_exception
+        self.assertEqual(_classify_plex_exception(PlexAuthError("bad token"))[0], "auth")
+        self.assertEqual(_classify_plex_exception(PlexTimeoutError("slow"))[0], "timeout")
+        self.assertEqual(_classify_plex_exception(PlexConnectionError("refused"))[0], "network")
+        self.assertEqual(_classify_plex_exception(PlexParseError("bad xml"))[0], "xml")
+        self.assertEqual(_classify_plex_exception(RuntimeError("???"))[0], "other")
+
+    async def test_refresh_records_failure_state_on_auth_error(self):
+        from plex import PlexAuthError
+        fake_plex = MagicMock()
+        fake_plex.get_all_movies = MagicMock(side_effect=PlexAuthError("Invalid token"))
+
+        with (
+            patch.object(bot, "plex_client", fake_plex),
+            patch.object(bot, "_plex_refresh_lock", None),
+            patch.object(bot, "_plex_library_updated_at", 0.0),
+            patch.object(bot, "_plex_consecutive_failures", 0),
+            patch.object(bot, "_plex_last_error_kind", ""),
+        ):
+            await bot._refresh_plex_library()
+            info = bot._plex_cache_info()
+
+        self.assertEqual(info["last_error_kind"], "auth")
+        self.assertGreaterEqual(info["consecutive_failures"], 1)
+
+
+# ---------------------------------------------------------------------------
 # _movie_trackers_panel tests
 # ---------------------------------------------------------------------------
 

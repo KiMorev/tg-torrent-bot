@@ -39,6 +39,40 @@ _RESOLUTION_RANK: dict[str, int] = {
 }
 
 
+class PlexAPIError(Exception):
+    """Base class for all Plex API errors. Carries an *error_kind* string
+    for diagnostics classification (``"auth"``, ``"timeout"``, ``"network"``,
+    ``"xml"``, ``"http"``, ``"other"``).
+    """
+
+    error_kind: str = "other"
+
+    def __init__(self, message: str = "", error_kind: str | None = None) -> None:
+        super().__init__(message)
+        if error_kind is not None:
+            self.error_kind = error_kind
+
+
+class PlexAuthError(PlexAPIError):
+    """Plex returned HTTP 401 — token is invalid or revoked."""
+    error_kind = "auth"
+
+
+class PlexTimeoutError(PlexAPIError):
+    """Plex did not respond within the request timeout."""
+    error_kind = "timeout"
+
+
+class PlexConnectionError(PlexAPIError):
+    """Could not establish a connection to Plex (DNS, refused, network down)."""
+    error_kind = "network"
+
+
+class PlexParseError(PlexAPIError):
+    """Plex returned a body that could not be parsed as XML (often HTML error page)."""
+    error_kind = "xml"
+
+
 @dataclass
 class PlexMovie:
     title: str
@@ -115,9 +149,28 @@ class PlexClient:
 
     def _get(self, path: str, **params: Any) -> ElementTree.Element:
         url = f"{self._base}{path}"
-        resp = self._session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return ElementTree.fromstring(resp.content)
+        try:
+            resp = self._session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+        except requests.Timeout as exc:
+            raise PlexTimeoutError(f"Timeout connecting to {path}") from exc
+        except requests.ConnectionError as exc:
+            raise PlexConnectionError(f"Connection failed: {exc}") from exc
+        except requests.RequestException as exc:
+            raise PlexAPIError(f"Request failed: {exc}", error_kind="other") from exc
+
+        if resp.status_code == 401:
+            raise PlexAuthError("Invalid Plex token (HTTP 401)")
+        if not resp.ok:
+            raise PlexAPIError(
+                f"HTTP {resp.status_code} from {path}",
+                error_kind="http",
+            )
+
+        try:
+            return ElementTree.fromstring(resp.content)
+        except ElementTree.ParseError as exc:
+            # Plex returned non-XML (HTML error page, truncated body, etc.)
+            raise PlexParseError(f"Malformed response from {path}: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Public API
