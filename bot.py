@@ -89,6 +89,7 @@ from keyboards import (
     _search_results_keyboard,
     tracker_selection_label,
     _season_select_keyboard,
+    _season_back_to_picker_keyboard,
     SEARCH_PAGE_SIZE,
     SUB_CALLBACK_PREFIX,
     _task_callback,
@@ -3583,6 +3584,9 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # --- Step 1: season filter ---
     season_num = _extract_season_from_query(search_query)
     if season_num is not None:
+        # Snapshot pre-filter results so we can hint "which seasons DO exist on
+        # the tracker" when the requested season has zero matches.
+        pre_filter_results = list(results_data)
         filtered = _filter_by_season(results_data, season_num)
         if filtered:
             results_data = filtered
@@ -3596,6 +3600,21 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     reply_markup=_no_quality_keyboard(base_query),
                 )
                 return SEARCH_RESULTS
+
+            # If we ran this search inside the season picker (srch_base_title set)
+            # and the tracker has SOME seasons but not the one requested, list them
+            # and offer a way back to the picker.
+            available = _seasons_available_in_results(pre_filter_results)
+            in_picker_flow = bool(context.user_data.get("srch_base_title"))
+            if available and in_picker_flow:
+                seasons_str = ", ".join(str(n) for n in available)
+                await edit_fn(
+                    f"По запросу «{search_query}» ничего не найдено.\n"
+                    f"На трекерах найдены сезоны: {seasons_str}.",
+                    reply_markup=_season_back_to_picker_keyboard(),
+                )
+                return SEARCH_SEASON_SELECT
+
             await edit_fn(
                 f"По запросу «{search_query}» ничего не найдено.\n"
                 "Попробуйте другой запрос."
@@ -4050,6 +4069,31 @@ async def search_season_skip(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
     return await _execute_search(query, context, f"{base}{quality_suffix}".strip())
+
+
+async def search_season_back_to_picker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Return from a 0-results screen back to the season picker.
+
+    Triggered by '⬅️ К выбору сезона' shown when a specific-season search
+    failed but the tracker has other seasons. Rebuilds the same picker UI
+    from saved srch_base_title + srch_total_seasons.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    base = context.user_data.get("srch_base_title", "")
+    if not base:
+        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        return ConversationHandler.END
+
+    total_seasons = context.user_data.get("srch_total_seasons")
+    season_count_label = f" ({total_seasons} сез.)" if total_seasons else ""
+    quality_hint = _series_quality_hint(context.user_data.get("srch_picked_quality", ""))
+    await query.edit_message_text(
+        f"📺 Сериал: «{base}»{season_count_label}\n{quality_hint}Выберите сезон:",
+        reply_markup=_season_select_keyboard(total_seasons),
+    )
+    return SEARCH_SEASON_SELECT
 
 
 async def search_season_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -6770,6 +6814,7 @@ def main() -> None:
                     CallbackQueryHandler(search_season_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_skip$"),
                     CallbackQueryHandler(search_season_input_ask, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_input$"),
                     CallbackQueryHandler(search_season_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_back$"),
+                    CallbackQueryHandler(search_season_back_to_picker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_back_to_picker$"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, search_season_got_input),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                 ],

@@ -544,6 +544,19 @@ def _search_after_add_keyboard(task_id: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _season_back_to_picker_keyboard() -> InlineKeyboardMarkup:
+    """Shown after a season-specific search returned 0 hits but the tracker
+    has other seasons. Lets the user step back into the picker instead of
+    having to restart the whole flow."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "⬅️ К выбору сезона",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:season_back_to_picker",
+        )],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
 def _season_select_keyboard(total_seasons: int | None) -> InlineKeyboardMarkup:
     """Keyboard for choosing which season to search for.
 

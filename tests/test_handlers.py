@@ -1692,6 +1692,36 @@ class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Запрос потерян", text)
 
 
+class SearchSeasonBackToPickerHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for search_season_back_to_picker — '⬅️ К выбору сезона' on 0-results screen."""
+
+    async def test_returns_to_picker_with_saved_base_title_and_total(self):
+        from bot import search_season_back_to_picker, SEARCH_SEASON_SELECT
+        update = _make_callback_update(callback_data="srch:season_back_to_picker")
+        context = _make_context(user_data={
+            "srch_base_title": "Клиника",
+            "srch_total_seasons": 10,
+            "srch_picked_quality": "1080",
+        })
+        result = await search_season_back_to_picker(update, context)
+        self.assertEqual(result, SEARCH_SEASON_SELECT)
+        edit = update.callback_query.edit_message_text
+        edit.assert_awaited_once()
+        text = edit.call_args.args[0]
+        self.assertIn("«Клиника»", text)
+        self.assertIn("(10 сез.)", text)
+        # Quality hint included because srch_picked_quality is set
+        self.assertIn("1080p", text)
+
+    async def test_handles_lost_base_title_gracefully(self):
+        from bot import search_season_back_to_picker
+        from telegram.ext import ConversationHandler
+        update = _make_callback_update(callback_data="srch:season_back_to_picker")
+        context = _make_context(user_data={})
+        result = await search_season_back_to_picker(update, context)
+        self.assertEqual(result, ConversationHandler.END)
+
+
 # ---------------------------------------------------------------------------
 # _movie_trackers_panel tests
 # ---------------------------------------------------------------------------

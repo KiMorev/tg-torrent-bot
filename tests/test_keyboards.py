@@ -12,6 +12,7 @@ from keyboards import (
     _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
+    _season_back_to_picker_keyboard,
     _season_select_keyboard,
     _task_keyboard,
     _tasks_keyboard,
@@ -130,6 +131,12 @@ class SeasonSelectKeyboardTests(unittest.TestCase):
         buttons = self._buttons(_season_select_keyboard(total_seasons=4))
         self.assertEqual(buttons["✏️ Свой номер"], "srch:season_input")
         self.assertEqual(buttons["🔎 Без сезона"], "srch:season_skip")
+
+    def test_back_to_picker_keyboard_has_both_buttons(self) -> None:
+        """0-results recovery keyboard must offer both 'back to picker' and 'cancel'."""
+        buttons = self._buttons(_season_back_to_picker_keyboard())
+        self.assertEqual(buttons["⬅️ К выбору сезона"], "srch:season_back_to_picker")
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
 
 
 class AdminKpCacheKeyboardTests(unittest.TestCase):
