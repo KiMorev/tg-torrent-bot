@@ -26,6 +26,7 @@ class JsonStateStore:
         movie_discovery_cache_file: Path | None = None,
         movie_discovery_settings_file: Path | None = None,
         topic_subscriptions_file: Path | None = None,
+        task_meta_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -35,6 +36,7 @@ class JsonStateStore:
         self.movie_discovery_cache_file = movie_discovery_cache_file
         self.movie_discovery_settings_file = movie_discovery_settings_file
         self.topic_subscriptions_file = topic_subscriptions_file
+        self.task_meta_file = task_meta_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -184,6 +186,41 @@ class JsonStateStore:
             owners[task_id] = chat_id
             self.save_task_owners(owners)
 
+    def load_task_meta(self) -> dict[str, dict]:
+        """task_id → {kind, title, year, quality, series_query, season_num, source}.
+
+        Provides canonical metadata captured at task-creation time, so Plex
+        polling can match by (title, year) or (series_query, season_num) rather
+        than guessing from the raw DS task title.
+        """
+        if not self.task_meta_file:
+            return {}
+        payload = self.load_json_file(self.task_meta_file, {})
+        if not isinstance(payload, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for task_id, entry in payload.items():
+            if not task_id or not isinstance(entry, dict):
+                continue
+            out[str(task_id)] = entry
+        return out
+
+    def save_task_meta(self, meta: dict[str, dict]) -> None:
+        if not self.task_meta_file:
+            return
+        self.save_json_file(self.task_meta_file, dict(sorted(meta.items())), "task meta")
+
+    def remember_task_meta(self, task_id: str, entry: dict) -> None:
+        if not task_id or not isinstance(entry, dict) or not self.task_meta_file:
+            return
+
+        with self.lock:
+            meta = self.load_task_meta()
+            if meta.get(task_id) == entry:
+                return
+            meta[str(task_id)] = entry
+            self.save_task_meta(meta)
+
     def load_notified_tasks(self) -> dict[str, object]:
         payload = self.load_json_file(self.notified_tasks_file, {})
         if not isinstance(payload, dict):
@@ -278,6 +315,14 @@ class JsonStateStore:
                     auto_delete.pop(k)
                 self.save_auto_delete_tasks(auto_delete)
 
+            if self.task_meta_file:
+                meta = self.load_task_meta()
+                stale_meta = {k for k in meta if k not in active_ids}
+                if stale_meta:
+                    for k in stale_meta:
+                        meta.pop(k)
+                    self.save_task_meta(meta)
+
     def forget_task_state(self, task_ids: list[str]) -> None:
         task_ids = [task_id for task_id in task_ids if task_id]
         if not task_ids:
@@ -316,6 +361,16 @@ class JsonStateStore:
                     auto_delete_changed = True
             if auto_delete_changed:
                 self.save_auto_delete_tasks(auto_delete_tasks)
+
+            if self.task_meta_file:
+                meta = self.load_task_meta()
+                meta_changed = False
+                for task_id in task_id_set:
+                    if task_id in meta:
+                        meta.pop(task_id, None)
+                        meta_changed = True
+                if meta_changed:
+                    self.save_task_meta(meta)
 
     def load_topic_subscriptions(self) -> dict[str, dict]:
         """topic_id → {chat_id, title, last_episode_end, total_episodes, added_at}."""

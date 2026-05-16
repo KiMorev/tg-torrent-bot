@@ -15,6 +15,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         notified_tasks_file=d / "notified.json",
         auto_delete_tasks_file=d / "auto_delete.json",
         topic_subscriptions_file=d / "subscriptions.json",
+        task_meta_file=d / "task_meta.json",
     )
 
 
@@ -43,6 +44,7 @@ class StateStoreTests(unittest.TestCase):
         self.store.add_tracker_processed_ids({"tid1"})
         self.store.save_notified_tasks({"tid1": "finished"})
         self.store.save_auto_delete_tasks({"tid1": 1234.0})
+        self.store.remember_task_meta("tid1", {"kind": "movie", "title": "X"})
 
         self.store.forget_task_state(["tid1"])
 
@@ -50,6 +52,44 @@ class StateStoreTests(unittest.TestCase):
         self.assertNotIn("tid1", self.store.load_tracker_processed_ids())
         self.assertNotIn("tid1", self.store.load_notified_tasks())
         self.assertNotIn("tid1", self.store.load_auto_delete_tasks())
+        self.assertNotIn("tid1", self.store.load_task_meta())
+
+    def test_task_meta_roundtrip(self) -> None:
+        self.store.remember_task_meta("tid1", {
+            "kind": "series", "title": "Клиника", "year": 2001,
+            "quality": "1080", "series_query": "Клиника", "season_num": 3,
+            "source": "search",
+        })
+        self.store.remember_task_meta("tid2", {
+            "kind": "movie", "title": "Dune", "year": 2024,
+            "quality": "4k", "source": "magnet",
+        })
+        meta = self.store.load_task_meta()
+        self.assertEqual(meta["tid1"]["kind"], "series")
+        self.assertEqual(meta["tid1"]["season_num"], 3)
+        self.assertEqual(meta["tid2"]["kind"], "movie")
+        self.assertEqual(meta["tid2"]["year"], 2024)
+
+    def test_remember_task_meta_skips_duplicate_entries(self) -> None:
+        """Repeated remember_task_meta with the same entry should not rewrite the file."""
+        entry = {"kind": "movie", "title": "Dune", "year": 2024, "quality": "1080", "source": "search"}
+        self.store.remember_task_meta("tid1", entry)
+        with patch.object(self.store, "save_task_meta") as save_mock:
+            self.store.remember_task_meta("tid1", entry)
+        save_mock.assert_not_called()
+
+    def test_remember_task_meta_ignores_empty_inputs(self) -> None:
+        self.store.remember_task_meta("", {"kind": "movie"})  # empty task_id
+        self.store.remember_task_meta("tid", None)  # None entry
+        self.assertEqual(self.store.load_task_meta(), {})
+
+    def test_prune_stale_task_state_drops_stale_task_meta(self) -> None:
+        self.store.remember_task_meta("active1", {"kind": "movie", "title": "A"})
+        self.store.remember_task_meta("stale1", {"kind": "series", "title": "B"})
+        self.store.prune_stale_task_state({"active1"})
+        meta = self.store.load_task_meta()
+        self.assertIn("active1", meta)
+        self.assertNotIn("stale1", meta)
 
     def test_prune_stale_task_state_removes_only_inactive(self) -> None:
         self.store.remember_task_owner("active1", 1)

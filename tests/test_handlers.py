@@ -1652,6 +1652,88 @@ class SeriesHelpersTests(unittest.TestCase):
         self.assertEqual(_seasons_available_in_results(results), [])
 
 
+class BuildTaskMetaTests(unittest.TestCase):
+    """Tests for _build_task_meta_from_result and _build_task_meta_from_title."""
+
+    def test_movie_result_produces_movie_meta(self):
+        from bot import _build_task_meta_from_result
+        result = {
+            "movie_title": "Dune: Part Two",
+            "title": "Dune.Part.Two.2024.2160p.WEB-DL",
+            "year": 2024,
+            "quality": "2160p",
+        }
+        meta = _build_task_meta_from_result(result, source="search")
+        self.assertEqual(meta["kind"], "movie")
+        self.assertEqual(meta["title"], "Dune: Part Two")
+        self.assertEqual(meta["year"], 2024)
+        self.assertEqual(meta["quality"], "4k")
+        self.assertEqual(meta["source"], "search")
+        self.assertNotIn("series_query", meta)
+
+    def test_series_result_produces_series_meta(self):
+        from bot import _build_task_meta_from_result
+        result = {
+            "movie_title": "Клиника / Scrubs / Сезон: 3 / Серии 1-22",
+            "title": "Клиника / Scrubs / Сезон: 3 / Серии 1-22 [BDRip 1080p]",
+            "year": 2003,
+            "quality": "1080p",
+        }
+        meta = _build_task_meta_from_result(result, source="search")
+        self.assertEqual(meta["kind"], "series")
+        self.assertEqual(meta["series_query"], "Клиника")
+        self.assertEqual(meta["season_num"], 3)
+        self.assertEqual(meta["quality"], "1080")
+        self.assertEqual(meta["source"], "search")
+
+    def test_from_title_detects_movie_when_no_season_marker(self):
+        from bot import _build_task_meta_from_title
+        meta = _build_task_meta_from_title("Dune.Part.Two.2024.1080p", source="torrent_file")
+        self.assertEqual(meta["kind"], "movie")
+        self.assertEqual(meta["year"], 2024)
+        self.assertEqual(meta["quality"], "1080")
+        self.assertEqual(meta["source"], "torrent_file")
+
+    def test_from_title_detects_series_via_S01E01(self):
+        from bot import _build_task_meta_from_title
+        meta = _build_task_meta_from_title("Schitts.Creek.S03E05.1080p", source="magnet")
+        self.assertEqual(meta["kind"], "series")
+        # series_query falls back to the title itself when no slash structure exists
+        self.assertEqual(meta["quality"], "1080")
+        self.assertEqual(meta["source"], "magnet")
+
+    def test_from_title_handles_missing_year_quality_gracefully(self):
+        from bot import _build_task_meta_from_title
+        meta = _build_task_meta_from_title("RandomFile", source="torrent_file")
+        self.assertEqual(meta["kind"], "movie")
+        self.assertEqual(meta["year"], 0)
+        self.assertEqual(meta["quality"], "")
+
+
+class TaskMetaWrapperTests(unittest.TestCase):
+    """Tests for the bot.py wrappers around state_store task_meta methods."""
+
+    def test_get_task_meta_returns_none_for_unknown_id(self):
+        with patch("bot.state_store") as st:
+            st.load_task_meta.return_value = {}
+            from bot import _get_task_meta
+            self.assertIsNone(_get_task_meta("missing"))
+
+    def test_get_task_meta_returns_entry_when_present(self):
+        sample = {"tid1": {"kind": "movie", "title": "X"}}
+        with patch("bot.state_store") as st:
+            st.load_task_meta.return_value = sample
+            from bot import _get_task_meta
+            self.assertEqual(_get_task_meta("tid1"), {"kind": "movie", "title": "X"})
+
+    def test_remember_task_meta_skips_empty_inputs(self):
+        with patch("bot.state_store") as st:
+            from bot import _remember_task_meta
+            _remember_task_meta("", {"kind": "movie"})
+            _remember_task_meta("tid", None)
+        st.remember_task_meta.assert_not_called()
+
+
 class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tests for search_season_back — the '⬅️ Назад' button in the season picker."""
 

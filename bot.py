@@ -1887,7 +1887,10 @@ def _enrich_cards_with_plex(cards: list[dict]) -> None:
         card["plex_resolution"] = match.resolution if match else None
 
 
-_SERIES_RE = re.compile(r"[Ss]\d+[Ee]\d+|\d+x\d+|[Сс]езон\s*\d+", re.I)
+# Accepts "S01E02", "1x02", "Сезон 3", "Сезон: 3", "Сезон:3" — the colon-form is
+# the most common on Rutracker. Stays consistent with _extract_season_from_query
+# in formatters.py.
+_SERIES_RE = re.compile(r"[Ss]\d+[Ee]\d+|\d+x\d+|[Сс]езон[:\s]+\d+", re.I)
 
 
 def _plex_is_series(title: str) -> bool:
@@ -2147,6 +2150,102 @@ def _save_task_owners(owners: dict[str, int]) -> None:
 
 def _remember_task_owner(task_id: str, chat_id: int | None) -> None:
     state_store.remember_task_owner(task_id, chat_id)
+
+
+def _load_task_meta() -> dict[str, dict]:
+    return state_store.load_task_meta()
+
+
+def _save_task_meta(meta: dict[str, dict]) -> None:
+    state_store.save_task_meta(meta)
+
+
+def _get_task_meta(task_id: str) -> dict | None:
+    """Return canonical metadata captured at task creation, or None."""
+    if not task_id:
+        return None
+    return _load_task_meta().get(task_id)
+
+
+def _remember_task_meta(task_id: str, entry: dict | None) -> None:
+    """Persist canonical metadata for a DS task.
+
+    ``entry`` should be built via :func:`_build_task_meta_from_result` or
+    :func:`_build_task_meta_from_title`. Silently no-ops on falsy task_id /
+    entry so callers can pass through optional values.
+    """
+    if not task_id or not entry:
+        return
+    state_store.remember_task_meta(task_id, entry)
+
+
+def _build_task_meta_from_result(result: dict, source: str = "search") -> dict:
+    """Build canonical task metadata from a search result dict.
+
+    Uses ``movie_title`` (KP-normalised, when KP enrichment ran) or falls back
+    to the raw release ``title``. Detects whether the release is a TV series
+    via :func:`_plex_is_series` and extracts ``series_query``+``season_num``
+    when applicable. Quality is normalised via :func:`_plex_quality_from_result`.
+    """
+    raw_title = result.get("movie_title") or result.get("title") or ""
+    quality = _plex_quality_from_result(result)
+    try:
+        year = int(result.get("year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if not year:
+        year = _movie_extract_year(raw_title) or 0
+
+    if _plex_is_series(raw_title):
+        season_num = _extract_season_from_query(raw_title) or -1
+        series_query = _extract_series_base_query(raw_title) or ""
+        return {
+            "kind": "series",
+            "title": raw_title,
+            "year": year,
+            "quality": quality,
+            "series_query": series_query,
+            "season_num": season_num,
+            "source": source,
+        }
+    return {
+        "kind": "movie",
+        "title": raw_title,
+        "year": year,
+        "quality": quality,
+        "source": source,
+    }
+
+
+def _build_task_meta_from_title(title: str, *, source: str) -> dict:
+    """Build canonical task metadata from a plain title string.
+
+    Used by direct ``.torrent`` and magnet flows where the only signal is the
+    filename / ``dn=`` parameter. Detects series via :func:`_plex_is_series`
+    and falls back to ``_movie_extract_year`` for year detection.
+    """
+    quality = _plex_quality_from_title(title)
+    year = _movie_extract_year(title) or 0
+
+    if _plex_is_series(title):
+        season_num = _extract_season_from_query(title) or -1
+        series_query = _extract_series_base_query(title) or ""
+        return {
+            "kind": "series",
+            "title": title,
+            "year": year,
+            "quality": quality,
+            "series_query": series_query,
+            "season_num": season_num,
+            "source": source,
+        }
+    return {
+        "kind": "movie",
+        "title": title,
+        "year": year,
+        "quality": quality,
+        "source": source,
+    }
 
 
 def _load_notified_tasks() -> dict[str, object]:

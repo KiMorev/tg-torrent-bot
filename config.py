@@ -108,6 +108,7 @@ class AppSettings:
     auto_delete_finished_statuses: set[str]
     approved_chat_ids_file: Path
     task_owners_file: Path
+    task_meta_file: Path
     notified_tasks_file: Path
     auto_delete_tasks_file: Path
     magnet_poll_attempts: int
@@ -208,6 +209,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         auto_delete_finished_statuses=parse_statuses(env.get("AUTO_DELETE_FINISHED_STATUSES", "finished")),
         approved_chat_ids_file=Path(env.get("APPROVED_CHAT_IDS_FILE", str(state_dir / "approved_chat_ids.json"))),
         task_owners_file=Path(env.get("TASK_OWNERS_FILE", str(state_dir / "task_owners.json"))),
+        task_meta_file=Path(env.get("TASK_META_FILE", str(state_dir / "task_meta.json"))),
         notified_tasks_file=Path(env.get("NOTIFIED_TASKS_FILE", str(state_dir / "notified_tasks.json"))),
         auto_delete_tasks_file=Path(env.get("AUTO_DELETE_TASKS_FILE", str(state_dir / "auto_delete_tasks.json"))),
         magnet_poll_attempts=max(1, env_int(env, "MAGNET_POLL_ATTEMPTS", 8)),
