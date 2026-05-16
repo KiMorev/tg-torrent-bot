@@ -109,12 +109,16 @@ from jackett_subscriptions import (
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from plex import (
     PlexMovie,
+    PlexShow,
+    PlexSeason,
+    PlexSeriesCheckResult,
     PlexAPIError,
     PlexAuthError,
     PlexTimeoutError,
     PlexConnectionError,
     PlexParseError,
     check_before_download as _plex_check_before_download,
+    check_before_download_season as _plex_check_before_download_season,
     _normalise_resolution as _plex_normalise_resolution,
 )
 from movie_discovery import (
@@ -335,6 +339,12 @@ plex_client = app_context.plex_client
 _plex_library: dict[tuple[str, int], "PlexMovie"] = {}
 _plex_library_updated_at: float = 0.0
 _PLEX_CACHE_INTERVAL = 30 * 60  # seconds
+
+# In-memory Plex TV shows cache: (normalized_title, year) → PlexShow.
+# Shows are loaded with empty seasons{}; per-show season metadata is fetched
+# lazily on demand via _plex_ensure_show_seasons.
+_plex_shows_library: dict[tuple[str, int], "PlexShow"] = {}
+_plex_shows_updated_at: float = 0.0
 
 # Quiet hours: /new notifications are deferred outside [START, END) window (local display timezone)
 _NOTIFY_WINDOW_START_HOUR = 9   # 09:00 inclusive
@@ -1752,6 +1762,51 @@ def _plex_library_find(title: str, year: int) -> "PlexMovie | None":
     return None
 
 
+def _plex_show_find(series_query: str, year: int = 0) -> "PlexShow | None":
+    """Look up a TV show in the in-memory Plex shows cache.
+
+    Mirrors :func:`_plex_library_find` but for shows. When ``year > 0`` uses
+    ±1-year tolerance via direct dict lookup. When ``year == 0`` (unknown),
+    falls back to a linear scan by normalised title across all years —
+    necessary because for series the user often doesn't supply an air-year.
+    """
+    norm = _normalize_movie_title(series_query).lower()
+    if not norm:
+        return None
+    if year > 0:
+        for dy in (0, 1, -1):
+            hit = _plex_shows_library.get((norm, year + dy))
+            if hit is not None:
+                return hit
+        return None
+    # No year known — pick the first show matching by normalised title.
+    for (cached_title, _cached_year), show in _plex_shows_library.items():
+        if cached_title == norm:
+            return show
+    return None
+
+
+async def _plex_ensure_show_seasons(show: "PlexShow") -> dict[int, "PlexSeason"]:
+    """Lazily populate ``show.seasons`` via :meth:`PlexClient.get_show_seasons`.
+
+    First call hits the network (two HTTP requests per show: seasons +
+    episode files). Subsequent calls reuse the cached dict on the show
+    instance. Returns an empty dict on any failure.
+    """
+    if show.seasons:
+        return show.seasons
+    if plex_client is None:
+        return {}
+    try:
+        seasons = await asyncio.to_thread(plex_client.get_show_seasons, show.rating_key)
+    except Exception as exc:
+        logger.debug("Plex show seasons fetch failed for %r: %s", show.title, exc)
+        return {}
+    if seasons:
+        show.seasons = seasons
+    return seasons
+
+
 def _plex_cache_info() -> dict:
     """Return metadata dict for diagnostics, including health state."""
     import time, datetime
@@ -1761,7 +1816,9 @@ def _plex_cache_info() -> dict:
 
     return {
         "count": len(_plex_library),
+        "show_count": len(_plex_shows_library),
         "updated_at": _fmt(_plex_library_updated_at),
+        "shows_updated_at": _fmt(_plex_shows_updated_at),
         "last_error_kind": _plex_last_error_kind,
         "last_error_message": _plex_last_error_message,
         "last_error_at": _fmt(_plex_last_error_at),
@@ -1854,6 +1911,25 @@ async def _refresh_plex_library() -> None:
             except Exception as exc:
                 # Non-fatal — deep-link button won't appear until next successful fetch.
                 logger.debug("Failed to fetch Plex machine ID: %s", exc)
+
+        # Refresh TV shows cache. Non-fatal: a Plex instance without a 'show'
+        # section will simply return an empty list — keep the old cache intact
+        # only on hard failure, otherwise overwrite (even with []).
+        global _plex_shows_library, _plex_shows_updated_at
+        try:
+            shows = await asyncio.to_thread(plex_client.get_all_shows)
+        except Exception as exc:
+            # Don't touch the existing cache — show refresh failures shouldn't
+            # mask earlier successful state.
+            logger.debug("Plex shows refresh skipped: %s", exc)
+        else:
+            new_shows_cache: dict[tuple[str, int], PlexShow] = {}
+            for show in shows:
+                key = _plex_cache_key(show.title, show.year)
+                new_shows_cache[key] = show
+            _plex_shows_library = new_shows_cache
+            _plex_shows_updated_at = time.time()
+            logger.debug("Plex shows cache refreshed: %d shows", len(_plex_shows_library))
 
 
 async def _plex_cache_loop() -> None:

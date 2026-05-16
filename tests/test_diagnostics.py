@@ -270,6 +270,26 @@ class DiagnosticsTests(unittest.TestCase):
         text = format_diagnostics(report)
         self.assertIn("✅ 🎬 <b>Plex</b>: подключен", text)
 
+    def test_plex_ok_shows_show_count_alongside_movies(self) -> None:
+        """When the TV-shows cache is populated, /admin shows a 'Шоу: M' counter."""
+        from unittest.mock import MagicMock
+        plex = MagicMock()
+        plex.is_healthy.return_value = True
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc, plex_client=plex,
+            plex_cache_info={
+                "count": 100,
+                "show_count": 25,
+                "updated_at": "2026-05-15 12:00",
+                "consecutive_failures": 0,
+            },
+        )
+        text = format_diagnostics(report)
+        self.assertIn("Фильмов в библиотеке: 100", text)
+        self.assertIn("Шоу: 25", text)
+
 
 if __name__ == "__main__":
     unittest.main()

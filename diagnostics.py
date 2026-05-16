@@ -279,8 +279,14 @@ def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagno
         return ServiceDiagnostic("Plex", "error", _summary("error", "🎬", "Plex", "не отвечает"))
 
     details = []
+    show_count = info.get("show_count")
     if movie_count is not None:
-        details.append(f"   Фильмов в библиотеке: {movie_count}")
+        line = f"   Фильмов в библиотеке: {movie_count}"
+        if show_count:
+            line += f" · Шоу: {show_count}"
+        details.append(line)
+    elif show_count:
+        details.append(f"   Шоу в библиотеке: {show_count}")
     if updated_at:
         details.append(f"   Кэш обновлён: {updated_at}")
 

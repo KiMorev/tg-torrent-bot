@@ -1734,6 +1734,91 @@ class TaskMetaWrapperTests(unittest.TestCase):
         st.remember_task_meta.assert_not_called()
 
 
+class PlexShowFindTests(unittest.TestCase):
+    """Tests for _plex_show_find — TV show lookup in the in-memory Plex cache."""
+
+    def _make_show(self, title: str, year: int) -> "object":
+        from plex import PlexShow
+        return PlexShow(title=title, year=year, rating_key=str(year * 100), seasons={})
+
+    def test_finds_show_by_exact_title_and_year(self):
+        from bot import _plex_show_find
+        show = self._make_show("Schitt's Creek", 2015)
+        with patch.object(bot, "_plex_shows_library", {("schitt s creek", 2015): show}):
+            self.assertIs(_plex_show_find("Schitt's Creek", 2015), show)
+
+    def test_year_tolerance_plus_minus_one(self):
+        from bot import _plex_show_find
+        show = self._make_show("X", 2020)
+        with patch.object(bot, "_plex_shows_library", {("x", 2020): show}):
+            self.assertIs(_plex_show_find("X", 2021), show)
+            self.assertIs(_plex_show_find("X", 2019), show)
+            self.assertIsNone(_plex_show_find("X", 2025))
+
+    def test_zero_year_scans_by_title_across_all_years(self):
+        from bot import _plex_show_find
+        show = self._make_show("Test", 2010)
+        with patch.object(bot, "_plex_shows_library", {("test", 2010): show}):
+            self.assertIs(_plex_show_find("Test", 0), show)
+
+    def test_returns_none_when_no_match(self):
+        from bot import _plex_show_find
+        with patch.object(bot, "_plex_shows_library", {}):
+            self.assertIsNone(_plex_show_find("Unknown Show", 0))
+
+
+class PlexEnsureShowSeasonsTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for _plex_ensure_show_seasons — lazy season loading."""
+
+    async def test_returns_cached_seasons_without_api_call(self):
+        from bot import _plex_ensure_show_seasons
+        from plex import PlexShow, PlexSeason
+        cached = {1: PlexSeason("k1", 1, 10, [], "1080")}
+        show = PlexShow(title="X", year=2020, rating_key="100", seasons=cached)
+        # plex_client.get_show_seasons must NOT be called when seasons are cached.
+        fake_client = MagicMock()
+        with patch.object(bot, "plex_client", fake_client):
+            result = await _plex_ensure_show_seasons(show)
+        self.assertIs(result, cached)
+        fake_client.get_show_seasons.assert_not_called()
+
+    async def test_fetches_seasons_when_show_seasons_empty(self):
+        from bot import _plex_ensure_show_seasons
+        from plex import PlexShow, PlexSeason
+        new_seasons = {1: PlexSeason("k1", 1, 8, [], "720")}
+        show = PlexShow(title="X", year=2020, rating_key="100", seasons={})
+        fake_client = MagicMock()
+        fake_client.get_show_seasons = MagicMock(return_value=new_seasons)
+        with patch.object(bot, "plex_client", fake_client):
+            result = await _plex_ensure_show_seasons(show)
+        self.assertEqual(result, new_seasons)
+        # And the result was cached on the show
+        self.assertEqual(show.seasons, new_seasons)
+
+    async def test_returns_empty_dict_on_api_failure(self):
+        from bot import _plex_ensure_show_seasons
+        from plex import PlexShow
+        show = PlexShow(title="X", year=2020, rating_key="100", seasons={})
+        fake_client = MagicMock()
+        fake_client.get_show_seasons = MagicMock(side_effect=Exception("boom"))
+        with patch.object(bot, "plex_client", fake_client):
+            result = await _plex_ensure_show_seasons(show)
+        self.assertEqual(result, {})
+
+
+class PlexCacheInfoIncludesShowsTests(unittest.TestCase):
+    def test_show_count_and_shows_updated_at_present(self):
+        from plex import PlexShow
+        from bot import _plex_cache_info
+        with (
+            patch.object(bot, "_plex_shows_library", {("x", 2020): PlexShow("X", 2020, "1", {})}),
+            patch.object(bot, "_plex_shows_updated_at", 1700000000.0),
+        ):
+            info = _plex_cache_info()
+        self.assertEqual(info["show_count"], 1)
+        self.assertTrue(info["shows_updated_at"])  # non-empty formatted timestamp
+
+
 class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tests for search_season_back — the '⬅️ Назад' button in the season picker."""
 
