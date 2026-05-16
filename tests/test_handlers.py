@@ -1360,7 +1360,8 @@ class PlexPollingTests(unittest.TestCase):
         call_kwargs = fake_app.bot.send_message.call_args.kwargs
         self.assertEqual(call_kwargs["chat_id"], 100)
         self.assertIn("✅", call_kwargs["text"])
-        self.assertIn("Dune.2021.1080p", call_kwargs["text"])
+        # The notification now uses the canonical Plex title, not the raw torrent name.
+        self.assertIn("Dune", call_kwargs["text"])
 
     def test_poll_after_finish_sends_timeout_notification_when_not_found(self):
         """Polling should send a timeout-notification when exhausted without finding the movie."""
@@ -1456,6 +1457,94 @@ class PlexPollingTests(unittest.TestCase):
         # Timeout notification should also be sent
         fake_app.bot.send_message.assert_awaited_once()
         self.assertIn("⚠️", fake_app.bot.send_message.call_args.kwargs["text"])
+
+    def test_poll_after_finish_uses_meta_canonical_lookup_for_movie(self):
+        """When meta is provided for a movie, poll must use _plex_library_find first
+        instead of _plex_find_by_ds_title."""
+        movie = self._make_plex_movie("Dune: Part Two", 2024, [])
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        # Substring match would fail (file_paths empty), but meta-based lookup hits.
+        meta = {"kind": "movie", "title": "Dune: Part Two", "year": 2024, "quality": "1080"}
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_library_find", return_value=movie),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_plex_machine_id", "abc"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Dune.Part.Two.2024.1080p", [100],
+                meta=meta, max_attempts=1, interval_seconds=0,
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        text = fake_app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("Dune: Part Two", text)
+
+    def test_poll_after_finish_uses_meta_for_series(self):
+        """For meta.kind=='series' poll must look up the show and find the season."""
+        from plex import PlexShow, PlexSeason
+        season = PlexSeason("season-key-77", 3, episode_count=10, file_paths=[], resolution="1080")
+        show = PlexShow("Клиника", 2001, "show-key-99", seasons={3: season})
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        meta = {"kind": "series", "title": "Klinika S03", "year": 0,
+                "quality": "1080", "series_query": "Клиника", "season_num": 3}
+
+        async def fake_ensure(show_arg):
+            return show_arg.seasons
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_show_find", return_value=show),
+            patch.object(bot, "_plex_ensure_show_seasons", AsyncMock(side_effect=fake_ensure)),
+            patch.object(bot, "_plex_machine_id", "machine-1"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Клиника / Сезон: 3", [100],
+                meta=meta, max_attempts=1, interval_seconds=0,
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        kwargs = fake_app.bot.send_message.call_args.kwargs
+        self.assertIn("Сезон 3", kwargs["text"])
+        self.assertIn("Клиника", kwargs["text"])
+        # Deep-link uses season's rating_key and metadataType=3
+        keyboard = kwargs["reply_markup"]
+        btn = keyboard.inline_keyboard[0][0]
+        self.assertIn("season-key-77", btn.url)
+        self.assertIn("metadataType=3", btn.url)
+
+    def test_poll_after_finish_series_without_meta_falls_back_via_legacy_path(self):
+        """A legacy task (no meta) whose DS title looks like a series should still
+        try the series path by reconstructing meta from the title."""
+        from plex import PlexShow, PlexSeason
+        season = PlexSeason("sk2", 4, 10, [], "720")
+        show = PlexShow("Show X", 2018, "show2", seasons={4: season})
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        async def fake_ensure(show_arg):
+            return show_arg.seasons
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_show_find", return_value=show),
+            patch.object(bot, "_plex_ensure_show_seasons", AsyncMock(side_effect=fake_ensure)),
+            patch.object(bot, "_plex_machine_id", "m1"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "legacy_task", "Show.X / Сезон: 4", [100],
+                meta=None, max_attempts=1, interval_seconds=0,
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        text = fake_app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("Сезон 4", text)
 
     def test_poll_after_finish_persists_plex_done_marker(self):
         """After polling completes, plex_done must be saved so restart doesn't re-poll."""

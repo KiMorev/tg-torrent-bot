@@ -2080,12 +2080,78 @@ def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
     return None
 
 
+async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[object, str, str]:
+    """Attempt to locate the just-finished task in the Plex library.
+
+    Returns a tuple ``(target, metadata_type, found_title)``:
+      • ``target`` — the matched PlexMovie or PlexSeason (has ``.rating_key``), or None.
+      • ``metadata_type`` — Plex API content type for the deep link
+        (``"1"`` for movie, ``"3"`` for season).
+      • ``found_title`` — human-readable label for the notification text
+        (movie title or 'Сезон N «Show»').
+
+    Match strategy:
+      • If ``meta`` says ``kind=="series"`` — look up the show, ensure its
+        seasons are cached, return ``seasons[meta["season_num"]]``.
+      • If ``meta`` says ``kind=="movie"`` — try canonical title+year lookup
+        first, then fall back to ``_plex_find_by_ds_title`` substring match.
+      • If ``meta`` is None — legacy path: substring match by ``task_title``,
+        then fall back to extracted title+year.
+    """
+    found_title = task_title
+
+    if meta and meta.get("kind") == "series":
+        series_query = str(meta.get("series_query") or "").strip()
+        try:
+            season_num = int(meta.get("season_num") or -1)
+        except (TypeError, ValueError):
+            season_num = -1
+        if series_query and season_num > 0:
+            show = _plex_show_find(series_query, int(meta.get("year") or 0))
+            if show is not None:
+                seasons = await _plex_ensure_show_seasons(show)
+                season = seasons.get(season_num)
+                if season is not None:
+                    found_title = f"Сезон {season_num} «{show.title or series_query}»"
+                    return season, "3", found_title
+        # Series meta is present but couldn't find a match — no fallback to movies.
+        return None, "1", found_title
+
+    # Movie path — either explicit kind="movie" or legacy (meta is None).
+    if meta:
+        canonical_title = str(meta.get("title") or "").strip()
+        year = int(meta.get("year") or 0)
+        if canonical_title:
+            hit = _plex_library_find(canonical_title, year)
+            if hit is not None:
+                return hit, "1", hit.title or canonical_title
+
+    # Substring match against file paths (handles the case where the bot's meta is
+    # missing or the title doesn't match Plex's canonical naming).
+    hit = _plex_find_by_ds_title(task_title)
+    if hit is not None:
+        return hit, "1", hit.title or task_title
+
+    # Last-ditch: try to extract title+year from the raw DS task title
+    # (covers legacy tasks created before task_meta was introduced).
+    year = _movie_extract_year(task_title) or 0
+    fallback_title = re.sub(r"[_.]+", " ", task_title)
+    fallback_title = re.sub(r"\s{2,}", " ", fallback_title).strip()
+    if fallback_title:
+        hit = _plex_library_find(fallback_title, year)
+        if hit is not None:
+            return hit, "1", hit.title or task_title
+
+    return None, "1", found_title
+
+
 async def _plex_poll_after_finish(
     app: "Application",
     task_id: str,
     task_title: str,
     chat_ids: list[int],
     *,
+    meta: dict | None = None,
     hint_msg_ids: dict[int, int] | None = None,
     max_attempts: int = 20,
     interval_seconds: float = 30.0,
@@ -2096,6 +2162,12 @@ async def _plex_poll_after_finish(
     Sends a NEW message (not edit) so iOS users get a push notification.
     When done (found or timeout), deletes the hint messages sent earlier so the
     chat doesn't accumulate stale «indexing…» banners.
+
+    When *meta* (from ``_get_task_meta``) is provided, it routes the lookup:
+      • ``kind="series"`` → builds a season deep link (metadataType=3).
+      • ``kind="movie"`` → canonical (title, year) lookup with substring fallback.
+      • ``None`` → legacy substring path, with a best-effort series-detection
+        fallback so old tasks without meta still get a chance.
     """
     async def _delete_hint_messages() -> None:
         for cid, mid in (hint_msg_ids or {}).items():
@@ -2104,11 +2176,17 @@ async def _plex_poll_after_finish(
             except Exception:
                 pass
 
-    logger.info("Plex polling started task_id=%s title=%r chat_ids=%s", task_id, task_title, chat_ids)
+    # Backfill meta from the task title for legacy tasks that pre-date task_meta.json.
+    if meta is None and _plex_is_series(task_title):
+        meta = _build_task_meta_from_title(task_title, source="legacy_ds")
+
+    logger.info(
+        "Plex polling started task_id=%s title=%r kind=%s chat_ids=%s",
+        task_id, task_title, (meta or {}).get("kind", "movie"), chat_ids,
+    )
     # Track whether at least one refresh succeeded so we can distinguish
     # "movie genuinely not in Plex" from "Plex was unreachable the whole time".
     refresh_succeeded_at_least_once = False
-    initial_failure_count = _plex_consecutive_failures
     try:
         for attempt in range(max_attempts):
             if attempt > 0:
@@ -2116,31 +2194,22 @@ async def _plex_poll_after_finish(
 
             # Refresh Plex library, then look for the file
             await _refresh_plex_library()
-            # Heuristic: if the global failure counter dropped or stayed at 0,
-            # this refresh succeeded. (We compare against initial baseline so
-            # other tasks' refreshes don't muddle the signal.)
+            # Heuristic: if the global failure counter is at 0,
+            # this refresh succeeded.
             if _plex_consecutive_failures == 0:
                 refresh_succeeded_at_least_once = True
-            plex_movie = _plex_find_by_ds_title(task_title)
-            if plex_movie is None:
-                # Fallback: Plex agent (TMDb/TVDb) may have renamed the file, or the
-                # metadata is indexed but file_paths is still empty. Try matching by
-                # extracted title+year against the same library that pre-check uses.
-                year = _movie_extract_year(task_title) or 0
-                fallback_title = re.sub(r"[_.]+", " ", task_title)
-                fallback_title = re.sub(r"\s{2,}", " ", fallback_title).strip()
-                if fallback_title:
-                    plex_movie = _plex_library_find(fallback_title, year)
+            target, metadata_type, found_title = await _plex_poll_lookup_target(task_title, meta)
 
-            if plex_movie is not None:
+            if target is not None:
                 # Build deep link
                 machine_id = _plex_machine_id
+                rating_key = getattr(target, "rating_key", "")
                 deep_link = (
-                    f"plex://preplay/?metadataKey=/library/metadata/{plex_movie.rating_key}"
-                    f"&metadataType=1&server={machine_id}"
-                ) if machine_id and plex_movie.rating_key else ""
+                    f"plex://preplay/?metadataKey=/library/metadata/{rating_key}"
+                    f"&metadataType={metadata_type}&server={machine_id}"
+                ) if machine_id and rating_key else ""
 
-                text = f"✅ <b>{html_module.escape(task_title)}</b> добавлен в Plex."
+                text = f"✅ <b>{html_module.escape(found_title)}</b> добавлен в Plex."
                 keyboard = (
                     InlineKeyboardMarkup([[
                         InlineKeyboardButton("▶️ Смотреть в Plex (iOS)", url=deep_link)
@@ -2161,7 +2230,7 @@ async def _plex_poll_after_finish(
                             "Plex poll: failed to send found-notification chat_id=%s", cid, exc_info=True
                         )
                 logger.info(
-                    "Plex polling: found %r after %d attempt(s)", task_title, attempt + 1
+                    "Plex polling: found %r after %d attempt(s)", found_title, attempt + 1
                 )
                 return
 
@@ -2764,11 +2833,12 @@ async def _run_task_notifications_once(app: Application) -> None:
         # `task_id not in _PLEX_POLLING_TASKS` and spawn duplicate polling tasks.
         # The check-and-reserve here runs synchronously (no awaits between them),
         # so it's safe under cooperative concurrency.
+        # Series no longer blocked here — _plex_poll_after_finish branches on
+        # task_meta and handles both kinds.
         plex_should_poll = (
             PLEX_ENABLED
             and status == "finished"
             and task_id not in _PLEX_POLLING_TASKS
-            and not _plex_is_series(task.get("title") or "")
             and not _plex_poll_is_done(task_id, notified)
         )
         if plex_should_poll:
@@ -2826,12 +2896,14 @@ async def _run_task_notifications_once(app: Application) -> None:
 
         # Start Plex polling after sending notifications so hint_msg_ids are available.
         if plex_should_poll:
+            task_meta = _get_task_meta(task_id)
             _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
                 _plex_poll_after_finish(
                     app,
                     task_id,
                     task.get("title") or "",
                     sorted(recipients),
+                    meta=task_meta,
                     hint_msg_ids=plex_hint_msgs,
                 )
             )
