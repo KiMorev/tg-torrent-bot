@@ -1730,8 +1730,18 @@ def _plex_cache_key(title: str, year: int) -> tuple[str, int]:
 
 
 def _plex_library_find(title: str, year: int) -> "PlexMovie | None":
-    """Look up a movie in the in-memory Plex cache with ±1 year tolerance."""
+    """Look up a movie in the in-memory Plex cache with ±1 year tolerance.
+
+    For ``year=0`` (unknown year, e.g. when extraction failed) we look up ONLY
+    the bucket ``year=0`` rather than spreading the search across years -1, 0, 1,
+    because that would silently match any movie whose Plex year is also missing.
+    """
     norm = _normalize_movie_title(title).lower()
+    if not norm:
+        return None
+    if year == 0:
+        # Unknown year: only consider entries that are also year=0 in Plex.
+        return _plex_library.get((norm, 0))
     for dy in (0, 1, -1):
         hit = _plex_library.get((norm, year + dy))
         if hit is not None:
@@ -1903,10 +1913,16 @@ def _plex_pre_check(title: str, year: int, requested_quality: str) -> "PlexCheck
     - The Plex library cache is empty (not yet loaded)
     - The title looks like a TV series
     - The movie is not found in the Plex cache
+    - The requested quality couldn't be determined (we cannot compare → no warning)
     """
     if not PLEX_ENABLED or not _plex_library:
         return None
     if _plex_is_series(title):
+        return None
+    if not requested_quality:
+        # Without a known target quality we cannot decide between same/better/upgrade.
+        # Silently skip the pre-check so the user isn't shown a misleading
+        # "same quality" warning based on the unknown-vs-unknown comparison.
         return None
     match = _plex_library_find(title, year)
     if match is None:
@@ -4466,6 +4482,11 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
 
+    # If a Plex confirm dialog was pending when the conversation expired, also
+    # discard its temp .torrent file so it doesn't sit in TMP_DIR until the next
+    # bot restart. (No-op for magnet/search variants — they have no temp_path.)
+    _cleanup_plex_pending(context.user_data.pop("plex_pending", None))
+
     for key in (
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
         "srch_picked", "srch_kp_info", "srch_results_page",
@@ -4477,6 +4498,23 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data.pop(key, None)
 
     return ConversationHandler.END
+
+
+def _cleanup_plex_pending(pending: object) -> None:
+    """Delete the temp .torrent file associated with an abandoned plex_pending entry.
+
+    plex_pending dicts for type='torrent' carry a temp_path. For other types
+    (magnet, search) there's nothing to clean up.
+    """
+    if not isinstance(pending, dict):
+        return
+    temp_path_str = pending.get("temp_path")
+    if not temp_path_str:
+        return
+    try:
+        Path(temp_path_str).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to remove abandoned plex_pending temp file %s", temp_path_str, exc_info=True)
 
 
 async def search_jackett_check_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -6356,6 +6394,11 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     text = (update.message.text or "").strip()
+
+    # If a Plex confirm dialog is still pending from a previous interaction and
+    # the user moved on (sent a new search/magnet/link), clean up the abandoned
+    # temp .torrent file before processing the new request.
+    _cleanup_plex_pending(context.user_data.pop("plex_pending", None))
 
     # 1. Magnet link — handle immediately, don't start a search conversation.
     magnet_uri = _find_magnet(text)

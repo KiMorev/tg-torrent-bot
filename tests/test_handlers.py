@@ -1478,6 +1478,59 @@ class PlexPollingTests(unittest.TestCase):
         self.assertIn("task1", saved)
         self.assertTrue(saved["task1"].get("plex_done"))
 
+    def test_cleanup_plex_pending_removes_temp_file(self):
+        """_cleanup_plex_pending must delete the temp .torrent if present."""
+        import tempfile
+        from bot import _cleanup_plex_pending
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".torrent") as f:
+            f.write(b"d8:announce")
+            tmp_path = f.name
+        # Sanity: file exists
+        self.assertTrue(Path(tmp_path).exists())
+
+        _cleanup_plex_pending({"type": "torrent", "temp_path": tmp_path})
+        self.assertFalse(Path(tmp_path).exists())
+
+    def test_cleanup_plex_pending_handles_missing_file(self):
+        """Must not raise if temp file already gone (e.g. consumed by confirm)."""
+        from bot import _cleanup_plex_pending
+        _cleanup_plex_pending({"type": "torrent", "temp_path": "/nonexistent/path/x.torrent"})
+        # No exception = pass
+
+    def test_cleanup_plex_pending_ignores_non_torrent_types(self):
+        """For magnet/search type entries (no temp_path) it must be a no-op."""
+        from bot import _cleanup_plex_pending
+        _cleanup_plex_pending({"type": "magnet", "magnet_uri": "magnet:?xt=..."})
+        _cleanup_plex_pending({"type": "search", "index": 0, "subscribe": False})
+        _cleanup_plex_pending(None)
+        # No exception = pass
+
+    def test_plex_pre_check_skipped_when_quality_unknown(self):
+        """If requested_quality is empty, pre-check must return None instead of
+        showing a misleading 'same quality' warning."""
+        movie = MagicMock()
+        movie.resolution = "1080"
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_library", {("dune", 2021): movie}),
+            patch.object(bot, "_plex_library_find", return_value=movie),
+        ):
+            result = bot._plex_pre_check("Dune", 2021, "")
+        self.assertIsNone(result)
+
+    def test_plex_library_find_year_zero_restricts_lookup(self):
+        """When year=0 (unknown), do not spread the ±1 search into years -1/0/1
+        to avoid false matches against movies with no year metadata."""
+        movie_zero = MagicMock()
+        movie_one = MagicMock()
+        library = {("foo", 0): movie_zero, ("foo", 1): movie_one}
+        with patch.object(bot, "_plex_library", library):
+            # year=0 must only return year=0 entry, NOT year=1
+            self.assertIs(bot._plex_library_find("foo", 0), movie_zero)
+            # year=1 still uses ±1 tolerance
+            self.assertIs(bot._plex_library_find("foo", 1), movie_one)
+
     def test_plex_poll_is_done_blocks_restart_after_reboot(self):
         """plex_poll_is_done() must return True when the persisted marker is present,
         preventing a second poll from starting after a bot restart."""
