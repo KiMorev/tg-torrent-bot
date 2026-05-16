@@ -955,6 +955,98 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(settings["movie_notify_last_run_at"], "2026-05-14 12:00")
 
 
+class RestoreFirstSeenFromPreviousTests(unittest.TestCase):
+    """Tests for _restore_first_seen_from_previous — keeps the original first_seen_at
+    when a card already existed in the previous cache, even if its key changed
+    because KP enrichment status flipped between refreshes."""
+
+    def test_matches_by_exact_key(self):
+        from bot import _restore_first_seen_from_previous
+        previous = [{
+            "key": "kp:777", "title": "Dune", "year": 2024,
+            "first_seen_at": "2026-05-01 10:00",
+        }]
+        new_cards = [{
+            "key": "kp:777", "title": "Dune", "year": 2024,
+            "first_seen_at": "2026-05-15 12:00",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-01 10:00")
+
+    def test_matches_by_title_year_when_key_flips_kp_resolved(self):
+        """Real-world regression: card was keyed 'movie_key(...)' last refresh
+        (KP not yet resolved), now keyed 'kp:N' because KP came back. Must still
+        recognise it's the same film and preserve first_seen_at."""
+        from bot import _restore_first_seen_from_previous
+        previous = [{
+            "key": "2026:project hail mary",   # was: movie_key("Project Hail Mary", 2026)
+            "title": "Project Hail Mary",
+            "year": 2026,
+            "first_seen_at": "2026-05-01 10:00",
+        }]
+        new_cards = [{
+            "key": "kp:12345",                  # now KP-enriched
+            "title": "Project Hail Mary",
+            "year": 2026,
+            "first_seen_at": "2026-05-15 18:05",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-01 10:00")
+
+    def test_matches_by_title_year_when_kp_lost(self):
+        """Reverse direction: previously KP-resolved, now KP cache missed."""
+        from bot import _restore_first_seen_from_previous
+        previous = [{
+            "key": "kp:777",
+            "title": "Dune: Part Two", "year": 2024,
+            "first_seen_at": "2026-04-01 10:00",
+        }]
+        new_cards = [{
+            "key": "2024:dune part two",
+            "title": "Dune: Part Two", "year": 2024,
+            "first_seen_at": "2026-05-15 12:00",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-04-01 10:00")
+
+    def test_keeps_now_when_film_is_actually_new(self):
+        """A genuinely new film (not in previous cache) must keep its now_text stamp."""
+        from bot import _restore_first_seen_from_previous
+        previous = [{
+            "key": "kp:111", "title": "Old Film", "year": 2020,
+            "first_seen_at": "2026-04-01 10:00",
+        }]
+        new_cards = [{
+            "key": "kp:999", "title": "Brand New", "year": 2026,
+            "first_seen_at": "2026-05-15 12:00",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-15 12:00")
+
+    def test_picks_earliest_when_duplicate_title_year_in_previous(self):
+        """If two previous cards collide on (title, year) we keep the older stamp."""
+        from bot import _restore_first_seen_from_previous
+        previous = [
+            {"key": "k1", "title": "Foo", "year": 2024, "first_seen_at": "2026-05-10 10:00"},
+            {"key": "k2", "title": "Foo", "year": 2024, "first_seen_at": "2026-04-01 10:00"},
+        ]
+        new_cards = [{
+            "key": "kp:999", "title": "Foo", "year": 2024,
+            "first_seen_at": "2026-05-15 12:00",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-04-01 10:00")
+
+    def test_handles_empty_previous(self):
+        from bot import _restore_first_seen_from_previous
+        new_cards = [{
+            "key": "k1", "title": "X", "year": 2020,
+            "first_seen_at": "2026-05-15 12:00",
+        }]
+        _restore_first_seen_from_previous(new_cards, [])
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-15 12:00")
+
+
 class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
     """Tests for time-window logic: deferred/pending notifications and flush."""
 

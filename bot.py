@@ -129,6 +129,7 @@ from movie_discovery import (
     evaluate_result as _movie_evaluate_result,
     extract_year as _movie_extract_year,
     is_recent_published_at as _movie_is_recent_published_at,
+    movie_key as _movie_card_key,
     normalize_movie_title as _normalize_movie_title,
     parse_published_at as _movie_parse_published_at,
     parse_qualities as _movie_parse_qualities,
@@ -1259,6 +1260,65 @@ def _format_movie_discovery_cache(cache: dict) -> str:
     return "\n".join(lines)
 
 
+def _restore_first_seen_from_previous(
+    new_cards: list[dict],
+    previous_cards: list[dict],
+) -> None:
+    """Carry forward the ``first_seen_at`` timestamp for cards that already existed.
+
+    build_cards always stamps ``first_seen_at=now`` for every card it constructs,
+    so without this restoration step every bot restart would make all top-10 films
+    look brand new to the push-notification logic.
+
+    Lookup uses two indexes:
+      1. **By card key** (primary). Exact match — fast and unambiguous.
+      2. **By (normalised title, year)** (fallback). Needed because the card's key
+         flips between refreshes when KP enrichment status changes:
+            was:  ``movie_key("project hail mary", 2026)``   (KP not resolved yet)
+            now:  ``"kp:12345"``                             (KP resolved this run)
+         Without the title+year fallback, the same logical film would be treated
+         as a brand-new card and trigger an unwanted /new notification.
+
+    If multiple previous cards collide on the same (title, year) bucket we keep the
+    earliest timestamp — that's the true first sighting of the film.
+
+    Mutates ``new_cards`` in place; no return value.
+    """
+    prev_by_key: dict[str, str] = {}
+    prev_by_title: dict[str, str] = {}
+    for c in previous_cards:
+        seen_at = str(c.get("first_seen_at") or "")
+        if not seen_at:
+            continue
+        if c.get("key"):
+            prev_by_key[c["key"]] = seen_at
+        title = str(c.get("title") or "")
+        year = c.get("year") or 0
+        if title and year:
+            try:
+                title_key = _movie_card_key(title, int(year))
+            except (TypeError, ValueError):
+                continue
+            existing = prev_by_title.get(title_key)
+            if existing is None or seen_at < existing:
+                prev_by_title[title_key] = seen_at
+
+    for card in new_cards:
+        # Try exact-key match first.
+        old_ts = prev_by_key.get(card.get("key") or "")
+        # Fallback: same logical film keyed differently because KP enrichment flipped.
+        if not old_ts:
+            title = str(card.get("title") or "")
+            year = card.get("year") or 0
+            if title and year:
+                try:
+                    old_ts = prev_by_title.get(_movie_card_key(title, int(year)))
+                except (TypeError, ValueError):
+                    old_ts = None
+        if old_ts:
+            card["first_seen_at"] = old_ts
+
+
 async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
@@ -1392,17 +1452,11 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         max_stale_refresh=max_stale_kp_refresh,
     )
     # Restore first_seen_at from the previous cache for cards that already existed.
-    # build_cards always stamps first_seen_at=now, so without this patch every bot restart
-    # would make all existing top-10 films look "new" to the push-notification logic.
-    prev_first_seen: dict[str, str] = {
-        c["key"]: str(c["first_seen_at"])
-        for c in (previous.get("cards") or [])
-        if c.get("key") and c.get("first_seen_at")
-    }
-    for card in cache.get("cards") or []:
-        old_ts = prev_first_seen.get(card.get("key") or "")
-        if old_ts:
-            card["first_seen_at"] = old_ts
+    # See _restore_first_seen_from_previous for full rationale.
+    _restore_first_seen_from_previous(
+        cache.get("cards") or [],
+        previous.get("cards") or [],
+    )
     _enrich_cards_with_plex(cache.get("cards") or [])
     cache["all_releases"] = all_releases
 
