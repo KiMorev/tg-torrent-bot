@@ -1363,6 +1363,91 @@ class PlexUnmatchedFormattingTests(unittest.TestCase):
         self.assertIn("🎬", text_movies_only)
 
 
+class FormatUnmatchedListTests(unittest.TestCase):
+    """Tests for _format_unmatched_list (admin /admin → 📋 Несматчено screen)."""
+
+    def _make_movie(self, filename: str) -> "object":
+        from plex import PlexMovie
+        return PlexMovie(title="", year=0, rating_key="r", resolution="",
+                         added_at=0, file_paths=[f"/movies/{filename}"], guid="local://r")
+
+    def test_empty_list_shows_clean_confirmation(self):
+        from bot import _format_unmatched_list
+        text = _format_unmatched_list([], [])
+        self.assertIn("Все файлы Plex успешно сматчены", text)
+
+    def test_truncates_to_25_with_overflow_count(self):
+        from bot import _format_unmatched_list
+        movies = [self._make_movie(f"file{i}.mkv") for i in range(30)]
+        text = _format_unmatched_list(movies, [])
+        # Last item that fits
+        self.assertIn("file24.mkv", text)
+        self.assertIn("ещё 5", text)
+        # The 26th+ should not appear inline
+        self.assertNotIn("file25.mkv", text)
+
+
+class AdminPlexUnmatchedCallbackTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for admin:plex_unmatched and admin:plex_unmatched_toggle callbacks."""
+
+    async def test_toggle_flips_state_and_renders_panel(self):
+        from bot import admin_callback
+        update = _make_callback_update(chat_id=300, callback_data="admin:plex_unmatched_toggle")
+        context = _make_context()
+
+        store: dict = {"plex_unmatched_notify_enabled": False}
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {300}),
+            patch.object(bot, "_build_admin_panel_text", AsyncMock(return_value="panel")),
+            patch.object(bot, "_get_plex_unmatched_counts", return_value={"movies": 0, "shows": 0, "total": 0}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            st.load_approved_chat_ids.return_value = set()
+            await admin_callback(update, context)
+
+        # State flipped
+        self.assertTrue(store["plex_unmatched_notify_enabled"])
+        # Pop-up text confirms — admin_callback already calls answer() at entry,
+        # then our handler calls answer("…notification enabled…") again.
+        self.assertGreaterEqual(update.callback_query.answer.call_count, 1)
+        confirmations = [
+            call.args[0] for call in update.callback_query.answer.call_args_list
+            if call.args and "Уведомления" in call.args[0]
+        ]
+        self.assertEqual(len(confirmations), 1, f"expected one toggle-confirmation answer; got {confirmations}")
+        # Panel re-rendered
+        update.callback_query.edit_message_text.assert_called()
+
+    async def test_unmatched_list_screen_shows_files(self):
+        from bot import admin_callback
+        from plex import PlexMovie
+        update = _make_callback_update(chat_id=300, callback_data="admin:plex_unmatched")
+        context = _make_context()
+        movie = PlexMovie(title="X", year=2024, rating_key="r1", resolution="",
+                          added_at=0, file_paths=["/m/unmatched.mkv"], guid="local://r1")
+
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {300}),
+            patch.object(bot, "_plex_library", {("x", 2024): movie}),
+            patch.object(bot, "_plex_shows_library", {}),
+            patch("bot.state_store") as st,
+        ):
+            st.load_approved_chat_ids.return_value = set()
+            await admin_callback(update, context)
+
+        update.callback_query.edit_message_text.assert_called()
+        call_args = update.callback_query.edit_message_text.call_args
+        # Could be positional or keyword arg — check both
+        text = call_args.args[0] if call_args.args else call_args.kwargs.get("text", "")
+        self.assertIn("unmatched.mkv", text)
+
+
 class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
     """Tests for time-window logic: deferred/pending notifications and flush."""
 

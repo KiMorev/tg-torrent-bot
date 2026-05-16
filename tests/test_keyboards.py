@@ -161,6 +161,49 @@ class SeasonSelectKeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["3"], "srch:season:3")
 
 
+class AdminPanelPlexUnmatchedTests(unittest.TestCase):
+    """Verify the conditional Plex-unmatched row in _admin_panel_keyboard."""
+
+    def _labels(self, keyboard) -> list[str]:
+        return [b.text for row in keyboard.inline_keyboard for b in row]
+
+    def test_unmatched_row_hidden_when_show_flag_false(self):
+        labels = self._labels(_admin_panel_keyboard(show_plex_unmatched=False))
+        # No mention of unmatched/Plex push toggle anywhere
+        for label in labels:
+            self.assertNotIn("Несматчено", label)
+            self.assertNotIn("Push о новых", label)
+
+    def test_unmatched_row_visible_with_count_and_off_label(self):
+        kb = _admin_panel_keyboard(
+            show_plex_unmatched=True,
+            plex_unmatched_count=4,
+            plex_unmatched_notify_enabled=False,
+        )
+        labels = self._labels(kb)
+        self.assertIn("📋 Несматчено в Plex (4)", labels)
+        self.assertIn("🔕 Push о новых: выкл", labels)
+
+    def test_unmatched_row_label_flips_when_enabled(self):
+        kb = _admin_panel_keyboard(
+            show_plex_unmatched=True,
+            plex_unmatched_count=0,
+            plex_unmatched_notify_enabled=True,
+        )
+        labels = self._labels(kb)
+        self.assertIn("📋 Несматчено в Plex (0)", labels)
+        self.assertIn("🔔 Push о новых: вкл", labels)
+
+    def test_existing_buttons_still_present(self):
+        """Adding the conditional row must not displace the original buttons."""
+        labels = self._labels(_admin_panel_keyboard(show_plex_unmatched=True))
+        # Sample existing labels
+        self.assertIn("🔄 Обновить", labels)
+        self.assertIn("🧭 Диагностика", labels)
+        self.assertIn("👥 Пользователи", labels)
+        self.assertIn("✖️ Закрыть", labels)
+
+
 class AdminKpCacheKeyboardTests(unittest.TestCase):
     def _buttons(self, keyboard) -> dict[str, str]:
         return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}

@@ -938,6 +938,22 @@ def _format_admin_movie_discovery_line() -> str:
     return "\n".join(lines)
 
 
+def _admin_panel_kb_kwargs() -> dict:
+    """Build the kwargs dict for _admin_panel_keyboard() based on current state.
+
+    Centralised here so both /admin entry points (slash command + callback)
+    render an identical panel without each duplicating the gathering logic.
+    """
+    if not PLEX_ENABLED:
+        return {"show_plex_unmatched": False}
+    counts = _get_plex_unmatched_counts()
+    return {
+        "show_plex_unmatched": True,
+        "plex_unmatched_count": counts["total"],
+        "plex_unmatched_notify_enabled": _is_plex_unmatched_notify_enabled(),
+    }
+
+
 async def _build_admin_panel_text() -> str:
     tasks = None
     task_error = ""
@@ -2167,6 +2183,42 @@ async def _notify_admins_unmatched(
             logger.warning(
                 "Plex-unmatched notification failed for admin chat_id=%s", chat_id, exc_info=True
             )
+
+
+def _format_unmatched_list(movies: list, shows: list) -> str:
+    """Build the HTML body for the /admin → 📋 Несматчено screen.
+
+    Shows up to 25 entries per kind to stay within Telegram's 4096-char
+    message limit even for libraries with hundreds of unmatched files.
+    Falls back to a clean confirmation when everything is matched.
+    """
+    if not movies and not shows:
+        return "✅ <b>Все файлы Plex успешно сматчены.</b>"
+
+    lines: list[str] = [
+        "📋 <b>Несматченные файлы в Plex</b>",
+        "",
+    ]
+
+    def _bullets(items: list, limit: int = 25) -> list[str]:
+        out = [
+            f"• <code>{html_module.escape(_format_unmatched_short_label(x))}</code>"
+            for x in items[:limit]
+        ]
+        extra = len(items) - limit
+        if extra > 0:
+            out.append(f"• …и ещё {extra}")
+        return out
+
+    if movies:
+        lines.append(f"🎬 <b>Фильмы ({len(movies)})</b>")
+        lines.extend(_bullets(movies))
+    if shows:
+        if movies:
+            lines.append("")
+        lines.append(f"📺 <b>Шоу ({len(shows)})</b>")
+        lines.extend(_bullets(shows))
+    return "\n".join(lines)
 
 
 def _format_unmatched_push(movies: list, shows: list, *, kind: str) -> str:
@@ -6098,7 +6150,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         progress_message,
         await _build_admin_panel_text(),
         parse_mode="HTML",
-        reply_markup=_admin_panel_keyboard(),
+        reply_markup=_admin_panel_keyboard(**_admin_panel_kb_kwargs()),
     )
 
 
@@ -6142,6 +6194,35 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "subscriptions":
         text, keyboard = _build_admin_subscriptions_view()
         await _safe_edit_callback(query, text, parse_mode="HTML", reply_markup=keyboard)
+        return
+
+    if action == "plex_unmatched":
+        movies, shows = _get_plex_unmatched_lists()
+        text = _format_unmatched_list(movies, shows)
+        await _safe_edit_callback(
+            query, text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
+                InlineKeyboardButton("✖️ Закрыть", callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
+            ]]),
+        )
+        return
+
+    if action == "plex_unmatched_toggle":
+        new_state = not _is_plex_unmatched_notify_enabled()
+        _set_plex_unmatched_notify_enabled(new_state)
+        # The pop-up confirms the action; the panel re-renders below with
+        # the toggle button's new label and any required initial-summary
+        # push will trigger on the next refresh.
+        await query.answer(
+            "🔔 Уведомления включены" if new_state else "🔕 Уведомления выключены",
+        )
+        await _safe_edit_callback(
+            query,
+            await _build_admin_panel_text(),
+            parse_mode="HTML",
+            reply_markup=_admin_panel_keyboard(**_admin_panel_kb_kwargs()),
+        )
         return
 
     if action == "force_kp_refresh":
@@ -6301,7 +6382,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         query,
         await _build_admin_panel_text(),
         parse_mode="HTML",
-        reply_markup=_admin_panel_keyboard(),
+        reply_markup=_admin_panel_keyboard(**_admin_panel_kb_kwargs()),
     )
 
 

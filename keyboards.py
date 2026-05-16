@@ -91,28 +91,51 @@ def _download_list_keyboard(scope: str = TASK_LIST_SCOPE_DEFAULT) -> InlineKeybo
     )
 
 
-def _admin_panel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def _admin_panel_keyboard(
+    *,
+    show_plex_unmatched: bool = False,
+    plex_unmatched_count: int = 0,
+    plex_unmatched_notify_enabled: bool = False,
+) -> InlineKeyboardMarkup:
+    """Build the admin panel keyboard.
+
+    ``show_plex_unmatched`` toggles the visibility of the Plex-unmatched
+    radar row (only meaningful when PLEX_ENABLED). The toggle button label
+    reflects ``plex_unmatched_notify_enabled``.
+    """
+    rows = [
         [
-            [
-                InlineKeyboardButton("🔄 Обновить", callback_data=_admin_callback("home")),
-                InlineKeyboardButton("🧭 Диагностика", callback_data=_admin_callback("diagnostics")),
-            ],
-            [
-                InlineKeyboardButton("👥 Пользователи", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh"),
-                InlineKeyboardButton("📋 Загрузки", callback_data=_task_callback("list", TASK_LIST_SCOPE_ALL)),
-            ],
-            [
-                InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
-            ],
-            [InlineKeyboardButton("🎬 Трекеры новинок", callback_data=_admin_callback("movie_trackers"))],
-            [
-                InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
-                InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
-            ],
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
-        ]
-    )
+            InlineKeyboardButton("🔄 Обновить", callback_data=_admin_callback("home")),
+            InlineKeyboardButton("🧭 Диагностика", callback_data=_admin_callback("diagnostics")),
+        ],
+        [
+            InlineKeyboardButton("👥 Пользователи", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh"),
+            InlineKeyboardButton("📋 Загрузки", callback_data=_task_callback("list", TASK_LIST_SCOPE_ALL)),
+        ],
+        [
+            InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
+        ],
+        [InlineKeyboardButton("🎬 Трекеры новинок", callback_data=_admin_callback("movie_trackers"))],
+        [
+            InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
+            InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
+        ],
+    ]
+
+    if show_plex_unmatched:
+        list_label = f"📋 Несматчено в Plex ({plex_unmatched_count})"
+        toggle_label = (
+            "🔔 Push о новых: вкл"
+            if plex_unmatched_notify_enabled
+            else "🔕 Push о новых: выкл"
+        )
+        rows.append([
+            InlineKeyboardButton(list_label, callback_data=_admin_callback("plex_unmatched")),
+            InlineKeyboardButton(toggle_label, callback_data=_admin_callback("plex_unmatched_toggle")),
+        ])
+
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def _admin_kp_cache_confirm_keyboard() -> InlineKeyboardMarkup:
