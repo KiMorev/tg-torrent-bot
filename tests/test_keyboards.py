@@ -172,7 +172,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
         # No mention of unmatched/Plex push toggle anywhere
         for label in labels:
             self.assertNotIn("Несматчено", label)
-            self.assertNotIn("Push о новых", label)
+            self.assertNotIn("Уведомления о новых", label)
 
     def test_unmatched_row_visible_with_count_and_off_label(self):
         kb = _admin_panel_keyboard(
@@ -182,7 +182,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
         )
         labels = self._labels(kb)
         self.assertIn("📋 Несматчено в Plex (4)", labels)
-        self.assertIn("🔕 Push о новых: выкл", labels)
+        self.assertIn("🔕 Уведомления о новых: выкл", labels)
 
     def test_unmatched_row_label_flips_when_enabled(self):
         kb = _admin_panel_keyboard(
@@ -192,7 +192,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
         )
         labels = self._labels(kb)
         self.assertIn("📋 Несматчено в Plex (0)", labels)
-        self.assertIn("🔔 Push о новых: вкл", labels)
+        self.assertIn("🔔 Уведомления о новых: вкл", labels)
 
     def test_existing_buttons_still_present(self):
         """Adding the conditional row must not displace the original buttons."""
