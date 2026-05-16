@@ -24,6 +24,7 @@ from plex import (
     check_before_download,
     check_before_download_season,
     compare_quality,
+    is_unmatched,
 )
 
 
@@ -591,6 +592,74 @@ class CheckBeforeDownloadSeasonTests(unittest.TestCase):
         show, season = self._show_season("4k")
         result = check_before_download_season(show, season, "1080")
         self.assertEqual(result.action, "warn_better")
+
+
+# ---------------------------------------------------------------------------
+# is_unmatched + guid parsing
+# ---------------------------------------------------------------------------
+
+class IsUnmatchedTests(unittest.TestCase):
+    """Verify the boolean detector used by the admin 'unmatched in Plex' feature."""
+
+    def _movie(self, guid: str) -> PlexMovie:
+        return PlexMovie(title="X", year=2024, rating_key="1",
+                         resolution="1080", added_at=0, file_paths=[], guid=guid)
+
+    def _show(self, guid: str) -> PlexShow:
+        return PlexShow(title="X", year=2024, rating_key="2", seasons={}, guid=guid)
+
+    def test_matched_when_guid_is_plex_scheme(self):
+        self.assertFalse(is_unmatched(self._movie("plex://movie/5d77688385ac6700")))
+        self.assertFalse(is_unmatched(self._show("plex://show/5d77688385ac6700")))
+
+    def test_matched_when_guid_is_kp_or_kinopoisk(self):
+        self.assertFalse(is_unmatched(self._movie("kp://12345")))
+        self.assertFalse(is_unmatched(self._movie("kinopoisk://12345")))
+
+    def test_matched_when_guid_is_other_agent(self):
+        self.assertFalse(is_unmatched(self._movie("imdb://tt1234567")))
+        self.assertFalse(is_unmatched(self._show("thetvdb://9999")))
+
+    def test_unmatched_when_guid_starts_local(self):
+        self.assertTrue(is_unmatched(self._movie("local://12345")))
+        self.assertTrue(is_unmatched(self._show("LOCAL://abc")))  # case-insensitive
+
+    def test_unmatched_when_guid_is_empty(self):
+        self.assertTrue(is_unmatched(self._movie("")))
+        self.assertTrue(is_unmatched(self._show("")))
+
+
+class ParseGuidTests(unittest.TestCase):
+    """Ensure the new guid field is populated from XML by both _parse_video and _parse_show."""
+
+    def test_parse_video_extracts_guid_attribute(self):
+        xml = (
+            '<Video title="Dune" year="2021" ratingKey="10" '
+            'guid="plex://movie/5d77688385ac6700" addedAt="1700000000">'
+            '<Media videoResolution="1080">'
+            '<Part file="/movies/Dune.mkv"/>'
+            '</Media></Video>'
+        )
+        movie = _parse_video(_xml(xml))
+        self.assertEqual(movie.guid, "plex://movie/5d77688385ac6700")
+
+    def test_parse_video_defaults_empty_when_no_guid(self):
+        xml = (
+            '<Video title="X" year="2020" ratingKey="11">'
+            '<Media videoResolution="720"><Part file="/x.mkv"/></Media></Video>'
+        )
+        movie = _parse_video(_xml(xml))
+        self.assertEqual(movie.guid, "")
+
+    def test_parse_show_extracts_guid_attribute(self):
+        xml = '<Directory title="X" year="2020" ratingKey="99" guid="plex://show/abc"/>'
+        show = _parse_show(_xml(xml))
+        self.assertEqual(show.guid, "plex://show/abc")
+
+    def test_parse_show_local_guid_means_unmatched(self):
+        xml = '<Directory title="X" ratingKey="99" guid="local://99"/>'
+        show = _parse_show(_xml(xml))
+        self.assertTrue(is_unmatched(show))
 
 
 if __name__ == "__main__":

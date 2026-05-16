@@ -82,6 +82,7 @@ class PlexMovie:
     resolution: str        # "4k", "1080", "720", "480", "sd", ""
     added_at: int          # Unix timestamp (addedAt field from Plex)
     file_paths: list[str] = field(default_factory=list)  # Media[].Part[].file
+    guid: str = ""         # "plex://movie/...", "kp://N", "local://..." (unmatched)
 
 
 @dataclass
@@ -113,6 +114,7 @@ class PlexShow:
     year: int
     rating_key: str
     seasons: dict[int, PlexSeason] = field(default_factory=dict)
+    guid: str = ""         # "plex://show/...", "kp://N", "local://..." (unmatched)
 
 
 @dataclass
@@ -398,6 +400,7 @@ def _parse_video(video: ElementTree.Element) -> PlexMovie:
         resolution=resolution,
         added_at=int(video.get("addedAt") or 0),
         file_paths=file_paths,
+        guid=video.get("guid", ""),
     )
 
 
@@ -408,7 +411,20 @@ def _parse_show(directory: ElementTree.Element) -> PlexShow:
         year=int(directory.get("year") or 0),
         rating_key=directory.get("ratingKey", ""),
         seasons={},  # populated lazily by get_show_seasons
+        guid=directory.get("guid", ""),
     )
+
+
+def is_unmatched(entry) -> bool:
+    """Return True if Plex couldn't match this file with any metadata agent.
+
+    Plex tags such entries with a ``local://`` GUID; matched entries have
+    ``plex://``, ``kinopoisk://``, ``kp://``, ``imdb://``, ``tvdb://`` or
+    similar agent prefixes. Empty guid (very old / corrupt entries) is also
+    treated as unmatched.
+    """
+    g = (getattr(entry, "guid", "") or "").lower()
+    return not g or g.startswith("local://")
 
 
 # ------------------------------------------------------------------
