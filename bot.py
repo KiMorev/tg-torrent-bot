@@ -2217,6 +2217,27 @@ def _build_task_meta_from_result(result: dict, source: str = "search") -> dict:
     }
 
 
+def _normalize_torrent_filename_for_match(safe_name: str) -> str:
+    """Convert a `safe_filename` form (underscores, dots, `.torrent` suffix) into
+    a human-readable title suitable for Plex / season detection.
+
+    Example: ``"Klinika_Sezon_3_1080p.torrent"`` → ``"Klinika Sezon 3 1080p"``.
+    """
+    stripped = safe_name.removesuffix(".torrent")
+    cleaned = re.sub(r"[_.]+", " ", stripped)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _extract_magnet_dn(magnet_uri: str) -> str:
+    """Return the URL-decoded ``dn=`` parameter from a magnet URI, or empty string."""
+    import urllib.parse
+    try:
+        qs = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(magnet_uri).query))
+        return urllib.parse.unquote_plus(qs.get("dn", ""))
+    except Exception:
+        return ""
+
+
 def _build_task_meta_from_title(title: str, *, source: str) -> dict:
     """Build canonical task metadata from a plain title string.
 
@@ -4403,6 +4424,7 @@ async def _download_and_add(
             return ConversationHandler.END
 
         _remember_task_owner(task_id, chat_id)
+        _remember_task_meta(task_id, _build_task_meta_from_result(result, source="search"))
 
         if temp_path.exists():
             if _torrent_file_is_private(temp_path):
@@ -4969,6 +4991,10 @@ async def _check_jackett_sub_via_rutracker_direct(
         task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
         if chat_id and task_id:
             _remember_task_owner(task_id, chat_id)
+            _remember_task_meta(
+                task_id,
+                _build_task_meta_from_title(new_title or "", source="jackett_sub"),
+            )
     except (RutrackerError, DownloadStationError) as e:
         logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
     finally:
@@ -5057,6 +5083,7 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                 task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
                 if chat_id and task_id:
                     _remember_task_owner(task_id, chat_id)
+                    _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
                 # Add public trackers unless private torrent
                 if not _torrent_file_is_private(temp_path):
                     await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
@@ -5069,6 +5096,7 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                 task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
                 if chat_id and task_id:
                     _remember_task_owner(task_id, chat_id)
+                    _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
                 return task_id
             except (JackettError, DownloadStationError) as e:
                 logger.warning("Subscription torrent_url download failed (%s), trying magnet", e)
@@ -5077,6 +5105,7 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
             task_id = await asyncio.to_thread(ds_client.create_magnet, candidate.magnet_url)
             if chat_id and task_id:
                 _remember_task_owner(task_id, chat_id)
+                _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
             return task_id
 
         raise JackettError("Нет torrent_url и magnet_url у кандидата")
@@ -5384,6 +5413,10 @@ async def _check_subscriptions(app: Application) -> None:
                 task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
                 if chat_id:
                     _remember_task_owner(task_id, chat_id)
+                    _remember_task_meta(
+                        task_id,
+                        _build_task_meta_from_title(new_title or "", source="rutracker_sub"),
+                    )
             except (RutrackerError, DownloadStationError) as e:
                 logger.warning("Failed to update subscription %s: %s", topic_id, e)
                 continue
@@ -6461,6 +6494,9 @@ async def _do_process_magnet(
         if not task_id:
             task_id = await _wait_for_magnet_task_id(magnet_uri, known_task_ids, progress_message)
         _remember_task_owner(task_id, chat_id)
+        dn = _extract_magnet_dn(magnet_uri)
+        if dn:
+            _remember_task_meta(task_id, _build_task_meta_from_title(dn, source="magnet"))
         await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
         tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
         _mark_tracker_processed_if_final(task_id, tracker_result)
@@ -6508,6 +6544,9 @@ async def _do_process_torrent(
         await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
         task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
         _remember_task_owner(task_id, chat_id)
+        meta_title = _normalize_torrent_filename_for_match(safe_name)
+        if meta_title:
+            _remember_task_meta(task_id, _build_task_meta_from_title(meta_title, source="torrent_file"))
         if _torrent_file_is_private(temp_path):
             tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
             _mark_tracker_processed_if_final(task_id, tracker_result)
@@ -6551,13 +6590,7 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # --- Plex duplicate check (best-effort: extract title + year from magnet dn= param) ---
     if PLEX_ENABLED:
-        dn_raw = ""
-        import urllib.parse
-        try:
-            qs = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(magnet_uri).query))
-            dn_raw = urllib.parse.unquote_plus(qs.get("dn", ""))
-        except Exception:
-            pass
+        dn_raw = _extract_magnet_dn(magnet_uri)
         if dn_raw:
             raw_year = _movie_extract_year(dn_raw) or 0
             req_quality = _plex_quality_from_title(dn_raw)
@@ -6709,8 +6742,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             # safe_name has underscores instead of spaces (safe_filename strips non-ASCII
             # and replaces separators). Convert back so normalize_movie_title can parse it:
             # "____They_Will_Kill_You___2026_____" → "They Will Kill You 2026"
-            plex_title = re.sub(r"[_.]", " ", safe_name.removesuffix(".torrent"))
-            plex_title = re.sub(r"\s{2,}", " ", plex_title).strip()
+            plex_title = _normalize_torrent_filename_for_match(safe_name)
             raw_year = _movie_extract_year(plex_title) or 0
             req_quality = _plex_quality_from_title(plex_title)
             plex_check = _plex_pre_check(plex_title, int(raw_year), req_quality)
