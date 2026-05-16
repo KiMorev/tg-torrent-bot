@@ -1286,6 +1286,32 @@ class PlexPollingTests(unittest.TestCase):
             self.assertIsNone(_plex_find_by_ds_title(""))
             self.assertIsNone(_plex_find_by_ds_title("   "))
 
+    def test_poll_after_finish_reports_unreachable_when_all_refreshes_failed(self):
+        """When Plex was unreachable for the entire polling window (no refresh
+        ever succeeded), the timeout message must say 'Plex недоступен',
+        not 'не появился в Plex'. Regression for #6 from the audit plan."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+
+        # _refresh_plex_library is a no-op AsyncMock — but we keep
+        # _plex_consecutive_failures > 0 to simulate ongoing failures.
+        with (
+            patch.object(bot, "_plex_library", {}),
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_plex_library_find", return_value=None),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_plex_consecutive_failures", 3),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Some.Movie.2024", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        text = fake_app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("сервер был недоступен", text)
+        self.assertNotIn("не появился в Plex", text)
+
     def test_poll_after_finish_falls_back_to_title_year_when_substring_misses(self):
         """If _plex_find_by_ds_title returns None (e.g. Plex renamed the file or
         file_paths is empty), the poller must try _plex_library_find(title, year).

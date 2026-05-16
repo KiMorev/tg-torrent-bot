@@ -1978,6 +1978,10 @@ async def _plex_poll_after_finish(
                 pass
 
     logger.info("Plex polling started task_id=%s title=%r chat_ids=%s", task_id, task_title, chat_ids)
+    # Track whether at least one refresh succeeded so we can distinguish
+    # "movie genuinely not in Plex" from "Plex was unreachable the whole time".
+    refresh_succeeded_at_least_once = False
+    initial_failure_count = _plex_consecutive_failures
     try:
         for attempt in range(max_attempts):
             if attempt > 0:
@@ -1985,6 +1989,11 @@ async def _plex_poll_after_finish(
 
             # Refresh Plex library, then look for the file
             await _refresh_plex_library()
+            # Heuristic: if the global failure counter dropped or stayed at 0,
+            # this refresh succeeded. (We compare against initial baseline so
+            # other tasks' refreshes don't muddle the signal.)
+            if _plex_consecutive_failures == 0:
+                refresh_succeeded_at_least_once = True
             plex_movie = _plex_find_by_ds_title(task_title)
             if plex_movie is None:
                 # Fallback: Plex agent (TMDb/TVDb) may have renamed the file, or the
@@ -2029,12 +2038,21 @@ async def _plex_poll_after_finish(
                 )
                 return
 
-        # Exhausted all attempts
+        # Exhausted all attempts — choose message based on whether we ever reached Plex.
         timeout_min = int(max_attempts * interval_seconds // 60)
-        text = (
-            f"⚠️ <b>{html_module.escape(task_title)}</b> скачан, "
-            f"но не появился в Plex за {timeout_min} мин."
-        )
+        title_esc = html_module.escape(task_title)
+        if refresh_succeeded_at_least_once:
+            text = (
+                f"⚠️ <b>{title_esc}</b> скачан, "
+                f"но не появился в Plex за {timeout_min} мин."
+            )
+            log_reason = "not found"
+        else:
+            text = (
+                f"⚠️ <b>{title_esc}</b> скачан, но проверить Plex не удалось — "
+                f"сервер был недоступен. Файл, возможно, уже в библиотеке."
+            )
+            log_reason = "Plex unreachable"
         await _delete_hint_messages()
         for cid in chat_ids:
             try:
@@ -2044,7 +2062,8 @@ async def _plex_poll_after_finish(
                     "Plex poll: failed to send timeout-notification chat_id=%s", cid, exc_info=True
                 )
         logger.info(
-            "Plex polling: gave up on %r after %d attempt(s)", task_title, max_attempts
+            "Plex polling: gave up on %r after %d attempt(s) — reason=%s",
+            task_title, max_attempts, log_reason,
         )
     except asyncio.CancelledError:
         await _delete_hint_messages()
