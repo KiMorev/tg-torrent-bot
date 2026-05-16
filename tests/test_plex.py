@@ -9,7 +9,10 @@ import requests
 from plex import (
     PlexClient,
     PlexMovie,
+    PlexShow,
+    PlexSeason,
     PlexCheckResult,
+    PlexSeriesCheckResult,
     PlexAPIError,
     PlexAuthError,
     PlexTimeoutError,
@@ -17,7 +20,9 @@ from plex import (
     PlexParseError,
     _normalise_resolution,
     _parse_video,
+    _parse_show,
     check_before_download,
+    check_before_download_season,
     compare_quality,
 )
 
@@ -38,8 +43,9 @@ def _mock_response(xml_text: str, status: int = 200) -> MagicMock:
     return resp
 
 
-def _make_client() -> PlexClient:
-    return PlexClient("http://192.168.1.103:32400", "testtoken")
+def _make_client(show_section_id: str | None = None) -> PlexClient:
+    return PlexClient("http://192.168.1.103:32400", "testtoken",
+                      show_section_id=show_section_id)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +438,159 @@ class CheckBeforeDownloadTests(unittest.TestCase):
         movie = self._movie("1080")
         result = check_before_download(movie, "1080")
         self.assertIs(result.plex_movie, movie)
+
+
+# ---------------------------------------------------------------------------
+# TV-section parsing and lookups
+# ---------------------------------------------------------------------------
+
+class ParseShowTests(unittest.TestCase):
+    def test_parse_show_extracts_title_year_rating_key(self):
+        xml = '<Directory title="Schitt\'s Creek" year="2015" ratingKey="42"/>'
+        show = _parse_show(_xml(xml))
+        self.assertEqual(show.title, "Schitt's Creek")
+        self.assertEqual(show.year, 2015)
+        self.assertEqual(show.rating_key, "42")
+        self.assertEqual(show.seasons, {})
+
+    def test_parse_show_handles_missing_year(self):
+        xml = '<Directory title="X" ratingKey="1"/>'
+        show = _parse_show(_xml(xml))
+        self.assertEqual(show.year, 0)
+
+
+class PlexClientFindShowSectionTests(unittest.TestCase):
+    def test_returns_first_show_section(self):
+        client = _make_client()
+        xml = (
+            '<MediaContainer>'
+            '<Directory type="movie" key="1" title="Movies"/>'
+            '<Directory type="show" key="2" title="TV Shows"/>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)):
+            self.assertEqual(client.find_show_section(), "2")
+
+    def test_returns_empty_when_no_show_section(self):
+        client = _make_client()
+        xml = '<MediaContainer><Directory type="movie" key="1"/></MediaContainer>'
+        with patch.object(client._session, "get", return_value=_mock_response(xml)):
+            self.assertEqual(client.find_show_section(), "")
+
+
+class PlexClientGetAllShowsTests(unittest.TestCase):
+    def test_returns_shows_with_empty_seasons(self):
+        """get_all_shows must NOT eagerly fetch seasons; they're loaded lazily."""
+        client = _make_client(show_section_id="2")
+        xml = (
+            '<MediaContainer>'
+            '<Directory title="Schitt\'s Creek" year="2015" ratingKey="100"/>'
+            '<Directory title="The Wire" year="2002" ratingKey="200"/>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)) as mock_get:
+            shows = client.get_all_shows()
+        self.assertEqual(len(shows), 2)
+        self.assertEqual({s.title for s in shows}, {"Schitt's Creek", "The Wire"})
+        # All shows must start with empty seasons (lazy loading)
+        for show in shows:
+            self.assertEqual(show.seasons, {})
+        # Only 1 HTTP call — no per-show season fetches
+        self.assertEqual(mock_get.call_count, 1)
+
+    def test_returns_empty_when_no_section(self):
+        client = _make_client()
+        # find_show_section returns "" → no further calls
+        empty_sections_xml = '<MediaContainer><Directory type="movie" key="1"/></MediaContainer>'
+        with patch.object(client._session, "get",
+                          return_value=_mock_response(empty_sections_xml)):
+            self.assertEqual(client.get_all_shows(), [])
+
+
+class PlexClientGetShowSeasonsTests(unittest.TestCase):
+    def test_returns_seasons_keyed_by_number_with_episode_files(self):
+        client = _make_client()
+        # First call: show's children (seasons), then one call per season for episodes
+        seasons_xml = (
+            '<MediaContainer>'
+            '<Directory ratingKey="11" index="1" leafCount="10" title="Season 1"/>'
+            '<Directory ratingKey="12" index="2" leafCount="8" title="Season 2"/>'
+            '</MediaContainer>'
+        )
+        season1_episodes = (
+            '<MediaContainer>'
+            '<Video><Media videoResolution="1080">'
+            '<Part file="/video/Show/S01/E01.mkv"/>'
+            '</Media></Video>'
+            '<Video><Media videoResolution="1080">'
+            '<Part file="/video/Show/S01/E02.mkv"/>'
+            '</Media></Video>'
+            '</MediaContainer>'
+        )
+        season2_episodes = (
+            '<MediaContainer>'
+            '<Video><Media videoResolution="2160">'
+            '<Part file="/video/Show/S02/E01.mkv"/>'
+            '</Media></Video>'
+            '</MediaContainer>'
+        )
+        responses = [
+            _mock_response(seasons_xml),
+            _mock_response(season1_episodes),
+            _mock_response(season2_episodes),
+        ]
+        with patch.object(client._session, "get", side_effect=responses):
+            seasons = client.get_show_seasons("100")
+        self.assertEqual(set(seasons.keys()), {1, 2})
+        self.assertEqual(seasons[1].episode_count, 10)
+        self.assertEqual(seasons[1].resolution, "1080")
+        self.assertEqual(len(seasons[1].file_paths), 2)
+        self.assertEqual(seasons[2].resolution, "4k")
+
+    def test_skips_specials_season_zero(self):
+        client = _make_client()
+        seasons_xml = (
+            '<MediaContainer>'
+            '<Directory ratingKey="10" index="0" leafCount="3" title="Specials"/>'
+            '<Directory ratingKey="11" index="1" leafCount="10" title="Season 1"/>'
+            '</MediaContainer>'
+        )
+        # Episodes for season 1 — needed because season 0 is filtered before fetch
+        season1_episodes = '<MediaContainer><Video><Media><Part file="/x.mkv"/></Media></Video></MediaContainer>'
+        responses = [_mock_response(seasons_xml), _mock_response(season1_episodes)]
+        with patch.object(client._session, "get", side_effect=responses):
+            seasons = client.get_show_seasons("100")
+        self.assertNotIn(0, seasons)
+        self.assertIn(1, seasons)
+
+    def test_returns_empty_for_empty_rating_key(self):
+        client = _make_client()
+        self.assertEqual(client.get_show_seasons(""), {})
+
+
+class CheckBeforeDownloadSeasonTests(unittest.TestCase):
+    def _show_season(self, resolution: str) -> tuple[PlexShow, PlexSeason]:
+        show = PlexShow(title="X", year=2020, rating_key="1", seasons={})
+        season = PlexSeason(rating_key="2", season_number=3,
+                            episode_count=10, file_paths=[], resolution=resolution)
+        return show, season
+
+    def test_same_quality_warns_same(self):
+        show, season = self._show_season("1080")
+        result = check_before_download_season(show, season, "1080")
+        self.assertEqual(result.action, "warn_same")
+        self.assertIs(result.show, show)
+        self.assertIs(result.season, season)
+
+    def test_plex_has_worse_offers_upgrade(self):
+        show, season = self._show_season("720")
+        result = check_before_download_season(show, season, "1080")
+        self.assertEqual(result.action, "offer_upgrade")
+
+    def test_plex_has_better_warns_better(self):
+        show, season = self._show_season("4k")
+        result = check_before_download_season(show, season, "1080")
+        self.assertEqual(result.action, "warn_better")
 
 
 if __name__ == "__main__":

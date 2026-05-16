@@ -27,6 +27,7 @@ _REQUEST_TIMEOUT = 10
 
 # Plex section types
 _SECTION_TYPE_MOVIE = "movie"
+_SECTION_TYPE_SHOW = "show"
 
 # Resolution ranking for quality comparison (higher = better)
 _RESOLUTION_RANK: dict[str, int] = {
@@ -93,6 +94,35 @@ class PlexCheckResult:
     action: str  # Literal["warn_same", "warn_better", "offer_upgrade"]
 
 
+@dataclass
+class PlexSeason:
+    """A single season of a TV show in the Plex library."""
+    rating_key: str
+    season_number: int
+    episode_count: int                        # leafCount from Plex
+    file_paths: list[str] = field(default_factory=list)   # all episode .file paths
+    resolution: str = ""                      # best across episodes ("4k"/"1080"/…)
+
+
+@dataclass
+class PlexShow:
+    """A TV show in the Plex library. ``seasons`` is lazily populated via
+    :meth:`PlexClient.get_show_seasons` — empty by default to avoid eagerly
+    fetching every show's children during the cache refresh."""
+    title: str
+    year: int
+    rating_key: str
+    seasons: dict[int, PlexSeason] = field(default_factory=dict)
+
+
+@dataclass
+class PlexSeriesCheckResult:
+    """Result of a pre-download Plex duplicate check for a TV season."""
+    show: PlexShow
+    season: PlexSeason
+    action: str  # Literal["warn_same", "warn_better", "offer_upgrade"]
+
+
 def _normalise_resolution(raw: str) -> str:
     """Normalise Plex videoResolution value to a canonical string."""
     r = (raw or "").strip().lower()
@@ -132,10 +162,12 @@ class PlexClient:
         url: str,
         token: str,
         movie_section_id: str | None = None,
+        show_section_id: str | None = None,
     ) -> None:
         self._base = url.rstrip("/")
         self._token = token
         self._section_id: str | None = movie_section_id
+        self._show_section_id: str | None = show_section_id
         self._machine_id: str | None = None
         self._session = requests.Session()
         self._session.headers.update({
@@ -240,6 +272,106 @@ class PlexClient:
                 return _parse_video(video)
         return None
 
+    # ------------------------------------------------------------------
+    # TV shows (Plex section type="show")
+    # ------------------------------------------------------------------
+
+    def find_show_section(self) -> str:
+        """Auto-detect the first TV show library section ID. Empty string if none."""
+        root = self._get("/library/sections")
+        for directory in root.findall("Directory"):
+            if directory.get("type") == _SECTION_TYPE_SHOW:
+                return directory.get("key", "")
+        return ""
+
+    def _ensure_show_section(self) -> str:
+        if not self._show_section_id:
+            self._show_section_id = self.find_show_section()
+        return self._show_section_id or ""
+
+    def get_all_shows(self) -> list[PlexShow]:
+        """Fetch all TV shows from the show library section.
+
+        Returns shows with empty ``seasons`` dicts — call :meth:`get_show_seasons`
+        when you actually need to inspect a specific show's seasons. This keeps
+        the initial refresh cheap (1 HTTP call) regardless of how many seasons
+        each show has.
+        """
+        section = self._ensure_show_section()
+        if not section:
+            logger.debug("Plex: no show section found — skipping show refresh")
+            return []
+        root = self._get(f"/library/sections/{section}/all", type=2)
+        return [_parse_show(d) for d in root.findall("Directory")]
+
+    def get_show_seasons(self, show_rating_key: str) -> dict[int, PlexSeason]:
+        """Fetch all seasons of a show plus the file paths of their episodes.
+
+        Returns a dict keyed by season number (1, 2, …). Each season carries:
+          • ``rating_key`` for deep-link building
+          • ``episode_count`` from Plex's leafCount
+          • ``file_paths`` — every episode's media file path
+          • ``resolution`` — best resolution seen across episodes
+
+        Episode listing is one HTTP call per season (Plex doesn't support
+        nested expansion). Specials (season_number == 0) are skipped.
+        """
+        if not show_rating_key:
+            return {}
+        try:
+            root = self._get(f"/library/metadata/{show_rating_key}/children")
+        except Exception as exc:
+            logger.debug("Plex get_show_seasons children failed for %s: %s",
+                         show_rating_key, exc)
+            return {}
+
+        seasons: dict[int, PlexSeason] = {}
+        for directory in root.findall("Directory"):
+            season_num = int(directory.get("index") or 0)
+            if season_num <= 0:
+                # Specials / unsorted episodes — skip; bot deals with numbered seasons.
+                continue
+            season_key = directory.get("ratingKey", "")
+            episode_count = int(directory.get("leafCount") or 0)
+            file_paths, resolution = self._fetch_season_episode_files(season_key)
+            seasons[season_num] = PlexSeason(
+                rating_key=season_key,
+                season_number=season_num,
+                episode_count=episode_count,
+                file_paths=file_paths,
+                resolution=resolution,
+            )
+        return seasons
+
+    def _fetch_season_episode_files(self, season_rating_key: str) -> tuple[list[str], str]:
+        """Return (file_paths, best_resolution) for episodes of a single season.
+
+        Best-effort: missing data or transient failures yield an empty list +
+        empty resolution; the caller can fall back to substring match later.
+        """
+        if not season_rating_key:
+            return [], ""
+        try:
+            root = self._get(f"/library/metadata/{season_rating_key}/children")
+        except Exception as exc:
+            logger.debug("Plex season children fetch failed for %s: %s",
+                         season_rating_key, exc)
+            return [], ""
+
+        files: list[str] = []
+        best_resolution = ""
+        for video in root.findall("Video"):
+            for media in video.findall("Media"):
+                if not best_resolution:
+                    cand = _normalise_resolution(media.get("videoResolution", ""))
+                    if cand:
+                        best_resolution = cand
+                for part in media.findall("Part"):
+                    fp = part.get("file", "")
+                    if fp:
+                        files.append(fp)
+        return files, best_resolution
+
 
 # ------------------------------------------------------------------
 # XML parsing helpers
@@ -269,8 +401,18 @@ def _parse_video(video: ElementTree.Element) -> PlexMovie:
     )
 
 
+def _parse_show(directory: ElementTree.Element) -> PlexShow:
+    """Build a PlexShow from a <Directory> XML element (type=2 in show sections)."""
+    return PlexShow(
+        title=directory.get("title", ""),
+        year=int(directory.get("year") or 0),
+        rating_key=directory.get("ratingKey", ""),
+        seasons={},  # populated lazily by get_show_seasons
+    )
+
+
 # ------------------------------------------------------------------
-# Quality-based pre-download check (stateless helper)
+# Quality-based pre-download check (stateless helpers)
 # ------------------------------------------------------------------
 
 def check_before_download(
@@ -290,3 +432,22 @@ def check_before_download(
     else:
         action = "warn_same"
     return PlexCheckResult(plex_movie=plex_movie, action=action)
+
+
+def check_before_download_season(
+    show: PlexShow,
+    season: PlexSeason,
+    requested_resolution: str,
+) -> PlexSeriesCheckResult:
+    """Determine what to show to the user when a season is already in Plex.
+
+    Mirrors :func:`check_before_download` but for a season's best resolution.
+    """
+    cmp = compare_quality(season.resolution, requested_resolution)
+    if cmp == "worse":
+        action = "offer_upgrade"
+    elif cmp == "better":
+        action = "warn_better"
+    else:
+        action = "warn_same"
+    return PlexSeriesCheckResult(show=show, season=season, action=action)
