@@ -1270,51 +1270,80 @@ def _restore_first_seen_from_previous(
     so without this restoration step every bot restart would make all top-10 films
     look brand new to the push-notification logic.
 
-    Lookup uses two indexes:
-      1. **By card key** (primary). Exact match — fast and unambiguous.
-      2. **By (normalised title, year)** (fallback). Needed because the card's key
-         flips between refreshes when KP enrichment status changes:
+    Lookup uses **three layered indexes**, queried in order. The first non-empty
+    hit wins:
+
+      1. **By card key** — primary, exact and fastest.
+      2. **By kp_id** — same Kinopoisk ID across refreshes means same film, even
+         if the title text changed (e.g. KP overwrote the raw release name with
+         a canonical RU name on the next run).
+      3. **By (normalised title, year)** — catches the case where the card's key
+         flipped between refreshes because KP enrichment status changed:
             was:  ``movie_key("project hail mary", 2026)``   (KP not resolved yet)
             now:  ``"kp:12345"``                             (KP resolved this run)
-         Without the title+year fallback, the same logical film would be treated
-         as a brand-new card and trigger an unwanted /new notification.
+         Both the new card's ``title`` and ``alt_title`` are probed, against
+         either ``title`` or ``alt_title`` from previous cards — so a transition
+         like raw English → canonical Russian (or vice versa) still matches.
 
-    If multiple previous cards collide on the same (title, year) bucket we keep the
+    If multiple previous cards collide on the same lookup bucket we keep the
     earliest timestamp — that's the true first sighting of the film.
 
     Mutates ``new_cards`` in place; no return value.
     """
     prev_by_key: dict[str, str] = {}
+    prev_by_kp_id: dict[str, str] = {}
     prev_by_title: dict[str, str] = {}
+
+    def _remember_earliest(idx: dict[str, str], k: str, ts: str) -> None:
+        existing = idx.get(k)
+        if existing is None or ts < existing:
+            idx[k] = ts
+
     for c in previous_cards:
         seen_at = str(c.get("first_seen_at") or "")
         if not seen_at:
             continue
         if c.get("key"):
-            prev_by_key[c["key"]] = seen_at
-        title = str(c.get("title") or "")
+            _remember_earliest(prev_by_key, str(c["key"]), seen_at)
+        kp_id = c.get("kp_id")
+        if kp_id:
+            _remember_earliest(prev_by_kp_id, str(kp_id), seen_at)
         year = c.get("year") or 0
-        if title and year:
-            try:
-                title_key = _movie_card_key(title, int(year))
-            except (TypeError, ValueError):
-                continue
-            existing = prev_by_title.get(title_key)
-            if existing is None or seen_at < existing:
-                prev_by_title[title_key] = seen_at
+        if year:
+            # Index against BOTH title and alt_title — KP enrichment may have
+            # swapped the canonical title between refreshes (en ↔ ru).
+            for title_field in (c.get("title"), c.get("alt_title")):
+                t = str(title_field or "")
+                if not t:
+                    continue
+                try:
+                    _remember_earliest(prev_by_title, _movie_card_key(t, int(year)), seen_at)
+                except (TypeError, ValueError):
+                    continue
 
     for card in new_cards:
-        # Try exact-key match first.
+        # 1. Exact-key match (fastest).
         old_ts = prev_by_key.get(card.get("key") or "")
-        # Fallback: same logical film keyed differently because KP enrichment flipped.
+        # 2. Same KP id — definitive proof it's the same film.
         if not old_ts:
-            title = str(card.get("title") or "")
+            kp_id = card.get("kp_id")
+            if kp_id:
+                old_ts = prev_by_kp_id.get(str(kp_id))
+        # 3. Title+year fallback (probe both title and alt_title).
+        if not old_ts:
             year = card.get("year") or 0
-            if title and year:
-                try:
-                    old_ts = prev_by_title.get(_movie_card_key(title, int(year)))
-                except (TypeError, ValueError):
-                    old_ts = None
+            if year:
+                for title_field in (card.get("title"), card.get("alt_title")):
+                    t = str(title_field or "")
+                    if not t:
+                        continue
+                    try:
+                        hit = prev_by_title.get(_movie_card_key(t, int(year)))
+                    except (TypeError, ValueError):
+                        continue
+                    if hit:
+                        old_ts = hit
+                        break
         if old_ts:
             card["first_seen_at"] = old_ts
 

@@ -1046,6 +1046,69 @@ class RestoreFirstSeenFromPreviousTests(unittest.TestCase):
         _restore_first_seen_from_previous(new_cards, [])
         self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-15 12:00")
 
+    def test_matches_by_kp_id_when_title_was_overwritten_by_kp(self):
+        """KP can overwrite the raw release title with the canonical name on next
+        refresh (e.g. 'Project Hail Mary' → 'Проект «Конец света»'). The card's
+        kp_id stays the same — match by it."""
+        from bot import _restore_first_seen_from_previous
+        previous = [{
+            "key": "kp:12345",
+            "kp_id": 12345,
+            "title": "Project Hail Mary",  # raw English title from release
+            "year": 2026,
+            "first_seen_at": "2026-05-01 10:00",
+        }]
+        new_cards = [{
+            "key": "kp:12345",
+            "kp_id": 12345,
+            "title": "Проект «Конец света»",  # canonical RU title from KP
+            "year": 2026,
+            "first_seen_at": "2026-05-15 18:05",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-01 10:00")
+
+    def test_matches_via_alt_title_when_primary_title_changed(self):
+        """If KP overwrote 'title' but 'alt_title' still holds the original name,
+        the (alt_title, year) bucket should catch the match."""
+        from bot import _restore_first_seen_from_previous
+        previous = [{
+            "key": "1",
+            "title": "Project Hail Mary",
+            "year": 2026,
+            "first_seen_at": "2026-05-01 10:00",
+        }]
+        new_cards = [{
+            "key": "2",   # different key, no kp_id either
+            "title": "Проект Конец света",
+            "alt_title": "Project Hail Mary",  # original English preserved here
+            "year": 2026,
+            "first_seen_at": "2026-05-15 18:05",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-05-01 10:00")
+
+    def test_kp_id_priority_over_title_collision(self):
+        """If two different films collide on title (unlikely but possible),
+        kp_id wins — it's a stronger identifier than the title."""
+        from bot import _restore_first_seen_from_previous
+        previous = [
+            {"key": "kp:1", "kp_id": 1, "title": "Foo", "year": 2024,
+             "first_seen_at": "2026-03-01 10:00"},
+            {"key": "kp:2", "kp_id": 2, "title": "Foo", "year": 2024,
+             "first_seen_at": "2026-04-01 10:00"},
+        ]
+        new_cards = [{
+            "key": "kp:2",
+            "kp_id": 2,
+            "title": "Foo Renamed",
+            "year": 2024,
+            "first_seen_at": "2026-05-15 12:00",
+        }]
+        _restore_first_seen_from_previous(new_cards, previous)
+        # Matches kp_id=2, not the title-bucket which collides with kp:1 too.
+        self.assertEqual(new_cards[0]["first_seen_at"], "2026-04-01 10:00")
+
 
 class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
     """Tests for time-window logic: deferred/pending notifications and flush."""
