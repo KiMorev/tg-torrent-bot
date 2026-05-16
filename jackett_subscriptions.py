@@ -30,7 +30,7 @@ def _normalize_title(title: str) -> str:
     parts = [
         part.strip()
         for part in title.split("/")
-        if not re.search(r"[Сс]езон|[Сс]ери", part)
+        if not re.search(r"сезон|сери", part, re.IGNORECASE)
     ]
     if parts:
         title = " ".join(parts[:2])

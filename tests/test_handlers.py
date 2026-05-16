@@ -1785,6 +1785,36 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         for r in filtered:
             self.assertIn("Сезон: 3".lower(), r["title"].lower())
 
+    def test_parse_episode_info_handles_uppercase_serii(self):
+        """СЕРИИ: 1-8 из 10 must be parsed identically to 'Серии: 1-8 из 10'."""
+        from formatters import _parse_episode_info
+        self.assertEqual(_parse_episode_info("Show СЕРИИ: 1-8 из 10"), (8, 10))
+        self.assertEqual(_parse_episode_info("Show серия: 5-9 из 10"), (9, 10))
+        self.assertEqual(_parse_episode_info("Show СЕРИЯ: 2-4 из 8"), (4, 8))
+
+    def test_extract_series_base_query_handles_uppercase_sezon(self):
+        """Series detection must work for СЕЗОН as well as Сезон/сезон."""
+        from formatters import _extract_series_base_query
+        self.assertEqual(_extract_series_base_query("Шоу / СЕЗОН: 3 / blah"), "Шоу")
+        self.assertEqual(_extract_series_base_query("Шоу / сезон 1"), "Шоу")
+        self.assertIsNone(_extract_series_base_query("Movie 2024 1080p"))
+
+    def test_format_sub_title_handles_uppercase_sezon(self):
+        """Sub-title formatting must extract the season number regardless of case."""
+        from formatters import _format_sub_title
+        result = _format_sub_title("Шоу / Show / СЕЗОН: 5 / Серии: 1-3")
+        self.assertIn("Сезон 5", result)
+
+    def test_jackett_normalize_title_strips_uppercase_sezon_parts(self):
+        """jackett_subscriptions._normalize_title must drop 'СЕЗОН' / 'СЕРИИ' parts."""
+        from jackett_subscriptions import _normalize_title
+        # 'СЕЗОН: 5' and 'СЕРИИ: 1-3' parts must be stripped — same as lowercase.
+        out = _normalize_title("Шоу / Show / СЕЗОН: 5 / СЕРИИ: 1-3 [1080p]")
+        # Lowercase keywords proves the function returns lowercased title; key thing
+        # is that 'сезон' / 'серии' parts are gone from the result.
+        self.assertNotIn("сезон", out)
+        self.assertNotIn("серии", out)
+
 
 class BuildTaskMetaTests(unittest.TestCase):
     """Tests for _build_task_meta_from_result and _build_task_meta_from_title."""

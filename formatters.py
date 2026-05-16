@@ -229,8 +229,10 @@ def _score_result(result: dict) -> float:
 # Series episode parsing
 # ---------------------------------------------------------------------------
 
-# Matches "Серии: 1-8 из 10" or "Серия: 1-8 из 10" (case-insensitive)
-_EPISODE_RE = re.compile(r"[Сс]ери[яи][:\s]+(\d+)-(\d+)\s+из\s+(\d+)")
+# Matches "Серии: 1-8 из 10" or "Серия: 1-8 из 10" (case-insensitive: also
+# СЕРИИ, серии). Note: [яи] is a morphology variant (Серия/Серии), not a case
+# class — it must stay alongside re.IGNORECASE.
+_EPISODE_RE = re.compile(r"сери[яи][:\s]+(\d+)-(\d+)\s+из\s+(\d+)", re.IGNORECASE)
 
 
 def _parse_episode_info(title: str) -> tuple[int, int] | None:
@@ -270,7 +272,7 @@ def _extract_series_base_query(title: str) -> str | None:
     Returns None when the title has no season marker (i.e. it looks like a
     movie rather than a multi-season series).
     """
-    if not re.search(r"[Сс]езон", title):
+    if not re.search(r"сезон", title, re.IGNORECASE):
         return None
 
     parts = [p.strip() for p in title.split("/")]
@@ -353,7 +355,7 @@ def _format_sub_title(title: str) -> str:
 
     season = ""
     for part in parts:
-        m = re.search(r"[Сс]езон[:\s]+(\d+)", part)
+        m = re.search(r"сезон[:\s]+(\d+)", part, re.IGNORECASE)
         if m:
             season = f" / Сезон {m.group(1)}"
             break
