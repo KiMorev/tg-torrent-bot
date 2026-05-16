@@ -1110,6 +1110,66 @@ class RestoreFirstSeenFromPreviousTests(unittest.TestCase):
         self.assertEqual(new_cards[0]["first_seen_at"], "2026-04-01 10:00")
 
 
+class PlexUnmatchedSettingsTests(unittest.TestCase):
+    """Tests for the runtime toggle + persisted 'seen' set used by the admin
+    Plex-unmatched radar."""
+
+    def _isolated_settings(self) -> dict:
+        return {}
+
+    def test_toggle_defaults_to_false(self):
+        from bot import _is_plex_unmatched_notify_enabled
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = self._isolated_settings()
+            self.assertFalse(_is_plex_unmatched_notify_enabled())
+
+    def test_toggle_round_trip(self):
+        from bot import _is_plex_unmatched_notify_enabled, _set_plex_unmatched_notify_enabled
+        store: dict = {}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _set_plex_unmatched_notify_enabled(True)
+            self.assertTrue(_is_plex_unmatched_notify_enabled())
+            _set_plex_unmatched_notify_enabled(False)
+            self.assertFalse(_is_plex_unmatched_notify_enabled())
+
+    def test_seen_round_trip_sorts_and_dedupes(self):
+        from bot import _load_plex_unmatched_seen, _save_plex_unmatched_seen
+        store: dict = {}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _save_plex_unmatched_seen({
+                "movies": ["k3", "k1", "k1", "k2"],
+                "shows":  ["s2", "s1", "s2"],
+            })
+            seen = _load_plex_unmatched_seen()
+        self.assertEqual(seen["movies"], ["k1", "k2", "k3"])
+        self.assertEqual(seen["shows"], ["s1", "s2"])
+
+    def test_seen_returns_empty_lists_when_unset(self):
+        from bot import _load_plex_unmatched_seen
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {}
+            seen = _load_plex_unmatched_seen()
+        self.assertEqual(seen, {"movies": [], "shows": []})
+
+    def test_seen_save_does_not_clobber_unrelated_settings(self):
+        """Verify _save_plex_unmatched_seen preserves other fields in settings."""
+        from bot import _save_plex_unmatched_seen
+        store = {"movie_subscriptions": {"100": {"x": 1}}, "movie_notify_last_run_at": "2026-05-15"}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _save_plex_unmatched_seen({"movies": ["k1"], "shows": []})
+        # Other fields untouched
+        self.assertEqual(store["movie_subscriptions"], {"100": {"x": 1}})
+        self.assertEqual(store["movie_notify_last_run_at"], "2026-05-15")
+        # New field added
+        self.assertEqual(store["plex_unmatched_seen"], {"movies": ["k1"], "shows": []})
+
+
 class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
     """Tests for time-window logic: deferred/pending notifications and flush."""
 

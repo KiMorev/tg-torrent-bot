@@ -1067,6 +1067,52 @@ def _save_movie_discovery_settings(settings: dict) -> None:
     state_store.save_movie_discovery_settings(settings)
 
 
+# --- Plex unmatched notification helpers (Block 2 of admin radar) ---
+
+def _is_plex_unmatched_notify_enabled() -> bool:
+    """Runtime toggle for push notifications about Plex-unmatched files.
+
+    Persisted in ``movie_discovery_settings`` so it survives bot restarts and
+    can be flipped through ``/admin`` without changing ``.env``. Defaults to
+    False — the feature is opt-in.
+    """
+    return bool(_load_movie_discovery_settings().get("plex_unmatched_notify_enabled", False))
+
+
+def _set_plex_unmatched_notify_enabled(value: bool) -> None:
+    """Persist the runtime toggle for Plex-unmatched push notifications."""
+    settings = _load_movie_discovery_settings()
+    settings["plex_unmatched_notify_enabled"] = bool(value)
+    _save_movie_discovery_settings(settings)
+
+
+def _load_plex_unmatched_seen() -> dict:
+    """Return the persisted set of rating_keys that were unmatched in the previous
+    Plex refresh, split by ``movies`` / ``shows``.
+
+    Used as the diff baseline for push notifications. The map is updated on every
+    refresh regardless of the toggle state, so a quick off→on flip doesn't trigger
+    a spam burst about previously-seen files.
+    """
+    seen = _load_movie_discovery_settings().get("plex_unmatched_seen") or {}
+    return {
+        "movies": list(seen.get("movies") or []),
+        "shows":  list(seen.get("shows")  or []),
+    }
+
+
+def _save_plex_unmatched_seen(seen: dict) -> None:
+    """Persist the rating_keys-of-unmatched snapshot. Stored sorted+deduped for
+    deterministic JSON output (easier to compare across refreshes during debugging).
+    """
+    settings = _load_movie_discovery_settings()
+    settings["plex_unmatched_seen"] = {
+        "movies": sorted(set(seen.get("movies") or [])),
+        "shows":  sorted(set(seen.get("shows")  or [])),
+    }
+    _save_movie_discovery_settings(settings)
+
+
 # --- Movie discovery subscription helpers ---
 
 def _get_movie_subscriptions() -> dict:
