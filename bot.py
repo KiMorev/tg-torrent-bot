@@ -2012,6 +2012,35 @@ def _plex_pre_check(title: str, year: int, requested_quality: str) -> "PlexCheck
     return _plex_check_before_download(match, requested_quality)
 
 
+async def _plex_pre_check_series(
+    series_query: str,
+    season_num: int | None,
+    requested_quality: str,
+) -> "PlexSeriesCheckResult | None":
+    """Return a PlexSeriesCheckResult when a season is already in Plex, else None.
+
+    Mirrors :func:`_plex_pre_check` but for TV seasons. Returns None when:
+      • Plex is disabled or the shows cache is empty
+      • series_query/season_num are missing or invalid
+      • requested_quality is unknown (can't compare → no warning)
+      • The show isn't in Plex, or the show is there but this season isn't
+    """
+    if not PLEX_ENABLED or not _plex_shows_library:
+        return None
+    if not series_query or not season_num or season_num <= 0:
+        return None
+    if not requested_quality:
+        return None
+    show = _plex_show_find(series_query)
+    if show is None:
+        return None
+    seasons = await _plex_ensure_show_seasons(show)
+    season = seasons.get(season_num)
+    if season is None:
+        return None
+    return _plex_check_before_download_season(show, season, requested_quality)
+
+
 def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
     """Find a Plex movie whose file path has *ds_title* as a complete component.
 
@@ -2189,6 +2218,40 @@ def _plex_confirm_text(check: "PlexCheckResult", display_title: str, requested_q
 
     return (
         f"⚠️ <b>{title_esc}</b> {verb}.\n"
+        "Скачать всё равно?"
+    )
+
+
+def _plex_series_confirm_text(
+    check: "PlexSeriesCheckResult",
+    display_title: str,
+    requested_quality: str,
+) -> str:
+    """Format the pre-download Plex warning for a TV season (HTML)."""
+    plex_res = check.season.resolution
+    plex_res_display = plex_res.upper() if plex_res else "неизвестное качество"
+    show_title_esc = html_module.escape(check.show.title or "")
+    season_num = check.season.season_number
+    title_esc = html_module.escape(display_title)
+
+    head = (
+        f"Сезон {season_num} «{show_title_esc}»"
+        if show_title_esc
+        else f"Сезон {season_num}"
+    )
+
+    if check.action == "warn_same":
+        verb = f"уже есть в Plex ({plex_res_display})"
+    elif check.action == "warn_better":
+        req_display = requested_quality.upper() if requested_quality else "неизвестное качество"
+        verb = f"уже есть в Plex в лучшем качестве ({plex_res_display} &gt; {req_display})"
+    else:  # offer_upgrade
+        req_display = requested_quality.upper() if requested_quality else "неизвестное качество"
+        verb = f"есть в Plex в худшем качестве ({plex_res_display}), запрошено {req_display}"
+
+    return (
+        f"⚠️ <b>{head}</b> {verb}.\n"
+        f"<i>Из раздачи: {title_esc}</i>\n"
         "Скачать всё равно?"
     )
 
@@ -4385,9 +4448,9 @@ async def _download_and_add(
         raw_title = result.get("movie_title") or result.get("title") or ""
         raw_year = result.get("year") or _movie_extract_year(raw_title) or 0
         req_quality = _plex_quality_from_result(result)
+        display_title = result.get("title") or raw_title
         plex_check = _plex_pre_check(raw_title, int(raw_year), req_quality)
         if plex_check is not None:
-            display_title = result.get("title") or raw_title
             context.user_data["plex_pending"] = {
                 "type": "search",
                 "index": index,
@@ -4399,6 +4462,23 @@ async def _download_and_add(
                 parse_mode="HTML",
             )
             return SEARCH_PLEX_CONFIRM
+        # Movie check returned None — try the TV-series path before downloading.
+        if _plex_is_series(raw_title):
+            series_query = _extract_series_base_query(raw_title) or ""
+            season_num = _extract_season_from_query(raw_title)
+            series_check = await _plex_pre_check_series(series_query, season_num, req_quality)
+            if series_check is not None:
+                context.user_data["plex_pending"] = {
+                    "type": "search",
+                    "index": index,
+                    "subscribe": subscribe,
+                }
+                await query.edit_message_text(
+                    _plex_series_confirm_text(series_check, display_title, req_quality),
+                    reply_markup=_plex_confirm_keyboard(),
+                    parse_mode="HTML",
+                )
+                return SEARCH_PLEX_CONFIRM
 
     await query.edit_message_text("⏳ Скачиваю torrent-файл…")
 
@@ -6684,6 +6764,24 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
                     parse_mode="HTML",
                 )
                 return
+            # Movie check missed — try the TV-series path.
+            if _plex_is_series(dn_raw):
+                series_query = _extract_series_base_query(dn_raw) or ""
+                season_num = _extract_season_from_query(dn_raw)
+                series_check = await _plex_pre_check_series(series_query, season_num, req_quality)
+                if series_check is not None:
+                    progress_message = await update.message.reply_text(_magnet_wait_text(0, 8))
+                    context.user_data["plex_pending"] = {
+                        "type": "magnet",
+                        "magnet_uri": magnet_uri,
+                    }
+                    await _safe_edit_message(
+                        progress_message,
+                        _plex_series_confirm_text(series_check, dn_raw, req_quality),
+                        reply_markup=_plex_confirm_keyboard(),
+                        parse_mode="HTML",
+                    )
+                    return
 
     progress_message = await update.message.reply_text(_magnet_wait_text(0, 8))
     logger.info("Creating Download Station task from magnet chat_id=%s", _chat_id(update))
@@ -6835,6 +6933,24 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     parse_mode="HTML",
                 )
                 return  # temp_path kept — will be cleaned up by confirm/cancel/timeout
+            # Movie check missed — try the TV-series path.
+            if _plex_is_series(plex_title):
+                series_query = _extract_series_base_query(plex_title) or ""
+                season_num = _extract_season_from_query(plex_title)
+                series_check = await _plex_pre_check_series(series_query, season_num, req_quality)
+                if series_check is not None:
+                    context.user_data["plex_pending"] = {
+                        "type": "torrent",
+                        "temp_path": str(temp_path),
+                        "safe_name": safe_name,
+                    }
+                    await _safe_edit_message(
+                        progress_message,
+                        _plex_series_confirm_text(series_check, original_name, req_quality),
+                        reply_markup=_plex_confirm_keyboard(),
+                        parse_mode="HTML",
+                    )
+                    return
 
         await _do_process_torrent(progress_message, context, temp_path, safe_name, chat_id=chat_id)
         temp_path = None  # _do_process_torrent owns cleanup now

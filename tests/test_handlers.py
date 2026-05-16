@@ -1819,6 +1819,116 @@ class PlexCacheInfoIncludesShowsTests(unittest.TestCase):
         self.assertTrue(info["shows_updated_at"])  # non-empty formatted timestamp
 
 
+class PlexPreCheckSeriesTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for _plex_pre_check_series — TV-season variant of pre-download check."""
+
+    def _make_show_with_seasons(self, *, season_resolution: str = "1080"):
+        from plex import PlexShow, PlexSeason
+        season = PlexSeason("seasonkey", 3, episode_count=10, file_paths=[],
+                            resolution=season_resolution)
+        show = PlexShow("Клиника", 2001, "showkey", seasons={3: season})
+        return show, season
+
+    async def test_returns_warn_same_when_quality_matches(self):
+        from bot import _plex_pre_check_series
+        show, _ = self._make_show_with_seasons(season_resolution="1080")
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("клиника", 2001): show}),
+        ):
+            result = await _plex_pre_check_series("Клиника", 3, "1080")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "warn_same")
+        self.assertEqual(result.season.season_number, 3)
+
+    async def test_returns_offer_upgrade_when_plex_has_worse_quality(self):
+        from bot import _plex_pre_check_series
+        show, _ = self._make_show_with_seasons(season_resolution="720")
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("клиника", 2001): show}),
+        ):
+            result = await _plex_pre_check_series("Клиника", 3, "1080")
+        self.assertEqual(result.action, "offer_upgrade")
+
+    async def test_returns_warn_better_when_plex_has_better_quality(self):
+        from bot import _plex_pre_check_series
+        show, _ = self._make_show_with_seasons(season_resolution="4k")
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("клиника", 2001): show}),
+        ):
+            result = await _plex_pre_check_series("Клиника", 3, "1080")
+        self.assertEqual(result.action, "warn_better")
+
+    async def test_returns_none_when_quality_unknown(self):
+        """Without a known requested_quality we can't decide → no warning."""
+        from bot import _plex_pre_check_series
+        show, _ = self._make_show_with_seasons()
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("клиника", 2001): show}),
+        ):
+            self.assertIsNone(await _plex_pre_check_series("Клиника", 3, ""))
+
+    async def test_returns_none_when_show_not_in_plex(self):
+        from bot import _plex_pre_check_series
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {}),
+        ):
+            self.assertIsNone(await _plex_pre_check_series("Unknown Show", 3, "1080"))
+
+    async def test_returns_none_when_season_not_in_show(self):
+        """Show is in Plex but the specific season isn't."""
+        from bot import _plex_pre_check_series
+        show, _ = self._make_show_with_seasons()  # only has season 3
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("клиника", 2001): show}),
+        ):
+            self.assertIsNone(await _plex_pre_check_series("Клиника", 5, "1080"))
+
+    async def test_returns_none_when_disabled(self):
+        from bot import _plex_pre_check_series
+        with patch.object(bot, "PLEX_ENABLED", False):
+            self.assertIsNone(await _plex_pre_check_series("Клиника", 3, "1080"))
+
+    async def test_returns_none_for_invalid_season_num(self):
+        from bot import _plex_pre_check_series
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_plex_shows_library", {("x", 2020): MagicMock()}),
+        ):
+            self.assertIsNone(await _plex_pre_check_series("X", 0, "1080"))
+            self.assertIsNone(await _plex_pre_check_series("X", -1, "1080"))
+            self.assertIsNone(await _plex_pre_check_series("X", None, "1080"))
+
+
+class PlexSeriesConfirmTextTests(unittest.TestCase):
+    def _check(self, action: str, season_resolution: str = "1080"):
+        from plex import PlexShow, PlexSeason, PlexSeriesCheckResult
+        show = PlexShow("Клиника", 2001, "showkey", seasons={})
+        season = PlexSeason("sk", 3, 10, [], season_resolution)
+        return PlexSeriesCheckResult(show=show, season=season, action=action)
+
+    def test_warn_same_text_mentions_show_and_season(self):
+        from bot import _plex_series_confirm_text
+        text = _plex_series_confirm_text(self._check("warn_same"), "Клиника / Сезон 3", "1080")
+        self.assertIn("Сезон 3", text)
+        self.assertIn("Клиника", text)
+        self.assertIn("уже есть в Plex", text)
+        self.assertIn("1080", text)
+
+    def test_offer_upgrade_mentions_requested_quality(self):
+        from bot import _plex_series_confirm_text
+        text = _plex_series_confirm_text(
+            self._check("offer_upgrade", season_resolution="720"), "Клиника", "1080"
+        )
+        self.assertIn("1080", text)
+        self.assertIn("720", text)
+
+
 class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tests for search_season_back — the '⬅️ Назад' button in the season picker."""
 
