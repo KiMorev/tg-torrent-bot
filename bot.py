@@ -1355,7 +1355,13 @@ def _format_kp_votes(votes: int | None) -> str:
     return str(votes)
 
 
-def _format_movie_discovery_cache(cache: dict) -> str:
+def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> str:
+    """Render the /new top-10 list.
+
+    When ``chat_id`` is supplied, the «🆕» badge appears only on films that this
+    specific user hasn't seen yet (per-user seen set). When ``chat_id`` is None
+    (legacy or system callers without a user context) the badge is omitted.
+    """
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     updated_at = cache.get("updated_at") or "—"
     qualities = ", ".join(_movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES))
@@ -1368,6 +1374,8 @@ def _format_movie_discovery_cache(cache: dict) -> str:
     if not cards:
         lines.append("\nПока нет подходящих фильмов. Кэш обновится в фоне, можно попробовать позже.")
         return "\n".join(lines)
+
+    user_seen: set[str] = _get_user_seen_ids(chat_id) if chat_id else set()
 
     for index, card in enumerate(cards[:10], 1):
         main_title = html_module.escape(str(card.get("title") or "Без названия"))
@@ -1382,7 +1390,8 @@ def _format_movie_discovery_cache(cache: dict) -> str:
         genres_text = f"\n   Жанры: {html_module.escape(genres)}" if genres else ""
         kp_url = card.get("kp_url")
         kp_text = f"\n   <a href=\"{html_module.escape(str(kp_url))}\">Кинопоиск</a>" if kp_url else ""
-        new_mark = " 🆕" if card.get("is_new") else ""
+        # Per-user badge: shown only when this user hasn't been notified about / opened this film yet.
+        new_mark = " 🆕" if (chat_id and not _is_card_seen(card, user_seen)) else ""
         if card.get("in_plex"):
             plex_res = card.get("plex_resolution") or ""
             plex_mark = f" ✅ {html_module.escape(plex_res)}" if plex_res else " ✅"
@@ -6461,11 +6470,12 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         cache = await _refresh_movie_discovery_cache()
         await _safe_edit_message(
             progress,
-            _format_movie_discovery_cache(cache),
+            _format_movie_discovery_cache(cache, chat_id=chat_id),
             reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
+        _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
         return
 
     # Re-apply Plex badges from current in-memory library (cheap, no network).
@@ -6473,11 +6483,14 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     _enrich_cards_with_plex(cache.get("cards") or [])
 
     await update.message.reply_text(
-        _format_movie_discovery_cache(cache),
+        _format_movie_discovery_cache(cache, chat_id=chat_id),
         reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
+    # Mark the displayed top-10 as 'seen' for this user — the «🆕» badge will
+    # disappear next time they open /new (until a new film appears).
+    _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
 
 
 async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6494,11 +6507,12 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
     cache = await _refresh_movie_discovery_cache()
     await _safe_edit_callback(
         query,
-        _format_movie_discovery_cache(cache),
+        _format_movie_discovery_cache(cache, chat_id=chat_id),
         reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
+    _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
 
 
 async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6575,11 +6589,12 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
     _enrich_cards_with_plex(cache.get("cards") or [])
     await _safe_edit_callback(
         query,
-        _format_movie_discovery_cache(cache),
+        _format_movie_discovery_cache(cache, chat_id=chat_id),
         reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
+    _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
 
 
 async def help_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

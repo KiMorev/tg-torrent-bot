@@ -1573,6 +1573,56 @@ class MovieSeenByUserHelpersTests(unittest.TestCase):
             self.assertEqual(st.save_movie_discovery_settings.call_count, first_call_count)
 
 
+class FormatMovieDiscoveryCachePerUserBadgeTests(unittest.TestCase):
+    """Tests for the per-user 🆕 badge in _format_movie_discovery_cache."""
+
+    def _cache(self, *cards) -> dict:
+        return {"updated_at": "2026-05-16 12:00", "cards": list(cards)}
+
+    def _card(self, title: str, kp_id: int | None = None) -> dict:
+        c = {"title": title, "year": 2026, "rating": 7.5}
+        if kp_id is not None:
+            c["kp_id"] = kp_id
+        return c
+
+    def test_badge_shown_for_unseen_film_with_chat_id(self):
+        from bot import _format_movie_discovery_cache
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {"movie_seen_by_user": {}}
+            text = _format_movie_discovery_cache(self._cache(self._card("Новый", kp_id=1)), chat_id=100)
+        self.assertIn("🆕", text)
+        self.assertIn("Новый", text)
+
+    def test_badge_hidden_for_seen_film(self):
+        from bot import _format_movie_discovery_cache
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {
+                "movie_seen_by_user": {"100": {"kp:1": "old-ts"}}
+            }
+            text = _format_movie_discovery_cache(self._cache(self._card("Виденный", kp_id=1)), chat_id=100)
+        self.assertNotIn("🆕", text)
+        self.assertIn("Виденный", text)
+
+    def test_per_user_independence(self):
+        """User A has seen the film, user B hasn't — different badge state."""
+        from bot import _format_movie_discovery_cache
+        cache = self._cache(self._card("Фильм", kp_id=42))
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {
+                "movie_seen_by_user": {"100": {"kp:42": "ts"}}
+            }
+            text_user_100 = _format_movie_discovery_cache(cache, chat_id=100)
+            text_user_200 = _format_movie_discovery_cache(cache, chat_id=200)
+        self.assertNotIn("🆕", text_user_100)
+        self.assertIn("🆕", text_user_200)
+
+    def test_no_badge_without_chat_id(self):
+        """When called without chat_id (system render), no badge is added."""
+        from bot import _format_movie_discovery_cache
+        text = _format_movie_discovery_cache(self._cache(self._card("X", kp_id=1)))
+        self.assertNotIn("🆕", text)
+
+
 # ---------------------------------------------------------------------------
 # Plex pre-download check helpers
 # ---------------------------------------------------------------------------
