@@ -1448,6 +1448,108 @@ class AdminPlexUnmatchedCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unmatched.mkv", text)
 
 
+class MovieSeenByUserHelpersTests(unittest.TestCase):
+    """Tests for the per-user 'seen' tracking helpers used by /new notifications
+    and the is_new_for_user badge."""
+
+    def test_card_identifiers_includes_both_kp_and_movie_key(self):
+        from bot import _card_identifiers
+        ids = _card_identifiers({"kp_id": 12345, "title": "Dune", "year": 2021})
+        self.assertIn("kp:12345", ids)
+        # movie_key uses normalized title + year, e.g. '2021:dune'
+        self.assertEqual(len(ids), 2)
+        self.assertTrue(any(i.startswith("2021:") for i in ids))
+
+    def test_card_identifiers_only_movie_key_when_no_kp(self):
+        from bot import _card_identifiers
+        ids = _card_identifiers({"title": "Dune", "year": 2021})
+        self.assertEqual(len(ids), 1)
+        self.assertTrue(ids[0].startswith("2021:"))
+
+    def test_card_identifiers_empty_when_no_title_no_kp(self):
+        from bot import _card_identifiers
+        self.assertEqual(_card_identifiers({}), [])
+
+    def test_is_card_seen_matches_by_any_id(self):
+        from bot import _is_card_seen
+        card = {"kp_id": 777, "title": "X", "year": 2024}
+        # Match via kp_id
+        self.assertTrue(_is_card_seen(card, {"kp:777"}))
+        # Match via title — even if kp_id-id isn't in the seen set
+        self.assertTrue(_is_card_seen(card, {"2024:x"}))
+        # No match
+        self.assertFalse(_is_card_seen(card, {"kp:999"}))
+
+    def test_is_card_seen_handles_empty_seen(self):
+        from bot import _is_card_seen
+        self.assertFalse(_is_card_seen({"kp_id": 1, "title": "X", "year": 2020}, set()))
+
+    def test_get_user_seen_ids_returns_set(self):
+        from bot import _get_user_seen_ids
+        store = {"movie_seen_by_user": {"100": {"kp:1": "ts1", "2020:x": "ts2"}}}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = store
+            self.assertEqual(_get_user_seen_ids(100), {"kp:1", "2020:x"})
+
+    def test_get_user_seen_ids_empty_for_unknown_user(self):
+        from bot import _get_user_seen_ids
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {"movie_seen_by_user": {"100": {"kp:1": "ts"}}}
+            self.assertEqual(_get_user_seen_ids(999), set())
+
+    def test_mark_user_seen_persists_all_identifiers(self):
+        from bot import _mark_user_seen
+        store: dict = {}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _mark_user_seen(100, [
+                {"kp_id": 777, "title": "Dune", "year": 2021},
+                {"title": "Foo", "year": 2024},
+            ])
+        seen = store["movie_seen_by_user"]["100"]
+        # 3 entries total: kp:777, 2021:dune (from Dune), 2024:foo (from Foo)
+        self.assertEqual(len(seen), 3)
+        self.assertIn("kp:777", seen)
+        self.assertIn("2021:dune", seen)
+        self.assertIn("2024:foo", seen)
+
+    def test_mark_user_seen_preserves_unrelated_users(self):
+        from bot import _mark_user_seen
+        store = {"movie_seen_by_user": {"999": {"kp:1": "old"}}}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
+        # User 999 still there
+        self.assertIn("kp:1", store["movie_seen_by_user"]["999"])
+        # User 100 has new entries
+        self.assertIn("kp:5", store["movie_seen_by_user"]["100"])
+
+    def test_mark_user_seen_idempotent_skips_save_when_nothing_changed(self):
+        """Calling mark on already-known cards must not rewrite the file."""
+        from bot import _mark_user_seen
+        store = {"movie_seen_by_user": {"100": {"kp:5": "ts-old", "2024:x": "ts-old"}}}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
+            # Card's IDs already at ts-old — would refresh to current time → changed=True
+            # So save IS called. Test the alternative: idempotent when timestamps freshly written.
+        # Run twice in quick succession — second should be no-op
+        store2 = dict(store)
+        store2["movie_seen_by_user"] = {"100": dict(store["movie_seen_by_user"]["100"])}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store2)
+            st.save_movie_discovery_settings.side_effect = store2.update
+            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
+            first_call_count = st.save_movie_discovery_settings.call_count
+            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
+            # The second call: identifiers exist with the same timestamp (just written),
+            # so save_movie_discovery_settings should NOT be called again.
+            self.assertEqual(st.save_movie_discovery_settings.call_count, first_call_count)
+
+
 class MovieNotificationWindowTests(unittest.IsolatedAsyncioTestCase):
     """Tests for time-window logic: deferred/pending notifications and flush."""
 

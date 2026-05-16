@@ -1130,6 +1130,86 @@ def _save_plex_unmatched_seen(seen: dict) -> None:
     _save_movie_discovery_settings(settings)
 
 
+# --- Per-user "seen in /new" tracking ---
+# Replaces the legacy global `movie_notify_last_run_at` + first_seen_at logic.
+# A film is "seen by user X" when X either received a push about it or opened
+# /new and saw it in the rendered top-10. Plashka «новинка» and push both use
+# this set as the single source of truth.
+
+def _card_identifiers(card: dict) -> list[str]:
+    """Return all stable IDs for a card.
+
+    A card's key flips between refreshes when KP enrichment status changes:
+        - kp resolved later → key = "kp:N"
+        - kp cache miss → key = movie_key(title, year)
+    To match a previously-stored ID through such flips we ALWAYS store both
+    ``kp:N`` (if kp_id is known) and ``movie_key(title, year)`` (if title+year
+    are known), and at lookup time check whether ANY of them appears in the
+    user's seen-set.
+    """
+    ids: list[str] = []
+    kp_id = card.get("kp_id")
+    if kp_id:
+        ids.append(f"kp:{kp_id}")
+    title = str(card.get("title") or "")
+    try:
+        year = int(card.get("year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if title and year:
+        try:
+            ids.append(_movie_card_key(title, year))
+        except (TypeError, ValueError):
+            pass
+    return ids
+
+
+def _is_card_seen(card: dict, seen_ids: set[str]) -> bool:
+    """True iff at least one of the card's identifiers is in the user's seen set."""
+    if not seen_ids:
+        return False
+    for cid in _card_identifiers(card):
+        if cid in seen_ids:
+            return True
+    return False
+
+
+def _get_user_seen_ids(chat_id: int) -> set[str]:
+    """Return the set of all film IDs the user has been shown (push or /new)."""
+    if not chat_id:
+        return set()
+    seen_by_user = _load_movie_discovery_settings().get("movie_seen_by_user") or {}
+    user_entry = seen_by_user.get(str(chat_id)) or {}
+    return set(user_entry.keys())
+
+
+def _mark_user_seen(chat_id: int, cards: list[dict]) -> None:
+    """Record that the user has now seen these cards. Persists ALL identifiers
+    of each card so a later KP-flip doesn't lose the match."""
+    if not chat_id or not cards:
+        return
+    now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    settings = _load_movie_discovery_settings()
+    seen_by_user = settings.get("movie_seen_by_user")
+    if not isinstance(seen_by_user, dict):
+        seen_by_user = {}
+    user_key = str(chat_id)
+    user_entry = seen_by_user.get(user_key)
+    if not isinstance(user_entry, dict):
+        user_entry = {}
+    changed = False
+    for card in cards:
+        for cid in _card_identifiers(card):
+            if user_entry.get(cid) != now_text:
+                user_entry[cid] = now_text
+                changed = True
+    if not changed:
+        return
+    seen_by_user[user_key] = user_entry
+    settings["movie_seen_by_user"] = seen_by_user
+    _save_movie_discovery_settings(settings)
+
+
 # --- Movie discovery subscription helpers ---
 
 def _get_movie_subscriptions() -> dict:
