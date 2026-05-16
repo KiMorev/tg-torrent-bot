@@ -1740,6 +1740,51 @@ class SeriesHelpersTests(unittest.TestCase):
         results = [{"title": None}, {"other": "x"}]
         self.assertEqual(_seasons_available_in_results(results), [])
 
+    def test_seasons_available_is_case_insensitive(self):
+        """СЕЗОН / сезон / Сезон — must all be matched."""
+        from formatters import _seasons_available_in_results
+        results = [
+            {"title": "Шоу / СЕЗОН: 1"},
+            {"title": "Show / сезон: 2"},
+            {"title": "Шоу / Сезон: 3"},
+        ]
+        self.assertEqual(_seasons_available_in_results(results), [1, 2, 3])
+
+
+class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
+    """Regression: regexps that detect/extract season numbers must all agree on
+    case-insensitive matching. Without this guarantee, an upper-case title like
+    'СЕЗОН: 1' could pass _plex_is_series (re.I) but fail extraction in
+    _extract_season_from_query / _filter_by_season, leaving meta inconsistent."""
+
+    def test_plex_is_series_handles_all_cyrillic_cases(self):
+        from bot import _plex_is_series
+        for variant in ("Сезон: 1", "сезон 1", "СЕЗОН: 1", "сЕзОн:1", "S01E02", "1x05"):
+            self.assertTrue(_plex_is_series(f"Show / {variant}"),
+                            f"variant {variant!r} not detected")
+
+    def test_extract_season_handles_all_cyrillic_cases(self):
+        from formatters import _extract_season_from_query
+        self.assertEqual(_extract_season_from_query("Show СЕЗОН: 5 1080p"), 5)
+        self.assertEqual(_extract_season_from_query("Show сезон 7"), 7)
+        self.assertEqual(_extract_season_from_query("Show Сезон: 3"), 3)
+        self.assertEqual(_extract_season_from_query("Show сЕзОн:9"), 9)
+        self.assertIsNone(_extract_season_from_query("Just a Movie"))
+
+    def test_filter_by_season_handles_all_cyrillic_cases(self):
+        from formatters import _filter_by_season
+        results = [
+            {"title": "Show / СЕЗОН: 3 / 1080p"},
+            {"title": "Show / сезон: 3 / 720p"},
+            {"title": "Show / Сезон: 3 / 4K"},
+            {"title": "Show / Сезон: 4 / 1080p"},
+        ]
+        # All three case-variants of season 3 must match, season 4 must not.
+        filtered = _filter_by_season(results, 3)
+        self.assertEqual(len(filtered), 3)
+        for r in filtered:
+            self.assertIn("Сезон: 3".lower(), r["title"].lower())
+
 
 class BuildTaskMetaTests(unittest.TestCase):
     """Tests for _build_task_meta_from_result and _build_task_meta_from_title."""

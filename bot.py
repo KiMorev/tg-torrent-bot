@@ -1963,10 +1963,11 @@ def _enrich_cards_with_plex(cards: list[dict]) -> None:
         card["plex_resolution"] = match.resolution if match else None
 
 
-# Accepts "S01E02", "1x02", "Сезон 3", "Сезон: 3", "Сезон:3" — the colon-form is
-# the most common on Rutracker. Stays consistent with _extract_season_from_query
-# in formatters.py.
-_SERIES_RE = re.compile(r"[Ss]\d+[Ee]\d+|\d+x\d+|[Сс]езон[:\s]+\d+", re.I)
+# Accepts "S01E02", "1x02", "Сезон 3", "Сезон: 3", "Сезон:3", "СЕЗОН 3" — the
+# colon-form is the most common on Rutracker. Case-insensitive matching is
+# applied via re.IGNORECASE; the literal "сезон" is enough since the flag
+# covers Latin/Cyrillic case mixing.
+_SERIES_RE = re.compile(r"s\d+e\d+|\d+x\d+|сезон[:\s]+\d+", re.IGNORECASE)
 
 
 def _plex_is_series(title: str) -> bool:

@@ -288,19 +288,21 @@ def _extract_season_from_query(query: str) -> int | None:
 
     Recognises the normalised form produced by _normalize_season_in_query:
         'Клиника Сезон: 10 1080p' → 10
-        'Breaking Bad'            → None
+        'СЕЗОН: 10'                → 10
+        'Breaking Bad'             → None
+    Case-insensitive: matches 'Сезон', 'сезон', 'СЕЗОН', 'сЕзОн' identically.
     """
-    m = re.search(r"[Сс]езон[:\s]+(\d+)\b", query)
+    m = re.search(r"сезон[:\s]+(\d+)\b", query, re.IGNORECASE)
     return int(m.group(1)) if m else None
 
 
 def _filter_by_season(results: list[dict], season_num: int) -> list[dict]:
     """Keep only results whose title contains the given season marker.
 
-    Matches 'Сезон: N', 'Сезон:N', 'Сезон N' (any case) with a word
-    boundary after N so that season 1 never matches season 10/11/12…
+    Matches 'Сезон: N', 'Сезон:N', 'Сезон N' in any case (case-insensitive)
+    with a word boundary after N so that season 1 never matches season 10/11/12…
     """
-    pattern = re.compile(rf"[Сс]езон[:\s]+{season_num}\b")
+    pattern = re.compile(rf"сезон[:\s]+{season_num}\b", re.IGNORECASE)
     return [r for r in results if pattern.search(r.get("title", ""))]
 
 
@@ -330,10 +332,12 @@ def _seasons_available_in_results(results: list[dict]) -> list[int]:
 
     Used when a season-specific search returns 0 hits — we tell the user which
     seasons the tracker *does* have so they don't keep guessing.
+    Case-insensitive: handles 'Сезон', 'сезон', 'СЕЗОН' alike.
     """
     found: set[int] = set()
+    pattern = re.compile(r"сезон[:\s]+(\d+)", re.IGNORECASE)
     for r in results:
-        for m in re.finditer(r"[Сс]езон[:\s]+(\d+)", r.get("title") or ""):
+        for m in pattern.finditer(r.get("title") or ""):
             found.add(int(m.group(1)))
     return sorted(found)
 
