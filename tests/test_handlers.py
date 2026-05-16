@@ -1652,6 +1652,46 @@ class SeriesHelpersTests(unittest.TestCase):
         self.assertEqual(_seasons_available_in_results(results), [])
 
 
+class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for search_season_back — the '⬅️ Назад' button in the season picker."""
+
+    async def test_back_restores_success_message_and_reopens_offer(self):
+        """Tapping back must restore the success_text + 'Другой сезон' keyboard
+        AND re-arm srch_series_query so the user can open the picker again."""
+        from bot import search_season_back, SEARCH_RESULTS
+        update = _make_callback_update(callback_data="srch:season_back")
+        context = _make_context(user_data={
+            "srch_series_success_text": "✅ Клиника Сезон 2 добавлен",
+            "srch_series_success_task_id": "dbid_777",
+            "srch_base_title": "Клиника",
+        })
+        result = await search_season_back(update, context)
+
+        self.assertEqual(result, SEARCH_RESULTS)
+        # The success text was restored verbatim
+        edit = update.callback_query.edit_message_text
+        edit.assert_awaited_once()
+        self.assertEqual(edit.call_args.args[0], "✅ Клиника Сезон 2 добавлен")
+        # And the keyboard is the after-add one (has '🔎 Другой сезон' button)
+        keyboard = edit.call_args.kwargs["reply_markup"]
+        button_texts = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("🔎 Другой сезон", button_texts)
+        # srch_series_query re-armed for the next 'Другой сезон' tap
+        self.assertEqual(context.user_data.get("srch_series_query"), "Клиника")
+
+    async def test_back_handles_lost_state_gracefully(self):
+        """If success_text is missing (state expired), close politely instead of crashing."""
+        from bot import search_season_back
+        from telegram.ext import ConversationHandler
+        update = _make_callback_update(callback_data="srch:season_back")
+        context = _make_context(user_data={})  # no series state
+        result = await search_season_back(update, context)
+        self.assertEqual(result, ConversationHandler.END)
+        update.callback_query.edit_message_text.assert_awaited_once()
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Запрос потерян", text)
+
+
 # ---------------------------------------------------------------------------
 # _movie_trackers_panel tests
 # ---------------------------------------------------------------------------

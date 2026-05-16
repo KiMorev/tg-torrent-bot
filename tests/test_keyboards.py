@@ -12,6 +12,7 @@ from keyboards import (
     _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
+    _season_select_keyboard,
     _task_keyboard,
     _tasks_keyboard,
     tracker_selection_label,
@@ -97,6 +98,38 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["🔄 Проверить снова"], "admin:diagnostics")
         self.assertEqual(buttons["⬅️ Админ-панель"], "admin:home")
         self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
+
+
+class SeasonSelectKeyboardTests(unittest.TestCase):
+    """Tests for the season picker keyboard."""
+
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+
+    def test_back_and_cancel_buttons_present(self) -> None:
+        """Picker must always end with both '⬅️ Назад' and '❌ Отмена' so the user
+        can either return to the previous step or abort the whole flow."""
+        buttons = self._buttons(_season_select_keyboard(total_seasons=5))
+        self.assertEqual(buttons["⬅️ Назад"], "srch:season_back")
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
+    def test_numbered_buttons_shown_for_known_season_count(self) -> None:
+        kb = _season_select_keyboard(total_seasons=3)
+        buttons = self._buttons(kb)
+        for n in (1, 2, 3):
+            self.assertEqual(buttons[str(n)], f"srch:season:{n}")
+
+    def test_numbered_buttons_hidden_for_unknown_season_count(self) -> None:
+        kb = _season_select_keyboard(total_seasons=None)
+        buttons = self._buttons(kb)
+        # No numeric buttons — only the input/skip/back/cancel row
+        for label in buttons:
+            self.assertFalse(label.isdigit(), f"unexpected numbered button {label!r}")
+
+    def test_helper_buttons_always_present(self) -> None:
+        buttons = self._buttons(_season_select_keyboard(total_seasons=4))
+        self.assertEqual(buttons["✏️ Свой номер"], "srch:season_input")
+        self.assertEqual(buttons["🔎 Без сезона"], "srch:season_skip")
 
 
 class AdminKpCacheKeyboardTests(unittest.TestCase):

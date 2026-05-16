@@ -575,6 +575,10 @@ def _season_select_keyboard(total_seasons: int | None) -> InlineKeyboardMarkup:
         ),
     ])
     rows.append([
+        InlineKeyboardButton(
+            "⬅️ Назад",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:season_back",
+        ),
         InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel"),
     ])
     return InlineKeyboardMarkup(rows)

@@ -4052,6 +4052,37 @@ async def search_season_skip(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await _execute_search(query, context, f"{base}{quality_suffix}".strip())
 
 
+async def search_season_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Return from the season picker to the 'series added' success message.
+
+    Restores the success_text+keyboard that was shown right after the season
+    was downloaded, so the user can either tap '🔎 Другой сезон' again later
+    or just keep that message as a download record. Keeps srch_series_query
+    populated so the picker can be re-opened.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    success_text = context.user_data.get("srch_series_success_text", "")
+    task_id = context.user_data.get("srch_series_success_task_id", "")
+    if not success_text:
+        await query.edit_message_text(
+            "Запрос потерян. Используйте /status для текущей задачи."
+        )
+        return ConversationHandler.END
+
+    # Re-arm the offer so '🔎 Другой сезон' on the restored card works again.
+    base_title = context.user_data.get("srch_base_title", "")
+    if base_title:
+        context.user_data["srch_series_query"] = base_title
+
+    await query.edit_message_text(
+        success_text,
+        reply_markup=_search_after_add_keyboard(task_id),
+    )
+    return SEARCH_RESULTS
+
+
 async def search_season_input_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User wants to type a custom season number — prompt them."""
     query = update.callback_query
@@ -6738,6 +6769,7 @@ def main() -> None:
                     CallbackQueryHandler(search_season_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season:\d+$"),
                     CallbackQueryHandler(search_season_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_skip$"),
                     CallbackQueryHandler(search_season_input_ask, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_input$"),
+                    CallbackQueryHandler(search_season_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_back$"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, search_season_got_input),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                 ],
