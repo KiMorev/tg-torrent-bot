@@ -123,7 +123,7 @@ def _admin_panel_keyboard(
     ]
 
     if show_plex_unmatched:
-        list_label = f"📋 Несматчено в Plex ({plex_unmatched_count})"
+        list_label = f"📋 Plex: без матча ({plex_unmatched_count})"
         toggle_label = (
             "🔔 Уведомления о новых: вкл"
             if plex_unmatched_notify_enabled

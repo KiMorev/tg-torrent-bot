@@ -123,6 +123,7 @@ from plex import (
     _normalise_resolution as _plex_normalise_resolution,
 )
 from movie_discovery import (
+    _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
     detect_quality as _movie_detect_quality,
     discovery_queries as _movie_discovery_queries,
@@ -2405,6 +2406,26 @@ def _enrich_cards_with_plex(cards: list[dict]) -> None:
             match = _plex_library_find(str(card["alt_title"]), year)
         card["in_plex"] = match is not None
         card["plex_resolution"] = match.resolution if match else None
+
+
+def _recompute_and_resort_cards(cards: list[dict]) -> None:
+    """Recompute ``score`` with the current formula+year and resort in-place.
+
+    The cache stores ``score`` snapshotted at the last refresh. The score
+    depends on ``current_year`` (year-boundary changes the recency component,
+    see ``_compute_card_score`` in ``movie_discovery.py``) and on the formula
+    constants/weights — both can drift between cache write and next display
+    (year rollover, deploy with formula tweaks). On cache hit we recompute to
+    avoid showing a stale order until the next background refresh.
+
+    Pure CPU, no network. O(N log N) over ~10–50 cards.
+    """
+    if not cards:
+        return
+    current_year = datetime.now(DISPLAY_TIMEZONE).year
+    for card in cards:
+        card["score"] = _movie_compute_card_score(card, current_year)
+    cards.sort(key=lambda c: c.get("score") or 0, reverse=True)
 
 
 # Accepts "S01E02", "1x02", "Сезон 3", "Сезон: 3", "Сезон:3", "СЕЗОН 3" — the
@@ -6576,6 +6597,11 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Re-apply Plex badges from current in-memory library (cheap, no network).
     # Needed after restart: JSON cache may have stale in_plex values.
     _enrich_cards_with_plex(cache.get("cards") or [])
+
+    # Recompute scores under current formula/year and resort. Cache stores
+    # `score` snapshotted at last refresh — formula or year boundary changes
+    # leave the order stale until the next refresh. Pure CPU, no network.
+    _recompute_and_resort_cards(cache.get("cards") or [])
 
     await update.message.reply_text(
         _format_movie_discovery_cache(cache, chat_id=chat_id),

@@ -181,7 +181,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
             plex_unmatched_notify_enabled=False,
         )
         labels = self._labels(kb)
-        self.assertIn("📋 Несматчено в Plex (4)", labels)
+        self.assertIn("📋 Plex: без матча (4)", labels)
         self.assertIn("🔕 Уведомления о новых: выкл", labels)
 
     def test_unmatched_row_label_flips_when_enabled(self):
@@ -191,7 +191,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
             plex_unmatched_notify_enabled=True,
         )
         labels = self._labels(kb)
-        self.assertIn("📋 Несматчено в Plex (0)", labels)
+        self.assertIn("📋 Plex: без матча (0)", labels)
         self.assertIn("🔔 Уведомления о новых: вкл", labels)
 
     def test_existing_buttons_still_present(self):

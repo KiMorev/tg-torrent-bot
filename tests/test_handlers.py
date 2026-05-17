@@ -541,6 +541,96 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertIsNotNone(lpo, "link_preview_options must be set")
         self.assertTrue(lpo.is_disabled, "link preview must be disabled in /new")
 
+    def test_movie_new_recomputes_score_on_cache_hit(self):
+        """Cache hit must recompute score under current formula/year and resort.
+
+        Regression: the cache stores `score` snapshotted at last refresh — if
+        the year boundary crosses or the formula changes, the cached order
+        becomes stale. /new must re-sort before display.
+        """
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        # Two cards: one with high stored score but low current_year recency
+        # (year=2020), one with low stored score but matches current_year
+        # (year matches today). After recompute the high-recency card wins.
+        from datetime import datetime as _dt
+        current_year = _dt.now(bot.DISPLAY_TIMEZONE).year
+        fake_cache = {
+            "updated_at": "2026-05-14 22:00",
+            "cards": [
+                # Stored score=0.99 but year is far in the past — recency hurts.
+                {
+                    "title": "Old But Stored First",
+                    "year": 2020,
+                    "score": 0.99,
+                    "rating": 7.5,
+                    "best_seeders": 50,
+                    "best_quality": "1080p",
+                    "releases": [{"title": "x", "score": 1}],
+                },
+                # Stored score=0.10 but year is current — recency dominates.
+                {
+                    "title": "Fresh But Stored Last",
+                    "year": current_year,
+                    "score": 0.10,
+                    "rating": 7.5,
+                    "best_seeders": 50,
+                    "best_quality": "1080p",
+                    "releases": [{"title": "x", "score": 1}],
+                },
+            ],
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_movie_discovery_enabled", return_value=True),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=fake_cache),
+        ):
+            asyncio.run(movie_new_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        # The fresh-year card must appear before the old card in the rendered list.
+        pos_fresh = text.find("Fresh But Stored Last")
+        pos_old = text.find("Old But Stored First")
+        self.assertGreater(pos_fresh, 0)
+        self.assertGreater(pos_old, 0)
+        self.assertLess(pos_fresh, pos_old, "recomputed score must place fresh-year card first")
+
+    def test_recompute_and_resort_resorts_in_place(self):
+        """_recompute_and_resort_cards: cards with stale wrong-order scores get re-sorted."""
+        from datetime import datetime as _dt
+        current_year = _dt.now(bot.DISPLAY_TIMEZONE).year
+        cards = [
+            {
+                "title": "A (old, stored high)",
+                "year": 2018,
+                "score": 0.99,
+                "rating": 7.0,
+                "best_seeders": 100,
+                "best_quality": "1080p",
+                "releases": [{"title": "x", "score": 1}],
+            },
+            {
+                "title": "B (current year, stored low)",
+                "year": current_year,
+                "score": 0.10,
+                "rating": 7.0,
+                "best_seeders": 100,
+                "best_quality": "1080p",
+                "releases": [{"title": "x", "score": 1}],
+            },
+        ]
+        bot._recompute_and_resort_cards(cards)
+        self.assertEqual(cards[0]["title"], "B (current year, stored low)")
+        self.assertEqual(cards[1]["title"], "A (old, stored high)")
+
+    def test_recompute_and_resort_empty_is_noop(self):
+        """Empty list must not raise."""
+        cards: list[dict] = []
+        bot._recompute_and_resort_cards(cards)
+        self.assertEqual(cards, [])
+
     def test_movie_new_refresh_callback_disables_link_preview(self):
         """«Обновить» callback must have link preview disabled."""
         update = _make_callback_update(chat_id=100, callback_data="new:refresh")
