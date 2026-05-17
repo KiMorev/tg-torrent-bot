@@ -233,18 +233,33 @@ def _score_result(result: dict) -> float:
 # СЕРИИ, серии). Note: [яи] is a morphology variant (Серия/Серии), not a case
 # class — it must stay alongside re.IGNORECASE.
 _EPISODE_RE = re.compile(r"сери[яи][:\s]+(\d+)-(\d+)\s+из\s+(\d+)", re.IGNORECASE)
+# English form: 'S2E1-9 of 9' → (last_end=9, total=9)
+_EPISODE_EN_OF_RE = re.compile(
+    r"\bS\d{1,2}E(\d{1,2})-(\d{1,2})\s+of\s+(\d{1,2})\b", re.IGNORECASE
+)
+# English form without `of N`: 'S2E1-9' → (last_end=9, total=last_end)
+_EPISODE_EN_RE = re.compile(r"\bS\d{1,2}E(\d{1,2})-(\d{1,2})\b", re.IGNORECASE)
 
 
 def _parse_episode_info(title: str) -> tuple[int, int] | None:
-    """Return (current_end, total) from a Rutracker series title, or None.
+    """Return (current_end, total) from a series title, or None.
 
+    Recognises both Russian Rutracker form ('Серии: 1-9 из 10') and the English
+    form common on Jackett/foreign trackers ('S2E1-9 of 9' or 'S2E1-9').
     Returns None when no episode pattern is found.
     Caller should check current_end < total to decide if the series is partial.
     """
     m = _EPISODE_RE.search(title)
-    if not m:
-        return None
-    return int(m.group(2)), int(m.group(3))
+    if m:
+        return int(m.group(2)), int(m.group(3))
+    m = _EPISODE_EN_OF_RE.search(title)
+    if m:
+        return int(m.group(2)), int(m.group(3))
+    m = _EPISODE_EN_RE.search(title)
+    if m:
+        end = int(m.group(2))
+        return end, end
+    return None
 
 
 _SEASON_NO_COLON_RE = re.compile(r"\bсезон[:\s]+(\d+)\b", re.IGNORECASE)
@@ -269,10 +284,13 @@ def _extract_series_base_query(title: str) -> str | None:
     Input:  'Клиника / Scrubs / Сезон: 10 / Серии: 1-8 из 10 [WEB-DL]'
     Output: 'Клиника'
 
+    Also recognises the English ``SNN`` / ``SNNeNN`` form used by Jackett-fed
+    foreign trackers (e.g. 'Аркейн / Arcane / S2E1-9 of 9 [...]' → 'Аркейн').
+
     Returns None when the title has no season marker (i.e. it looks like a
     movie rather than a multi-season series).
     """
-    if not re.search(r"сезон", title, re.IGNORECASE):
+    if not re.search(r"сезон|\bS\d{1,2}(?:E\d|\b)", title, re.IGNORECASE):
         return None
 
     parts = [p.strip() for p in title.split("/")]
@@ -288,23 +306,35 @@ def _extract_series_base_query(title: str) -> str | None:
 def _extract_season_from_query(query: str) -> int | None:
     """Return the season number embedded in a search query, or None.
 
-    Recognises the normalised form produced by _normalize_season_in_query:
+    Recognises both the normalised Russian form produced by
+    _normalize_season_in_query and the English ``SNN`` / ``SNNeNN`` form:
         'Клиника Сезон: 10 1080p' → 10
         'СЕЗОН: 10'                → 10
+        'Arcane S01'               → 1
+        'Show S1E3'                → 1
         'Breaking Bad'             → None
-    Case-insensitive: matches 'Сезон', 'сезон', 'СЕЗОН', 'сЕзОн' identically.
+    Case-insensitive.
     """
     m = re.search(r"сезон[:\s]+(\d+)\b", query, re.IGNORECASE)
-    return int(m.group(1)) if m else None
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\bS(\d{1,2})(?:E\d|\b)", query, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def _filter_by_season(results: list[dict], season_num: int) -> list[dict]:
     """Keep only results whose title contains the given season marker.
 
-    Matches 'Сезон: N', 'Сезон:N', 'Сезон N' in any case (case-insensitive)
-    with a word boundary after N so that season 1 never matches season 10/11/12…
+    Matches both Russian ('Сезон: N', 'Сезон N', 'Сезон 0N') and English
+    ('S1', 'S01', 'S01E03') forms, case-insensitive, with boundaries so that
+    season 1 never matches season 10/11/12…
     """
-    pattern = re.compile(rf"сезон[:\s]+{season_num}\b", re.IGNORECASE)
+    pattern = re.compile(
+        rf"(?:сезон[:\s]+0*{season_num}\b|s0*{season_num}(?:e\d|\b))",
+        re.IGNORECASE,
+    )
     return [r for r in results if pattern.search(r.get("title", ""))]
 
 
@@ -334,12 +364,17 @@ def _seasons_available_in_results(results: list[dict]) -> list[int]:
 
     Used when a season-specific search returns 0 hits — we tell the user which
     seasons the tracker *does* have so they don't keep guessing.
-    Case-insensitive: handles 'Сезон', 'сезон', 'СЕЗОН' alike.
+    Recognises both Russian ('Сезон: N') and English ('S1', 'S01', 'S01E03')
+    forms, case-insensitive.
     """
     found: set[int] = set()
-    pattern = re.compile(r"сезон[:\s]+(\d+)", re.IGNORECASE)
+    ru_pattern = re.compile(r"сезон[:\s]+(\d+)", re.IGNORECASE)
+    en_pattern = re.compile(r"\bS(\d{1,2})(?:E\d|\b)", re.IGNORECASE)
     for r in results:
-        for m in pattern.finditer(r.get("title") or ""):
+        title = r.get("title") or ""
+        for m in ru_pattern.finditer(title):
+            found.add(int(m.group(1)))
+        for m in en_pattern.finditer(title):
             found.add(int(m.group(1)))
     return sorted(found)
 

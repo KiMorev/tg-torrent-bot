@@ -2560,6 +2560,90 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         self.assertNotIn("серии", out)
 
 
+class EnglishSeriesFormatTests(unittest.TestCase):
+    """Regression: regexps that detect/extract season+episode markers must
+    recognise the English ``SxxExx`` form used by Jackett-fed foreign trackers
+    (e.g. 'Аркейн / Arcane / S2E1-9 of 9 [...]'). Without this, a query like
+    'Аркейн сезон 1' returned 0 hits because all results came back with
+    English-form titles that the filter rejected.
+    """
+
+    def test_extract_season_from_query_recognises_english(self):
+        from formatters import _extract_season_from_query
+        self.assertEqual(_extract_season_from_query("Аркейн сезон 1"), 1)
+        self.assertEqual(_extract_season_from_query("Arcane S01"), 1)
+        self.assertEqual(_extract_season_from_query("Show S1E3"), 1)
+        self.assertEqual(_extract_season_from_query("Show s02"), 2)
+        self.assertIsNone(_extract_season_from_query("Movie 2024"))
+
+    def test_filter_by_season_keeps_english_form(self):
+        from formatters import _filter_by_season
+        results = [
+            {"title": "Аркейн / Arcane / S01E1-9 of 9 [WEB-DL]"},
+            {"title": "Show / S1 / 1080p"},
+            {"title": "Show / Сезон: 1 / 1080p"},
+            {"title": "Show / Сезон: 01 / 1080p"},
+            {"title": "Show / S01E03 / 1080p"},
+        ]
+        filtered = _filter_by_season(results, 1)
+        self.assertEqual(len(filtered), 5)
+
+    def test_filter_by_season_rejects_other_seasons(self):
+        from formatters import _filter_by_season
+        results = [
+            {"title": "Show / S02E03 / 1080p"},
+            {"title": "Show / Сезон: 2 / 1080p"},
+            {"title": "Show / S10E01 / 1080p"},  # must NOT match season 1
+            {"title": "Show / S01E03 / 1080p"},  # must match season 1
+        ]
+        filtered = _filter_by_season(results, 1)
+        self.assertEqual(len(filtered), 1)
+        self.assertIn("S01E03", filtered[0]["title"])
+
+    def test_seasons_available_in_results_recognises_english(self):
+        from formatters import _seasons_available_in_results
+        results = [
+            {"title": "Show / S01E1-9 of 9 / [WEB-DL]"},
+            {"title": "Show / Сезон: 2 / 1080p"},
+            {"title": "Show / S03E05 / 720p"},
+        ]
+        self.assertEqual(_seasons_available_in_results(results), [1, 2, 3])
+
+    def test_extract_series_base_query_recognises_english(self):
+        from formatters import _extract_series_base_query
+        self.assertEqual(
+            _extract_series_base_query("Аркейн / Arcane: League of Legends / S2E1-9 of 9 [...]"),
+            "Аркейн",
+        )
+        self.assertEqual(
+            _extract_series_base_query("Шоу / Show / S01E03 / 1080p"),
+            "Шоу",
+        )
+        self.assertIsNone(_extract_series_base_query("Movie 2024 1080p"))
+
+    def test_parse_episode_info_recognises_english_with_of(self):
+        from formatters import _parse_episode_info
+        self.assertEqual(_parse_episode_info("Аркейн / Arcane / S2E1-9 of 9 [...]"), (9, 9))
+        self.assertEqual(_parse_episode_info("Show / S1E3-7 of 10"), (7, 10))
+
+    def test_parse_episode_info_recognises_english_without_of(self):
+        """When 'of N' is absent, total falls back to last_episode_end (treat as complete)."""
+        from formatters import _parse_episode_info
+        self.assertEqual(_parse_episode_info("Show / S2E1-9 [WEB-DL]"), (9, 9))
+        self.assertEqual(_parse_episode_info("Show / S1E3-7"), (7, 7))
+
+    def test_parse_episode_info_prefers_russian_when_both_present(self):
+        """If both Russian and English forms are in the title, Russian wins
+        (mixed-language Rutracker titles always include Russian form authoritatively).
+        """
+        from formatters import _parse_episode_info
+        # Russian says (8, 10), English says (9, 9) — Russian must win.
+        self.assertEqual(
+            _parse_episode_info("Show / S1E1-9 of 9 / Серии: 1-8 из 10"),
+            (8, 10),
+        )
+
+
 class BuildTaskMetaTests(unittest.TestCase):
     """Tests for _build_task_meta_from_result and _build_task_meta_from_title."""
 

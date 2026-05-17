@@ -48,6 +48,27 @@ class JackettSubscriptionTests(unittest.TestCase):
         self.assertEqual(sub["total_episodes"], 10)
         self.assertEqual(sub["seen_titles"], [title, "other"])
 
+    def test_build_subscription_from_english_series_format(self) -> None:
+        """Regression: jackett results from foreign trackers come with English
+        ``SxxExx of N`` form. build_jackett_subscription must extract season,
+        last_episode_end and total_episodes correctly."""
+        title = "Аркейн / Arcane: League of Legends / S2E1-9 of 9 [WEB-DL]"
+        sub = build_jackett_subscription(
+            chat_id=100,
+            query="Аркейн сезон 2 1080p",
+            result={
+                "title": title,
+                "tracker_name": "rutracker",
+                "url": "https://rutracker.org/forum/viewtopic.php?t=456",
+            },
+            seen_results=[{"title": title}],
+            added_at="2026-05-12 10:00",
+        )
+
+        self.assertEqual(sub["season"], 2)
+        self.assertEqual(sub["last_episode_end"], 9)
+        self.assertEqual(sub["total_episodes"], 9)
+
     def test_select_candidate_requires_tracker_season_and_episode_progress(self) -> None:
         sub = {
             "type": "jackett",
