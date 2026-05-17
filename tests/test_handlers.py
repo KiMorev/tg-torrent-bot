@@ -977,6 +977,42 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         recipient_ids = [call.kwargs["chat_id"] for call in app.bot.send_message.await_args_list]
         self.assertEqual(recipient_ids, [200])
 
+    async def test_push_sets_notified_at_but_NOT_shown_at(self):
+        """Regression: after a push the film has notified_at but shown_at must
+        remain empty — so the user still sees the 🆕 badge when they click
+        'Открыть /new' from the push, and can visually locate the film."""
+        from bot import _is_card_notified, _is_card_shown_in_new
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        card = self._make_card("Новый", kp_id=42)
+        cache = {"cards": [card]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        # Notified yes, shown_at no — badge will remain visible
+        with unittest.mock.patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = settings
+            self.assertTrue(_is_card_notified(card, 100))
+            self.assertFalse(_is_card_shown_in_new(card, 100))
+
+    async def test_already_shown_in_new_blocks_push(self):
+        """If a user opened /new and saw the film, no push is sent (subscriber's
+        time isn't wasted on a redundant notification)."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {"100": {"kp:42": {"shown_at": "ts", "notified_at": None}}},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [self._make_card("X", kp_id=42)]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_not_called()
+
 
 class RestoreFirstSeenFromPreviousTests(unittest.TestCase):
     """Tests for _restore_first_seen_from_previous — keeps the original first_seen_at
@@ -1472,14 +1508,15 @@ class AdminPlexUnmatchedCallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MovieSeenByUserHelpersTests(unittest.TestCase):
-    """Tests for the per-user 'seen' tracking helpers used by /new notifications
-    and the is_new_for_user badge."""
+    """Tests for the per-user dual-signal tracking (notified_at + shown_at)
+    used by /new notifications and the 🆕 badge."""
+
+    # --- _card_identifiers (unchanged) ---
 
     def test_card_identifiers_includes_both_kp_and_movie_key(self):
         from bot import _card_identifiers
         ids = _card_identifiers({"kp_id": 12345, "title": "Dune", "year": 2021})
         self.assertIn("kp:12345", ids)
-        # movie_key uses normalized title + year, e.g. '2021:dune'
         self.assertEqual(len(ids), 2)
         self.assertTrue(any(i.startswith("2021:") for i in ids))
 
@@ -1493,84 +1530,148 @@ class MovieSeenByUserHelpersTests(unittest.TestCase):
         from bot import _card_identifiers
         self.assertEqual(_card_identifiers({}), [])
 
-    def test_is_card_seen_matches_by_any_id(self):
-        from bot import _is_card_seen
-        card = {"kp_id": 777, "title": "X", "year": 2024}
-        # Match via kp_id
-        self.assertTrue(_is_card_seen(card, {"kp:777"}))
-        # Match via title — even if kp_id-id isn't in the seen set
-        self.assertTrue(_is_card_seen(card, {"2024:x"}))
-        # No match
-        self.assertFalse(_is_card_seen(card, {"kp:999"}))
+    # --- legacy-aware entry inspectors ---
 
-    def test_is_card_seen_handles_empty_seen(self):
-        from bot import _is_card_seen
-        self.assertFalse(_is_card_seen({"kp_id": 1, "title": "X", "year": 2020}, set()))
+    def test_entry_is_notified_handles_dict_and_legacy_string(self):
+        from bot import _entry_is_notified
+        self.assertTrue(_entry_is_notified({"notified_at": "2026-05-17 10:00"}))
+        self.assertFalse(_entry_is_notified({"notified_at": None, "shown_at": "ts"}))
+        # Legacy plain-string entry counts as notified
+        self.assertTrue(_entry_is_notified("2026-05-01 10:00"))
+        self.assertFalse(_entry_is_notified(None))
+        self.assertFalse(_entry_is_notified({}))
 
-    def test_get_user_seen_ids_returns_set(self):
-        from bot import _get_user_seen_ids
-        store = {"movie_seen_by_user": {"100": {"kp:1": "ts1", "2020:x": "ts2"}}}
+    def test_entry_is_shown_in_new_handles_dict_and_legacy_string(self):
+        from bot import _entry_is_shown_in_new
+        self.assertTrue(_entry_is_shown_in_new({"shown_at": "2026-05-17 10:00"}))
+        self.assertFalse(_entry_is_shown_in_new({"notified_at": "ts", "shown_at": None}))
+        # Legacy entries are treated as fully shown — no false 🆕 wave after migration
+        self.assertTrue(_entry_is_shown_in_new("2026-05-01 10:00"))
+        self.assertFalse(_entry_is_shown_in_new(None))
+        self.assertFalse(_entry_is_shown_in_new({}))
+
+    # --- _is_card_notified / _is_card_shown_in_new ---
+
+    def test_is_card_notified_finds_any_identifier(self):
+        from bot import _is_card_notified
+        store = {"movie_seen_by_user": {"100": {"kp:777": {"notified_at": "ts"}}}}
         with patch("bot.state_store") as st:
             st.load_movie_discovery_settings.return_value = store
-            self.assertEqual(_get_user_seen_ids(100), {"kp:1", "2020:x"})
+            self.assertTrue(_is_card_notified({"kp_id": 777, "title": "X", "year": 2024}, 100))
+            # Different card → not notified
+            self.assertFalse(_is_card_notified({"kp_id": 999, "title": "Y", "year": 2024}, 100))
 
-    def test_get_user_seen_ids_empty_for_unknown_user(self):
-        from bot import _get_user_seen_ids
+    def test_is_card_notified_matches_via_title_when_kp_id_missing(self):
+        """KP-flip: previously stored under movie_key, now card has kp_id."""
+        from bot import _is_card_notified
+        store = {"movie_seen_by_user": {"100": {"2024:x": {"notified_at": "ts"}}}}
         with patch("bot.state_store") as st:
-            st.load_movie_discovery_settings.return_value = {"movie_seen_by_user": {"100": {"kp:1": "ts"}}}
-            self.assertEqual(_get_user_seen_ids(999), set())
+            st.load_movie_discovery_settings.return_value = store
+            self.assertTrue(_is_card_notified({"kp_id": 777, "title": "X", "year": 2024}, 100))
 
-    def test_mark_user_seen_persists_all_identifiers(self):
-        from bot import _mark_user_seen
+    def test_is_card_shown_in_new_distinguishes_from_notified(self):
+        """Card with only notified_at must NOT count as shown."""
+        from bot import _is_card_notified, _is_card_shown_in_new
+        store = {"movie_seen_by_user": {"100": {"kp:777": {"notified_at": "ts"}}}}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = store
+            card = {"kp_id": 777, "title": "X", "year": 2024}
+            self.assertTrue(_is_card_notified(card, 100))
+            self.assertFalse(_is_card_shown_in_new(card, 100))
+
+    def test_legacy_string_entry_satisfies_both_checks(self):
+        """Old single-timestamp entries from previous code version act as full seen."""
+        from bot import _is_card_notified, _is_card_shown_in_new
+        store = {"movie_seen_by_user": {"100": {"kp:777": "2026-05-01 10:00"}}}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = store
+            card = {"kp_id": 777, "title": "X", "year": 2024}
+            self.assertTrue(_is_card_notified(card, 100))
+            self.assertTrue(_is_card_shown_in_new(card, 100))
+
+    # --- _mark_user_notified / _mark_user_shown_in_new ---
+
+    def test_mark_user_notified_sets_only_notified_at(self):
+        from bot import _mark_user_notified
         store: dict = {}
         with patch("bot.state_store") as st:
             st.load_movie_discovery_settings.side_effect = lambda: dict(store)
             st.save_movie_discovery_settings.side_effect = store.update
-            _mark_user_seen(100, [
+            _mark_user_notified(100, [{"kp_id": 777, "title": "X", "year": 2024}])
+        entry = store["movie_seen_by_user"]["100"]["kp:777"]
+        self.assertIsInstance(entry, dict)
+        self.assertTrue(entry.get("notified_at"))
+        # shown_at remains unset
+        self.assertIsNone(entry.get("shown_at"))
+
+    def test_mark_user_shown_in_new_sets_only_shown_at(self):
+        from bot import _mark_user_shown_in_new
+        store: dict = {}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _mark_user_shown_in_new(100, [{"kp_id": 777, "title": "X", "year": 2024}])
+        entry = store["movie_seen_by_user"]["100"]["kp:777"]
+        self.assertTrue(entry.get("shown_at"))
+        self.assertIsNone(entry.get("notified_at"))
+
+    def test_mark_user_signals_preserve_each_other(self):
+        """Setting notified_at must not clobber existing shown_at and vice versa."""
+        from bot import _mark_user_notified, _mark_user_shown_in_new
+        store: dict = {}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _mark_user_notified(100, [{"kp_id": 777, "title": "X", "year": 2024}])
+            _mark_user_shown_in_new(100, [{"kp_id": 777, "title": "X", "year": 2024}])
+        entry = store["movie_seen_by_user"]["100"]["kp:777"]
+        self.assertTrue(entry.get("notified_at"))
+        self.assertTrue(entry.get("shown_at"))
+
+    def test_mark_persists_all_card_identifiers(self):
+        """Both 'kp:N' and 'year:title' identifiers are persisted so a later KP-flip
+        still finds a match."""
+        from bot import _mark_user_notified
+        store: dict = {}
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.side_effect = lambda: dict(store)
+            st.save_movie_discovery_settings.side_effect = store.update
+            _mark_user_notified(100, [
                 {"kp_id": 777, "title": "Dune", "year": 2021},
                 {"title": "Foo", "year": 2024},
             ])
         seen = store["movie_seen_by_user"]["100"]
-        # 3 entries total: kp:777, 2021:dune (from Dune), 2024:foo (from Foo)
+        # kp:777, 2021:dune, 2024:foo
         self.assertEqual(len(seen), 3)
         self.assertIn("kp:777", seen)
         self.assertIn("2021:dune", seen)
         self.assertIn("2024:foo", seen)
 
-    def test_mark_user_seen_preserves_unrelated_users(self):
-        from bot import _mark_user_seen
-        store = {"movie_seen_by_user": {"999": {"kp:1": "old"}}}
+    def test_mark_preserves_other_users(self):
+        from bot import _mark_user_notified
+        store = {"movie_seen_by_user": {"999": {"kp:1": {"notified_at": "old"}}}}
         with patch("bot.state_store") as st:
             st.load_movie_discovery_settings.side_effect = lambda: dict(store)
             st.save_movie_discovery_settings.side_effect = store.update
-            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
-        # User 999 still there
+            _mark_user_notified(100, [{"kp_id": 5, "title": "X", "year": 2024}])
         self.assertIn("kp:1", store["movie_seen_by_user"]["999"])
-        # User 100 has new entries
         self.assertIn("kp:5", store["movie_seen_by_user"]["100"])
 
-    def test_mark_user_seen_idempotent_skips_save_when_nothing_changed(self):
-        """Calling mark on already-known cards must not rewrite the file."""
-        from bot import _mark_user_seen
-        store = {"movie_seen_by_user": {"100": {"kp:5": "ts-old", "2024:x": "ts-old"}}}
+    def test_mark_upgrades_legacy_string_entry_to_dict(self):
+        """A pre-existing plain-timestamp entry must be promoted to the dict format
+        when the new helpers touch it. The other signal also gets backfilled from
+        the legacy timestamp so previously-seen films aren't reset to 🆕."""
+        from bot import _mark_user_shown_in_new
+        store = {"movie_seen_by_user": {"100": {"kp:777": "2026-05-01 10:00"}}}
         with patch("bot.state_store") as st:
             st.load_movie_discovery_settings.side_effect = lambda: dict(store)
             st.save_movie_discovery_settings.side_effect = store.update
-            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
-            # Card's IDs already at ts-old — would refresh to current time → changed=True
-            # So save IS called. Test the alternative: idempotent when timestamps freshly written.
-        # Run twice in quick succession — second should be no-op
-        store2 = dict(store)
-        store2["movie_seen_by_user"] = {"100": dict(store["movie_seen_by_user"]["100"])}
-        with patch("bot.state_store") as st:
-            st.load_movie_discovery_settings.side_effect = lambda: dict(store2)
-            st.save_movie_discovery_settings.side_effect = store2.update
-            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
-            first_call_count = st.save_movie_discovery_settings.call_count
-            _mark_user_seen(100, [{"kp_id": 5, "title": "X", "year": 2024}])
-            # The second call: identifiers exist with the same timestamp (just written),
-            # so save_movie_discovery_settings should NOT be called again.
-            self.assertEqual(st.save_movie_discovery_settings.call_count, first_call_count)
+            _mark_user_shown_in_new(100, [{"kp_id": 777, "title": "X", "year": 2024}])
+        entry = store["movie_seen_by_user"]["100"]["kp:777"]
+        self.assertIsInstance(entry, dict)
+        # Legacy timestamp preserved as notified_at; new shown_at written
+        self.assertEqual(entry.get("notified_at"), "2026-05-01 10:00")
+        self.assertTrue(entry.get("shown_at"))
 
 
 class FormatMovieDiscoveryCachePerUserBadgeTests(unittest.TestCase):
@@ -1620,6 +1721,34 @@ class FormatMovieDiscoveryCachePerUserBadgeTests(unittest.TestCase):
         """When called without chat_id (system render), no badge is added."""
         from bot import _format_movie_discovery_cache
         text = _format_movie_discovery_cache(self._cache(self._card("X", kp_id=1)))
+        self.assertNotIn("🆕", text)
+
+    def test_badge_remains_after_push_only(self):
+        """Regression: a film that was pushed but not yet opened in /new must
+        STILL show the 🆕 badge — so the user can locate it visually when
+        they click 'Открыть /new' from the push."""
+        from bot import _format_movie_discovery_cache
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {
+                "movie_seen_by_user": {
+                    "100": {"kp:1": {"notified_at": "ts", "shown_at": None}}
+                }
+            }
+            text = _format_movie_discovery_cache(self._cache(self._card("Pushed", kp_id=1)), chat_id=100)
+        # Badge stays because shown_at is empty
+        self.assertIn("🆕", text)
+        self.assertIn("Pushed", text)
+
+    def test_badge_gone_after_shown_in_new(self):
+        """After user opened /new and saw the film (shown_at set), the badge disappears."""
+        from bot import _format_movie_discovery_cache
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {
+                "movie_seen_by_user": {
+                    "100": {"kp:1": {"notified_at": "ts1", "shown_at": "ts2"}}
+                }
+            }
+            text = _format_movie_discovery_cache(self._cache(self._card("Seen", kp_id=1)), chat_id=100)
         self.assertNotIn("🆕", text)
 
 

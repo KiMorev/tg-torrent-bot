@@ -1130,10 +1130,15 @@ def _save_plex_unmatched_seen(seen: dict) -> None:
 
 
 # --- Per-user "seen in /new" tracking ---
-# Replaces the legacy global `movie_notify_last_run_at` + first_seen_at logic.
-# A film is "seen by user X" when X either received a push about it or opened
-# /new and saw it in the rendered top-10. Plashka «новинка» and push both use
-# this set as the single source of truth.
+# Tracks two independent per-user signals for each film card:
+#
+#   - notified_at  — bot has pushed the film to this user (blocks duplicate push)
+#   - shown_at     — user has opened /new and seen the film in the rendered top-10
+#                    (hides the 🆕 badge on subsequent /new opens)
+#
+# These are independent — a push lands in 'notified_at' WITHOUT touching 'shown_at',
+# so the user still sees the 🆕 badge when they click "Открыть /new" and can
+# visually locate the film they just got the push for.
 
 def _card_identifiers(card: dict) -> list[str]:
     """Return all stable IDs for a card.
@@ -1144,7 +1149,7 @@ def _card_identifiers(card: dict) -> list[str]:
     To match a previously-stored ID through such flips we ALWAYS store both
     ``kp:N`` (if kp_id is known) and ``movie_key(title, year)`` (if title+year
     are known), and at lookup time check whether ANY of them appears in the
-    user's seen-set.
+    user's tracking dict.
     """
     ids: list[str] = []
     kp_id = card.get("kp_id")
@@ -1163,28 +1168,79 @@ def _card_identifiers(card: dict) -> list[str]:
     return ids
 
 
-def _is_card_seen(card: dict, seen_ids: set[str]) -> bool:
-    """True iff at least one of the card's identifiers is in the user's seen set."""
-    if not seen_ids:
+def _entry_is_notified(entry) -> bool:
+    """True iff a push was sent for this film to this user.
+
+    Legacy entries (plain timestamp strings from the previous single-signal scheme)
+    are treated as fully notified to avoid a wave of duplicate push at the
+    migration point.
+    """
+    if isinstance(entry, str):
+        return bool(entry)
+    if isinstance(entry, dict):
+        return bool(entry.get("notified_at"))
+    return False
+
+
+def _entry_is_shown_in_new(entry) -> bool:
+    """True iff the user has opened /new and seen this film in the list.
+
+    Legacy entries are treated as fully shown — the 🆕 badge won't appear
+    on films the old single-signal scheme already considered 'seen'.
+    """
+    if isinstance(entry, str):
+        return bool(entry)
+    if isinstance(entry, dict):
+        return bool(entry.get("shown_at"))
+    return False
+
+
+def _get_user_entries(chat_id: int) -> dict:
+    """Return the per-user dict of {film_id: entry}, where entry is either the
+    new {notified_at, shown_at} dict or a legacy timestamp string."""
+    if not chat_id:
+        return {}
+    seen_by_user = _load_movie_discovery_settings().get("movie_seen_by_user") or {}
+    user_entry = seen_by_user.get(str(chat_id))
+    return user_entry if isinstance(user_entry, dict) else {}
+
+
+def _is_card_notified(card: dict, chat_id: int) -> bool:
+    """True iff any of the card's identifiers has a notified_at in the user's dict.
+
+    Used to skip duplicate push.
+    """
+    entries = _get_user_entries(chat_id)
+    if not entries:
         return False
     for cid in _card_identifiers(card):
-        if cid in seen_ids:
+        if _entry_is_notified(entries.get(cid)):
             return True
     return False
 
 
-def _get_user_seen_ids(chat_id: int) -> set[str]:
-    """Return the set of all film IDs the user has been shown (push or /new)."""
-    if not chat_id:
-        return set()
-    seen_by_user = _load_movie_discovery_settings().get("movie_seen_by_user") or {}
-    user_entry = seen_by_user.get(str(chat_id)) or {}
-    return set(user_entry.keys())
+def _is_card_shown_in_new(card: dict, chat_id: int) -> bool:
+    """True iff any of the card's identifiers has a shown_at in the user's dict.
+
+    Used to hide the 🆕 badge in /new for already-shown films.
+    """
+    entries = _get_user_entries(chat_id)
+    if not entries:
+        return False
+    for cid in _card_identifiers(card):
+        if _entry_is_shown_in_new(entries.get(cid)):
+            return True
+    return False
 
 
-def _mark_user_seen(chat_id: int, cards: list[dict]) -> None:
-    """Record that the user has now seen these cards. Persists ALL identifiers
-    of each card so a later KP-flip doesn't lose the match."""
+def _mark_user_signal(chat_id: int, cards: list[dict], *, signal: str) -> None:
+    """Internal: set ``signal`` (either 'notified_at' or 'shown_at') = now for each
+    identifier of each card. Other fields of the entry are preserved.
+
+    Legacy string entries are upgraded to the new dict format in place.
+    Saves only when something actually changed (idempotent within the same minute).
+    """
+    assert signal in ("notified_at", "shown_at")
     if not chat_id or not cards:
         return
     now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -1196,17 +1252,45 @@ def _mark_user_seen(chat_id: int, cards: list[dict]) -> None:
     user_entry = seen_by_user.get(user_key)
     if not isinstance(user_entry, dict):
         user_entry = {}
+
     changed = False
     for card in cards:
         for cid in _card_identifiers(card):
-            if user_entry.get(cid) != now_text:
-                user_entry[cid] = now_text
-                changed = True
+            existing = user_entry.get(cid)
+            if isinstance(existing, str):
+                # Legacy upgrade: an old single-timestamp entry counts as both
+                # notified and shown. Promote to dict and overwrite the target signal.
+                existing = {"notified_at": existing, "shown_at": existing}
+            elif not isinstance(existing, dict):
+                existing = {}
+            if existing.get(signal) == now_text:
+                # No actual change for this signal this minute — skip.
+                # But ensure dict form is persisted if existing was non-dict.
+                if user_entry.get(cid) is not existing:
+                    user_entry[cid] = existing
+                    changed = True
+                continue
+            existing[signal] = now_text
+            user_entry[cid] = existing
+            changed = True
+
     if not changed:
         return
     seen_by_user[user_key] = user_entry
     settings["movie_seen_by_user"] = seen_by_user
     _save_movie_discovery_settings(settings)
+
+
+def _mark_user_notified(chat_id: int, cards: list[dict]) -> None:
+    """Set ``notified_at`` for each card's identifiers. Preserves ``shown_at``.
+    Called after a successful push so the same film isn't pushed twice."""
+    _mark_user_signal(chat_id, cards, signal="notified_at")
+
+
+def _mark_user_shown_in_new(chat_id: int, cards: list[dict]) -> None:
+    """Set ``shown_at`` for each card's identifiers. Preserves ``notified_at``.
+    Called after rendering /new so the 🆕 badge disappears next time."""
+    _mark_user_signal(chat_id, cards, signal="shown_at")
 
 
 # --- Movie discovery subscription helpers ---
@@ -1359,8 +1443,11 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
     """Render the /new top-10 list.
 
     When ``chat_id`` is supplied, the «🆕» badge appears only on films that this
-    specific user hasn't seen yet (per-user seen set). When ``chat_id`` is None
-    (legacy or system callers without a user context) the badge is omitted.
+    specific user hasn't opened in /new yet (``shown_at`` is empty). Note: a push
+    alone does NOT hide the badge — the user still needs to open /new to clear
+    it, so they can visually locate the film they just got a push for. When
+    ``chat_id`` is None (legacy or system callers without a user context) the
+    badge is omitted.
     """
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     updated_at = cache.get("updated_at") or "—"
@@ -1375,8 +1462,6 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
         lines.append("\nПока нет подходящих фильмов. Кэш обновится в фоне, можно попробовать позже.")
         return "\n".join(lines)
 
-    user_seen: set[str] = _get_user_seen_ids(chat_id) if chat_id else set()
-
     for index, card in enumerate(cards[:10], 1):
         main_title = html_module.escape(str(card.get("title") or "Без названия"))
         alt_title = html_module.escape(str(card.get("alt_title") or ""))
@@ -1390,8 +1475,10 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
         genres_text = f"\n   Жанры: {html_module.escape(genres)}" if genres else ""
         kp_url = card.get("kp_url")
         kp_text = f"\n   <a href=\"{html_module.escape(str(kp_url))}\">Кинопоиск</a>" if kp_url else ""
-        # Per-user badge: shown only when this user hasn't been notified about / opened this film yet.
-        new_mark = " 🆕" if (chat_id and not _is_card_seen(card, user_seen)) else ""
+        # Per-user badge: shown only when the user hasn't opened /new and seen
+        # this film yet. A push alone does NOT clear the badge — the user must
+        # actually open /new to confirm they've seen it.
+        new_mark = " 🆕" if (chat_id and not _is_card_shown_in_new(card, chat_id)) else ""
         if card.get("in_plex"):
             plex_res = card.get("plex_resolution") or ""
             plex_mark = f" ✅ {html_module.escape(plex_res)}" if plex_res else " ✅"
@@ -1858,14 +1945,22 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
         except (TypeError, ValueError):
             continue
 
-        user_seen = _get_user_seen_ids(chat_id)
-        new_for_user = [c for c in top_cards if not _is_card_seen(c, user_seen)]
+        # Skip film when EITHER signal is already set:
+        #   - notified_at: bot has already pushed it once → avoid duplicate push
+        #   - shown_at: user has already opened /new and seen the film → push
+        #     would be redundant
+        new_for_user = [
+            c for c in top_cards
+            if not _is_card_notified(c, chat_id) and not _is_card_shown_in_new(c, chat_id)
+        ]
         if not new_for_user:
             continue
 
         sent = await _send_movie_notification_push_to_user(new_for_user, chat_id, app)
         if sent:
-            _mark_user_seen(chat_id, new_for_user)
+            # Only set notified_at — shown_at remains empty so the 🆕 badge stays
+            # visible when the user clicks "Открыть /new" from the push.
+            _mark_user_notified(chat_id, new_for_user)
 
 
 async def _movie_discovery_loop(app: "Application") -> None:
@@ -6475,7 +6570,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
-        _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
+        _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
         return
 
     # Re-apply Plex badges from current in-memory library (cheap, no network).
@@ -6490,7 +6585,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     # Mark the displayed top-10 as 'seen' for this user — the «🆕» badge will
     # disappear next time they open /new (until a new film appears).
-    _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
+    _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
 
 
 async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6512,7 +6607,7 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
-    _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
+    _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
 
 
 async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6594,7 +6689,7 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
-    _mark_user_seen(chat_id, (cache.get("cards") or [])[:10])
+    _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
 
 
 async def help_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
