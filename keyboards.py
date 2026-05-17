@@ -125,9 +125,9 @@ def _admin_panel_keyboard(
     if show_plex_unmatched:
         list_label = f"📋 Plex: без матча ({plex_unmatched_count})"
         toggle_label = (
-            "🔔 Уведомления о новых: вкл"
+            "🔔 Подписка: вкл"
             if plex_unmatched_notify_enabled
-            else "🔕 Уведомления о новых: выкл"
+            else "🔕 Подписка: выкл"
         )
         rows.append([
             InlineKeyboardButton(list_label, callback_data=_admin_callback("plex_unmatched")),
