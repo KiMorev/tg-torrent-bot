@@ -398,16 +398,19 @@ SUBSCRIPTION_CHECK_INTERVAL_HOURS=6
 
 Нажатие **🎬 Открыть /new** раскрывает полный список прямо в уведомлении. **🔕 Отписаться** немедленно снимает подписку.
 
-**Per-user семантика «видел».** Бот ведёт для каждого пользователя свой набор «уже виденных» фильмов в `state/movie_discovery_settings.json` (поле `movie_seen_by_user`). Фильм считается виденным когда:
+**Per-user семантика — два независимых сигнала.** Бот ведёт для каждого пользователя свой набор отметок на каждый фильм в `state/movie_discovery_settings.json` (поле `movie_seen_by_user`). Каждая запись содержит **два сигнала**:
 
-- пользователь получил уведомление про него (если он подписан на `/new`), ИЛИ
-- пользователь открыл `/new` и фильм был в показанном топ-10 («открыл значит увидел»).
+- `notified_at` — бот отправил пользователю уведомление про этот фильм
+- `shown_at` — пользователь открыл `/new` и увидел этот фильм в показанном топ-10
 
 Что это означает на практике:
-- **Плашка `🆕`** рядом с фильмом — индивидуальна для каждого пользователя. Открыл `/new` → плашки исчезли (для тебя). Другой пользователь, открыв `/new`, всё ещё увидит свои плашки на тех же фильмах.
-- **Уведомления** не дублируются: если фильм уже был засвечен пользователю в push или через `/new`, повторного уведомления о нём не будет.
+- **Плашка `🆕`** гаснет **только** после `shown_at` — то есть когда пользователь реально открыл `/new`. Push сам по себе плашку **не** гасит — поэтому, кликнув «🎬 Открыть /new» из уведомления, ты увидишь фильм **с плашкой** и легко найдёшь его глазами в списке.
+- **Повторное уведомление** не приходит, если у фильма выставлен либо `notified_at` (уже пушнули), либо `shown_at` (юзер уже открывал `/new` и видел фильм без помощи push).
+- **Плашка индивидуальна для каждого пользователя**: один открыл `/new` → его плашки исчезли. Другой открывая `/new`, всё ещё увидит свои плашки на тех же фильмах.
 - **Рестарт бота** не вызывает ложных уведомлений (`movie_seen_by_user` персистится).
-- **Фильм поднялся с 13-й позиции в 8-ю** (впервые в топ-10) — пользователь получит уведомление как и хочется.
+- **Фильм поднялся с 13-й позиции в 8-ю** (впервые в топ-10 для этого пользователя) — уведомление прилетит.
+
+> Legacy-данные из старой версии (одна timestamp-строка на фильм вместо пары `{notified_at, shown_at}`) трактуются как «фильм уже был и в push, и в `/new`» — то есть после обновления бот **не** засыпет пользователя сводкой про прошлые фильмы.
 
 **Тихие часы.** Уведомления отправляются только с 09:00 до 22:00 по локальному времени бота (`DISPLAY_TIMEZONE`). Вне окна бот просто не пушит — поскольку seen-set не обновляется, при следующем in-window refresh diff включит те же фильмы, что и должно было прилететь.
 
@@ -610,7 +613,7 @@ python -m pytest tests/ -v
 - кэш результатов Кинопоиска (`prune_kp_cache`): раздельные TTL для найденных/ненайденных записей, per-entry `ttl_days` с jitter, trim по max_entries; `build_cards` с kp_cache: cache-hit, cache-miss, stale-refresh с лимитом и graceful degradation
 - Jackett-подписки: построение якоря, выбор кандидата по трекеру/сезону/прогрессу серий; прямой путь через Rutracker (`_check_jackett_sub_via_rutracker_direct`) включая unavailable-паузу и удаление подписки только при успешном скачивании завершённого сезона
 - дублирующие загрузки: перехват `torrent_duplicate`, авто-удаление дубля, контекстное уведомление; подписка `sub_notify` и доставка финального уведомления подписчикам
-- подписка на новинки `/new`: хранилище подписок (`_get/_is/_set_movie_subscription`), кнопка subscribe/unsubscribe в клавиатуре. Per-user семантика «видел»: хелперы `_card_identifiers` (kp:N + movie_key fallback для устойчивости к KP-flip), `_is_card_seen`, `_get_user_seen_ids`, `_mark_user_seen` через `movie_seen_by_user` в settings. Логика `_run_movie_discovery_notifications` пушит только незасвеченные фильмы каждому подписчику и обновляет seen-set после успешной отправки. Тихие часы: вне окна push пропускается, seen-set не обновляется → diff натурально доедет следующим in-window рефрешем. Плашка «🆕» в `/new` рендерится per-user: `_format_movie_discovery_cache(cache, chat_id=...)` использует `_is_card_seen`. Открытие `/new` (команда / refresh callback / open callback из push) автоматически вызывает `_mark_user_seen` для top-10.
+- подписка на новинки `/new`: хранилище подписок (`_get/_is/_set_movie_subscription`), кнопка subscribe/unsubscribe в клавиатуре. Per-user семантика с **двумя независимыми сигналами**: хелперы `_card_identifiers` (kp:N + movie_key fallback для устойчивости к KP-flip), legacy-aware `_entry_is_notified`/`_entry_is_shown_in_new`, `_is_card_notified`/`_is_card_shown_in_new`, `_mark_user_notified`/`_mark_user_shown_in_new` через `movie_seen_by_user`. Логика `_run_movie_discovery_notifications` пушит фильмы для которых не выставлен ни один из сигналов и обновляет только `notified_at`. Тихие часы: вне окна push пропускается, сигналы не обновляются → diff натурально доедет следующим in-window рефрешем. Плашка «🆕» в `/new` рендерится per-user: `_format_movie_discovery_cache(cache, chat_id=...)` использует `_is_card_shown_in_new` (push сам по себе плашку не гасит). Открытие `/new` (команда / refresh callback / open callback из push) автоматически вызывает `_mark_user_shown_in_new` для top-10. Legacy single-timestamp entries auto-upgrade при первой записи.
 - правила доступа, политики уведомлений, отображение задач и torrent/magnet-утилиты
 - интеграция с Plex: нормализация разрешения, сравнение качества, разбор XML, все методы `PlexClient` для фильмов и сериалов (`get_all_movies`/`find_movie`/`get_all_shows`/`get_show_seasons`), классификация ошибок (`PlexAuthError`/`PlexTimeoutError`/`PlexConnectionError`/`PlexParseError`); логика pre-download check для фильмов (3 точки входа) + аналогичный pre-check для сезонов сериалов (`_plex_pre_check_series` через TV-секцию); обогащение карточек `/new` значком ✅; polling после завершения скачивания (`_plex_poll_after_finish` с разветвлением по `meta.kind`: фильм → `_plex_library_find` + substring fallback, сериал → `_plex_show_find` + season match; deep link с `metadataType=1` для фильма и `=3` для сезона; persist маркера `plex_done`); single-flight `_refresh_plex_library` с coalesce-окном; TV-кэш с lazy-loading сезонов (`_plex_ensure_show_seasons`); диагностика Plex в `/admin` с распознаванием типа ошибки и счётчиком сериалов; очистка `plex_pending` при таймауте ConversationHandler и при новом text-сообщении
 - хранилище контекста задач (`task_meta.json`): `_build_task_meta_from_result` / `_build_task_meta_from_title` для извлечения канонических метаданных при добавлении задачи; `state_store.remember_task_meta` со skip-если-не-изменилось; cleanup в `prune_stale_task_state` и `forget_task_state`
