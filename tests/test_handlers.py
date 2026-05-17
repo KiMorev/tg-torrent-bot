@@ -60,6 +60,8 @@ from bot import (
     admin_callback,
     admin_command,
     help_command,
+    menu_callback,
+    menu_command,
     movie_new_close_callback,
     movie_new_command,
     movie_new_refresh_callback,
@@ -2468,6 +2470,227 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         # is that 'сезон' / 'серии' parts are gone from the result.
         self.assertNotIn("сезон", out)
         self.assertNotIn("серии", out)
+
+
+class SeasonRegexEnglishFormatTests(unittest.TestCase):
+    """Regression for the 'Аркейн сезон 1' → 'Arcane S01E1-9 of 9' bug.
+
+    When a release on Rutracker/Jackett uses English season markers ('S01E03',
+    'S2E1-9 of 9') instead of Russian 'Сезон: 1', the helpers must still:
+      - detect the season number,
+      - filter by season,
+      - extract the series base name,
+      - parse episode ranges."""
+
+    def test_extract_season_recognises_english_sxx(self):
+        from formatters import _extract_season_from_query
+        self.assertEqual(_extract_season_from_query("Arcane S01"), 1)
+        self.assertEqual(_extract_season_from_query("Show S1E3"), 1)
+        self.assertEqual(_extract_season_from_query("Foo s02"), 2)
+        # English form must still win when Russian is absent
+        self.assertEqual(_extract_season_from_query("Arcane S10E5"), 10)
+
+    def test_extract_season_prefers_russian_when_both_present(self):
+        """Russian marker is the user's intent; English in the title is incidental."""
+        from formatters import _extract_season_from_query
+        self.assertEqual(_extract_season_from_query("Show Сезон: 3 S05"), 3)
+
+    def test_filter_by_season_matches_english_forms(self):
+        from formatters import _filter_by_season
+        results = [
+            {"title": "Arcane / S01E1-9 of 9 [WEB-DL]"},
+            {"title": "Arcane / S1E1 / 720p"},
+            {"title": "Arcane / S01 / pilot"},
+            {"title": "Arcane / S02E1-3 / 1080p"},  # different season
+            {"title": "Arcane / S10E1 / 4K"},        # boundary check: 10 ≠ 1
+        ]
+        filtered = _filter_by_season(results, 1)
+        kept = {r["title"] for r in filtered}
+        self.assertIn("Arcane / S01E1-9 of 9 [WEB-DL]", kept)
+        self.assertIn("Arcane / S1E1 / 720p", kept)
+        self.assertIn("Arcane / S01 / pilot", kept)
+        self.assertNotIn("Arcane / S02E1-3 / 1080p", kept)
+        self.assertNotIn("Arcane / S10E1 / 4K", kept)
+
+    def test_filter_by_season_matches_mixed_russian_and_english(self):
+        from formatters import _filter_by_season
+        results = [
+            {"title": "Show / Сезон: 1 / Серии 1-8"},
+            {"title": "Show / S01E1-8 of 8 / WEB-DL"},
+            {"title": "Show / Сезон: 2 / Серии 1-8"},
+        ]
+        filtered = _filter_by_season(results, 1)
+        kept = {r["title"] for r in filtered}
+        self.assertEqual(len(kept), 2)
+
+    def test_seasons_available_collects_both_formats(self):
+        from formatters import _seasons_available_in_results
+        results = [
+            {"title": "Show / S01E1-9 of 9"},
+            {"title": "Show / Сезон: 2 / pilot"},
+            {"title": "Show / S03 / leak"},
+        ]
+        self.assertEqual(_seasons_available_in_results(results), [1, 2, 3])
+
+    def test_extract_series_base_query_handles_english_marker(self):
+        """Series with only an English 'S2E1-9' marker must still resolve to a base name."""
+        from formatters import _extract_series_base_query
+        title = "Аркейн / Arcane: League of Legends / S2E1-9 of 9 (2024) [WEB-DL 1080p]"
+        self.assertEqual(_extract_series_base_query(title), "Аркейн")
+
+    def test_extract_series_base_query_still_rejects_pure_movies(self):
+        from formatters import _extract_series_base_query
+        # No season or SxxExx marker → still None
+        self.assertIsNone(_extract_series_base_query("Some Movie / 2024 [BDRemux]"))
+
+    def test_parse_episode_info_handles_s_e_with_of(self):
+        """'S2E1-9 of 9' must yield (last_episode_end, total)."""
+        from formatters import _parse_episode_info
+        self.assertEqual(_parse_episode_info("Arcane / S2E1-9 of 9 [...]"), (9, 9))
+        self.assertEqual(_parse_episode_info("Show / S01E3-5 of 10"), (5, 10))
+
+    def test_parse_episode_info_handles_s_e_without_of(self):
+        """'S2E1-9' (no 'of N') must be treated as a full season: total = last."""
+        from formatters import _parse_episode_info
+        self.assertEqual(_parse_episode_info("Arcane / S2E1-9"), (9, 9))
+
+    def test_parse_episode_info_russian_still_wins_when_both_present(self):
+        """Russian episode marker takes precedence over English."""
+        from formatters import _parse_episode_info
+        self.assertEqual(
+            _parse_episode_info("Show / СЕРИИ: 3-5 из 10 / S1E1-9 of 9"),
+            (5, 10),
+        )
+
+
+class ExpandSearchQueriesForJackettTests(unittest.TestCase):
+    """Tests for the second-query expansion that bridges 'Аркейн сезон 1' to
+    releases titled with English 'S01E1-9 of 9' markers."""
+
+    def test_returns_only_original_when_no_season_marker(self):
+        from formatters import _expand_search_queries_for_jackett
+        self.assertEqual(_expand_search_queries_for_jackett("Аркейн"), ["Аркейн"])
+        self.assertEqual(_expand_search_queries_for_jackett("Movie 2024"), ["Movie 2024"])
+
+    def test_returns_only_original_for_english_sxx_input(self):
+        """When the user already typed 'Arcane S01', no Russian variant is added."""
+        from formatters import _expand_search_queries_for_jackett
+        self.assertEqual(_expand_search_queries_for_jackett("Arcane S01"), ["Arcane S01"])
+
+    def test_adds_s0n_variant_for_russian_season_marker(self):
+        from formatters import _expand_search_queries_for_jackett
+        result = _expand_search_queries_for_jackett("Аркейн сезон 1")
+        self.assertEqual(result, ["Аркейн сезон 1", "Аркейн S01"])
+
+    def test_adds_s10_for_double_digit_season(self):
+        from formatters import _expand_search_queries_for_jackett
+        result = _expand_search_queries_for_jackett("Клиника Сезон: 10 1080p")
+        self.assertEqual(result, ["Клиника Сезон: 10 1080p", "Клиника S10 1080p"])
+
+    def test_handles_uppercase_sezon(self):
+        from formatters import _expand_search_queries_for_jackett
+        result = _expand_search_queries_for_jackett("Show СЕЗОН: 3")
+        self.assertEqual(result, ["Show СЕЗОН: 3", "Show S03"])
+
+    def test_handles_leading_zero_in_season_number(self):
+        """'сезон 01' must reduce to 'S01', not 'S001'."""
+        from formatters import _expand_search_queries_for_jackett
+        result = _expand_search_queries_for_jackett("Show сезон 01")
+        self.assertEqual(result, ["Show сезон 01", "Show S01"])
+
+
+class MenuCommandTests(unittest.TestCase):
+    """Smoke tests for the /menu command and its callback dispatcher."""
+
+    def test_menu_command_replies_with_public_keyboard_for_regular_user(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            asyncio.run(menu_command(update, context))
+
+        kwargs = update.message.reply_text.call_args.kwargs
+        markup = kwargs["reply_markup"]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        # Public actions present; admin actions absent
+        self.assertIn("🎬 Новинки", labels)
+        self.assertIn("📋 Загрузки", labels)
+        self.assertIn("❓ Помощь", labels)
+        self.assertNotIn("⚙️ Админ-панель", labels)
+
+    def test_menu_command_replies_with_admin_keyboard_for_admin(self):
+        update = _make_message_update(chat_id=300)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", set()),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            asyncio.run(menu_command(update, context))
+
+        markup = update.message.reply_text.call_args.kwargs["reply_markup"]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertIn("⚙️ Админ-панель", labels)
+        self.assertIn("👥 Пользователи", labels)
+
+    def test_menu_callback_dispatches_help_action(self):
+        """Tapping '❓ Помощь' from /menu must invoke help_command."""
+        update = _make_callback_update(chat_id=100, callback_data="menu:help")
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", False),
+            patch.object(bot, "help_command", new_callable=AsyncMock) as mock_help,
+        ):
+            asyncio.run(menu_callback(update, context))
+
+        mock_help.assert_awaited_once()
+        # Menu message should be deleted before dispatch
+        update.callback_query.message.delete.assert_awaited()
+
+    def test_menu_callback_rejects_admin_action_for_non_admin(self):
+        """Non-admins clicking 'menu:admin' must be silently ignored."""
+        update = _make_callback_update(chat_id=100, callback_data="menu:admin")
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "admin_command", new_callable=AsyncMock) as mock_admin,
+        ):
+            asyncio.run(menu_callback(update, context))
+
+        mock_admin.assert_not_awaited()
+
+
+class JackettSubscriptionEnglishFormatTests(unittest.TestCase):
+    """build_jackett_subscription must extract season/episode correctly from
+    releases that use English markers — 'S2E1-9 of 9' → season=2, episodes=9/9."""
+
+    def test_build_subscription_from_english_format_result(self):
+        from jackett_subscriptions import build_jackett_subscription
+        result = {
+            "title": "Аркейн / Arcane: League of Legends / S2E1-9 of 9 (2024) [WEB-DL 1080p]",
+            "tracker_name": "rutracker",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+        }
+        sub = build_jackett_subscription(
+            chat_id=42,
+            query="Аркейн сезон 2",
+            result=result,
+            seen_results=[],
+            added_at="2026-05-17 12:00",
+        )
+        self.assertEqual(sub["season"], 2)
+        self.assertEqual(sub["last_episode_end"], 9)
+        self.assertEqual(sub["total_episodes"], 9)
 
 
 class BuildTaskMetaTests(unittest.TestCase):

@@ -8,6 +8,7 @@ from keyboards import (
     _admin_panel_keyboard,
     _final_notification_keyboard,
     _jackett_select_keyboard,
+    _main_menu_keyboard,
     _search_advanced_keyboard,
     _search_error_keyboard,
     _search_options_keyboard,
@@ -169,9 +170,9 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
 
     def test_unmatched_row_hidden_when_show_flag_false(self):
         labels = self._labels(_admin_panel_keyboard(show_plex_unmatched=False))
-        # No mention of unmatched/Plex push toggle anywhere
+        # No mention of Plex-unmatched row or push-toggle anywhere
         for label in labels:
-            self.assertNotIn("Несматчено", label)
+            self.assertNotIn("Plex: без матча", label)
             self.assertNotIn("Уведомления о новых", label)
 
     def test_unmatched_row_visible_with_count_and_off_label(self):
@@ -181,7 +182,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
             plex_unmatched_notify_enabled=False,
         )
         labels = self._labels(kb)
-        self.assertIn("📋 Несматчено в Plex (4)", labels)
+        self.assertIn("📋 Plex: без матча (4)", labels)
         self.assertIn("🔕 Уведомления о новых: выкл", labels)
 
     def test_unmatched_row_label_flips_when_enabled(self):
@@ -191,7 +192,7 @@ class AdminPanelPlexUnmatchedTests(unittest.TestCase):
             plex_unmatched_notify_enabled=True,
         )
         labels = self._labels(kb)
-        self.assertIn("📋 Несматчено в Plex (0)", labels)
+        self.assertIn("📋 Plex: без матча (0)", labels)
         self.assertIn("🔔 Уведомления о новых: вкл", labels)
 
     def test_existing_buttons_still_present(self):
@@ -585,6 +586,36 @@ class AdminPanelKeyboardMovieTrackersTests(unittest.TestCase):
         buttons = {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
         self.assertIn("🎬 Трекеры новинок", buttons)
         self.assertEqual(buttons["🎬 Трекеры новинок"], "admin:movie_trackers")
+
+
+class MainMenuKeyboardTests(unittest.TestCase):
+    """Verify the /menu keyboard is role-aware and uses the menu: callback prefix."""
+
+    def _buttons(self, kb):
+        return {btn.text: btn.callback_data for row in kb.inline_keyboard for btn in row}
+
+    def test_public_menu_has_four_actions_plus_close(self):
+        kb = _main_menu_keyboard(is_admin=False)
+        btns = self._buttons(kb)
+        self.assertEqual(btns["🎬 Новинки"], "menu:new")
+        self.assertEqual(btns["🔔 Подписки"], "menu:subs")
+        self.assertEqual(btns["📋 Загрузки"], "menu:status")
+        self.assertEqual(btns["❓ Помощь"], "menu:help")
+        self.assertEqual(btns["✖️ Закрыть"], "task:close:")
+        # No admin entries leak into the public menu
+        self.assertNotIn("⚙️ Админ-панель", btns)
+        self.assertNotIn("👥 Пользователи", btns)
+
+    def test_admin_menu_adds_admin_buttons(self):
+        kb = _main_menu_keyboard(is_admin=True)
+        btns = self._buttons(kb)
+        # Public buttons preserved
+        self.assertEqual(btns["🎬 Новинки"], "menu:new")
+        self.assertEqual(btns["📋 Загрузки"], "menu:status")
+        # Admin extras present
+        self.assertEqual(btns["⚙️ Админ-панель"], "menu:admin")
+        self.assertEqual(btns["👥 Пользователи"], "menu:users")
+        self.assertEqual(btns["✖️ Закрыть"], "task:close:")
 
 
 if __name__ == "__main__":

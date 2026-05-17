@@ -21,6 +21,7 @@ ADMIN_CALLBACK_PREFIX = "admin"
 SEARCH_CALLBACK_PREFIX = "srch"
 JACKETT_SELECT_PREFIX = "jk"  # used inside srch: namespace
 SUB_CALLBACK_PREFIX = "sub"
+MENU_CALLBACK_PREFIX = "menu"
 
 TASK_LIST_SCOPE_ALL = "all"
 TASK_LIST_SCOPE_MY = "mine"
@@ -74,6 +75,32 @@ def _finished_task_ids(tasks: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _main_menu_keyboard(*, is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Inline keyboard for /menu — one-tap access to every public action.
+
+    Admin-only buttons (admin panel, users) are added when *is_admin* is True.
+    All buttons dispatch through `menu_callback`, which delegates to the
+    corresponding command handler.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("🎬 Новинки", callback_data=f"{MENU_CALLBACK_PREFIX}:new"),
+            InlineKeyboardButton("🔔 Подписки", callback_data=f"{MENU_CALLBACK_PREFIX}:subs"),
+        ],
+        [
+            InlineKeyboardButton("📋 Загрузки", callback_data=f"{MENU_CALLBACK_PREFIX}:status"),
+            InlineKeyboardButton("❓ Помощь", callback_data=f"{MENU_CALLBACK_PREFIX}:help"),
+        ],
+    ]
+    if is_admin:
+        rows.append([
+            InlineKeyboardButton("⚙️ Админ-панель", callback_data=f"{MENU_CALLBACK_PREFIX}:admin"),
+            InlineKeyboardButton("👥 Пользователи", callback_data=f"{MENU_CALLBACK_PREFIX}:users"),
+        ])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
 def _access_approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -123,7 +150,7 @@ def _admin_panel_keyboard(
     ]
 
     if show_plex_unmatched:
-        list_label = f"📋 Несматчено в Plex ({plex_unmatched_count})"
+        list_label = f"📋 Plex: без матча ({plex_unmatched_count})"
         toggle_label = (
             "🔔 Уведомления о новых: вкл"
             if plex_unmatched_notify_enabled

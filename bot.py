@@ -36,6 +36,7 @@ from config import load_settings, parse_chat_ids
 from diagnostics import friendly_error as _friendly_error, format_diagnostics, run_diagnostics
 from download_station import DownloadStationError
 from formatters import (
+    _expand_search_queries_for_jackett,
     _extract_season_from_query,
     _extract_series_base_query,
     _filter_by_season,
@@ -58,6 +59,7 @@ from keyboards import (
     ACCESS_CALLBACK_PREFIX,
     ADMIN_CALLBACK_PREFIX,
     JACKETT_SELECT_PREFIX,
+    MENU_CALLBACK_PREFIX,
     SEARCH_CALLBACK_PREFIX,
     TASK_CALLBACK_PREFIX,
     TASK_LIST_PAGE_SIZE,
@@ -78,6 +80,7 @@ from keyboards import (
     _download_list_keyboard,
     _final_notification_keyboard,
     _finished_task_ids,
+    _main_menu_keyboard,
     _plex_confirm_keyboard,
     _jackett_select_keyboard,
     _new_task_keyboard,
@@ -263,6 +266,7 @@ KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
 SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate warning
 BOT_COMMANDS = [
+    BotCommand("menu", "Меню бота"),
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
     BotCommand("status", "Список загрузок"),
@@ -1589,6 +1593,7 @@ def _restore_first_seen_from_previous(
 async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
+    logger.info("Movie discovery refresh starting at %s", now_text)
 
     # --- Tracker monitoring: detect removed Jackett trackers ---
     md_settings = _load_movie_discovery_settings()
@@ -1781,7 +1786,35 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     }
     _save_movie_discovery_debug(debug_report)
     logger.info("Movie discovery refreshed: cards=%d releases=%d", len(cache.get("cards", [])), len(releases))
+    # Diagnostic snapshot of the post-refresh order — used to compare against
+    # what /new shows on the next invocation (was it cache_hit or fresh?).
+    logger.info(
+        "Movie discovery top-10 after refresh: %s",
+        _format_cards_diagnostic(cache.get("cards") or []),
+    )
     return cache
+
+
+def _format_cards_diagnostic(cards: list[dict], limit: int = 10) -> str:
+    """Format top-N cards as a compact one-liner-per-card snapshot for logs.
+
+    Used to compare card order between cache-hit and post-refresh /new flows
+    when investigating "list looks unsorted after restart" reports.
+    """
+    if not cards:
+        return "(no cards)"
+    parts = []
+    for i, c in enumerate(cards[:limit], 1):
+        score = c.get("score")
+        score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "?"
+        parts.append(
+            f"#{i} {c.get('title')!r} score={score_str} "
+            f"releases={c.get('release_count')} "
+            f"seeders={c.get('best_seeders')} "
+            f"quality={c.get('best_quality')!r} "
+            f"year={c.get('year')}"
+        )
+    return " | ".join(parts)
 
 
 async def _recompute_movie_discovery_from_cache() -> None:
@@ -4280,21 +4313,70 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         selected: set[str] = context.user_data.get("srch_jackett_selected", set())
 
         if selected:  # Jackett search
+            # Build query variants: original + optional S0N form for Russian
+            # 'сезон N' inputs. Jackett's @_synchronized lock serialises calls,
+            # so two variants take roughly 2× the single-query timeout.
+            search_queries = _expand_search_queries_for_jackett(search_query)
+            per_query_timeout = 45.0
+            gather_timeout = per_query_timeout * len(search_queries)
+            j_results_raw: list | None = None
+            raw_err: str | None = None
+
             try:
-                j_results_raw = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        jackett_client.search,
-                        search_query,
-                        indexers=list(selected),
-                        fetch_limit=JACKETT_FETCH_LIMIT,
+                gather_results = await asyncio.wait_for(
+                    asyncio.gather(
+                        *(
+                            asyncio.to_thread(
+                                jackett_client.search,
+                                q,
+                                indexers=list(selected),
+                                fetch_limit=JACKETT_FETCH_LIMIT,
+                            )
+                            for q in search_queries
+                        ),
+                        return_exceptions=True,
                     ),
-                    timeout=45.0,
+                    timeout=gather_timeout,
                 )
-            except (JackettError, asyncio.TimeoutError) as e:
+            except asyncio.TimeoutError:
                 raw_err = (
-                    "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
-                    if isinstance(e, asyncio.TimeoutError) else str(e)
+                    f"Jackett не ответил за {int(gather_timeout)} сек — "
+                    "проверьте Global timeout в настройках Jackett"
                 )
+            else:
+                per_query_lists: list[list] = []
+                first_error: Exception | None = None
+                for q, item in zip(search_queries, gather_results):
+                    if isinstance(item, Exception):
+                        logger.warning("Jackett query %r failed: %s", q, item)
+                        if first_error is None:
+                            first_error = item
+                    else:
+                        per_query_lists.append(item)
+                if not per_query_lists and first_error is not None:
+                    raw_err = str(first_error)
+                else:
+                    # Dedupe across variants by (topic_url, magnet_url), keeping
+                    # the order of the original-query results first.
+                    seen_keys: set[tuple[str, str]] = set()
+                    j_results_raw = []
+                    for rs in per_query_lists:
+                        for r in rs:
+                            key = (
+                                getattr(r, "topic_url", "") or "",
+                                getattr(r, "magnet_url", "") or "",
+                            )
+                            if key in seen_keys:
+                                continue
+                            seen_keys.add(key)
+                            j_results_raw.append(r)
+                    if len(search_queries) > 1:
+                        logger.info(
+                            "Jackett expanded search: original=%r variants=%s results=%d",
+                            search_query, search_queries[1:], len(j_results_raw),
+                        )
+
+            if raw_err is not None:
                 logger.error("Jackett search failed in _run_search: %s", raw_err)
                 if rutracker_client:
                     banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
@@ -6560,7 +6642,14 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     chat_id = update.effective_chat.id if update.effective_chat else None
     cache = _load_movie_discovery_cache()
-    if not cache.get("cards"):
+    cards_now = cache.get("cards") or []
+    updated_at = cache.get("updated_at") or "(never)"
+    is_new_count = sum(1 for c in cards_now if c.get("is_new"))
+    if not cards_now:
+        logger.info(
+            "/new chat_id=%s source=fresh_refresh updated_at=%s reason=empty_cache",
+            chat_id, updated_at,
+        )
         progress = await update.message.reply_text("🎬 Собираю новинки…")
         cache = await _refresh_movie_discovery_cache()
         await _safe_edit_message(
@@ -6575,7 +6664,13 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Re-apply Plex badges from current in-memory library (cheap, no network).
     # Needed after restart: JSON cache may have stale in_plex values.
-    _enrich_cards_with_plex(cache.get("cards") or [])
+    _enrich_cards_with_plex(cards_now)
+
+    logger.info(
+        "/new chat_id=%s source=cache_hit updated_at=%s cards=%d is_new=%d top10=[%s]",
+        chat_id, updated_at, len(cards_now), is_new_count,
+        _format_cards_diagnostic(cards_now),
+    )
 
     await update.message.reply_text(
         _format_movie_discovery_cache(cache, chat_id=chat_id),
@@ -6597,6 +6692,7 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
         return
 
     chat_id = query.message.chat.id if query.message else None
+    logger.info("/new refresh requested by chat_id=%s", chat_id)
     await query.answer()
     await _safe_edit_callback(query, "🎬 Обновляю новинки…")
     cache = await _refresh_movie_discovery_cache()
@@ -6627,6 +6723,112 @@ async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT
         logger.debug("Failed to delete movie discovery message", exc_info=True)
     if chat_id:
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
+
+
+# ---------------------------------------------------------------------------
+# /menu command — single entry point with role-aware buttons
+# ---------------------------------------------------------------------------
+
+
+class _MenuMessageProxy:
+    """Stand-in for `update.message` when invoking a *_command from a callback.
+
+    `reply_text(...)` falls back to `bot.send_message(chat_id=...)`, so command
+    handlers that build their UI via `update.message.reply_text(...)` work
+    unchanged from `menu_callback`. Only the subset of attributes used by the
+    dispatched commands is provided.
+    """
+
+    def __init__(self, chat, context: ContextTypes.DEFAULT_TYPE):
+        self.chat = chat
+        self.chat_id = chat.id if chat else None
+        self.message_id = None
+        self.from_user = None
+        self._context = context
+
+    async def reply_text(self, text: str = "", **kwargs):
+        kwargs.pop("reply_to_message_id", None)
+        kwargs.pop("reply_to_message", None)
+        text_kw = kwargs.pop("text", text)
+        return await self._context.bot.send_message(
+            chat_id=self.chat.id, text=text_kw, **kwargs
+        )
+
+    async def reply_html(self, text: str, **kwargs):
+        return await self.reply_text(text, parse_mode="HTML", **kwargs)
+
+
+class _MenuDispatchUpdate:
+    """Update wrapper that swaps `.message` for `_MenuMessageProxy`.
+
+    Other attributes (effective_chat / effective_user / callback_query / …)
+    transparently delegate to the wrapped callback Update, so `_is_allowed`
+    and friends still see the real clicking user.
+    """
+
+    def __init__(self, real: Update, context: ContextTypes.DEFAULT_TYPE):
+        self._real = real
+        self._proxy = _MenuMessageProxy(real.effective_chat, context)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    @property
+    def message(self):
+        return self._proxy
+
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        logger.warning("Rejected /menu from chat_id=%s", _chat_id(update))
+        await _reply_access_pending(update, context)
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    await update.message.reply_text(
+        "Меню бота — выберите действие:",
+        reply_markup=_main_menu_keyboard(is_admin=_is_admin_chat(chat_id)),
+    )
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+
+    action = query.data.split(":", 1)[1] if ":" in query.data else ""
+    chat_id = query.message.chat.id if query.message else None
+    is_admin = _is_admin_chat(chat_id)
+
+    if action in {"admin", "users"} and not is_admin:
+        return
+
+    # Drop the menu message; each dispatched command will send a fresh UI.
+    try:
+        if query.message:
+            await query.message.delete()
+    except Exception:
+        logger.debug("Failed to delete /menu message", exc_info=True)
+
+    proxy = _MenuDispatchUpdate(update, context)
+    if action == "new":
+        await movie_new_command(proxy, context)
+    elif action == "subs":
+        await subs_command(proxy, context)
+    elif action == "status":
+        await status(proxy, context)
+    elif action == "help":
+        await help_command(proxy, context)
+    elif action == "admin":
+        await admin_command(proxy, context)
+    elif action == "users":
+        await users_command(proxy, context)
 
 
 async def movie_new_subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7660,8 +7862,10 @@ def main() -> None:
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("new", movie_new_command))
+    app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=f"^{MENU_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(access_callback, pattern=f"^{ACCESS_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
