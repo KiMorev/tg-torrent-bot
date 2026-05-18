@@ -1843,6 +1843,167 @@ class FormatMovieDiscoveryCachePerUserBadgeTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Download fallback: Jackett → rutracker_client direct
+# ---------------------------------------------------------------------------
+
+
+class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """When Jackett's proxy fails to deliver a Rutracker .torrent (HTTP 404 from
+    /dl/<indexer>/?path=...), the bot must try fetching the file via
+    rutracker_client.download_torrent before showing an error. Magnet is not a
+    fallback for Rutracker — it's a private tracker with passkey-bearing
+    announce URLs that aren't in the .torrent metadata.
+    """
+
+    async def test_jackett_404_falls_back_to_rutracker_client_for_rutracker_result(self):
+        from jackett import JackettError
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Test Movie 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+            "torrent_url": "http://jackett:9117/dl/rutracker/?path=abc",
+            "magnet_url": None,
+            "tracker_name": "rutracker",
+            "source": "jackett",
+            "topic_id": "",
+            "size": "3 GB",
+            "seeders": 10,
+            "quality": "1080p",
+            "year": 2024,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Test"})
+
+        mock_jackett = MagicMock()
+        mock_jackett.download_torrent = MagicMock(side_effect=JackettError("HTTP 404 — Not Found"))
+        mock_jackett._api_key = "key"
+
+        mock_rt = MagicMock()
+        mock_rt.download_torrent = MagicMock(return_value=b"d8:announce4:test")
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        mock_ds.create_torrent_file.return_value = "task1"
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_torrent_file_is_private", return_value=False),
+            patch.object(bot, "_add_public_trackers_to_download_task", return_value=MagicMock(skipped_reason=None)),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_register_task_card_from_query"),
+            patch.object(bot, "_start_task_card_refresh"),
+            patch.object(bot, "_mark_tracker_processed_if_final"),
+        ):
+            await bot._download_and_add(update.callback_query, context, 0, subscribe=False, _skip_plex_check=True)
+
+        # rutracker_client was called with the topic id extracted from the URL.
+        mock_rt.download_torrent.assert_called_once_with("12345")
+        # DS create_torrent_file was called with the bytes returned by rutracker_client.
+        ds_call = mock_ds.create_torrent_file.call_args
+        self.assertIsNotNone(ds_call)
+        # The temp path bytes get written first; just verify the call shape.
+        self.assertEqual(mock_ds.create_torrent_file.call_count, 1)
+
+    async def test_jackett_404_no_rutracker_client_falls_through_to_existing_research(self):
+        """If rutracker_client is None, behaviour is unchanged: re-search + magnet path runs."""
+        from jackett import JackettError
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Test 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+            "torrent_url": "http://jackett/dl/rutracker/?path=abc",
+            "magnet_url": "magnet:?xt=urn:btih:deadbeef",
+            "tracker_name": "rutracker",
+            "source": "jackett",
+            "topic_id": "",
+            "size": "3 GB",
+            "seeders": 10,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Test"})
+
+        mock_jackett = MagicMock()
+        # Jackett 404 on first call; _refresh_jackett_torrent_url returns None;
+        # fall back to magnet.
+        mock_jackett.download_torrent = MagicMock(side_effect=JackettError("HTTP 404"))
+        mock_jackett._api_key = "k"
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        mock_ds.create_magnet.return_value = "task1"
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_refresh_jackett_torrent_url", AsyncMock(return_value=None)),
+            patch.object(bot, "_add_public_trackers_to_download_task", return_value=MagicMock(skipped_reason=None)),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_register_task_card_from_query"),
+            patch.object(bot, "_start_task_card_refresh"),
+            patch.object(bot, "_mark_tracker_processed_if_final"),
+        ):
+            await bot._download_and_add(update.callback_query, context, 0, subscribe=False, _skip_plex_check=True)
+
+        # Magnet path was taken.
+        mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:deadbeef")
+
+    async def test_jackett_404_rutracker_also_fails_falls_through(self):
+        """If both Jackett and rutracker_client fail, the existing re-search/magnet
+        chain still runs (magnet works in this fake setup)."""
+        from jackett import JackettError
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Test 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+            "torrent_url": "http://jackett/dl/rutracker/?path=abc",
+            "magnet_url": "magnet:?xt=urn:btih:cafebabe",
+            "tracker_name": "rutracker",
+            "source": "jackett",
+            "topic_id": "",
+            "size": "3 GB",
+            "seeders": 10,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Test"})
+
+        mock_jackett = MagicMock()
+        mock_jackett.download_torrent = MagicMock(side_effect=JackettError("HTTP 404"))
+        mock_jackett._api_key = "k"
+
+        mock_rt = MagicMock()
+        mock_rt.download_torrent = MagicMock(side_effect=RutrackerError("Rutracker also down"))
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        mock_ds.create_magnet.return_value = "task1"
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_refresh_jackett_torrent_url", AsyncMock(return_value=None)),
+            patch.object(bot, "_add_public_trackers_to_download_task", return_value=MagicMock(skipped_reason=None)),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_register_task_card_from_query"),
+            patch.object(bot, "_start_task_card_refresh"),
+            patch.object(bot, "_mark_tracker_processed_if_final"),
+        ):
+            await bot._download_and_add(update.callback_query, context, 0, subscribe=False, _skip_plex_check=True)
+
+        # Both Jackett and rutracker_client were tried.
+        mock_jackett.download_torrent.assert_called_once()
+        mock_rt.download_torrent.assert_called_once_with("12345")
+        # Fell through to magnet.
+        mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:cafebabe")
+
+
+# ---------------------------------------------------------------------------
 # Plex pre-download check helpers
 # ---------------------------------------------------------------------------
 

@@ -5235,41 +5235,73 @@ async def _download_and_add(
                     task_id = await _wait_for_magnet_task_id(magnet, known_task_ids, query.message)
                 download_method = "magnet"
             except JackettError as torrent_err:
-                logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
-                await query.edit_message_text("⏳ Обновляю раздачи, повторяю попытку…")
-                fresh_url = await _refresh_jackett_torrent_url(jackett_client, result, context)
-                if fresh_url:
+                # Step 0 (new): if this is a Rutracker result and we have a direct
+                # rutracker_client, try fetching the .torrent through it. Jackett's
+                # proxy is the most failure-prone link (session refresh, 404 from
+                # /dl/<indexer>/?path=...); rutracker_client uses its own session
+                # and may succeed. Magnet fallback below physically can't work for
+                # Rutracker (private tracker, magnet needs a passkey-bearing
+                # announce URL that's not in the .torrent metadata).
+                tracker_name = (result.get("tracker_name") or result.get("category") or "").lower()
+                topic_id_from_url = _extract_rutracker_topic_id(result.get("url") or "")
+                direct_rt_ok = False
+                if rutracker_client and "rutracker" in tracker_name and topic_id_from_url:
                     try:
+                        logger.info(
+                            "Jackett download failed (%s), trying rutracker_client direct: topic_id=%s",
+                            torrent_err, topic_id_from_url,
+                        )
+                        await query.edit_message_text("⏳ Пробую скачать напрямую с Rutracker…")
                         torrent_bytes = await asyncio.to_thread(
-                            jackett_client.download_torrent, fresh_url
+                            rutracker_client.download_torrent, topic_id_from_url
                         )
                         temp_path.write_bytes(torrent_bytes)
                         task_id = await asyncio.to_thread(
                             ds_client.create_torrent_file, temp_path, safe_name
                         )
-                    except JackettError as retry_err:
-                        logger.warning("retry also failed (%s), trying magnet", retry_err)
-                        if result.get("magnet_url"):
-                            task_id = await asyncio.to_thread(
-                                ds_client.create_magnet, result["magnet_url"]
-                            )
-                            if not task_id:
-                                task_id = await _wait_for_magnet_task_id(
-                                    result["magnet_url"], known_task_ids, query.message
-                                )
-                            download_method = "magnet"
-                        else:
-                            raise retry_err
-                elif result.get("magnet_url"):
-                    logger.warning("re-search found no fresh URL, falling back to magnet")
-                    task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
-                    if not task_id:
-                        task_id = await _wait_for_magnet_task_id(
-                            result["magnet_url"], known_task_ids, query.message
-                        )
-                    download_method = "magnet"
+                        direct_rt_ok = True
+                    except RutrackerError as rt_err:
+                        logger.info("rutracker_client direct also failed: %s — falling back", rt_err)
+                        # fall through to existing re-search / magnet chain
+
+                if direct_rt_ok:
+                    pass  # task_id is set; skip the re-search/magnet block
                 else:
-                    raise torrent_err
+                    logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
+                    await query.edit_message_text("⏳ Обновляю раздачи, повторяю попытку…")
+                    fresh_url = await _refresh_jackett_torrent_url(jackett_client, result, context)
+                    if fresh_url:
+                        try:
+                            torrent_bytes = await asyncio.to_thread(
+                                jackett_client.download_torrent, fresh_url
+                            )
+                            temp_path.write_bytes(torrent_bytes)
+                            task_id = await asyncio.to_thread(
+                                ds_client.create_torrent_file, temp_path, safe_name
+                            )
+                        except JackettError as retry_err:
+                            logger.warning("retry also failed (%s), trying magnet", retry_err)
+                            if result.get("magnet_url"):
+                                task_id = await asyncio.to_thread(
+                                    ds_client.create_magnet, result["magnet_url"]
+                                )
+                                if not task_id:
+                                    task_id = await _wait_for_magnet_task_id(
+                                        result["magnet_url"], known_task_ids, query.message
+                                    )
+                                download_method = "magnet"
+                            else:
+                                raise retry_err
+                    elif result.get("magnet_url"):
+                        logger.warning("re-search found no fresh URL, falling back to magnet")
+                        task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
+                        if not task_id:
+                            task_id = await _wait_for_magnet_task_id(
+                                result["magnet_url"], known_task_ids, query.message
+                            )
+                        download_method = "magnet"
+                    else:
+                        raise torrent_err
         elif source == "rutracker" and topic_id and rutracker_client:
             # Direct Rutracker search result (not via Jackett) — use rutracker_client
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
