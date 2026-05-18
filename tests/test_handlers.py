@@ -2003,6 +2003,80 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:cafebabe")
 
 
+class FormatDownloadErrorTests(unittest.TestCase):
+    """_format_download_error: replaces raw long URLs with a compact summary."""
+
+    def test_jackett_404_compact_text(self):
+        from jackett import JackettError
+        # The real error text contains a huge URL with base64 path; we shouldn't
+        # leak any of that.
+        exc = JackettError(
+            "Не удалось скачать torrent через Jackett: HTTP 404 — 404 Client Error: "
+            "Not Found for url: http://192.168.1.103:9117/dl/rutracker/?jackett_apikey="
+            "***&path=Q2ZESjhQTTMtd2RZRZlVwUGlDOTF0SjVL... (огромный URL)"
+        )
+        text = bot._format_download_error(exc)
+        # Compact message, no URL leakage.
+        self.assertIn("HTTP 404", text)
+        self.assertNotIn("path=", text)
+        self.assertNotIn("jackett_apikey", text)
+        self.assertLess(len(text), 200)
+
+    def test_jackett_5xx_text(self):
+        from jackett import JackettError
+        exc = JackettError("Не удалось скачать: HTTP 503 Service Unavailable")
+        text = bot._format_download_error(exc)
+        self.assertIn("5xx", text)
+
+    def test_jackett_timeout_text(self):
+        from jackett import JackettError
+        exc = JackettError("Read timed out after 45s")
+        text = bot._format_download_error(exc)
+        self.assertIn("ожидания", text)
+
+    def test_rutracker_error_text(self):
+        exc = RutrackerError("Капча на странице")
+        text = bot._format_download_error(exc)
+        self.assertIn("Rutracker", text)
+        self.assertIn("Капча", text)
+
+    def test_download_station_error_text(self):
+        from download_station import DownloadStationError
+        exc = DownloadStationError("Auth failed")
+        text = bot._format_download_error(exc)
+        self.assertIn("Download Station", text)
+
+    def test_unknown_error_truncated(self):
+        exc = ValueError("X" * 500)
+        text = bot._format_download_error(exc)
+        self.assertLess(len(text), 250)
+
+
+class SearchRetryDlHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """search_retry_dl: re-runs _download_and_add with the given index."""
+
+    async def test_retry_invokes_download_with_parsed_index(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:retry_dl:2")
+        context = _make_context()
+        with patch.object(bot, "_download_and_add", AsyncMock(return_value=bot.SEARCH_RESULTS)) as dl_mock:
+            await bot.search_retry_dl(update, context)
+        dl_mock.assert_awaited_once()
+        args = dl_mock.call_args.args
+        self.assertEqual(args[2], 2)   # index = 2
+        # subscribe kwarg is False by default in retry
+        self.assertEqual(dl_mock.call_args.kwargs.get("subscribe"), False)
+
+    async def test_retry_with_malformed_callback_data_ends_conversation(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:retry_dl:not-a-number")
+        context = _make_context()
+        with patch.object(bot, "_download_and_add", AsyncMock()) as dl_mock:
+            result = await bot.search_retry_dl(update, context)
+        dl_mock.assert_not_awaited()
+        from telegram.ext import ConversationHandler
+        self.assertEqual(result, ConversationHandler.END)
+        update.callback_query.edit_message_text.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Plex pre-download check helpers
 # ---------------------------------------------------------------------------

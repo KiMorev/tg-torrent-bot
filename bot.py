@@ -83,6 +83,7 @@ from keyboards import (
     _new_task_keyboard,
     _search_advanced_keyboard,
     _search_after_add_keyboard,
+    _download_error_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
     _search_options_keyboard,
@@ -4620,6 +4621,23 @@ async def search_no_quality_all_trackers(update: Update, context: ContextTypes.D
     return await _execute_search(query, context, base)
 
 
+async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Retry the same download that just failed, by index into ``srch_results``.
+
+    Shown as «🔄 Повторить» on the error screen after a torrent download
+    failure. Re-runs ``_download_and_add`` with the same index; if it fails
+    again, the user sees the error screen again (and can keep retrying).
+    """
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        return ConversationHandler.END
+    return await _download_and_add(query, context, index, subscribe=False)
+
+
 async def search_expand_jackett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Kept for backwards-compat; now delegates to search_switch_trackers."""
     return await search_switch_trackers(update, context)
@@ -5127,6 +5145,49 @@ async def search_season_got_input(update: Update, context: ContextTypes.DEFAULT_
     return await _run_search(update.message.reply_text, context, search_query)
 
 
+def _pending_downloads_enabled() -> bool:
+    """Whether the pending-download queue feature is active.
+
+    Stub for now (Block 2 only ships the retry UI). The full pending-queue
+    implementation in a subsequent change will read a real setting and gate
+    the «⏳ Поставить в очередь» button + queue handler off this.
+    """
+    return False
+
+
+def _format_download_error(exc: Exception) -> str:
+    """Human-readable short description of a torrent download failure.
+
+    Replaces raw exception text (which on Jackett HTTP 404 contains a huge URL
+    with base64 path and URL-encoded filename — see ``jackett.py:303``) with a
+    one-line summary suitable for the chat UI. Keeps the head of the message
+    for unfamiliar errors so we don't drop diagnostic info.
+    """
+    msg = str(exc)
+    if isinstance(exc, JackettError):
+        if "HTTP 404" in msg:
+            return (
+                "❌ Не удалось скачать torrent через Jackett (HTTP 404). "
+                "Возможно, трекер временно недоступен."
+            )
+        if "HTTP 5" in msg:
+            return (
+                "❌ Jackett вернул ошибку сервера (5xx). "
+                "Возможно, трекер временно недоступен."
+            )
+        lower = msg.lower()
+        if "timeout" in lower or "timed out" in lower:
+            return "❌ Превышено время ожидания от Jackett."
+        # Fallback: keep the head of the message, drop any URL/path tail.
+        head = msg.split(" — ", 1)[0]
+        return f"❌ Ошибка Jackett: {head[:200]}"
+    if isinstance(exc, RutrackerError):
+        return f"❌ Не удалось скачать torrent с Rutracker: {msg[:200]}"
+    if isinstance(exc, DownloadStationError):
+        return f"❌ Не удалось добавить задачу в Download Station: {msg[:200]}"
+    return f"❌ Ошибка: {msg[:200]}"
+
+
 async def _download_and_add(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -5400,7 +5461,22 @@ async def _download_and_add(
         if task_id and _card_chat_id and _card_msg_id:
             _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
     except (RutrackerError, JackettError, DownloadStationError) as e:
-        await query.edit_message_text(f"Ошибка: {e}")
+        logger.warning("Download failed for index=%s: %s", index, e, exc_info=True)
+        error_text = _format_download_error(e)
+        # Remember the error so the pending-queue handler (if user clicks
+        # «⏳ Поставить в очередь») can record it on the queued entry.
+        context.user_data["srch_last_dl_error"] = error_text
+        await query.edit_message_text(
+            error_text,
+            reply_markup=_download_error_keyboard(
+                index=index,
+                can_queue=_pending_downloads_enabled(),
+                can_retry=True,
+            ),
+        )
+        # Return SEARCH_RESULTS (not END) so the Retry/Queue callbacks
+        # dispatch within the active ConversationHandler.
+        return SEARCH_RESULTS
     finally:
         try:
             if temp_path.exists():
@@ -7906,6 +7982,7 @@ def main() -> None:
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),
                     CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
                     CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
+                    CallbackQueryHandler(search_retry_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry_dl:\d+$"),
                     CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
                     CallbackQueryHandler(search_direct_rutracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:direct_rt$"),
                     # Legacy patterns — delegate to new handlers

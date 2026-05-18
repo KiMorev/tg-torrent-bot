@@ -419,6 +419,38 @@ def _search_error_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _download_error_keyboard(
+    *,
+    index: int,
+    can_queue: bool = False,
+    can_retry: bool = True,
+) -> InlineKeyboardMarkup:
+    """Shown on a torrent download failure.
+
+    Offers actionable buttons depending on what's available:
+
+    - **🔄 Повторить** — retry the same download (uses ``index`` into ``srch_results``).
+      Default on; pass ``can_retry=False`` to hide (e.g. if the result is unrecoverable).
+    - **⏳ Поставить в очередь** — only when ``can_queue=True``. The handler that
+      processes this button is part of the pending-download-queue feature
+      (gated by ``PENDING_DOWNLOADS_ENABLED``).
+    - **✖️ Закрыть** — always present so the screen never dead-ends.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_retry:
+        rows.append([InlineKeyboardButton(
+            "🔄 Повторить",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry_dl:{index}",
+        )])
+    if can_queue:
+        rows.append([InlineKeyboardButton(
+            "⏳ Поставить в очередь",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:queue_dl:{index}",
+        )])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
 def tracker_selection_label(indexers: list[dict], selected_ids: set[str]) -> str:
     """Human-readable label for the currently selected Jackett tracker set."""
     if not indexers:

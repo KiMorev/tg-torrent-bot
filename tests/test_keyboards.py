@@ -9,6 +9,7 @@ from keyboards import (
     _final_notification_keyboard,
     _jackett_select_keyboard,
     _search_advanced_keyboard,
+    _download_error_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
     _search_options_keyboard,
@@ -445,6 +446,37 @@ class SearchErrorKeyboardTests(unittest.TestCase):
     def test_has_exactly_two_buttons(self) -> None:
         all_buttons = [b for row in _search_error_keyboard().inline_keyboard for b in row]
         self.assertEqual(len(all_buttons), 2)
+
+
+class DownloadErrorKeyboardTests(unittest.TestCase):
+    """_download_error_keyboard — Retry / Queue (optional) / Close."""
+
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+
+    def test_default_has_retry_and_close(self) -> None:
+        buttons = self._buttons(_download_error_keyboard(index=3))
+        self.assertEqual(buttons["🔄 Повторить"], "srch:retry_dl:3")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+        self.assertNotIn("⏳ Поставить в очередь", buttons)
+
+    def test_can_queue_adds_queue_button(self) -> None:
+        buttons = self._buttons(_download_error_keyboard(index=5, can_queue=True))
+        self.assertEqual(buttons["🔄 Повторить"], "srch:retry_dl:5")
+        self.assertEqual(buttons["⏳ Поставить в очередь"], "srch:queue_dl:5")
+        self.assertIn("✖️ Закрыть", buttons)
+
+    def test_can_retry_false_hides_retry(self) -> None:
+        buttons = self._buttons(_download_error_keyboard(index=0, can_retry=False))
+        self.assertNotIn("🔄 Повторить", buttons)
+        self.assertIn("✖️ Закрыть", buttons)
+
+    def test_close_is_always_last_row(self) -> None:
+        for can_q, can_r in [(False, False), (True, False), (False, True), (True, True)]:
+            kb = _download_error_keyboard(index=1, can_queue=can_q, can_retry=can_r)
+            last_row = kb.inline_keyboard[-1]
+            self.assertEqual(last_row[0].text, "✖️ Закрыть",
+                             f"Close must be last for can_q={can_q}, can_r={can_r}")
 
 
 class NoResultsKeyboardTests(unittest.TestCase):
