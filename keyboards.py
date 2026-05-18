@@ -369,19 +369,43 @@ def _delete_finished_confirm_keyboard(scope: str) -> InlineKeyboardMarkup:
     )
 
 
-def _no_quality_keyboard(base_query: str) -> InlineKeyboardMarkup:
-    """Shown when a quality-filtered search returns no results.
+def _no_results_keyboard(
+    *,
+    has_quality: bool,
+    jackett_can_expand: bool,
+) -> InlineKeyboardMarkup:
+    """Shown on a 'no results' dead-end. Offers to relax filters and retry.
 
-    Offers to repeat the search with the bare base query (no quality suffix)
-    or cancel altogether.
+    Conditional rows — buttons appear only when they have something to do:
+
+    - ``has_quality``: the query carried a quality suffix (e.g. ' 1080p') over
+      the bare ``srch_query`` — offer to drop it.
+    - ``jackett_can_expand``: Jackett is configured AND ``srch_jackett_selected``
+      is a strict subset of available indexers — offer to broaden.
+    - Both flags True → also offer the combined retry.
+
+    Always ends with Cancel so the screen never dead-ends.
     """
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "🔍 Искать без фильтра качества",
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_quality:
+        rows.append([InlineKeyboardButton(
+            "🔍 Без фильтра качества",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:no_quality",
-        )],
-        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
-    ])
+        )])
+    if jackett_can_expand:
+        rows.append([InlineKeyboardButton(
+            "🌐 На всех трекерах",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:expand_all_trackers",
+        )])
+    if has_quality and jackett_can_expand:
+        rows.append([InlineKeyboardButton(
+            "🔍🌐 Без качества + все трекеры",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers",
+        )])
+    rows.append([InlineKeyboardButton(
+        "❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel",
+    )])
+    return InlineKeyboardMarkup(rows)
 
 
 def _search_error_keyboard() -> InlineKeyboardMarkup:

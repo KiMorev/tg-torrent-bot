@@ -3261,6 +3261,129 @@ class StatusCommandTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class SearchNoResultsFallbackTests(unittest.TestCase):
+    """Handlers for 'no results' fallback buttons: expand trackers, drop quality, combined."""
+
+    def test_expand_all_trackers_sets_all_indexers_and_reruns(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:expand_all_trackers")
+        context = _make_context(user_data={
+            "srch_query": "Аркейн",
+            "srch_search_query": "Аркейн 1080p",
+            "srch_jackett_indexers": [{"id": "rutracker"}, {"id": "nnmclub"}, {"id": "kinozal"}],
+            "srch_jackett_selected": {"rutracker"},
+        })
+        with patch.object(bot, "_execute_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as exec_mock:
+            asyncio.run(bot.search_expand_all_trackers(update, context))
+
+        # All known indexers are now selected
+        self.assertEqual(
+            context.user_data["srch_jackett_selected"],
+            {"rutracker", "nnmclub", "kinozal"},
+        )
+        # _execute_search called with the original search_query (with quality)
+        exec_mock.assert_awaited_once()
+        _, _, sq = exec_mock.call_args.args
+        self.assertEqual(sq, "Аркейн 1080p")
+
+    def test_expand_all_trackers_aborts_when_indexers_unknown(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:expand_all_trackers")
+        context = _make_context(user_data={
+            "srch_query": "Аркейн",
+            "srch_jackett_indexers": [],   # Jackett never queried in this session
+        })
+        with patch.object(bot, "_execute_search", AsyncMock()) as exec_mock:
+            result = asyncio.run(bot.search_expand_all_trackers(update, context))
+
+        exec_mock.assert_not_awaited()
+        # Conversation must end with a fallback message
+        update.callback_query.edit_message_text.assert_called_once()
+        from telegram.ext import ConversationHandler
+        self.assertEqual(result, ConversationHandler.END)
+
+    def test_no_quality_all_trackers_drops_quality_and_broadens(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:no_quality_all_trackers")
+        context = _make_context(user_data={
+            "srch_query": "Аркейн",
+            "srch_search_query": "Аркейн 1080p",   # what was last executed
+            "srch_jackett_indexers": [{"id": "rutracker"}, {"id": "nnmclub"}],
+            "srch_jackett_selected": {"rutracker"},
+        })
+        with patch.object(bot, "_execute_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as exec_mock:
+            asyncio.run(bot.search_no_quality_all_trackers(update, context))
+
+        # Trackers broadened
+        self.assertEqual(
+            context.user_data["srch_jackett_selected"],
+            {"rutracker", "nnmclub"},
+        )
+        # Quality dropped — _execute_search called with the BASE query, not search_query
+        _, _, sq = exec_mock.call_args.args
+        self.assertEqual(sq, "Аркейн")
+
+    def test_no_quality_all_trackers_aborts_when_base_lost(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:no_quality_all_trackers")
+        context = _make_context(user_data={
+            "srch_query": "",   # base lost
+            "srch_jackett_indexers": [{"id": "rutracker"}],
+        })
+        with patch.object(bot, "_execute_search", AsyncMock()) as exec_mock:
+            result = asyncio.run(bot.search_no_quality_all_trackers(update, context))
+
+        exec_mock.assert_not_awaited()
+        from telegram.ext import ConversationHandler
+        self.assertEqual(result, ConversationHandler.END)
+
+    def test_no_results_flags_detects_quality_suffix(self):
+        """_no_results_flags returns has_quality=True when srch_query differs from search_query."""
+        context = _make_context(user_data={"srch_query": "Аркейн"})
+        has_q, _ = bot._no_results_flags(context, "Аркейн 1080p")
+        self.assertTrue(has_q)
+
+    def test_no_results_flags_no_quality_when_queries_match(self):
+        context = _make_context(user_data={"srch_query": "Аркейн"})
+        has_q, _ = bot._no_results_flags(context, "Аркейн")
+        self.assertFalse(has_q)
+
+    def test_no_results_flags_jackett_can_expand_strict_subset(self):
+        context = _make_context(user_data={
+            "srch_query": "X",
+            "srch_jackett_indexers": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "srch_jackett_selected": {"a"},
+        })
+        with patch.object(bot, "jackett_client", object()):
+            _, can_exp = bot._no_results_flags(context, "X")
+        self.assertTrue(can_exp)
+
+    def test_no_results_flags_jackett_cannot_expand_when_all_selected(self):
+        context = _make_context(user_data={
+            "srch_query": "X",
+            "srch_jackett_indexers": [{"id": "a"}, {"id": "b"}],
+            "srch_jackett_selected": {"a", "b"},
+        })
+        with patch.object(bot, "jackett_client", object()):
+            _, can_exp = bot._no_results_flags(context, "X")
+        self.assertFalse(can_exp)
+
+    def test_no_results_flags_jackett_cannot_expand_when_no_indexers_known(self):
+        context = _make_context(user_data={
+            "srch_query": "X",
+            "srch_jackett_indexers": [],
+        })
+        with patch.object(bot, "jackett_client", object()):
+            _, can_exp = bot._no_results_flags(context, "X")
+        self.assertFalse(can_exp)
+
+    def test_no_results_flags_jackett_cannot_expand_when_no_jackett(self):
+        context = _make_context(user_data={
+            "srch_query": "X",
+            "srch_jackett_indexers": [{"id": "a"}, {"id": "b"}],
+            "srch_jackett_selected": {"a"},
+        })
+        with patch.object(bot, "jackett_client", None):
+            _, can_exp = bot._no_results_flags(context, "X")
+        self.assertFalse(can_exp)
+
+
 class SearchCancelCallbackTests(unittest.TestCase):
     def test_callback_deletes_message(self):
         """Cancel via button must delete the search UI message, never edit it."""

@@ -83,7 +83,7 @@ from keyboards import (
     _new_task_keyboard,
     _search_advanced_keyboard,
     _search_after_add_keyboard,
-    _no_quality_keyboard,
+    _no_results_keyboard,
     _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
@@ -4162,10 +4162,16 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             "tracker_name": "rutracker",
         })
     if not results_data:
+        has_quality, _ = _no_results_flags(context, search_query)
+        # Direct Rutracker path — Jackett expansion is irrelevant here.
         await query.edit_message_text(
-            f"По запросу «{search_query}» ничего не найдено в Rutracker."
+            f"По запросу «{search_query}» ничего не найдено в Rutracker.",
+            reply_markup=_no_results_keyboard(
+                has_quality=has_quality,
+                jackett_can_expand=False,
+            ),
         )
-        return ConversationHandler.END
+        return SEARCH_RESULTS
     results_data.sort(key=_score_result, reverse=True)
     results_data[0]["recommended"] = True
     banner = "🔗 Прямой поиск Rutracker"
@@ -4249,6 +4255,23 @@ async def _refresh_jackett_torrent_url(
 
     logger.debug("_refresh_jackett_torrent_url: no matching result found in %d fresh results", len(fresh))
     return None
+
+
+def _no_results_flags(context: ContextTypes.DEFAULT_TYPE, search_query: str) -> tuple[bool, bool]:
+    """Compute (has_quality, jackett_can_expand) for ``_no_results_keyboard``.
+
+    - ``has_quality``: bare ``srch_query`` differs from the actual executed
+      ``search_query`` (case-insensitive) — i.e. a quality suffix was appended.
+    - ``jackett_can_expand``: Jackett is configured AND the user's selected
+      indexers are a strict subset of the known ones — we can broaden.
+    """
+    base = (context.user_data.get("srch_query") or "").strip()
+    has_quality = bool(base) and base.lower() != search_query.lower()
+    indexers = context.user_data.get("srch_jackett_indexers") or []
+    all_ids = {i["id"] for i in indexers}
+    selected = set(context.user_data.get("srch_jackett_selected") or set())
+    jackett_can_expand = bool(jackett_client) and bool(all_ids) and selected != all_ids
+    return has_quality, jackett_can_expand
 
 
 async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query: str) -> int:
@@ -4374,11 +4397,16 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         return ConversationHandler.END
 
     if not results_data:
+        has_quality, jackett_can_expand = _no_results_flags(context, search_query)
         await edit_fn(
             f"По запросу «{search_query}» ничего не найдено.\n"
-            "Попробуйте другой запрос."
+            "Попробуйте ослабить фильтры или другой запрос.",
+            reply_markup=_no_results_keyboard(
+                has_quality=has_quality,
+                jackett_can_expand=jackett_can_expand,
+            ),
         )
-        return ConversationHandler.END
+        return SEARCH_RESULTS
 
     # --- Step 1: season filter ---
     season_num = _extract_season_from_query(search_query)
@@ -4390,13 +4418,15 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         if filtered:
             results_data = filtered
         else:
-            base_query = context.user_data.get("srch_query", "").strip()
-            has_quality = bool(base_query) and base_query.lower() != search_query.lower()
+            has_quality, jackett_can_expand = _no_results_flags(context, search_query)
             if has_quality:
                 await edit_fn(
                     f"По запросу «{search_query}» раздач с указанным качеством не найдено.\n"
-                    f"Попробовать без фильтра качества?",
-                    reply_markup=_no_quality_keyboard(base_query),
+                    f"Попробуйте ослабить фильтры:",
+                    reply_markup=_no_results_keyboard(
+                        has_quality=True,
+                        jackett_can_expand=jackett_can_expand,
+                    ),
                 )
                 return SEARCH_RESULTS
 
@@ -4414,11 +4444,17 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 )
                 return SEARCH_SEASON_SELECT
 
+            # Generic dead-end after season filter wiped everything: offer to
+            # broaden trackers (the requested season may exist elsewhere).
             await edit_fn(
                 f"По запросу «{search_query}» ничего не найдено.\n"
-                "Попробуйте другой запрос."
+                "Попробуйте ослабить фильтры или другой запрос.",
+                reply_markup=_no_results_keyboard(
+                    has_quality=False,
+                    jackett_can_expand=jackett_can_expand,
+                ),
             )
-            return ConversationHandler.END
+            return SEARCH_RESULTS
 
     # --- Step 2: sort by score, best first ---
     results_data.sort(key=_score_result, reverse=True)
@@ -4490,6 +4526,43 @@ async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Повторить поиск без фильтра качества (фоллбэк при 0 результатов)."""
     query = update.callback_query
     await query.answer()
+    base = context.user_data.get("srch_query", "").strip()
+    if not base:
+        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        return ConversationHandler.END
+    return await _execute_search(query, context, base)
+
+
+async def search_expand_all_trackers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Расширить выбор Jackett-индексеров до всех доступных и повторить запрос.
+
+    Used as a fallback after a 0-results dead-end — broadens the search from the
+    default (Rutracker-only) to every indexer Jackett knows about, keeping the
+    same query (including any quality suffix).
+    """
+    query = update.callback_query
+    await query.answer()
+    indexers = context.user_data.get("srch_jackett_indexers") or []
+    all_ids = {i["id"] for i in indexers}
+    if not all_ids:
+        await query.edit_message_text("Jackett-индексеры неизвестны. Начните поиск заново.")
+        return ConversationHandler.END
+    context.user_data["srch_jackett_selected"] = all_ids
+    sq = context.user_data.get("srch_search_query") or context.user_data.get("srch_query", "")
+    if not sq:
+        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        return ConversationHandler.END
+    return await _execute_search(query, context, sq)
+
+
+async def search_no_quality_all_trackers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Combined fallback: drop quality filter AND broaden trackers, then retry."""
+    query = update.callback_query
+    await query.answer()
+    indexers = context.user_data.get("srch_jackett_indexers") or []
+    all_ids = {i["id"] for i in indexers}
+    if all_ids:
+        context.user_data["srch_jackett_selected"] = all_ids
     base = context.user_data.get("srch_query", "").strip()
     if not base:
         await query.edit_message_text("Запрос потерян. Начните поиск заново.")
@@ -4673,18 +4746,26 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _safe_answer(query, "Jackett не нашёл результатов по выбранным трекерам.", show_alert=True)
         existing = context.user_data.get("srch_results", [])
         banner = context.user_data.get("srch_banner", "")
-        await query.edit_message_text(
-            _build_results_text(existing, search_query, 0, banner=banner) if existing
-            else f"По запросу «{search_query}» ничего не найдено.",
-            reply_markup=_search_results_keyboard(
+        if existing:
+            empty_markup = _search_results_keyboard(
                 existing, page=0,
                 show_retry_jackett=True,   # offer retry with different trackers
                 show_direct_rutracker=False,
-            ) if existing else None,
+            )
+        else:
+            has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+            empty_markup = _no_results_keyboard(
+                has_quality=has_quality,
+                jackett_can_expand=jackett_can_expand,
+            )
+        await query.edit_message_text(
+            _build_results_text(existing, search_query, 0, banner=banner) if existing
+            else f"По запросу «{search_query}» ничего не найдено.",
+            reply_markup=empty_markup,
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
-        return SEARCH_RESULTS if existing else ConversationHandler.END
+        return SEARCH_RESULTS
 
     logger.info("Jackett search returned %d results", len(j_results_raw))
 
@@ -7741,6 +7822,8 @@ def main() -> None:
                     CallbackQueryHandler(search_results_page, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:res_page:"),
                     CallbackQueryHandler(search_series_entry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:series_base$"),
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),
+                    CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
+                    CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
                     CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
                     CallbackQueryHandler(search_direct_rutracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:direct_rt$"),
                     # Legacy patterns — delegate to new handlers

@@ -9,6 +9,7 @@ from keyboards import (
     _final_notification_keyboard,
     _jackett_select_keyboard,
     _search_advanced_keyboard,
+    _no_results_keyboard,
     _search_error_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
@@ -444,6 +445,58 @@ class SearchErrorKeyboardTests(unittest.TestCase):
     def test_has_exactly_two_buttons(self) -> None:
         all_buttons = [b for row in _search_error_keyboard().inline_keyboard for b in row]
         self.assertEqual(len(all_buttons), 2)
+
+
+class NoResultsKeyboardTests(unittest.TestCase):
+    """_no_results_keyboard — conditional fallback buttons + always Cancel."""
+
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+
+    def test_only_cancel_when_nothing_can_be_relaxed(self) -> None:
+        buttons = self._buttons(_no_results_keyboard(
+            has_quality=False, jackett_can_expand=False,
+        ))
+        self.assertEqual(list(buttons.keys()), ["❌ Отмена"])
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
+    def test_has_quality_only_shows_no_quality_button(self) -> None:
+        buttons = self._buttons(_no_results_keyboard(
+            has_quality=True, jackett_can_expand=False,
+        ))
+        self.assertIn("🔍 Без фильтра качества", buttons)
+        self.assertEqual(buttons["🔍 Без фильтра качества"], "srch:no_quality")
+        self.assertNotIn("🌐 На всех трекерах", buttons)
+        self.assertNotIn("🔍🌐 Без качества + все трекеры", buttons)
+        self.assertIn("❌ Отмена", buttons)
+
+    def test_jackett_can_expand_only_shows_expand_button(self) -> None:
+        buttons = self._buttons(_no_results_keyboard(
+            has_quality=False, jackett_can_expand=True,
+        ))
+        self.assertIn("🌐 На всех трекерах", buttons)
+        self.assertEqual(buttons["🌐 На всех трекерах"], "srch:expand_all_trackers")
+        self.assertNotIn("🔍 Без фильтра качества", buttons)
+        self.assertNotIn("🔍🌐 Без качества + все трекеры", buttons)
+        self.assertIn("❌ Отмена", buttons)
+
+    def test_both_flags_true_shows_three_fallbacks_plus_cancel(self) -> None:
+        buttons = self._buttons(_no_results_keyboard(
+            has_quality=True, jackett_can_expand=True,
+        ))
+        self.assertEqual(len(buttons), 4)
+        self.assertEqual(buttons["🔍 Без фильтра качества"], "srch:no_quality")
+        self.assertEqual(buttons["🌐 На всех трекерах"], "srch:expand_all_trackers")
+        self.assertEqual(buttons["🔍🌐 Без качества + все трекеры"], "srch:no_quality_all_trackers")
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
+    def test_cancel_is_always_last_row(self) -> None:
+        """Regardless of which fallback rows are present, Cancel is the final row."""
+        for has_q, can_exp in [(False, False), (True, False), (False, True), (True, True)]:
+            kb = _no_results_keyboard(has_quality=has_q, jackett_can_expand=can_exp)
+            last_row = kb.inline_keyboard[-1]
+            self.assertEqual(last_row[0].text, "❌ Отмена",
+                             f"Cancel must be last for has_q={has_q}, can_exp={can_exp}")
 
 
 class TasksKeyboardCloseTests(unittest.TestCase):
