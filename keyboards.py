@@ -96,12 +96,17 @@ def _admin_panel_keyboard(
     show_plex_unmatched: bool = False,
     plex_unmatched_count: int = 0,
     plex_unmatched_notify_enabled: bool = False,
+    stuck_notifications_count: int = 0,
 ) -> InlineKeyboardMarkup:
     """Build the admin panel keyboard.
 
     ``show_plex_unmatched`` toggles the visibility of the Plex-unmatched
     radar row (only meaningful when PLEX_ENABLED). The toggle button label
     reflects ``plex_unmatched_notify_enabled``.
+
+    ``stuck_notifications_count`` — if >0, surfaces a «Сбросить счётчики (N)»
+    button. Hidden when 0 to avoid clutter; the admin sees the count in the
+    status text either way and only needs the action when something's stuck.
     """
     rows = [
         [
@@ -133,6 +138,12 @@ def _admin_panel_keyboard(
             InlineKeyboardButton(list_label, callback_data=_admin_callback("plex_unmatched")),
             InlineKeyboardButton(toggle_label, callback_data=_admin_callback("plex_unmatched_toggle")),
         ])
+
+    if stuck_notifications_count > 0:
+        rows.append([InlineKeyboardButton(
+            f"🔄 Сбросить счётчики ({stuck_notifications_count})",
+            callback_data=_admin_callback("reset_notify_failures"),
+        )])
 
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))])
     return InlineKeyboardMarkup(rows)
@@ -318,11 +329,19 @@ def _final_notification_keyboard(
     task_id: str,
     *,
     show_plex: bool = False,
-    plex_url: str = "plex://",
+    plex_url: str = "https://app.plex.tv/desktop",
 ) -> InlineKeyboardMarkup:
+    """Final notification keyboard for a completed task.
+
+    The default ``plex_url`` is the Plex Universal Link
+    (``https://app.plex.tv/desktop``) — iOS/Android Plex apps intercept it via
+    Universal Links / Intent filters, on desktop it opens Plex Web. We can't
+    use the ``plex://`` scheme because Telegram rejects it in inline-button
+    URLs since 2026 (BadRequest "unsupported url protocol").
+    """
     rows = []
     if show_plex:
-        rows.append([InlineKeyboardButton("▶️ Открыть Plex (iOS)", url=plex_url)])
+        rows.append([InlineKeyboardButton("▶️ Открыть Plex", url=plex_url)])
     rows.append([InlineKeyboardButton("🧹 Удалить из списка", callback_data=_task_callback("delete_ask", task_id))])
     rows.append([InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))])
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])

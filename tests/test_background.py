@@ -625,6 +625,101 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         # No-op.
 
 
+class MessageFormatBugClassificationTests(unittest.TestCase):
+    """Regression: Telegram's BadRequest with text like 'inline keyboard button
+    url is invalid' is OUR bug (malformed message), not the chat's fault.
+    Counting it as permanent against chat_id would blackhole healthy chats.
+
+    Real example: in May 2026 Telegram stopped accepting `plex://` URLs in
+    inline-button URLs; our notification code shipped that URL and ALL push
+    notifications for finished tasks died after 3 retries per task — until
+    the URL was fixed AND the per-chat failure counter was reset.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+        bot.TASK_CARD_MESSAGES.clear()
+
+    def tearDown(self) -> None:
+        bot.TASK_CARD_MESSAGES.clear()
+        self._tmp.cleanup()
+
+    def test_button_url_invalid_does_not_increment_failures(self) -> None:
+        """BadRequest about button URL must NOT add to failures[chat_id]."""
+        from telegram.error import BadRequest
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=BadRequest(
+            "Inline keyboard button url 'plex://' is invalid: unsupported url protocol"
+        ))
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            # Multiple cycles — failures must STILL be empty.
+            for _ in range(5):
+                asyncio.run(_run_task_notifications_once(mock_app))
+
+        notified = self._store.load_notified_tasks().get("tid1")
+        # Either no entry persisted (transient = no state change), or entry
+        # exists but with no failures recorded.
+        if notified is not None and isinstance(notified, dict):
+            self.assertEqual(notified.get("failures") or {}, {})
+
+    def test_button_url_invalid_logs_error_level(self) -> None:
+        """For our format-bug class we log at ERROR to make the broken code visible."""
+        from telegram.error import BadRequest
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=BadRequest(
+            "Inline keyboard button url 'plex://preplay/?...' is invalid"
+        ))
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="ERROR") as captured:
+                asyncio.run(_run_task_notifications_once(mock_app))
+
+        joined = "\n".join(captured.output)
+        self.assertIn("message_format_bug", joined)
+        self.assertIn("tid1", joined)
+
+    def test_real_chat_not_found_still_counts_as_permanent(self) -> None:
+        """Regression guard: actual chat errors must STILL count against the cap
+        (we discriminate on text, not on exception type)."""
+        from telegram.error import BadRequest
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=BadRequest("Chat not found"))
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["failures"], {"999": 1})
+
+
 class AutoDeleteDelayTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

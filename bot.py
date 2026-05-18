@@ -888,6 +888,42 @@ def _format_admin_notifications_line() -> str:
     return f"• Уведомления: {statuses}"
 
 
+def _count_stuck_notifications() -> int:
+    """Count tasks whose notification delivery has hit the failure cap for
+    at least one recipient. Such tasks will never receive a push until the
+    failure counter is reset (admin button «🔄 Сбросить счётчики»).
+    """
+    notified = _load_notified_tasks()
+    cap = MAX_TASK_NOTIFICATION_FAILURES
+    count = 0
+    for entry in notified.values():
+        if not isinstance(entry, dict):
+            continue
+        failures = entry.get("failures") or {}
+        if not isinstance(failures, dict):
+            continue
+        for v in failures.values():
+            try:
+                if int(v or 0) >= cap:
+                    count += 1
+                    break
+            except (TypeError, ValueError):
+                continue
+    return count
+
+
+def _format_admin_stuck_notifications_line() -> str:
+    """One-line status: are any task notifications stuck at failure cap?"""
+    n = _count_stuck_notifications()
+    if n == 0:
+        return "• Уведомления о завершении: ✅ всё доставляется"
+    return (
+        f"• Уведомления о завершении: ⚠️ зависших {n} "
+        f"{_plural(n, 'задача', 'задачи', 'задач')} — "
+        f"тапни «🔄 Сбросить счётчики ({n})»"
+    )
+
+
 def _format_admin_search_defaults_line() -> str:
     quality = _SRCH_DEFAULT_SETTINGS.get("quality", "1080p")
     audio = "да" if _SRCH_DEFAULT_SETTINGS.get("audio") else "нет"
@@ -971,13 +1007,18 @@ def _admin_panel_kb_kwargs() -> dict:
     Centralised here so both /admin entry points (slash command + callback)
     render an identical panel without each duplicating the gathering logic.
     """
+    stuck = _count_stuck_notifications()
     if not PLEX_ENABLED:
-        return {"show_plex_unmatched": False}
+        return {
+            "show_plex_unmatched": False,
+            "stuck_notifications_count": stuck,
+        }
     counts = _get_plex_unmatched_counts()
     return {
         "show_plex_unmatched": True,
         "plex_unmatched_count": counts["total"],
         "plex_unmatched_notify_enabled": _is_plex_unmatched_notify_enabled(),
+        "stuck_notifications_count": stuck,
     }
 
 
@@ -997,6 +1038,7 @@ async def _build_admin_panel_text() -> str:
         "📊 <b>Состояние</b>",
         _format_admin_tasks_line(tasks, task_error),
         _format_admin_subscriptions_line(),
+        _format_admin_stuck_notifications_line(),
         "",
         "⚙️ <b>Правила и интеграции</b>",
         _format_admin_configured_integrations(),
@@ -2699,15 +2741,18 @@ async def _plex_poll_after_finish(
                 # Build deep link
                 machine_id = _plex_machine_id
                 rating_key = getattr(target, "rating_key", "")
+                # Plex Universal Link (https://). Telegram rejects plex:// in
+                # inline-button URLs; iOS/Android Plex apps still intercept this
+                # https form via Universal Links / Intent filter.
                 deep_link = (
-                    f"plex://preplay/?metadataKey=/library/metadata/{rating_key}"
-                    f"&metadataType={metadata_type}&server={machine_id}"
+                    f"https://app.plex.tv/desktop/#!/server/{machine_id}"
+                    f"/details?key=%2Flibrary%2Fmetadata%2F{rating_key}"
                 ) if machine_id and rating_key else ""
 
                 text = f"✅ <b>{html_module.escape(found_title)}</b> добавлен в Plex."
                 keyboard = (
                     InlineKeyboardMarkup([[
-                        InlineKeyboardButton("▶️ Смотреть в Plex (iOS)", url=deep_link)
+                        InlineKeyboardButton("▶️ Смотреть в Plex", url=deep_link)
                     ]])
                     if deep_link else None
                 )
@@ -2830,11 +2875,14 @@ def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> 
 
 def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
     if (status or "").lower() in {"finished", "seeding"}:
-        # Use plex:// scheme so the button opens the iOS/Android Plex app directly
-        # rather than an HTTP URL that opens in the browser.  The specific deep-link
-        # (plex://preplay/…) is sent later by _plex_poll_after_finish once Plex
-        # has indexed the downloaded file.
-        return _final_notification_keyboard(task_id, show_plex=PLEX_ENABLED, plex_url="plex://")
+        # Use Plex Universal Link (https://app.plex.tv/...) — iOS/Android Plex
+        # apps intercept it via Universal Links/Intent filter, desktop opens
+        # Plex Web. We can't use plex:// (Telegram rejects it in inline-button
+        # URLs since 2026). The specific deep-link with metadataKey is sent
+        # later by _plex_poll_after_finish once Plex has indexed the file.
+        return _final_notification_keyboard(
+            task_id, show_plex=PLEX_ENABLED, plex_url="https://app.plex.tv/desktop",
+        )
 
     return _make_task_keyboard(task_id, status, task_type)
 
@@ -3323,6 +3371,24 @@ async def _classify_send_error(exc: Exception) -> tuple[str, bool]:
     # check it BEFORE NetworkError so "chat not found" / "user is deactivated"
     # are classified as permanent (not retried as transient).
     if isinstance(exc, BadRequest):
+        # Discriminate: some BadRequests are about the message FORMAT (our bug),
+        # not about the chat. Penalising chat_id failures for those would let a
+        # malformed message blackhole a healthy chat permanently — exactly the
+        # plex:// regression in May 2026.
+        msg = str(exc).lower()
+        format_bug_markers = (
+            "inline keyboard button",
+            "button_url_invalid",
+            "url is invalid",
+            "unsupported url protocol",
+            "can't parse entities",
+            "message text is empty",
+        )
+        if any(marker in msg for marker in format_bug_markers):
+            # Format bug — do NOT count against the chat. Same content will
+            # keep failing on every cycle, but ERROR-level log makes it loudly
+            # operator-visible so the underlying code bug gets fixed quickly.
+            return "message_format_bug", False
         return "chat_not_found", True
     if isinstance(exc, TimedOut):
         return "timeout", False
@@ -3478,7 +3544,11 @@ async def _run_task_notifications_once(app: Application) -> None:
                     # Transient — retry on next cycle without penalty. We do NOT
                     # set task_changed, so the per-chat state isn't rewritten
                     # and the failure counter stays at its previous value.
-                    logger.info(
+                    # Message-format bugs are our own code defect: ERROR level so
+                    # they don't hide in a sea of INFO entries.
+                    log_level = logging.ERROR if label == "message_format_bug" else logging.INFO
+                    logger.log(
+                        log_level,
                         "Task notification deferred (transient: %s) chat_id=%s task_id=%s — will retry",
                         label, chat_id, task_id,
                     )
@@ -7049,6 +7119,31 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             query,
             f"✅ KP кеш очищен: удалено <b>{old_size}</b> {_plural(old_size, 'запись', 'записи', 'записей')}.\n\n"
             f"Кеш будет заполнен заново при следующем обновлении новинок.",
+            parse_mode="HTML",
+            reply_markup=_admin_kp_cache_cleared_keyboard(),
+        )
+        return
+
+    if action == "reset_notify_failures":
+        notified = _load_notified_tasks()
+        reset_count = 0
+        for entry in notified.values():
+            if not isinstance(entry, dict):
+                continue
+            failures = entry.get("failures")
+            if isinstance(failures, dict) and failures:
+                entry["failures"] = {}
+                reset_count += 1
+        _save_notified_tasks(notified)
+        logger.info(
+            "Admin reset notification failure counters: tasks affected=%s", reset_count,
+        )
+        await _safe_edit_callback(
+            query,
+            f"✅ Сброшено счётчиков для <b>{reset_count}</b> "
+            f"{_plural(reset_count, 'задачи', 'задач', 'задач')}.\n\n"
+            "При следующем тике уведомлений (раз в 180с) попытки доставки "
+            "начнутся заново с 0.",
             parse_mode="HTML",
             reply_markup=_admin_kp_cache_cleared_keyboard(),
         )

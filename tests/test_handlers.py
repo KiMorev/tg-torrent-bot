@@ -306,6 +306,130 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Живой статус сервисов — в разделе «Диагностика»", text)
         self.assertIn("🎬 <b>Новинки</b>", text)
 
+    def test_admin_panel_shows_ok_when_no_stuck_notifications(self):
+        """Status line in /admin panel reports OK when no failure counters are at cap."""
+        update = _make_message_update(chat_id=300)
+        context = _make_context()
+        progress_message = MagicMock()
+        progress_message.edit_text = AsyncMock()
+        update.message.reply_text.return_value = progress_message
+
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {}
+        # No notified_tasks with failures.
+        fake_store.load_notified_tasks.return_value = {
+            "t1": {"status": "done", "sent": ["300"], "failures": {}},
+        }
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = []
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "ds_client", fake_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(admin_command(update, context))
+
+        text = progress_message.edit_text.call_args.args[0]
+        self.assertIn("Уведомления о завершении: ✅ всё доставляется", text)
+        # No reset button when count == 0
+        markup = progress_message.edit_text.call_args.kwargs.get("reply_markup")
+        button_labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertFalse(
+            any("Сбросить счётчики" in lbl for lbl in button_labels),
+            f"Reset button should be hidden when count=0, got: {button_labels}",
+        )
+
+    def test_admin_panel_shows_count_and_button_when_stuck(self):
+        """Status line + reset button reflect the actual number of stuck tasks."""
+        update = _make_message_update(chat_id=300)
+        context = _make_context()
+        progress_message = MagicMock()
+        progress_message.edit_text = AsyncMock()
+        update.message.reply_text.return_value = progress_message
+
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {}
+        # Two tasks with failures at cap, one without — count should be 2.
+        fake_store.load_notified_tasks.return_value = {
+            "t1": {"status": "done", "sent": [], "failures": {"300": 3}},
+            "t2": {"status": "done", "sent": [], "failures": {"300": 3, "400": 1}},
+            "t3": {"status": "done", "sent": ["300"], "failures": {}},
+            "t4": {"status": "done", "sent": [], "failures": {"300": 2}},  # below cap
+        }
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = []
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "ds_client", fake_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "MAX_TASK_NOTIFICATION_FAILURES", 3),
+        ):
+            asyncio.run(admin_command(update, context))
+
+        text = progress_message.edit_text.call_args.args[0]
+        self.assertIn("Уведомления о завершении: ⚠️ зависших 2", text)
+        markup = progress_message.edit_text.call_args.kwargs.get("reply_markup")
+        button_labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertTrue(
+            any("Сбросить счётчики (2)" in lbl for lbl in button_labels),
+            f"Expected reset button with count 2, got: {button_labels}",
+        )
+
+    def test_count_stuck_notifications_helper(self):
+        """Direct unit test for the helper that powers the admin status line."""
+        fake_store = MagicMock()
+        fake_store.load_notified_tasks.return_value = {
+            "t1": {"failures": {"300": 3}},                # at cap → counted
+            "t2": {"failures": {"300": 3, "400": 1}},      # one at cap → counted
+            "t3": {"failures": {}},                         # empty → skipped
+            "t4": {"failures": {"300": 2}},                 # below cap → skipped
+            "t5": "done",                                   # legacy string → skipped
+            "t6": {"failures": "bad"},                      # malformed → skipped
+            "t7": None,                                     # missing → skipped
+        }
+        with (
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "MAX_TASK_NOTIFICATION_FAILURES", 3),
+        ):
+            self.assertEqual(bot._count_stuck_notifications(), 2)
+
+    def test_reset_notify_failures_callback_clears_all(self):
+        """Tapping «🔄 Сбросить счётчики» wipes failures across all entries."""
+        update = _make_callback_update(chat_id=300, callback_data="admin:reset_notify_failures")
+        context = _make_context()
+
+        # Build a real state_store backed by a tmp dir so save/load round-trips.
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            store = _make_store(tmp.name)
+            store.save_notified_tasks({
+                "t1": {"status": "done", "sent": [], "failures": {"300": 3}},
+                "t2": {"status": "done", "sent": ["300"], "failures": {"400": 3}},
+                "t3": {"status": "done", "sent": ["300"], "failures": {}},
+            })
+            with (
+                patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(admin_callback(update, context))
+
+            after = store.load_notified_tasks()
+            self.assertEqual(after["t1"]["failures"], {})
+            self.assertEqual(after["t2"]["failures"], {})
+            self.assertEqual(after["t3"]["failures"], {})
+        finally:
+            tmp.cleanup()
+
+        # Response text mentions affected count (2 — t3 had no failures so skipped).
+        edit_calls = update.callback_query.edit_message_text.call_args_list
+        last_text = edit_calls[-1].args[0] if edit_calls[-1].args else edit_calls[-1].kwargs.get("text", "")
+        self.assertIn("Сброшено", last_text)
+        self.assertIn("2", last_text)
+
     def test_admin_diagnostics_callback_reuses_diagnostics_view(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:diagnostics")
         context = _make_context()
@@ -2491,11 +2615,15 @@ class PlexPollingTests(unittest.TestCase):
         kwargs = fake_app.bot.send_message.call_args.kwargs
         self.assertIn("Сезон 3", kwargs["text"])
         self.assertIn("Клиника", kwargs["text"])
-        # Deep-link uses season's rating_key and metadataType=3
+        # Plex Universal Link uses the season's rating_key. Telegram rejects
+        # plex:// so we use https://app.plex.tv/... which Plex apps intercept
+        # via Universal Links. Plex Web infers metadata type from ratingKey,
+        # explicit metadataType= no longer needed.
         keyboard = kwargs["reply_markup"]
         btn = keyboard.inline_keyboard[0][0]
+        self.assertTrue(btn.url.startswith("https://app.plex.tv"))
         self.assertIn("season-key-77", btn.url)
-        self.assertIn("metadataType=3", btn.url)
+        self.assertIn("machine-1", btn.url)
 
     def test_poll_after_finish_series_without_meta_falls_back_via_legacy_path(self):
         """A legacy task (no meta) whose DS title looks like a series should still
@@ -3400,19 +3528,25 @@ class NotificationKeyboardTests(unittest.TestCase):
             seeding_labels = self._labels(_notification_keyboard("tid1", "seeding", "bt"))
             error_labels = self._labels(_notification_keyboard("tid1", "error", "bt"))
 
-        self.assertIn("▶️ Открыть Plex (iOS)", finished_labels)
-        self.assertIn("▶️ Открыть Plex (iOS)", seeding_labels)
-        self.assertNotIn("▶️ Открыть Plex (iOS)", error_labels)
+        self.assertIn("▶️ Открыть Plex", finished_labels)
+        self.assertIn("▶️ Открыть Plex", seeding_labels)
+        self.assertNotIn("▶️ Открыть Plex", error_labels)
 
-    def test_plex_button_uses_plex_scheme_not_http(self):
-        """Кнопка должна открывать Plex-приложение (plex://), а не HTTP URL в браузере."""
+    def test_plex_button_uses_telegram_supported_scheme(self):
+        """Telegram rejects ``plex://`` inline-button URLs since May 2026.
+        We use ``https://app.plex.tv/...`` which iOS/Android Plex apps still
+        intercept via Universal Links / Intent filter."""
         with patch.object(bot, "PLEX_ENABLED", True):
             keyboard = _notification_keyboard("tid1", "finished", "bt")
         urls = self._urls(keyboard)
-        plex_url = urls.get("▶️ Открыть Plex (iOS)", "")
+        plex_url = urls.get("▶️ Открыть Plex", "")
         self.assertTrue(
-            plex_url.startswith("plex://"),
-            f"Ожидался plex:// URL, получен: {plex_url!r}",
+            plex_url.startswith("https://"),
+            f"Telegram rejects non-https URLs in inline buttons; got: {plex_url!r}",
+        )
+        self.assertTrue(
+            "plex.tv" in plex_url,
+            f"Expected a Plex Universal Link, got: {plex_url!r}",
         )
 
 
