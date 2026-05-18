@@ -27,6 +27,7 @@ class JsonStateStore:
         movie_discovery_settings_file: Path | None = None,
         topic_subscriptions_file: Path | None = None,
         task_meta_file: Path | None = None,
+        pending_downloads_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -37,6 +38,7 @@ class JsonStateStore:
         self.movie_discovery_settings_file = movie_discovery_settings_file
         self.topic_subscriptions_file = topic_subscriptions_file
         self.task_meta_file = task_meta_file
+        self.pending_downloads_file = pending_downloads_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -385,6 +387,29 @@ class JsonStateStore:
         if not self.topic_subscriptions_file:
             return
         self.save_json_file(self.topic_subscriptions_file, subs, "topic subscriptions")
+
+    def load_pending_downloads(self) -> dict[str, dict]:
+        """Load the deferred download queue.
+
+        Returns ``{entry_id: entry_dict}`` or an empty dict on missing/invalid file.
+        """
+        if not self.pending_downloads_file:
+            return {}
+        payload = self.load_json_file(self.pending_downloads_file, {})
+        if not isinstance(payload, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for entry_id, entry in payload.items():
+            if isinstance(entry, dict) and entry_id:
+                out[str(entry_id)] = entry
+        return out
+
+    def save_pending_downloads(self, entries: dict[str, dict]) -> None:
+        if not self.pending_downloads_file:
+            return
+        # Stable order for diff-friendly JSON.
+        ordered = {k: entries[k] for k in sorted(entries.keys())}
+        self.save_json_file(self.pending_downloads_file, ordered, "pending downloads")
 
     def load_movie_discovery_cache(self) -> dict:
         if not self.movie_discovery_cache_file:

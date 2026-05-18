@@ -35,6 +35,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         notified_tasks_file=d / "notified.json",
         auto_delete_tasks_file=d / "auto_delete.json",
         topic_subscriptions_file=d / "subscriptions.json",
+        pending_downloads_file=d / "pending_downloads.json",
     )
 
 
@@ -344,6 +345,121 @@ class TaskNotificationDeliveryTests(unittest.TestCase):
         # plus the final no-op save at the end of the cycle = at least 2 calls.
         self.assertGreaterEqual(len(save_calls), 2,
             f"expected ≥2 saves (one per changed task), got {len(save_calls)}")
+
+
+class PendingDownloadsLoopTests(unittest.TestCase):
+    """Pending download queue: success → entry removed + push, failure → attempts++,
+    TTL expiry → entry dropped + 'gave up' push, disabled → no-op."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _seed_entry(self, *, attempts: int = 0, hours_ago: float = 0.0) -> str:
+        from datetime import datetime, timedelta
+        added_at = (datetime.now(bot.DISPLAY_TIMEZONE) - timedelta(hours=hours_ago)).isoformat()
+        entry_id = "test-entry-1"
+        self._store.save_pending_downloads({
+            entry_id: {
+                "chat_id": 100,
+                "added_at": added_at,
+                "title": "Test Movie",
+                "topic_url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+                "torrent_url": "http://jackett:9117/dl/rutracker/?path=Q",
+                "magnet_url": None,
+                "tracker": "rutracker",
+                "source": "jackett",
+                "subscribe": False,
+                "attempts": attempts,
+                "last_attempt_at": None,
+                "last_error": "",
+            }
+        })
+        return entry_id
+
+    def test_disabled_loop_is_noop(self) -> None:
+        self._seed_entry()
+        mock_app = MagicMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", False),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+        # Entry untouched.
+        loaded = self._store.load_pending_downloads()
+        self.assertEqual(len(loaded), 1)
+
+    def test_success_removes_entry_and_notifies(self) -> None:
+        entry_id = self._seed_entry()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task1", "torrent-файл"))),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+        loaded = self._store.load_pending_downloads()
+        self.assertNotIn(entry_id, loaded)
+        mock_app.bot.send_message.assert_awaited_once()
+        sent_text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("стартовала", sent_text)
+        self.assertIn("Test Movie", sent_text)
+
+    def test_failure_increments_attempts_and_persists(self) -> None:
+        entry_id = self._seed_entry(attempts=1)
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        from jackett import JackettError
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=JackettError("HTTP 404"))),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+        loaded = self._store.load_pending_downloads()
+        # Still queued, attempts bumped to 2.
+        self.assertIn(entry_id, loaded)
+        self.assertEqual(loaded[entry_id]["attempts"], 2)
+        # Error is recorded as the compact form, not the raw exception text.
+        self.assertIn("404", loaded[entry_id]["last_error"])
+        self.assertIsNotNone(loaded[entry_id]["last_attempt_at"])
+        # No success notification.
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_ttl_expired_drops_entry_and_pushes_failure(self) -> None:
+        entry_id = self._seed_entry(attempts=5, hours_ago=25.0)
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=AssertionError("should not be called"))),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+        loaded = self._store.load_pending_downloads()
+        self.assertNotIn(entry_id, loaded)
+        mock_app.bot.send_message.assert_awaited_once()
+        sent_text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("Не удалось скачать", sent_text)
+
+    def test_empty_queue_is_fast_path(self) -> None:
+        mock_app = MagicMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=AssertionError("should not be called"))),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+        # No-op.
 
 
 class AutoDeleteDelayTests(unittest.TestCase):

@@ -196,6 +196,26 @@ NOTIFY_CHAT_IDS=
 
 ---
 
+### Отложенная загрузка (pending queue)
+
+```env
+PENDING_DOWNLOADS_ENABLED=true
+PENDING_DOWNLOADS_INTERVAL_SECONDS=300
+PENDING_DOWNLOADS_TTL_HOURS=24
+```
+
+Когда скачивание `.torrent` не удалось (Rutracker лёг, Jackett 404, network blip), бот показывает компактное сообщение об ошибке с кнопками:
+
+- **🔄 Повторить** — сейчас же попробовать ту же раздачу заново.
+- **⏳ Поставить в очередь** — сохранить запрос в `state/pending_downloads.json` и пытаться скачать в фоне раз в `PENDING_DOWNLOADS_INTERVAL_SECONDS` (default 5 минут). Каждая попытка идёт по той же цепочке fallback: Jackett-proxy → rutracker_client напрямую → magnet (если есть).
+- **✖️ Закрыть** — закрыть сообщение.
+
+При успехе бот присылает уведомление «✅ Отложенная загрузка стартовала», и задача попадает в обычный мониторинг прогресса. Если за `PENDING_DOWNLOADS_TTL_HOURS` (default 24ч) не получилось — пользователь получает «⌛ Не удалось скачать за …ч» с числом попыток и последней ошибкой.
+
+Отключается через `PENDING_DOWNLOADS_ENABLED=false` — кнопка «⏳ Поставить в очередь» тогда не показывается, фоновой петли нет.
+
+---
+
 ### Автоочистка
 
 ```env

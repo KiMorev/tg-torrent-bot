@@ -144,6 +144,10 @@ class AppSettings:
     movie_discovery_limit: int
     movie_discovery_min_kp_rating: float
     movie_discovery_qualities: str
+    pending_downloads_enabled: bool
+    pending_downloads_interval_seconds: int
+    pending_downloads_ttl_hours: float
+    pending_downloads_file: Path
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
@@ -253,4 +257,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         movie_discovery_limit=max(1, min(50, env_int(env, "MOVIE_DISCOVERY_LIMIT", 20))),
         movie_discovery_min_kp_rating=max(0.0, env_float(env, "MOVIE_DISCOVERY_MIN_KP_RATING", 6.0)),
         movie_discovery_qualities=(env.get("MOVIE_DISCOVERY_QUALITIES", "1080p").strip() or "1080p"),
+        pending_downloads_enabled=env_bool(env, "PENDING_DOWNLOADS_ENABLED", True),
+        pending_downloads_interval_seconds=max(60, env_int(env, "PENDING_DOWNLOADS_INTERVAL_SECONDS", 300)),
+        pending_downloads_ttl_hours=max(0.1, env_float(env, "PENDING_DOWNLOADS_TTL_HOURS", 24.0)),
+        pending_downloads_file=Path(
+            env.get("PENDING_DOWNLOADS_FILE", str(state_dir / "pending_downloads.json"))
+        ),
     )

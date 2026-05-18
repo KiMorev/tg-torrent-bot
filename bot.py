@@ -255,6 +255,9 @@ MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS = settings.movie_discovery_jackett_max_age_
 MOVIE_DISCOVERY_LIMIT = settings.movie_discovery_limit
 MOVIE_DISCOVERY_MIN_KP_RATING = settings.movie_discovery_min_kp_rating
 MOVIE_DISCOVERY_QUALITIES = settings.movie_discovery_qualities
+PENDING_DOWNLOADS_ENABLED = settings.pending_downloads_enabled
+PENDING_DOWNLOADS_INTERVAL_SECONDS = settings.pending_downloads_interval_seconds
+PENDING_DOWNLOADS_TTL_HOURS = settings.pending_downloads_ttl_hours
 
 # kinopoiskapiunofficial.tech free tier: 500 requests/day
 _KP_DAILY_LIMIT = 500
@@ -298,6 +301,8 @@ TASK_CARD_MESSAGES: dict[str, set[tuple[int, int]]] = {}
 MAX_TASK_NOTIFICATION_FAILURES = 3
 # Unix timestamp of next scheduled subscription check (set by the loop)
 _next_subscription_check_at: float | None = None
+# Unix timestamp of next scheduled pending-downloads check (set by the loop)
+_next_pending_check_at: float | None = None
 
 
 logging.basicConfig(
@@ -638,9 +643,30 @@ async def _run_background_monitor_cycle(app: Application) -> None:
     await _run_task_maintenance_cycle(app)
 
 
+async def _run_pending_downloads_gated(app: Application) -> None:
+    """Wrap _run_pending_downloads_once with a per-cycle gate.
+
+    The maintenance loop ticks every TRACKERS_BACKGROUND_INTERVAL_SECONDS, but
+    we only want to attempt pending downloads at PENDING_DOWNLOADS_INTERVAL_SECONDS
+    cadence (typically much longer, e.g. 5 min). The gate stores the next-allowed
+    timestamp at module scope so it persists across cycles.
+    """
+    global _next_pending_check_at
+    if not _pending_downloads_enabled():
+        return
+    now_ts = time.time()
+    if _next_pending_check_at is not None and now_ts < _next_pending_check_at:
+        return
+    try:
+        await _run_pending_downloads_once(app)
+    finally:
+        _next_pending_check_at = time.time() + PENDING_DOWNLOADS_INTERVAL_SECONDS
+
+
 async def _run_task_maintenance_cycle(app: Application) -> None:
     await _run_background_step("task notifications", lambda: _run_task_notifications_once(app))
     await _run_background_step("auto-delete finished tasks", _run_auto_delete_finished_once)
+    await _run_background_step("pending downloads", lambda: _run_pending_downloads_gated(app))
     await _run_background_step("stale state pruning", _run_prune_stale_state_once)
 
 
@@ -3435,6 +3461,171 @@ def _is_auto_delete_candidate(task: dict) -> bool:
     return _policy_is_auto_delete_candidate(task, AUTO_DELETE_FINISHED_STATUSES)
 
 
+# ---------------------------------------------------------------------------
+# Pending download queue: re-try failed Jackett/Rutracker downloads in the
+# background until success or TTL expiry.
+# ---------------------------------------------------------------------------
+
+
+async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
+    """Try to deliver a queued download. Returns (task_id, method) on success.
+
+    Walks the same chain as the interactive path:
+      1. Jackett proxy (if entry.torrent_url and jackett_client available)
+      2. rutracker_client direct (for Rutracker results)
+      3. Magnet (if entry.magnet_url is set — only meaningful for public trackers)
+
+    Raises ``JackettError``/``RutrackerError``/``DownloadStationError``/``RuntimeError``
+    when none of the paths succeeds — caller increments attempts and stores the
+    last_error message.
+    """
+    title = str(entry.get("title") or "untitled")
+    safe_name = _safe_filename(f"{title}.torrent")
+    temp_path = _temp_path(safe_name)
+    tracker = (entry.get("tracker") or "").lower()
+    topic_url = entry.get("topic_url") or ""
+    torrent_url = entry.get("torrent_url") or ""
+    magnet_url = entry.get("magnet_url") or ""
+
+    last_err: Exception | None = None
+    try:
+        # Step 1: Jackett proxy
+        if torrent_url and jackett_client is not None:
+            try:
+                torrent_bytes = await asyncio.to_thread(
+                    jackett_client.download_torrent, torrent_url
+                )
+                temp_path.write_bytes(torrent_bytes)
+                task_id = await asyncio.to_thread(
+                    ds_client.create_torrent_file, temp_path, safe_name
+                )
+                return task_id, "torrent-файл"
+            except JackettError as e:
+                last_err = e  # fall through to next step
+
+        # Step 2: rutracker_client direct
+        if rutracker_client is not None and "rutracker" in tracker:
+            topic_id = _extract_rutracker_topic_id(topic_url)
+            if topic_id:
+                try:
+                    torrent_bytes = await asyncio.to_thread(
+                        rutracker_client.download_torrent, topic_id
+                    )
+                    temp_path.write_bytes(torrent_bytes)
+                    task_id = await asyncio.to_thread(
+                        ds_client.create_torrent_file, temp_path, safe_name
+                    )
+                    return task_id, "torrent-файл (Rutracker direct)"
+                except RutrackerError as e:
+                    last_err = e
+
+        # Step 3: magnet
+        if magnet_url:
+            task_id = await asyncio.to_thread(ds_client.create_magnet, magnet_url)
+            if not task_id:
+                task_id = await _wait_for_magnet_task_id(magnet_url, set(), None)
+            return task_id, "magnet"
+
+        # Nothing worked.
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("Нет источников для скачивания (torrent_url / magnet_url отсутствуют)")
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+async def _notify_pending_success(
+    app: Application, entry: dict, task_id: str, method: str,
+) -> None:
+    chat_id = entry.get("chat_id")
+    if not chat_id:
+        return
+    title = entry.get("title") or "загрузка"
+    text = (
+        f"✅ Отложенная загрузка стартовала: «{title}».\n"
+        f"Метод: {method}. Слежу за прогрессом."
+    )
+    try:
+        await app.bot.send_message(chat_id=int(chat_id), text=text)
+    except Exception:
+        logger.warning("Failed to notify pending-success for chat_id=%s", chat_id, exc_info=True)
+    _remember_task_owner(task_id, int(chat_id))
+    _remember_task_meta(task_id, _build_task_meta_from_result(
+        _pending_entry_to_search_result(entry), source="pending",
+    ))
+
+
+async def _notify_pending_dropped(app: Application, entry: dict) -> None:
+    chat_id = entry.get("chat_id")
+    if not chat_id:
+        return
+    title = entry.get("title") or "загрузка"
+    attempts = int(entry.get("attempts") or 0)
+    last_error = entry.get("last_error") or "неизвестно"
+    ttl_h = PENDING_DOWNLOADS_TTL_HOURS
+    text = (
+        f"⌛ Не удалось скачать «{title}» за {ttl_h:g}ч ({attempts} попыток).\n"
+        f"Последняя ошибка: {last_error}.\n"
+        "Попробуйте найти раздачу заново."
+    )
+    try:
+        await app.bot.send_message(chat_id=int(chat_id), text=text)
+    except Exception:
+        logger.warning("Failed to notify pending-dropped for chat_id=%s", chat_id, exc_info=True)
+
+
+async def _run_pending_downloads_once(app: Application) -> None:
+    """One pass over the pending queue: retry each entry, drop expired ones."""
+    if not _pending_downloads_enabled():
+        return
+    pending = _load_pending_downloads()
+    if not pending:
+        return
+
+    now = datetime.now(DISPLAY_TIMEZONE)
+    ttl = timedelta(hours=PENDING_DOWNLOADS_TTL_HOURS)
+    changed = False
+
+    for entry_id, entry in list(pending.items()):
+        added_at_str = str(entry.get("added_at") or "")
+        try:
+            added_at = datetime.fromisoformat(added_at_str)
+        except ValueError:
+            added_at = now  # malformed → treat as just-added (give it a chance)
+        if now - added_at > ttl:
+            await _notify_pending_dropped(app, entry)
+            del pending[entry_id]
+            changed = True
+            continue
+
+        try:
+            task_id, method = await _attempt_pending_download(entry)
+        except Exception as exc:
+            entry["attempts"] = int(entry.get("attempts") or 0) + 1
+            entry["last_attempt_at"] = now.isoformat()
+            entry["last_error"] = _format_download_error(exc)[:200]
+            logger.info(
+                "Pending download retry failed: id=%s attempts=%s err=%s",
+                entry_id, entry["attempts"], entry["last_error"],
+            )
+            changed = True
+            continue
+
+        # Success — notify and drop.
+        logger.info("Pending download succeeded: id=%s task_id=%s method=%s",
+                    entry_id, task_id, method)
+        await _notify_pending_success(app, entry, task_id, method)
+        del pending[entry_id]
+        changed = True
+
+    if changed:
+        _save_pending_downloads(pending)
+
+
 async def _run_auto_delete_finished_once() -> None:
     if not _auto_delete_finished_enabled():
         return
@@ -4638,6 +4829,57 @@ async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return await _download_and_add(query, context, index, subscribe=False)
 
 
+async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Add the failed download to the pending queue for background retry.
+
+    Shown as «⏳ Поставить в очередь» on the error screen, only when
+    ``_pending_downloads_enabled()`` is True. The background loop tries the
+    same Jackett → rutracker_client → magnet chain every
+    ``PENDING_DOWNLOADS_INTERVAL_SECONDS`` and gives up after
+    ``PENDING_DOWNLOADS_TTL_HOURS``.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not _pending_downloads_enabled():
+        await query.edit_message_text("Очередь отложенных загрузок отключена.")
+        return ConversationHandler.END
+    try:
+        index = int(query.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Запрос потерян.")
+        return ConversationHandler.END
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+    result = results[index]
+    chat_id = query.message.chat.id if query.message else None
+    last_error = str(context.user_data.get("srch_last_dl_error") or "")
+
+    pending = _load_pending_downloads()
+    entry_id = uuid.uuid4().hex[:12]
+    pending[entry_id] = _pending_download_entry_from_result(
+        result, chat_id=chat_id, subscribe=False, error=last_error,
+    )
+    _save_pending_downloads(pending)
+    logger.info(
+        "Pending download queued: id=%s title=%s chat_id=%s",
+        entry_id, pending[entry_id]["title"], chat_id,
+    )
+
+    interval_min = max(1, PENDING_DOWNLOADS_INTERVAL_SECONDS // 60)
+    title_text = pending[entry_id]["title"][:80]
+    await query.edit_message_text(
+        f"⏳ «{title_text}» поставлено в очередь.\n"
+        f"Попробую скачать снова через ~{interval_min} мин.\n"
+        f"Если за {PENDING_DOWNLOADS_TTL_HOURS:g}ч не получится — пришлю уведомление об отказе.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+        ]]),
+    )
+    return ConversationHandler.END
+
+
 async def search_expand_jackett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Kept for backwards-compat; now delegates to search_switch_trackers."""
     return await search_switch_trackers(update, context)
@@ -5146,13 +5388,48 @@ async def search_season_got_input(update: Update, context: ContextTypes.DEFAULT_
 
 
 def _pending_downloads_enabled() -> bool:
-    """Whether the pending-download queue feature is active.
+    """Whether the pending-download queue feature is active (env-gated)."""
+    return PENDING_DOWNLOADS_ENABLED
 
-    Stub for now (Block 2 only ships the retry UI). The full pending-queue
-    implementation in a subsequent change will read a real setting and gate
-    the «⏳ Поставить в очередь» button + queue handler off this.
-    """
-    return False
+
+def _load_pending_downloads() -> dict[str, dict]:
+    return state_store.load_pending_downloads()
+
+
+def _save_pending_downloads(entries: dict[str, dict]) -> None:
+    state_store.save_pending_downloads(entries)
+
+
+def _pending_download_entry_from_result(
+    result: dict, *, chat_id: int | None, subscribe: bool, error: str,
+) -> dict:
+    """Build a pending-queue entry from a search result + last error message."""
+    return {
+        "chat_id": chat_id,
+        "added_at": datetime.now(DISPLAY_TIMEZONE).isoformat(),
+        "title": str(result.get("title") or ""),
+        "topic_url": str(result.get("url") or ""),
+        "torrent_url": str(result.get("torrent_url") or ""),
+        "magnet_url": result.get("magnet_url") or None,
+        "tracker": str(result.get("tracker_name") or result.get("category") or ""),
+        "source": str(result.get("source") or ""),
+        "subscribe": bool(subscribe),
+        "attempts": 0,
+        "last_attempt_at": None,
+        "last_error": (error or "")[:200],
+    }
+
+
+def _pending_entry_to_search_result(entry: dict) -> dict:
+    """Inverse: reconstruct a search-result-shaped dict for _build_task_meta_from_result."""
+    return {
+        "title": entry.get("title") or "",
+        "url": entry.get("topic_url") or "",
+        "torrent_url": entry.get("torrent_url") or "",
+        "magnet_url": entry.get("magnet_url"),
+        "tracker_name": entry.get("tracker") or "",
+        "source": entry.get("source") or "",
+    }
 
 
 def _format_download_error(exc: Exception) -> str:
@@ -7983,6 +8260,7 @@ def main() -> None:
                     CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
                     CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
                     CallbackQueryHandler(search_retry_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry_dl:\d+$"),
+                    CallbackQueryHandler(search_queue_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:queue_dl:\d+$"),
                     CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
                     CallbackQueryHandler(search_direct_rutracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:direct_rt$"),
                     # Legacy patterns — delegate to new handlers

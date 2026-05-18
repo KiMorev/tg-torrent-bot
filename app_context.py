@@ -40,6 +40,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         movie_discovery_settings_file=settings.movie_discovery_settings_file,
         topic_subscriptions_file=settings.topic_subscriptions_file,
         task_meta_file=settings.task_meta_file,
+        pending_downloads_file=settings.pending_downloads_file,
     )
     rutracker_client = (
         RutrackerClient(

@@ -16,6 +16,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         auto_delete_tasks_file=d / "auto_delete.json",
         topic_subscriptions_file=d / "subscriptions.json",
         task_meta_file=d / "task_meta.json",
+        pending_downloads_file=d / "pending_downloads.json",
     )
 
 
@@ -53,6 +54,56 @@ class StateStoreTests(unittest.TestCase):
         self.assertNotIn("tid1", self.store.load_notified_tasks())
         self.assertNotIn("tid1", self.store.load_auto_delete_tasks())
         self.assertNotIn("tid1", self.store.load_task_meta())
+
+    def test_pending_downloads_roundtrip(self) -> None:
+        entries = {
+            "abc123": {
+                "chat_id": 100,
+                "added_at": "2026-05-17T10:00:00+03:00",
+                "title": "Test Movie",
+                "topic_url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+                "torrent_url": "http://jackett:9117/dl/rutracker/?path=Q",
+                "magnet_url": None,
+                "tracker": "rutracker",
+                "source": "jackett",
+                "subscribe": False,
+                "attempts": 2,
+                "last_attempt_at": "2026-05-17T11:00:00+03:00",
+                "last_error": "HTTP 404",
+            },
+            "def456": {
+                "chat_id": 200,
+                "added_at": "2026-05-17T09:00:00+03:00",
+                "title": "Another",
+                "topic_url": "",
+                "torrent_url": "",
+                "magnet_url": "magnet:?xt=urn:btih:deadbeef",
+                "tracker": "public",
+                "source": "jackett",
+                "subscribe": False,
+                "attempts": 0,
+                "last_attempt_at": None,
+                "last_error": "",
+            },
+        }
+        self.store.save_pending_downloads(entries)
+        loaded = self.store.load_pending_downloads()
+        self.assertEqual(loaded, entries)
+
+    def test_pending_downloads_empty_when_missing(self) -> None:
+        self.assertEqual(self.store.load_pending_downloads(), {})
+
+    def test_pending_downloads_ignores_non_dict_entries(self) -> None:
+        # Save raw bad payload, then verify load skips it.
+        self.store.save_json_file(
+            self.store.pending_downloads_file,
+            {"good": {"chat_id": 1}, "bad": "string entry", "alsobad": 42},
+            "test",
+        )
+        loaded = self.store.load_pending_downloads()
+        self.assertIn("good", loaded)
+        self.assertNotIn("bad", loaded)
+        self.assertNotIn("alsobad", loaded)
 
     def test_task_meta_roundtrip(self) -> None:
         self.store.remember_task_meta("tid1", {
