@@ -3051,7 +3051,22 @@ def _explicit_notification_chat_ids() -> set[int]:
 
 
 def _notification_recipients(task_id: str) -> set[int]:
-    return _policy_notification_recipients(
+    """Resolve who should receive a notification for ``task_id``.
+
+    Primary path delegates to ``task_policies.notification_recipients`` which
+    walks: explicit NOTIFY_CHAT_IDS → task_owners → fallback admins (if
+    ``TASK_NOTIFY_EXTERNAL_TASKS=true``).
+
+    Self-healing fallback: if the primary path returns an empty set but the
+    task has a registered card in ``TASK_CARD_MESSAGES``, the chat_id(s)
+    displaying that card are implicitly the owner — they clicked «Скачать»
+    and are waiting for a result. This catches cases where the on-disk
+    ``task_owners.json`` record was lost (mid-write crash, manual JSON edit,
+    state pruning that ran too aggressively). Recovered chat_ids are
+    filtered through ``_all_allowed_chat_ids()`` so we never notify a
+    non-authorised user even if the card got registered with one.
+    """
+    recipients = _policy_notification_recipients(
         task_id,
         explicit_chat_ids=_explicit_notification_chat_ids(),
         task_owners=_load_task_owners(),
@@ -3059,6 +3074,22 @@ def _notification_recipients(task_id: str) -> set[int]:
         fallback_chat_ids=_all_allowed_chat_ids(),
         allowed_chat_ids=_all_allowed_chat_ids(),
     )
+    if recipients:
+        return recipients
+
+    card_chat_ids = {chat_id for chat_id, _ in TASK_CARD_MESSAGES.get(str(task_id), set())}
+    if not card_chat_ids:
+        return recipients
+    allowed = _all_allowed_chat_ids()
+    if allowed:
+        card_chat_ids = {c for c in card_chat_ids if c in allowed}
+    if card_chat_ids:
+        logger.info(
+            "Task notification recipients recovered from task-card registry: "
+            "task=%s chat_ids=%s",
+            task_id, sorted(card_chat_ids),
+        )
+    return card_chat_ids
 
 
 def _notification_status_key(status: str) -> str:
@@ -3344,6 +3375,11 @@ async def _run_task_notifications_once(app: Application) -> None:
             notification_key,
         )
         if legacy_done:
+            logger.info(
+                "Task notification skipped task=%s status=%s key=%s: legacy_done "
+                "(plain-string state from old format, treated as already delivered)",
+                task_id, status, notification_key,
+            )
             continue
 
         recipients = _notification_recipients(task_id)
@@ -3359,6 +3395,17 @@ async def _run_task_notifications_once(app: Application) -> None:
                         pass
 
         if not recipients:
+            owners_now = _load_task_owners() or {}
+            logger.info(
+                "Task notification skipped task=%s status=%s key=%s: no recipients "
+                "(owner_in_json=%s, external_enabled=%s, explicit_count=%s, "
+                "task_card_registered=%s)",
+                task_id, status, notification_key,
+                task_id in owners_now,
+                TASK_NOTIFY_EXTERNAL_TASKS,
+                len(_explicit_notification_chat_ids()),
+                bool(TASK_CARD_MESSAGES.get(str(task_id))),
+            )
             continue
 
         # Determine if Plex polling should start for this task. We must atomically
@@ -3383,8 +3430,17 @@ async def _run_task_notifications_once(app: Application) -> None:
         for chat_id in sorted(recipients):
             recipient_key = str(chat_id)
             if recipient_key in sent_recipients:
+                logger.debug(
+                    "Recipient already notified task=%s chat=%s key=%s",
+                    task_id, chat_id, notification_key,
+                )
                 continue
             if failed_recipients.get(recipient_key, 0) >= MAX_TASK_NOTIFICATION_FAILURES:
+                logger.info(
+                    "Recipient skipped (failures cap) task=%s chat=%s failures=%s/%s key=%s",
+                    task_id, chat_id, failed_recipients[recipient_key],
+                    MAX_TASK_NOTIFICATION_FAILURES, notification_key,
+                )
                 continue
 
             try:
@@ -3696,6 +3752,13 @@ def _register_task_card_message(chat_id: int | None, message_id: int | None, tas
         return
 
     TASK_CARD_MESSAGES.setdefault(str(task_id), set()).add((chat_id, message_id))
+    # Sticky owner: ensure task_owners.json records this chat_id as the task's
+    # owner. _remember_task_owner is idempotent (see state_store L185-189), so a
+    # repeat call is a no-op without I/O. This is a safety net — every spot in
+    # the codebase that creates a task should already call _remember_task_owner
+    # explicitly, but if any of them silently fails (mid-write crash, empty
+    # task_id from a magnet poll), the active task-card guarantees recovery.
+    _remember_task_owner(str(task_id), chat_id)
 
 
 def _register_task_card_from_message(message, task_id: str | None, fallback_chat_id: int | None = None) -> None:

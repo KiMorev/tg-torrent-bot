@@ -186,6 +186,169 @@ class NotificationDeduplicationTests(unittest.TestCase):
         self.assertEqual(notified["failures"], {"999": 2})
 
 
+class NotificationSkipLoggingTests(unittest.TestCase):
+    """Regression: every skip branch in _run_task_notifications_once must
+    produce a log line so a missing push notification can be diagnosed from
+    docker logs without code instrumentation."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+        bot.TASK_CARD_MESSAGES.clear()
+
+    def tearDown(self) -> None:
+        bot.TASK_CARD_MESSAGES.clear()
+        self._tmp.cleanup()
+
+    def test_skip_legacy_done_logs_reason(self) -> None:
+        # Pre-seed notified_tasks with the legacy plain-string format.
+        self._store.save_notified_tasks({"tid1": "done"})
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="INFO") as captured:
+                asyncio.run(_run_task_notifications_once(mock_app))
+        joined = "\n".join(captured.output)
+        self.assertIn("legacy_done", joined)
+        self.assertIn("tid1", joined)
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_skip_no_recipients_logs_reason(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", False),
+            patch.object(bot, "ALLOWED_CHAT_IDS", set()),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="INFO") as captured:
+                asyncio.run(_run_task_notifications_once(mock_app))
+        joined = "\n".join(captured.output)
+        self.assertIn("no recipients", joined)
+        self.assertIn("tid1", joined)
+        # Diagnostic context should include why recipients were empty
+        self.assertIn("external_enabled=False", joined)
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_skip_failures_cap_logs_reason(self) -> None:
+        # Pre-seed notified_tasks with the failure cap already hit.
+        self._store.save_notified_tasks({
+            "tid1": {"status": "done", "sent": [], "failures": {"999": 3}},
+        })
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "MAX_TASK_NOTIFICATION_FAILURES", 3),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="INFO") as captured:
+                asyncio.run(_run_task_notifications_once(mock_app))
+        joined = "\n".join(captured.output)
+        self.assertIn("failures cap", joined)
+        self.assertIn("tid1", joined)
+        self.assertIn("3/3", joined)
+        mock_app.bot.send_message.assert_not_awaited()
+
+
+class NotificationSelfHealingTests(unittest.TestCase):
+    """When task_owners.json lost the record but TASK_CARD_MESSAGES still
+    holds the chat that's actively viewing the task, we recover the recipient
+    so the push gets delivered anyway. Filtering through ALLOWED_CHAT_IDS
+    keeps unauthorised chat_ids out."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+        bot.TASK_CARD_MESSAGES.clear()
+
+    def tearDown(self) -> None:
+        bot.TASK_CARD_MESSAGES.clear()
+        self._tmp.cleanup()
+
+    def test_recipients_recovered_from_task_card_registry(self) -> None:
+        # No owner in task_owners.json, no external/explicit — primary path
+        # would return empty. But the user has an active task-card.
+        bot.TASK_CARD_MESSAGES["tid1"] = {(999, 42)}
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_app.bot.delete_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", False),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="INFO") as captured:
+                asyncio.run(_run_task_notifications_once(mock_app))
+
+        # Push delivered to the recovered chat_id
+        mock_app.bot.send_message.assert_awaited_once()
+        self.assertEqual(mock_app.bot.send_message.await_args.kwargs.get("chat_id"), 999)
+        # Recovery is logged for observability
+        joined = "\n".join(captured.output)
+        self.assertIn("recovered from task-card registry", joined)
+        self.assertIn("tid1", joined)
+
+    def test_recovered_recipients_filtered_by_allowed_chat_ids(self) -> None:
+        # Card registered with a chat_id NOT in ALLOWED_CHAT_IDS — safety filter
+        # must drop it. No push should go out.
+        bot.TASK_CARD_MESSAGES["tid1"] = {(666, 42)}  # 666 is not allowed
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", False),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),  # only 999 allowed
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_sticky_owner_via_register_task_card_message(self) -> None:
+        # Calling _register_task_card_message should also write to task_owners.
+        with patch.object(bot, "state_store", self._store):
+            bot._register_task_card_message(chat_id=999, message_id=42, task_id="tid1")
+        owners = self._store.load_task_owners()
+        self.assertEqual(owners.get("tid1"), 999)
+        # Also stored in TASK_CARD_MESSAGES.
+        self.assertIn(("tid1"), bot.TASK_CARD_MESSAGES)
+        self.assertIn((999, 42), bot.TASK_CARD_MESSAGES["tid1"])
+
+
 class TaskNotificationDeliveryTests(unittest.TestCase):
     """Regression: transient Telegram errors must NOT count against the
     per-chat failure threshold. Only permanent errors (bot blocked, chat
