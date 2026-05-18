@@ -553,10 +553,36 @@ PLEX_MOVIE_SECTION=           # опционально; если пусто — 
    ```
    ✅ Dune: Part Two добавлен в Plex.
    [▶️ Смотреть в Plex]
+   [✖️ Закрыть]
    ```
-   Кнопка ведёт по [Plex Universal Link](https://support.plex.tv/articles/218168898-universal-links/) `https://app.plex.tv/desktop/#!/server/{machineId}/details?key=...`: на iOS/Android Plex app перехватывает её и открывает конкретный фильм/сезон; на десктопе — открывается Plex Web. Telegram не принимает `plex://` в inline-кнопках с May 2026 (HTTP 400 «unsupported url protocol»), поэтому используется только https-вариант.
+   Для сериалов — `✅ Сезон 3 «Клиника» добавлен в Plex`. Если контент не появился за 10 минут — приходит предупреждение. Если Plex всё это время был недоступен — приходит уведомление с другим текстом («сервер был недоступен»), чтобы не сваливать причину на индексацию.
 
-   Для сериалов — `✅ Сезон 3 «Клиника» добавлен в Plex`, кнопка ведёт прямо на сезонный rating_key. Если контент не появился за 10 минут — приходит предупреждение. Если Plex всё это время был недоступен — приходит уведомление с другим текстом («сервер был недоступен»), чтобы не сваливать причину на индексацию.
+   **Куда ведёт кнопка «Смотреть в Plex».** Поведение зависит от env-переменной `PLEX_DEEPLINK_BASE_URL`:
+
+   - **Не задано (по умолчанию)** — кнопка ведёт на `https://app.plex.tv/desktop/#!/server/{machineId}/details?key=...`. Plex Web показывает контент с вашего сервера. **На iOS это открывается в Safari**, не в нативном приложении: Plex не публикует [Universal Links](https://support.plex.tv/articles/218168898-universal-links/) для `app.plex.tv` (проверил их AASA — для пути `/desktop` ничего не зарегистрировано). Telegram при этом не принимает `plex://` в inline-кнопках с мая 2026 (`HTTP 400: unsupported url protocol`), поэтому прямо открыть приложение из кнопки невозможно — нужен redirect.
+
+   - **`PLEX_DEEPLINK_BASE_URL=https://your-host/plex.html`** — бот формирует кнопку с URL `https://your-host/plex.html?key=/library/metadata/{ratingKey}&server={machineId}`. По этому адресу вы хостите крошечную HTML-страничку, которая JS-ом делает `location.href = "plex://..."`. Safari/Chrome принимают `plex://` через `location.href` (это разрешено) → iOS/Android запускают **нативное Plex-приложение**.
+
+     Минимальный `plex.html`:
+     ```html
+     <!DOCTYPE html>
+     <html><body>
+     <script>
+       const p = new URLSearchParams(location.search);
+       const key = p.get('key'), server = p.get('server');
+       if (key && server) {
+         location.href = `plex://preplay/?metadataKey=${encodeURIComponent(key)}&metadataType=1&server=${server}`;
+       } else {
+         location.href = 'plex://';
+       }
+     </script>
+     <p>Открываю Plex…</p>
+     </body></html>
+     ```
+
+     Хостить можно где угодно: Synology DSM Web Station, GitHub Pages, Cloudflare Pages, отдельный nginx на NAS. Главное — публичный https URL который iOS Safari сможет открыть.
+
+   **Где бот берёт точное название для сверки.** При добавлении задачи в Download Station (через поиск, magnet, `.torrent`, KP-ссылку, подписку Rutracker/Jackett) бот сохраняет канонические метаданные в `state/task_meta.json`: `kind` (movie/series), `title`, `year`, `quality`, `series_query`, `season_num`. При завершении задачи polling использует именно эти данные для лукапа в Plex — а не сырое имя торрента из DS. Это значит что фильмы с кириллицей в имени файла или сериалы с переименованными Plex-агентом файлами тоже корректно находятся.
 
    **Где бот берёт точное название для сверки.** При добавлении задачи в Download Station (через поиск, magnet, `.torrent`, KP-ссылку, подписку Rutracker/Jackett) бот сохраняет канонические метаданные в `state/task_meta.json`: `kind` (movie/series), `title`, `year`, `quality`, `series_query`, `season_num`. При завершении задачи polling использует именно эти данные для лукапа в Plex — а не сырое имя торрента из DS. Это значит что фильмы с кириллицей в имени файла или сериалы с переименованными Plex-агентом файлами тоже корректно находятся.
 

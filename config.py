@@ -125,6 +125,7 @@ class AppSettings:
     plex_url: str
     plex_token: str
     plex_movie_section: str
+    plex_deeplink_base_url: str
     topic_subscriptions_file: Path
     subscription_check_interval_hours: int
     jackett_url: str
@@ -230,6 +231,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         plex_url=(env.get("PLEX_URL", "").strip() or ""),
         plex_enabled=bool(env.get("PLEX_URL", "").strip() and env.get("PLEX_TOKEN", "").strip()),
         plex_movie_section=env.get("PLEX_MOVIE_SECTION", "").strip(),
+        plex_deeplink_base_url=env.get("PLEX_DEEPLINK_BASE_URL", "").strip(),
         topic_subscriptions_file=Path(
             env.get("TOPIC_SUBSCRIPTIONS_FILE", str(state_dir / "topic_subscriptions.json"))
         ),

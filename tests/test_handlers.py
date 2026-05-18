@@ -2615,15 +2615,17 @@ class PlexPollingTests(unittest.TestCase):
         kwargs = fake_app.bot.send_message.call_args.kwargs
         self.assertIn("Сезон 3", kwargs["text"])
         self.assertIn("Клиника", kwargs["text"])
-        # Plex Universal Link uses the season's rating_key. Telegram rejects
-        # plex:// so we use https://app.plex.tv/... which Plex apps intercept
-        # via Universal Links. Plex Web infers metadata type from ratingKey,
-        # explicit metadataType= no longer needed.
+        # Plex deep-link uses the season's rating_key + machine_id.
         keyboard = kwargs["reply_markup"]
         btn = keyboard.inline_keyboard[0][0]
+        self.assertEqual(btn.text, "▶️ Смотреть в Plex")
         self.assertTrue(btn.url.startswith("https://app.plex.tv"))
         self.assertIn("season-key-77", btn.url)
         self.assertIn("machine-1", btn.url)
+        # ✖️ Закрыть button on a separate row so the user can dismiss
+        # the notification once seen.
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("✖️ Закрыть", labels)
 
     def test_poll_after_finish_series_without_meta_falls_back_via_legacy_path(self):
         """A legacy task (no meta) whose DS title looks like a series should still
@@ -3522,6 +3524,17 @@ class NotificationKeyboardTests(unittest.TestCase):
     def _urls(self, keyboard):
         return {btn.text: btn.url for row in keyboard.inline_keyboard for btn in row if btn.url}
 
+    def test_movie_notification_keyboard_has_close_button(self):
+        """Push about new films in /new must offer ✖️ Закрыть so the user can
+        dismiss the notification once seen."""
+        from bot import _movie_notification_keyboard
+        keyboard = _movie_notification_keyboard()
+        labels = self._labels(keyboard)
+        self.assertIn("✖️ Закрыть", labels)
+        # Existing buttons preserved
+        self.assertIn("🎬 Открыть /new", labels)
+        self.assertIn("🔕 Отписаться", labels)
+
     def test_plex_button_appears_only_for_final_download_statuses(self):
         with patch.object(bot, "PLEX_ENABLED", True):
             finished_labels = self._labels(_notification_keyboard("tid1", "finished", "bt"))
@@ -3534,9 +3547,12 @@ class NotificationKeyboardTests(unittest.TestCase):
 
     def test_plex_button_uses_telegram_supported_scheme(self):
         """Telegram rejects ``plex://`` inline-button URLs since May 2026.
-        We use ``https://app.plex.tv/...`` which iOS/Android Plex apps still
-        intercept via Universal Links / Intent filter."""
-        with patch.object(bot, "PLEX_ENABLED", True):
+        We use ``https://`` URLs: app.plex.tv/desktop by default, or the user's
+        configured PLEX_DEEPLINK_BASE_URL when set."""
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "PLEX_DEEPLINK_BASE_URL", ""),
+        ):
             keyboard = _notification_keyboard("tid1", "finished", "bt")
         urls = self._urls(keyboard)
         plex_url = urls.get("▶️ Открыть Plex", "")
@@ -3546,8 +3562,65 @@ class NotificationKeyboardTests(unittest.TestCase):
         )
         self.assertTrue(
             "plex.tv" in plex_url,
-            f"Expected a Plex Universal Link, got: {plex_url!r}",
+            f"Expected a Plex URL, got: {plex_url!r}",
         )
+
+    def test_plex_button_honours_custom_deeplink_base_url(self):
+        """When PLEX_DEEPLINK_BASE_URL is set, the placeholder URL uses it
+        (no query params yet — the metadata-specific link is built later by
+        Plex polling). This is the iOS-native-app workaround: user hosts a
+        redirect page that does location.href='plex://...'."""
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "PLEX_DEEPLINK_BASE_URL", "https://nas.example.com/plex.html"),
+        ):
+            keyboard = _notification_keyboard("tid1", "finished", "bt")
+        urls = self._urls(keyboard)
+        plex_url = urls.get("▶️ Открыть Plex", "")
+        self.assertEqual(plex_url, "https://nas.example.com/plex.html")
+
+
+class PlexDeepLinkHelperTests(unittest.TestCase):
+    """_plex_deep_link: builds Plex URLs for inline buttons, with optional
+    user-hosted redirect base for native-app launching on iOS."""
+
+    def test_no_args_default_returns_plex_web_root(self):
+        with patch.object(bot, "PLEX_DEEPLINK_BASE_URL", ""):
+            self.assertEqual(bot._plex_deep_link(), "https://app.plex.tv/desktop")
+
+    def test_with_rating_key_and_machine_id_default_returns_plex_web_deeplink(self):
+        with patch.object(bot, "PLEX_DEEPLINK_BASE_URL", ""):
+            url = bot._plex_deep_link("12345", "abc-machine-id")
+        self.assertEqual(
+            url,
+            "https://app.plex.tv/desktop/#!/server/abc-machine-id/details?key=%2Flibrary%2Fmetadata%2F12345",
+        )
+
+    def test_custom_base_url_no_args_returns_base_as_is(self):
+        with patch.object(bot, "PLEX_DEEPLINK_BASE_URL", "https://nas.example.com/plex.html"):
+            self.assertEqual(bot._plex_deep_link(), "https://nas.example.com/plex.html")
+
+    def test_custom_base_url_with_args_appends_query_params(self):
+        """Redirect page reads key+server and does location.href='plex://...'."""
+        with patch.object(bot, "PLEX_DEEPLINK_BASE_URL", "https://nas.example.com/plex.html"):
+            url = bot._plex_deep_link("12345", "abc-machine-id")
+        self.assertIn("https://nas.example.com/plex.html?", url)
+        self.assertIn("key=%2Flibrary%2Fmetadata%2F12345", url)
+        self.assertIn("server=abc-machine-id", url)
+
+    def test_custom_base_with_existing_query_uses_ampersand(self):
+        """If the base URL already has ?something, append using &."""
+        with patch.object(bot, "PLEX_DEEPLINK_BASE_URL", "https://nas.example.com/plex.html?theme=dark"):
+            url = bot._plex_deep_link("12345", "abc-machine-id")
+        self.assertIn("theme=dark&key=", url)
+        self.assertNotIn("?key=", url)
+
+    def test_empty_rating_key_with_custom_base_returns_base(self):
+        with patch.object(bot, "PLEX_DEEPLINK_BASE_URL", "https://nas.example.com/plex.html"):
+            self.assertEqual(
+                bot._plex_deep_link(rating_key="", machine_id="m1"),
+                "https://nas.example.com/plex.html",
+            )
 
 
 # ---------------------------------------------------------------------------

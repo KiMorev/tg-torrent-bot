@@ -238,6 +238,7 @@ KINOPOISK_ENABLED = settings.kinopoisk_enabled
 PLEX_ENABLED = settings.plex_enabled
 PLEX_URL = settings.plex_url
 PLEX_TOKEN = settings.plex_token
+PLEX_DEEPLINK_BASE_URL = settings.plex_deeplink_base_url
 TOPIC_SUBSCRIPTIONS_FILE = settings.topic_subscriptions_file
 SUBSCRIPTION_CHECK_INTERVAL_HOURS = settings.subscription_check_interval_hours
 JACKETT_URL = settings.jackett_url
@@ -1954,10 +1955,13 @@ def _format_movie_notification_text(cards: list) -> str:
 
 
 def _movie_notification_keyboard() -> "InlineKeyboardMarkup":
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
-        InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
+        ],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+    ])
 
 
 async def _send_movie_notification_push_to_user(
@@ -2509,6 +2513,50 @@ def _plex_is_series(title: str) -> bool:
     return bool(_SERIES_RE.search(title))
 
 
+def _plex_deep_link(rating_key: str = "", machine_id: str = "") -> str:
+    """Build a Plex deep-link URL for use in a Telegram inline button.
+
+    Telegram rejects ``plex://`` URLs in inline-button URLs since May 2026
+    ("unsupported url protocol"). So we always return an https URL.
+
+    Two modes, depending on whether ``PLEX_DEEPLINK_BASE_URL`` is configured:
+
+    1. **Empty (default)** — fallback to ``https://app.plex.tv/desktop`` (Plex
+       Web). Opens in Safari/browser on iOS because Plex does NOT publish
+       Universal Links for app.plex.tv (checked their AASA file; only
+       watch.plex.tv has them, and only for Plex Discover public catalog,
+       not for personal servers).
+
+    2. **Configured** — append ``?key=...&server=...`` query params to that
+       base URL. The user is expected to host a tiny redirect page at that
+       URL that reads the params and does
+       ``location.href = "plex://preplay/?metadataKey=...&server=..."`` —
+       which DOES launch the native Plex app on iOS/Android via custom URL
+       scheme (Safari accepts plex:// in location.href; only Telegram
+       inline-button URLs reject it). See README for the redirect snippet.
+    """
+    base = (PLEX_DEEPLINK_BASE_URL or "").strip()
+    if not base:
+        # Default: Plex Web. Best we can do without a redirect page.
+        if not rating_key or not machine_id:
+            return "https://app.plex.tv/desktop"
+        return (
+            f"https://app.plex.tv/desktop/#!/server/{machine_id}"
+            f"/details?key=%2Flibrary%2Fmetadata%2F{rating_key}"
+        )
+    # Configured redirect: append key+server. Empty rating_key/machine_id
+    # → just the base (placeholder for "open Plex").
+    if not rating_key or not machine_id:
+        return base
+    from urllib.parse import urlencode
+    sep = "&" if "?" in base else "?"
+    qs = urlencode({
+        "key": f"/library/metadata/{rating_key}",
+        "server": machine_id,
+    })
+    return f"{base}{sep}{qs}"
+
+
 def _plex_quality_from_result(result: dict) -> str:
     """Return a Plex-normalised quality string from a search result dict."""
     q = result.get("quality") or ""
@@ -2741,21 +2789,22 @@ async def _plex_poll_after_finish(
                 # Build deep link
                 machine_id = _plex_machine_id
                 rating_key = getattr(target, "rating_key", "")
-                # Plex Universal Link (https://). Telegram rejects plex:// in
-                # inline-button URLs; iOS/Android Plex apps still intercept this
-                # https form via Universal Links / Intent filter.
-                deep_link = (
-                    f"https://app.plex.tv/desktop/#!/server/{machine_id}"
-                    f"/details?key=%2Flibrary%2Fmetadata%2F{rating_key}"
-                ) if machine_id and rating_key else ""
+                # Build Plex deep-link. Honors PLEX_DEEPLINK_BASE_URL if set
+                # (user-hosted redirect page → native Plex app on iOS);
+                # otherwise falls back to Plex Web at app.plex.tv.
+                deep_link = _plex_deep_link(rating_key, machine_id) if machine_id and rating_key else ""
 
                 text = f"✅ <b>{html_module.escape(found_title)}</b> добавлен в Plex."
-                keyboard = (
-                    InlineKeyboardMarkup([[
-                        InlineKeyboardButton("▶️ Смотреть в Plex", url=deep_link)
-                    ]])
-                    if deep_link else None
+                close_btn = InlineKeyboardButton(
+                    "✖️ Закрыть", callback_data=_task_callback("close", ""),
                 )
+                if deep_link:
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("▶️ Смотреть в Plex", url=deep_link)],
+                        [close_btn],
+                    ])
+                else:
+                    keyboard = InlineKeyboardMarkup([[close_btn]])
                 await _delete_hint_messages()
                 for cid in chat_ids:
                     try:
@@ -2875,13 +2924,13 @@ def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> 
 
 def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
     if (status or "").lower() in {"finished", "seeding"}:
-        # Use Plex Universal Link (https://app.plex.tv/...) — iOS/Android Plex
-        # apps intercept it via Universal Links/Intent filter, desktop opens
-        # Plex Web. We can't use plex:// (Telegram rejects it in inline-button
-        # URLs since 2026). The specific deep-link with metadataKey is sent
-        # later by _plex_poll_after_finish once Plex has indexed the file.
+        # Placeholder Plex URL — no specific item yet. The specific deep-link
+        # with metadataKey is sent later by _plex_poll_after_finish once Plex
+        # has indexed the file. _plex_deep_link() honours PLEX_DEEPLINK_BASE_URL
+        # if configured (user-hosted redirect → native app on iOS); otherwise
+        # falls back to https://app.plex.tv/desktop (Plex Web in Safari).
         return _final_notification_keyboard(
-            task_id, show_plex=PLEX_ENABLED, plex_url="https://app.plex.tv/desktop",
+            task_id, show_plex=PLEX_ENABLED, plex_url=_plex_deep_link(),
         )
 
     return _make_task_keyboard(task_id, status, task_type)
