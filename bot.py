@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LinkPreviewOptions, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -3236,6 +3236,45 @@ async def _handle_duplicate_task(
         logger.warning("Failed to send duplicate notification to %s", owner_id, exc_info=True)
 
 
+async def _classify_send_error(exc: Exception) -> tuple[str, bool]:
+    """Classify a Telegram ``send_message`` exception for the notification loop.
+
+    Returns ``(label, is_permanent)``:
+
+    - ``label`` — short tag for logging (``rate_limit``, ``timeout``, ``network``,
+      ``blocked``, ``chat_not_found``, ``permanent``).
+    - ``is_permanent`` — True if the error should count against the per-chat
+      ``MAX_TASK_NOTIFICATION_FAILURES`` threshold; False for transient errors
+      that should be retried on the next cycle **without** penalty.
+
+    Side effect: for ``RetryAfter`` we honour the server's hint by awaiting
+    ``asyncio.sleep(retry_after)`` so the next send in this cycle isn't blocked
+    immediately. Capped at 30 s as a safety bound.
+
+    Order matters: ``TimedOut`` inherits from ``NetworkError`` in
+    python-telegram-bot; check it first.
+    """
+    if isinstance(exc, RetryAfter):
+        sleep_for = min(float(getattr(exc, "retry_after", 1) or 1), 30.0)
+        await asyncio.sleep(sleep_for)
+        return "rate_limit", False
+    if isinstance(exc, Forbidden):
+        # User blocked the bot or left the chat — permanent.
+        return "blocked", True
+    # IMPORTANT: BadRequest is a subclass of NetworkError in python-telegram-bot —
+    # check it BEFORE NetworkError so "chat not found" / "user is deactivated"
+    # are classified as permanent (not retried as transient).
+    if isinstance(exc, BadRequest):
+        return "chat_not_found", True
+    if isinstance(exc, TimedOut):
+        return "timeout", False
+    if isinstance(exc, NetworkError):
+        # NetworkError covers DNS failure, ConnectionReset, BadGateway, etc.
+        return "network", False
+    # Unknown — treat as permanent so we don't busy-retry forever on our bugs.
+    return "permanent", True
+
+
 async def _run_task_notifications_once(app: Application) -> None:
     if not _task_notifications_enabled():
         return
@@ -3341,18 +3380,25 @@ async def _run_task_notifications_once(app: Application) -> None:
                         plex_hint_msgs[chat_id] = hint.message_id
                     except Exception:
                         pass
-            except Exception:
-                failure_count = failed_recipients.get(recipient_key, 0) + 1
-                failed_recipients[recipient_key] = failure_count
-                task_changed = True
-                logger.warning(
-                    "Failed to send task status notification chat_id=%s task_id=%s attempt=%s/%s",
-                    chat_id,
-                    task_id,
-                    failure_count,
-                    MAX_TASK_NOTIFICATION_FAILURES,
-                    exc_info=True,
-                )
+            except Exception as exc:
+                label, is_permanent = await _classify_send_error(exc)
+                if is_permanent:
+                    failure_count = failed_recipients.get(recipient_key, 0) + 1
+                    failed_recipients[recipient_key] = failure_count
+                    task_changed = True
+                    logger.warning(
+                        "Task notification failed (permanent: %s) chat_id=%s task_id=%s attempt=%s/%s",
+                        label, chat_id, task_id, failure_count, MAX_TASK_NOTIFICATION_FAILURES,
+                        exc_info=True,
+                    )
+                else:
+                    # Transient — retry on next cycle without penalty. We do NOT
+                    # set task_changed, so the per-chat state isn't rewritten
+                    # and the failure counter stays at its previous value.
+                    logger.info(
+                        "Task notification deferred (transient: %s) chat_id=%s task_id=%s — will retry",
+                        label, chat_id, task_id,
+                    )
 
         if task_changed:
             notified[task_id] = _make_notification_delivery_state(
@@ -3360,6 +3406,10 @@ async def _run_task_notifications_once(app: Application) -> None:
                 sent_recipients,
                 failed_recipients,
             )
+            # Persist after each task so a crash mid-cycle loses at most one
+            # task's worth of state (instead of the whole cycle, which would
+            # cause duplicate notifications on restart).
+            _save_notified_tasks(notified)
             changed = True
 
         # Start Plex polling after sending notifications so hint_msg_ids are available.

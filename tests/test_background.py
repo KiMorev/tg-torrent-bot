@@ -185,6 +185,167 @@ class NotificationDeduplicationTests(unittest.TestCase):
         self.assertEqual(notified["failures"], {"999": 2})
 
 
+class TaskNotificationDeliveryTests(unittest.TestCase):
+    """Regression: transient Telegram errors must NOT count against the
+    per-chat failure threshold. Only permanent errors (bot blocked, chat
+    not found, programming bugs) increment the counter, so a temporary
+    network blip / rate-limit / 5xx doesn't permanently drop a user from
+    the recipient list."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._store = _make_store(self._tmp.name)
+        bot.TASK_CARD_MESSAGES.clear()
+
+    def tearDown(self) -> None:
+        bot.TASK_CARD_MESSAGES.clear()
+        self._tmp.cleanup()
+
+    def _make_task(self):
+        return {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+
+    def _run_with_error(self, exc: Exception, *, cycles: int = 3) -> None:
+        """Run the notification cycle ``cycles`` times, each time send_message raises ``exc``."""
+        task = self._make_task()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=exc)
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            for _ in range(cycles):
+                asyncio.run(_run_task_notifications_once(mock_app))
+        return mock_app
+
+    def test_retry_after_does_not_increment_failures(self) -> None:
+        from telegram.error import RetryAfter
+        # retry_after=0 to keep the test fast — our handler still calls asyncio.sleep(min(0, 30)).
+        self._run_with_error(RetryAfter(retry_after=0), cycles=5)
+        notified = self._store.load_notified_tasks().get("tid1")
+        # Either no entry at all, or entry with empty/zero failures — both are acceptable.
+        if notified is not None and isinstance(notified, dict):
+            self.assertEqual(notified.get("failures") or {}, {})
+
+    def test_timed_out_does_not_increment_failures(self) -> None:
+        from telegram.error import TimedOut
+        self._run_with_error(TimedOut("read timed out"), cycles=5)
+        notified = self._store.load_notified_tasks().get("tid1")
+        if notified is not None and isinstance(notified, dict):
+            self.assertEqual(notified.get("failures") or {}, {})
+
+    def test_network_error_does_not_increment_failures(self) -> None:
+        from telegram.error import NetworkError
+        self._run_with_error(NetworkError("connection reset"), cycles=5)
+        notified = self._store.load_notified_tasks().get("tid1")
+        if notified is not None and isinstance(notified, dict):
+            self.assertEqual(notified.get("failures") or {}, {})
+
+    def test_forbidden_increments_failures(self) -> None:
+        from telegram.error import Forbidden
+        self._run_with_error(Forbidden("bot was blocked by the user"), cycles=3)
+        notified = self._store.load_notified_tasks()["tid1"]
+        # Capped at MAX_TASK_NOTIFICATION_FAILURES (default 3) — 3 cycles, 3 failures.
+        self.assertEqual(notified["failures"], {"999": 3})
+
+    def test_bad_request_chat_not_found_increments_failures(self) -> None:
+        from telegram.error import BadRequest
+        self._run_with_error(BadRequest("chat not found"), cycles=2)
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["failures"], {"999": 2})
+
+    def test_unknown_exception_treated_as_permanent(self) -> None:
+        # ValueError isn't a Telegram-specific class — should be treated as permanent
+        # so we don't busy-retry on our own programming bugs.
+        self._run_with_error(ValueError("kaboom"), cycles=2)
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["failures"], {"999": 2})
+
+    def test_permanent_then_recovery_sends_notification(self) -> None:
+        """Failures < limit and then a successful send → notification delivered, counter cleared."""
+        from telegram.error import Forbidden
+        task = self._make_task()
+        mock_app = MagicMock()
+        # First two cycles fail with Forbidden (permanent), third succeeds.
+        mock_app.bot.send_message = AsyncMock(side_effect=[
+            Forbidden("blocked"), Forbidden("blocked"), None,
+        ])
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertEqual(mock_app.bot.send_message.await_count, 3)
+        notified = self._store.load_notified_tasks()["tid1"]
+        # After success, failures should be cleared and the user marked as sent.
+        self.assertEqual(notified.get("failures") or {}, {})
+        self.assertIn("999", notified.get("sent", []))
+
+    def test_transient_failure_does_not_persist_state(self) -> None:
+        """If all sends fail with transient errors, no state changes are persisted —
+        next cycle starts fresh and can retry without the user 'used up' attempts."""
+        from telegram.error import TimedOut
+        self._run_with_error(TimedOut("read timed out"), cycles=3)
+        notified = self._store.load_notified_tasks()
+        # Either the file has no entry for tid1, or it has one but with no failures recorded.
+        entry = notified.get("tid1")
+        if entry is None:
+            return
+        if isinstance(entry, dict):
+            self.assertEqual(entry.get("failures") or {}, {})
+            self.assertEqual(entry.get("sent") or [], [])
+
+    def test_state_saved_per_task_not_just_at_end(self) -> None:
+        """Two tasks in the same cycle — state must be written after each, so a
+        crash between them doesn't lose the first task's notification."""
+        from telegram.error import Forbidden
+        task1 = {"id": "tid1", "status": "finished", "type": "bt", "title": "A", "size": 0}
+        task2 = {"id": "tid2", "status": "finished", "type": "bt", "title": "B", "size": 0}
+        mock_app = MagicMock()
+        # Task 1 fails permanently (so state should be written for it), task 2 succeeds.
+        mock_app.bot.send_message = AsyncMock(side_effect=[Forbidden("blocked"), None])
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task1, task2]
+
+        save_calls = []
+        original_save = self._store.save_notified_tasks
+
+        def spy_save(payload):
+            save_calls.append(dict(payload))
+            original_save(payload)
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(self._store, "save_notified_tasks", side_effect=spy_save),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        # Both tasks resulted in task_changed → save was called twice (per-task)
+        # plus the final no-op save at the end of the cycle = at least 2 calls.
+        self.assertGreaterEqual(len(save_calls), 2,
+            f"expected ≥2 saves (one per changed task), got {len(save_calls)}")
+
+
 class AutoDeleteDelayTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
