@@ -2093,10 +2093,15 @@ def _plex_library_find(title: str, year: int) -> "PlexMovie | None":
 def _plex_show_find(series_query: str, year: int = 0) -> "PlexShow | None":
     """Look up a TV show in the in-memory Plex shows cache.
 
-    Mirrors :func:`_plex_library_find` but for shows. When ``year > 0`` uses
-    ±1-year tolerance via direct dict lookup. When ``year == 0`` (unknown),
-    falls back to a linear scan by normalised title across all years —
-    necessary because for series the user often doesn't supply an air-year.
+    Strategy:
+      1. If ``year > 0`` — try year-bounded match with ±1 tolerance (covers
+         off-by-one regional dates).
+      2. Title-only fallback — match by normalised title across all years.
+         Necessary because for series the user's ``meta.year`` typically
+         reflects the season/episode year (e.g. 2026 for Good Omens S3E1),
+         while Plex caches the show under its PREMIERE year (e.g. 2019).
+         Without this fallback, _plex_poll_lookup_target never finds the
+         show and the «✅ добавлен в Plex» notification is never sent.
     """
     norm = _normalize_movie_title(series_query).lower()
     if not norm:
@@ -2106,8 +2111,8 @@ def _plex_show_find(series_query: str, year: int = 0) -> "PlexShow | None":
             hit = _plex_shows_library.get((norm, year + dy))
             if hit is not None:
                 return hit
-        return None
-    # No year known — pick the first show matching by normalised title.
+        # Fall through to title-only — series years frequently disagree with
+        # Plex's premiere year, so we don't return None here.
     for (cached_title, _cached_year), show in _plex_shows_library.items():
         if cached_title == norm:
             return show
@@ -2697,6 +2702,20 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
                 if season is not None:
                     found_title = f"Сезон {season_num} «{show.title or series_query}»"
                     return season, "3", found_title
+                logger.info(
+                    "Plex lookup: show %r found but season %d missing (have: %s)",
+                    show.title, season_num, sorted(seasons.keys()),
+                )
+            else:
+                logger.info(
+                    "Plex lookup: series show not found query=%r year=%s shows_cached=%d",
+                    series_query, meta.get("year"), len(_plex_shows_library),
+                )
+        else:
+            logger.info(
+                "Plex lookup: series meta incomplete query=%r season_num=%s",
+                series_query, season_num,
+            )
         # Series meta is present but couldn't find a match — no fallback to movies.
         return None, "1", found_title
 
@@ -2725,6 +2744,13 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
         if hit is not None:
             return hit, "1", hit.title or task_title
 
+    logger.info(
+        "Plex lookup: movie not found task_title=%r meta_title=%r year=%s movies_cached=%d",
+        task_title,
+        (meta or {}).get("title", ""),
+        (meta or {}).get("year", 0),
+        len(_plex_library),
+    )
     return None, "1", found_title
 
 

@@ -92,3 +92,42 @@
 | `rutracker.py` | Клиент Rutracker |
 | `jackett.py` | Клиент Jackett |
 | `tests/` | Юнит-тесты (pytest) |
+
+## Диагностические логи
+
+Когда что-то идёт не так на проде — искать в логах эти маркеры (logger name: `tg_torrent_drop`).
+
+### Уведомления о завершении задач (`_run_task_notifications_once`)
+
+- `Recipient skipped (failures cap) task=... chat=... failures=N/3 key=done` — счётчик failures исчерпан, push не отправлен. Решение: «🔄 Сбросить счётчики» в `/admin`.
+- `Task notification failed (permanent: <label>) chat_id=... attempt=N/3` — отправка не удалась. `label`:
+  - `blocked` — бот заблокирован пользователем
+  - `chat_not_found` — чат удалён или `user is deactivated`
+  - `message_format_bug` — наш баг в формате сообщения (НЕ считается против chat'а)
+  - `permanent` — неизвестная ошибка, treat as permanent
+- `Task notification deferred (transient: <label>) chat_id=... — will retry` — transient ошибка, счётчик НЕ растёт. INFO для `rate_limit`/`timeout`/`network`, ERROR для `message_format_bug`.
+
+### Plex polling (`_plex_poll_after_finish` / `_plex_poll_lookup_target`)
+
+- `Plex polling started task_id=... title=... kind=... chat_ids=[...]` — запуск (после finished).
+- `Plex polling: found 'TITLE' after N attempt(s)` — нашли в библиотеке, шлём push.
+- `Plex lookup: series show not found query=... year=... shows_cached=N` — show не нашёлся в кэше TV-секции. Проверить: 1) подключена ли секция в Plex, 2) совпадает ли normalised title (`_normalize_movie_title`), 3) если ничего не помогает — посмотреть `_plex_shows_library.keys()` через debug.
+- `Plex lookup: show 'X' found but season N missing (have: [...])` — show нашёлся, но нужного сезона ещё нет в Plex (новый сезон ещё не вышел, либо файл не индексирован).
+- `Plex lookup: movie not found task_title=... meta_title=... year=... movies_cached=N` — для фильмов: ни canonical, ни substring lookup не сработали.
+- `Plex poll: failed to send found-notification chat_id=...` — push нашёлся, но send_message упал. Смотреть `Task notification failed/deferred` рядом — обычно та же причина (rate-limit / blocked / format-bug).
+
+### Pending downloads (`_run_pending_downloads_once`)
+
+- `Pending download queued: id=... title=... chat_id=...` — задача поставлена в очередь.
+- `Pending download retry failed: id=... attempts=N err=...` — фоновая попытка не сработала.
+- `Pending download succeeded: id=... task_id=... method=...` — успех, push отправлен.
+
+### Скачивание через Jackett (`_download_and_add`)
+
+- `Jackett download failed (...), trying rutracker_client direct: topic_id=...` — fallback на прямой Rutracker.
+- `rutracker_client direct also failed: ... — falling back` — fallback тоже не сработал, идём на re-search / magnet.
+- `Download failed for index=N: <error>` — финальная ошибка, юзеру показана кнопка retry/queue.
+
+### Когда найден новый баг — сюда же
+
+Если выяснили причину «почему что-то не работало» по логам, и логи помогли — стоит добавить новый маркер в этот список. Лог-строки в коде живут вместе с фичей, эта таблица — оглавление для будущих сессий.

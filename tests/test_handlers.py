@@ -3108,9 +3108,9 @@ class PlexShowFindTests(unittest.TestCase):
         from bot import _plex_show_find
         show = self._make_show("X", 2020)
         with patch.object(bot, "_plex_shows_library", {("x", 2020): show}):
+            # ±1 tolerance: 2019, 2020, 2021 — все находят show.
             self.assertIs(_plex_show_find("X", 2021), show)
             self.assertIs(_plex_show_find("X", 2019), show)
-            self.assertIsNone(_plex_show_find("X", 2025))
 
     def test_zero_year_scans_by_title_across_all_years(self):
         from bot import _plex_show_find
@@ -3122,6 +3122,69 @@ class PlexShowFindTests(unittest.TestCase):
         from bot import _plex_show_find
         with patch.object(bot, "_plex_shows_library", {}):
             self.assertIsNone(_plex_show_find("Unknown Show", 0))
+
+    def test_lookup_logs_diagnostic_when_series_show_not_found(self):
+        """When _plex_poll_lookup_target can't find a series, it must log an
+        INFO line with the query / year / cache size — so operators can
+        diagnose «не появился в Plex» without reading code."""
+        from bot import _plex_poll_lookup_target
+        meta = {"kind": "series", "series_query": "Nonexistent", "season_num": 1, "year": 2026}
+        with (
+            patch.object(bot, "_plex_shows_library", {}),
+            self.assertLogs("tg_torrent_drop", level="INFO") as captured,
+        ):
+            target, mt, ft = asyncio.run(_plex_poll_lookup_target("task title", meta))
+        self.assertIsNone(target)
+        joined = "\n".join(captured.output)
+        self.assertIn("Plex lookup: series show not found", joined)
+        self.assertIn("Nonexistent", joined)
+
+    def test_lookup_logs_diagnostic_when_movie_not_found(self):
+        """Same for movie path — log diagnostic when nothing matches."""
+        from bot import _plex_poll_lookup_target
+        meta = {"kind": "movie", "title": "Nonexistent Film", "year": 2026}
+        with (
+            patch.object(bot, "_plex_library", {}),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_plex_library_find", return_value=None),
+            self.assertLogs("tg_torrent_drop", level="INFO") as captured,
+        ):
+            target, mt, ft = asyncio.run(_plex_poll_lookup_target("task.title.2026.mkv", meta))
+        self.assertIsNone(target)
+        joined = "\n".join(captured.output)
+        self.assertIn("Plex lookup: movie not found", joined)
+
+    def test_year_mismatch_for_series_falls_back_to_title_only(self):
+        """Regression: for TV series, meta.year often reflects the season/episode
+        year (e.g. 2026 for Good Omens S3E1) while Plex caches the show under
+        its PREMIERE year (2019). Without title-only fallback, the lookup
+        returns None and the «✅ добавлен в Plex» notification is never sent.
+        """
+        from bot import _plex_show_find
+        show = self._make_show("Good Omens", 2019)
+        with patch.object(bot, "_plex_shows_library", {("good omens", 2019): show}):
+            # meta.year=2026 (episode year), Plex.year=2019 (premiere) — gap > 1.
+            self.assertIs(_plex_show_find("Good Omens", 2026), show)
+            # Also works for wider gaps.
+            self.assertIs(_plex_show_find("Good Omens", 2100), show)
+
+    def test_year_match_still_takes_priority_over_title_only(self):
+        """When two shows share a normalised title under different years and the
+        requested year matches one exactly, that one wins over the fallback."""
+        from bot import _plex_show_find
+        old_show = self._make_show("Same Title", 2010)
+        new_show = self._make_show("Same Title", 2026)
+        with patch.object(
+            bot,
+            "_plex_shows_library",
+            {("same title", 2010): old_show, ("same title", 2026): new_show},
+        ):
+            # year=2026 exact → new_show; ±1 tolerance is checked before title-only.
+            self.assertIs(_plex_show_find("Same Title", 2026), new_show)
+            # year=2010 exact → old_show.
+            self.assertIs(_plex_show_find("Same Title", 2010), old_show)
+            # year=2027 (±1 of 2026) → new_show.
+            self.assertIs(_plex_show_find("Same Title", 2027), new_show)
 
 
 class PlexEnsureShowSeasonsTests(unittest.IsolatedAsyncioTestCase):
