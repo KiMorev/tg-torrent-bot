@@ -3,6 +3,7 @@
 > **Версия 1.0**
 
 [![tests](https://github.com/KiMorev/tg-torrent-bot/actions/workflows/test.yml/badge.svg)](https://github.com/KiMorev/tg-torrent-bot/actions/workflows/test.yml)
+[![ghcr](https://img.shields.io/badge/ghcr.io-kimorev%2Ftg--torrent--bot-blue?logo=docker)](https://github.com/KiMorev/tg-torrent-bot/pkgs/container/tg-torrent-bot)
 
 Telegram-помощник для домашнего киносервера на базе Synology + Plex.
 
