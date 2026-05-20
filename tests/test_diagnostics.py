@@ -1,6 +1,8 @@
 import unittest
 from datetime import timezone
 
+import requests
+
 from diagnostics import format_diagnostics, friendly_error, run_diagnostics
 from download_station import DownloadStationError
 
@@ -329,6 +331,91 @@ class DiagnosticsTests(unittest.TestCase):
         )
         text = format_diagnostics(report)
         self.assertNotIn("Не сматчено", text)
+
+
+class PlexDeeplinkDiagnosticTests(unittest.TestCase):
+    """Health check for the Plex deep-link redirect page (PLEX_DEEPLINK_BASE_URL).
+
+    If this URL goes down, ALL «▶️ Открыть/Смотреть в Plex» buttons in the bot
+    become dead links — so it must be in /admin diagnostics.
+    """
+
+    def _run(self, deeplink_url: str, *, get_mock=None):
+        from unittest.mock import patch
+        with patch("diagnostics.requests.get", get_mock or (lambda *a, **kw: None)):
+            return run_diagnostics(
+                rutracker_client=None, jackett_client=None,
+                ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+                display_timezone=timezone.utc,
+                plex_deeplink_base_url=deeplink_url,
+            )
+
+    def _deeplink_service(self, report):
+        return next(s for s in report.services if s.name == "Plex deep-link")
+
+    def test_disabled_when_url_empty(self):
+        report = self._run("")
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "disabled")
+        self.assertIn("app.plex.tv/desktop", svc.summary)
+
+    def test_disabled_when_url_whitespace_only(self):
+        report = self._run("   ")
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "disabled")
+
+    def test_ok_when_url_returns_200_with_plex_marker(self):
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=200, text='<html>...location.href = "plex://..."...</html>')
+        report = self._run("https://example.com/plex.html",
+                           get_mock=MagicMock(return_value=resp))
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "ok")
+        self.assertIn("доступен", svc.summary)
+
+    def test_warn_when_200_but_no_plex_marker(self):
+        """Captive portal / wrong page / placeholder hits 200 but lacks our marker."""
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=200, text="<html><body>Default Apache page</body></html>")
+        report = self._run("https://example.com/plex.html",
+                           get_mock=MagicMock(return_value=resp))
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "warn")
+        self.assertIn("контент не похож", svc.summary)
+
+    def test_error_on_4xx(self):
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=404, text="not found")
+        report = self._run("https://example.com/plex.html",
+                           get_mock=MagicMock(return_value=resp))
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("404", svc.summary)
+
+    def test_error_on_5xx(self):
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=502, text="bad gateway")
+        report = self._run("https://example.com/plex.html",
+                           get_mock=MagicMock(return_value=resp))
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("502", svc.summary)
+
+    def test_error_on_timeout(self):
+        from unittest.mock import MagicMock
+        get = MagicMock(side_effect=requests.exceptions.Timeout("read timed out"))
+        report = self._run("https://example.com/plex.html", get_mock=get)
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("таймаут", svc.summary)
+
+    def test_error_on_connection_error(self):
+        from unittest.mock import MagicMock
+        get = MagicMock(side_effect=requests.exceptions.ConnectionError("DNS lookup failed"))
+        report = self._run("https://example.com/plex.html", get_mock=get)
+        svc = self._deeplink_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("недоступен", svc.summary)
 
 
 if __name__ == "__main__":

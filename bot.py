@@ -4382,6 +4382,7 @@ async def _build_diagnostics_text() -> str:
         display_timezone=DISPLAY_TIMEZONE,
         plex_client=plex_client,
         plex_cache_info=_plex_cache_info() if plex_client else None,
+        plex_deeplink_base_url=PLEX_DEEPLINK_BASE_URL,
     )
     return format_diagnostics(report)
 

@@ -2,6 +2,8 @@ import html
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 
+import requests
+
 from download_station import DownloadStationError
 
 
@@ -305,6 +307,73 @@ def _plex_diagnostic(plex_client, plex_cache_info: dict | None) -> ServiceDiagno
     return ServiceDiagnostic("Plex", "ok", _summary("ok", "🎬", "Plex", "подключен"), details)
 
 
+def _plex_deeplink_diagnostic(deeplink_base_url: str) -> ServiceDiagnostic:
+    """Check that the Plex deep-link redirect page is reachable.
+
+    Every Telegram «▶️ Открыть/Смотреть в Plex» button leads to this URL — if
+    the redirect page is down, all Plex-open buttons in the chat become dead
+    links. The check uses a short HTTP GET (timeout 5s) and looks for the
+    'plex://' marker in the response body to confirm the page is the right one
+    (not, e.g., a captive portal or 404 from a misconfigured proxy).
+
+    When PLEX_DEEPLINK_BASE_URL is empty the bot falls back to the public
+    `https://app.plex.tv/desktop` (Plex Web), which we don't health-check —
+    it's always-up Cloudflare-hosted. We report this as 'disabled' so the
+    admin knows there's no custom redirect to monitor.
+    """
+    name = "Plex deep-link"
+    icon = "🔗"
+    url = (deeplink_base_url or "").strip()
+    if not url:
+        return ServiceDiagnostic(
+            name, "disabled",
+            _summary("disabled", icon, name, "не настроен — используется https://app.plex.tv/desktop"),
+            ["   PLEX_DEEPLINK_BASE_URL пуст. Plex-кнопки ведут на публичный Plex Web (всегда доступен)."],
+        )
+
+    try:
+        resp = requests.get(url, timeout=5, allow_redirects=True)
+    except requests.exceptions.Timeout:
+        return ServiceDiagnostic(
+            name, "error",
+            _summary("error", icon, name, "недоступен (таймаут 5с)"),
+            [f"   URL: {url}"],
+        )
+    except requests.exceptions.RequestException as exc:
+        return ServiceDiagnostic(
+            name, "error",
+            _summary("error", icon, name, "недоступен"),
+            [f"   URL: {url}", _raw_detail(str(exc))],
+        )
+
+    if resp.status_code != 200:
+        return ServiceDiagnostic(
+            name, "error",
+            _summary("error", icon, name, f"HTTP {resp.status_code}"),
+            [f"   URL: {url}"],
+        )
+
+    # Content sanity-check: our redirect page must contain a plex:// reference
+    # in its JS. If it's missing — the file was replaced or we hit a wrong host
+    # (e.g. a captive portal, default web-server page).
+    body = (resp.text or "")[:4096]
+    if "plex://" not in body:
+        return ServiceDiagnostic(
+            name, "warn",
+            _summary("warn", icon, name, "отвечает, но контент не похож на redirect-страницу"),
+            [
+                f"   URL: {url}",
+                "   В ответе нет ссылки `plex://`. Проверьте что отдаётся правильный файл plex.html.",
+            ],
+        )
+
+    return ServiceDiagnostic(
+        name, "ok",
+        _summary("ok", icon, name, "доступен"),
+        [f"   URL: {url}"],
+    )
+
+
 def _plural_ru(n: int, one: str, few: str, many: str) -> str:
     """Russian plural picker: 1 фильм / 2 фильма / 5 фильмов."""
     n_abs = abs(n) % 100
@@ -327,6 +396,7 @@ def run_diagnostics(
     display_timezone: tzinfo,
     plex_client=None,
     plex_cache_info: dict | None = None,
+    plex_deeplink_base_url: str = "",
 ) -> DiagnosticsReport:
     return DiagnosticsReport(
         [
@@ -335,6 +405,7 @@ def run_diagnostics(
             _jackett_diagnostic(jackett_client),
             _public_trackers_diagnostic(tracker_service, display_timezone),
             _plex_diagnostic(plex_client, plex_cache_info),
+            _plex_deeplink_diagnostic(plex_deeplink_base_url),
         ]
     )
 
