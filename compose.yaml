@@ -1,8 +1,12 @@
 services:
   tg_torrent_drop:
-    build: .
+    image: ghcr.io/kimorev/tg-torrent-bot:latest
     container_name: tg_torrent_drop
     restart: unless-stopped
+    pull_policy: always
+    labels:
+      # Watchtower will only auto-update containers with this label set to true.
+      - "com.centurylinklabs.watchtower.enable=true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -66,6 +70,21 @@ services:
       PENDING_DOWNLOADS_ENABLED: "${PENDING_DOWNLOADS_ENABLED:-true}"
       PENDING_DOWNLOADS_INTERVAL_SECONDS: "${PENDING_DOWNLOADS_INTERVAL_SECONDS:-300}"
       PENDING_DOWNLOADS_TTL_HOURS: "${PENDING_DOWNLOADS_TTL_HOURS:-24}"
+
+  # Watchtower auto-updates labelled containers when a new image digest appears in GHCR.
+  # Polls every 5 minutes. Only the tg_torrent_drop container is watched (label filter).
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      TZ: "${TZ:-Europe/Moscow}"
 
 volumes:
   tg_torrent_drop_state:
