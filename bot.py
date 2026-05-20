@@ -1661,6 +1661,24 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
 
+    # Diagnostic: snapshot pre-refresh state for the cold-start /new bug investigation.
+    # See CLAUDE.md → "Movie discovery" markers for what this lets us reconstruct.
+    _prev_for_log = _load_movie_discovery_cache()
+    _prev_cards_for_log = _prev_for_log.get("cards") or []
+    _rutracker_paused = False
+    try:
+        if rutracker_client is not None and hasattr(rutracker_client, "_cooldown_until"):
+            cd = getattr(rutracker_client, "_cooldown_until", None)
+            _rutracker_paused = bool(cd and cd > now.timestamp())
+    except Exception:
+        pass
+    logger.info(
+        "movie_discovery: refresh started prev_cards=%d rutracker_paused=%s jackett=%s",
+        len(_prev_cards_for_log),
+        _rutracker_paused,
+        jackett_client is not None,
+    )
+
     # --- Tracker monitoring: detect removed Jackett trackers ---
     md_settings = _load_movie_discovery_settings()
     known_tracker_ids: set[str] = set(md_settings.get("jackett_trackers_known") or [])
@@ -1750,6 +1768,15 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
                 logger.warning("Movie discovery Rutracker search failed: %s", search_query, exc_info=True)
                 reason_counts["rutracker:error"] += 1
 
+    logger.info(
+        "movie_discovery: sources fetched jackett_raw=%d rutracker_raw=%d accepted=%d errors=jackett:%d,rutracker:%d",
+        source_counts.get("jackett_raw", 0),
+        source_counts.get("rutracker_raw", 0),
+        len(releases),
+        reason_counts.get("jackett:error", 0),
+        reason_counts.get("rutracker:error", 0),
+    )
+
     by_fingerprint = {}
     for release in releases:
         key = "|".join(str(release.get(part, "") or "") for part in ("source", "tracker", "topic_id", "topic_url", "title", "size"))
@@ -1807,6 +1834,32 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     else:
         searches_today = kp_searches_this_run
     cache["kp_api_stats"] = {"date": today_str, "searches": searches_today}
+
+    # Diagnostic: log cards diff vs previous cache. This is the smoking-gun line
+    # for the cold-start /new bug — shows which kp_ids appeared/disappeared between
+    # consecutive refreshes (e.g. transient Rutracker cooldown after restart).
+    _new_cards_log = cache.get("cards") or []
+    _prev_ids_log = {c.get("kp_id") for c in _prev_cards_for_log if c.get("kp_id")}
+    _new_ids_log = {c.get("kp_id") for c in _new_cards_log if c.get("kp_id")}
+    _added_log = _new_ids_log - _prev_ids_log
+    _removed_log = _prev_ids_log - _new_ids_log
+    logger.info(
+        "movie_discovery: cache built cards=%d prev_cards=%d added=%d removed=%d top10=[%s]",
+        len(_new_cards_log),
+        len(_prev_cards_for_log),
+        len(_added_log),
+        len(_removed_log),
+        ", ".join(
+            f"{(c.get('title') or '?')!s}={c.get('kp_id') or '-'}"
+            for c in _new_cards_log[:10]
+        ),
+    )
+    if _added_log or _removed_log:
+        logger.info(
+            "movie_discovery: cards diff added_kp=%s removed_kp=%s",
+            ",".join(map(str, list(_added_log)[:20])) or "-",
+            ",".join(map(str, list(_removed_log)[:20])) or "-",
+        )
 
     _save_movie_discovery_cache(cache)
     debug_report = {
@@ -2001,17 +2054,25 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
     """
     top_cards = (cache.get("cards") or [])[:10]
     if not top_cards:
+        logger.info("movie_discovery: notify skipped — no cards in cache")
         return
 
     subs = _get_movie_subscriptions()
     if not subs:
+        logger.info("movie_discovery: notify skipped — no subscribers")
         return
 
     if not _is_in_notification_window():
         # Quiet hours — don't push and don't mark anything seen. The next in-window
         # refresh will compute the same (or larger) diff and deliver naturally.
-        logger.debug("Out of notification window — skipping /new push (will retry next window)")
+        logger.info("movie_discovery: notify skipped — out of notification window")
         return
+
+    logger.info(
+        "movie_discovery: notify start subscribers=%d top10_kp=[%s]",
+        len(subs),
+        ",".join(str(c.get("kp_id") or "-") for c in top_cards),
+    )
 
     for chat_id_str in list(subs.keys()):
         try:
@@ -2028,13 +2089,37 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
             if not _is_card_notified(c, chat_id) and not _is_card_shown_in_new(c, chat_id)
         ]
         if not new_for_user:
+            logger.info(
+                "movie_discovery: notify chat=%s no_new (all top10 already notified/shown)",
+                chat_id,
+            )
             continue
+
+        logger.info(
+            "movie_discovery: notify chat=%s candidates=%d kp_ids=[%s]",
+            chat_id,
+            len(new_for_user),
+            ",".join(str(c.get("kp_id") or "-") for c in new_for_user),
+        )
 
         sent = await _send_movie_notification_push_to_user(new_for_user, chat_id, app)
         if sent:
             # Only set notified_at — shown_at remains empty so the 🆕 badge stays
             # visible when the user clicks "Открыть /new" from the push.
             _mark_user_notified(chat_id, new_for_user)
+            logger.info(
+                "movie_discovery: notify sent chat=%s pushed=%d kp_ids=[%s]",
+                chat_id,
+                len(new_for_user),
+                ",".join(str(c.get("kp_id") or "-") for c in new_for_user),
+            )
+        else:
+            logger.warning(
+                "movie_discovery: notify failed chat=%s candidates=%d kp_ids=[%s]",
+                chat_id,
+                len(new_for_user),
+                ",".join(str(c.get("kp_id") or "-") for c in new_for_user),
+            )
 
 
 async def _movie_discovery_loop(app: "Application") -> None:
@@ -2044,11 +2129,21 @@ async def _movie_discovery_loop(app: "Application") -> None:
 
     interval = MOVIE_DISCOVERY_INTERVAL_HOURS * 3600
 
+    first_refresh_done = False
+
     async def _refresh_and_notify() -> None:
+        nonlocal first_refresh_done
+        is_first = not first_refresh_done
+        if is_first:
+            logger.info("movie_discovery: first refresh after startup BEGIN")
         cache = await _refresh_movie_discovery_cache()
         await _run_movie_discovery_notifications(cache, app)
+        if is_first:
+            logger.info("movie_discovery: first refresh after startup DONE")
+            first_refresh_done = True
 
     try:
+        logger.info("movie_discovery: loop started — first refresh now, interval=%dh", MOVIE_DISCOVERY_INTERVAL_HOURS)
         await _run_background_step("movie discovery refresh", _refresh_and_notify)
         while True:
             await asyncio.sleep(interval)
@@ -7331,6 +7426,12 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     chat_id = update.effective_chat.id if update.effective_chat else None
     cache = _load_movie_discovery_cache()
+    logger.info(
+        "movie_discovery: /new render path=command chat=%s cache_cards=%d top10_kp=[%s]",
+        chat_id,
+        len(cache.get("cards") or []),
+        ",".join(str(c.get("kp_id") or "-") for c in (cache.get("cards") or [])[:10]),
+    )
     if not cache.get("cards"):
         progress = await update.message.reply_text("🎬 Собираю новинки…")
         cache = await _refresh_movie_discovery_cache()
@@ -7375,7 +7476,14 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
     chat_id = query.message.chat.id if query.message else None
     await query.answer()
     await _safe_edit_callback(query, "🎬 Обновляю новинки…")
+    logger.info("movie_discovery: /new render path=refresh_callback chat=%s — refreshing now", chat_id)
     cache = await _refresh_movie_discovery_cache()
+    logger.info(
+        "movie_discovery: /new render path=refresh_callback chat=%s post_refresh cache_cards=%d top10_kp=[%s]",
+        chat_id,
+        len(cache.get("cards") or []),
+        ",".join(str(c.get("kp_id") or "-") for c in (cache.get("cards") or [])[:10]),
+    )
     await _safe_edit_callback(
         query,
         _format_movie_discovery_cache(cache, chat_id=chat_id),
@@ -7457,6 +7565,12 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     chat_id = query.message.chat.id if query.message else None
     cache = _load_movie_discovery_cache()
+    logger.info(
+        "movie_discovery: /new render path=open_callback chat=%s cache_cards=%d top10_kp=[%s]",
+        chat_id,
+        len(cache.get("cards") or []),
+        ",".join(str(c.get("kp_id") or "-") for c in (cache.get("cards") or [])[:10]),
+    )
     _enrich_cards_with_plex(cache.get("cards") or [])
     await _safe_edit_callback(
         query,
