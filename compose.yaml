@@ -89,6 +89,23 @@ services:
       # Empty ADMIN_CHAT_IDS → Watchtower runs without notifications (updates still happen).
       WATCHTOWER_NOTIFICATION_URL: "telegram://${BOT_TOKEN}@telegram?chats=${ADMIN_CHAT_IDS}"
       WATCHTOWER_NOTIFICATION_REPORT: "true"
+      # Russian compact template. Sends a message only when something actually
+      # changed (Updated > 0 or Failed > 0) — REPORT mode suppresses empty bodies.
+      WATCHTOWER_NOTIFICATION_TEMPLATE: |
+        {{- if .Report -}}
+          {{- with .Report -}}
+            {{- if .Updated -}}
+        🔄 CineDownload обновлён
+        {{range .Updated}}• {{.Name}} → {{.LatestImageID.ShortID}}
+        {{end -}}
+            {{- end -}}
+            {{- if .Failed -}}
+        ⚠️ Не удалось обновить CineDownload
+        {{range .Failed}}• {{.Name}}: {{.Error}}
+        {{end -}}
+            {{- end -}}
+          {{- end -}}
+        {{- end -}}
       TZ: "${TZ:-Europe/Moscow}"
 
 volumes:
