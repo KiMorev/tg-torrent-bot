@@ -84,6 +84,11 @@ services:
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Reuse the bot's BOT_TOKEN and ADMIN_CHAT_IDS from .env — no extra secrets needed.
+      # Comma-separated chat IDs in ADMIN_CHAT_IDS work directly with shoutrrr's telegram://.
+      # Empty ADMIN_CHAT_IDS → Watchtower runs without notifications (updates still happen).
+      WATCHTOWER_NOTIFICATION_URL: "telegram://${BOT_TOKEN}@telegram?chats=${ADMIN_CHAT_IDS}"
+      WATCHTOWER_NOTIFICATION_REPORT: "true"
       TZ: "${TZ:-Europe/Moscow}"
 
 volumes:

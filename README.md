@@ -93,12 +93,72 @@ Telegram-помощник для домашнего киносервера на 
 
 ## Установка
 
-1. Скопируй `.env.example` в `.env` и заполни необходимые переменные.
-2. Положи все файлы проекта в `/volume1/docker/tg_torrent_drop` на NAS.
-3. В **Synology Container Manager** → **Проекты** → создай проект из этой папки.
-4. Нажми **Собрать** → **Запустить**.
+1. Скачай два файла из репозитория в папку `/volume1/docker/tg_torrent_drop` на NAS:
+   - [`compose.yaml`](compose.yaml) — описание контейнеров
+   - [`.env.example`](.env.example) → переименуй в `.env` и заполни секреты
+2. В **Synology Container Manager** → **Проекты** → создай проект из этой папки.
+3. Нажми **Собрать** → **Запустить**.
 
-При обновлении: замени изменённые файлы и выполни **Остановить → Собрать → Запустить**.
+Container Manager скачает готовый образ из GHCR (`ghcr.io/kimorev/tg-torrent-bot:latest`)
+и поднимет рядом контейнер Watchtower, который автоматически обновляет бота при
+каждом push в `main` (см. ниже «Автоматическое обновление»). Никаких `.py`-файлов
+на NAS держать не нужно — они живут внутри образа.
+
+---
+
+## Автоматическое обновление
+
+Пайплайн end-to-end:
+
+1. Push в `main` на GitHub → workflow `.github/workflows/test.yml` запускает `pytest`.
+2. Если тесты зелёные — job `build-and-push` собирает multi-arch образ
+   (`linux/amd64` + `linux/arm64`) и пушит в GHCR с двумя тегами:
+   - `:latest` — всегда указывает на свежий main
+   - `:sha-<short>` — immutable, для отката
+3. Watchtower на NAS опрашивает GHCR раз в 5 минут. Когда видит новый digest
+   у `:latest` — делает `docker pull`, останавливает старый контейнер, поднимает
+   новый, удаляет устаревший layer.
+4. После успешного обновления — Watchtower шлёт push в Telegram **только
+   администраторам** (используются `BOT_TOKEN` и `ADMIN_CHAT_IDS` из `.env`;
+   обычные approved-пользователи уведомление НЕ получают).
+
+Если CI падает — образ не публикуется, бот остаётся на старой версии.
+
+### Уведомления об автообновлении
+
+Watchtower использует уже настроенный `BOT_TOKEN` и список `ADMIN_CHAT_IDS`
+из `.env` — отдельных секретов не нужно. При каждом успешном обновлении
+контейнера приходит сообщение примерно такого вида:
+
+```
+1 Scanned, 1 Updated, 0 Failed
+- /tg_torrent_drop (ghcr.io/kimorev/tg-torrent-bot:latest):
+    Updated to sha256:abc123...
+```
+
+Если `ADMIN_CHAT_IDS` в `.env` пуст — Watchtower молча работает без
+уведомлений (само обновление не страдает). Чтобы временно отключить
+уведомления не убирая админов — закомментируй строку
+`WATCHTOWER_NOTIFICATION_URL` в `compose.yaml` и пересобери проект.
+
+### Откат на предыдущую версию
+
+В `compose.yaml` поменяй `:latest` на конкретный SHA:
+
+```yaml
+    image: ghcr.io/kimorev/tg-torrent-bot:sha-9f7aafc
+```
+
+Затем в Container Manager → **Action → Build**. Список доступных тегов:
+https://github.com/KiMorev/tg-torrent-bot/pkgs/container/tg-torrent-bot
+
+После того как починили проблему в `main` — верни `:latest`.
+
+### Принудительное обновление
+
+Watchtower проверяет GHCR раз в 5 минут. Если не хочешь ждать — рестартни
+контейнер `watchtower` через Container Manager (стартовый цикл сразу проверит
+новые образы).
 
 ---
 
