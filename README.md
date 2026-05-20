@@ -2,6 +2,8 @@
 
 > **Версия 1.0**
 
+[![tests](https://github.com/KiMorev/tg-torrent-bot/actions/workflows/test.yml/badge.svg)](https://github.com/KiMorev/tg-torrent-bot/actions/workflows/test.yml)
+
 Telegram-помощник для домашнего киносервера на базе Synology + Plex.
 
 Ищет фильмы и сериалы по нескольким трекерам (через Jackett или прямо в Rutracker), ведёт ленту новинок с фильтрацией по рейтингу Кинопоиска, проверяет наличие в Plex до скачивания, и присылает push-уведомление с прямой ссылкой на просмотр когда файл появился в библиотеке. Сами раздачи — `.torrent` и magnet — скачиваются в Synology Download Station в фоне, без участия пользователя.
