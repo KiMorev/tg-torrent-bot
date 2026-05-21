@@ -11,6 +11,12 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - tg_torrent_drop_state:/data
+      # Optional: read-only bind-mount of the NAS movie volume.
+      # Enables the «📀 Хранилище» block in /admin (free/used GB + forecast +
+      # alert at STORAGE_ALERT_PERCENT). Remove this line to disable the
+      # feature — bot will simply skip the block.
+      # If your movies live in another path, change the LEFT side only.
+      - /volume1/video:/storage:ro
     environment:
       BOT_TOKEN: "${BOT_TOKEN}"
       ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS}"
@@ -70,6 +76,7 @@ services:
       PENDING_DOWNLOADS_ENABLED: "${PENDING_DOWNLOADS_ENABLED:-true}"
       PENDING_DOWNLOADS_INTERVAL_SECONDS: "${PENDING_DOWNLOADS_INTERVAL_SECONDS:-300}"
       PENDING_DOWNLOADS_TTL_HOURS: "${PENDING_DOWNLOADS_TTL_HOURS:-24}"
+      STORAGE_ALERT_PERCENT: "${STORAGE_ALERT_PERCENT:-90}"
 
   # Watchtower auto-updates labelled containers when a new image digest appears in GHCR.
   # Polls every 5 minutes. Only the tg_torrent_drop container is watched (label filter).

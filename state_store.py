@@ -28,6 +28,7 @@ class JsonStateStore:
         topic_subscriptions_file: Path | None = None,
         task_meta_file: Path | None = None,
         pending_downloads_file: Path | None = None,
+        storage_history_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -39,6 +40,7 @@ class JsonStateStore:
         self.topic_subscriptions_file = topic_subscriptions_file
         self.task_meta_file = task_meta_file
         self.pending_downloads_file = pending_downloads_file
+        self.storage_history_file = storage_history_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -432,3 +434,42 @@ class JsonStateStore:
         if not self.movie_discovery_settings_file:
             return
         self.save_json_file(self.movie_discovery_settings_file, settings, "movie discovery settings")
+
+    # ---- Storage history (for /admin «📀 Хранилище» forecast) ----
+
+    def load_storage_history(self) -> list[dict]:
+        """Return the rolling list of disk-usage snapshots (oldest first).
+
+        Each entry: {"ts": ISO8601 str, "used_bytes": int, "free_bytes": int}.
+        Returns [] when the file doesn't exist yet or is malformed.
+        """
+        if not self.storage_history_file:
+            return []
+        payload = self.load_json_file(self.storage_history_file, [])
+        if not isinstance(payload, list):
+            return []
+        # Filter to well-formed entries — defence against partial corruption.
+        return [
+            e for e in payload
+            if isinstance(e, dict)
+            and isinstance(e.get("ts"), str)
+            and isinstance(e.get("used_bytes"), int)
+        ]
+
+    def append_storage_snapshot(self, snapshot: dict, max_age_days: int = 30) -> None:
+        """Append a snapshot, prune entries older than `max_age_days`, save atomically.
+
+        Pruning is by ISO timestamp — entries with `ts` lexicographically less
+        than (now - max_age_days) get dropped. Lex compare works because we
+        always write `isoformat(timespec='seconds')` which is sortable.
+        """
+        if not self.storage_history_file:
+            return
+        from datetime import datetime, timedelta, timezone
+        history = self.load_storage_history()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+        # Normalize cutoff to be lex-comparable with naive ISO strings.
+        cutoff_naive = cutoff.split("+")[0]
+        history = [e for e in history if e["ts"] >= cutoff_naive]
+        history.append(snapshot)
+        self.save_json_file(self.storage_history_file, history, "storage history")

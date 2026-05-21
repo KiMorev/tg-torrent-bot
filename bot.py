@@ -124,6 +124,7 @@ from plex import (
     is_unmatched as _plex_is_unmatched,
     _normalise_resolution as _plex_normalise_resolution,
 )
+from storage import STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
@@ -260,6 +261,7 @@ MOVIE_DISCOVERY_QUALITIES = settings.movie_discovery_qualities
 PENDING_DOWNLOADS_ENABLED = settings.pending_downloads_enabled
 PENDING_DOWNLOADS_INTERVAL_SECONDS = settings.pending_downloads_interval_seconds
 PENDING_DOWNLOADS_TTL_HOURS = settings.pending_downloads_ttl_hours
+STORAGE_ALERT_PERCENT = settings.storage_alert_percent
 
 # kinopoiskapiunofficial.tech free tier: 500 requests/day
 _KP_DAILY_LIMIT = 500
@@ -702,6 +704,7 @@ async def _run_task_maintenance_cycle(app: Application) -> None:
     await _run_background_step("task notifications", lambda: _run_task_notifications_once(app))
     await _run_background_step("auto-delete finished tasks", _run_auto_delete_finished_once)
     await _run_background_step("pending downloads", lambda: _run_pending_downloads_gated(app))
+    await _run_background_step("storage snapshot", lambda: _run_storage_snapshot_gated(app))
     await _run_background_step("stale state pruning", _run_prune_stale_state_once)
 
 
@@ -983,6 +986,147 @@ def _format_kp_api_stats_line(cache: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Storage budget — /admin disk-usage block + background snapshot/alert
+# ---------------------------------------------------------------------------
+
+# One-shot alert flag (in-memory). Module-scope dict so it survives across
+# task ticks but resets on process restart (acceptable — alert will simply
+# re-fire on the first crossing after restart if usage is still high).
+_STORAGE_ALERT_STATE: dict[str, bool] = {"above": False}
+
+# Gate timestamp for storage snapshot (separate from pending-downloads gate).
+_next_storage_snapshot_at: float | None = None
+
+
+def _format_storage_forecast(info: StorageInfo) -> str | None:
+    """7-day linear extrapolation to STORAGE_ALERT_PERCENT.
+
+    Returns None if there's no usable history yet (need ≥2 snapshots
+    spanning some time). Handles zero/negative growth gracefully.
+    """
+    history = state_store.load_storage_history()
+    if len(history) < 2:
+        return None
+
+    from datetime import timedelta
+    now_ts = datetime.now(DISPLAY_TIMEZONE)
+    # Pick the entry closest to a week ago (older end); fall back to oldest.
+    week_ago = now_ts - timedelta(days=7)
+    older = None
+    for entry in history:
+        try:
+            entry_ts = datetime.fromisoformat(entry["ts"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        # Normalise to compare (drop tz if any — we store naive ISO).
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=DISPLAY_TIMEZONE)
+        if entry_ts <= week_ago.replace(tzinfo=entry_ts.tzinfo):
+            older = entry  # latest snapshot that's still ≥ 1 week old
+    if older is None:
+        older = history[0]  # nothing a full week old yet — use oldest available
+
+    try:
+        older_ts = datetime.fromisoformat(older["ts"])
+        if older_ts.tzinfo is None:
+            older_ts = older_ts.replace(tzinfo=DISPLAY_TIMEZONE)
+    except (ValueError, TypeError, KeyError):
+        return None
+
+    delta_seconds = (now_ts - older_ts).total_seconds()
+    delta_days = max(0.5, delta_seconds / 86400)  # avoid div-by-zero
+    delta_used = info.used_bytes - int(older.get("used_bytes") or 0)
+    rate_per_day = delta_used / delta_days
+
+    if rate_per_day <= 0:
+        return "Прогноз: темп заполнения нулевой или отрицательный"
+    target = info.total_bytes * (STORAGE_ALERT_PERCENT / 100)
+    bytes_until = target - info.used_bytes
+    if bytes_until <= 0:
+        return f"Порог {STORAGE_ALERT_PERCENT}% уже превышен"
+    days_left = int(bytes_until / rate_per_day)
+    suffix = _plural(days_left, "день", "дня", "дней")
+    return f"Прогноз: ~{days_left} {suffix} до {STORAGE_ALERT_PERCENT}%"
+
+
+def _format_admin_storage_section() -> str | None:
+    """Build the «📀 Хранилище» admin block, or None when feature disabled.
+
+    Feature is disabled (block hidden) when the `/storage` mount isn't
+    present inside the container. This is the graceful-degrade signal — the
+    admin hasn't bind-mounted the NAS volume yet.
+    """
+    info = get_storage_info(STORAGE_MOUNT_PATH)
+    if info is None:
+        return None
+    icon = "⚠️" if info.used_percent >= STORAGE_ALERT_PERCENT else "📀"
+    lines = [
+        f"{icon} <b>Хранилище</b>",
+        f"• Занято: {format_bytes(info.used_bytes)} из {format_bytes(info.total_bytes)} "
+        f"({info.used_percent:.0f}%)",
+    ]
+    forecast = _format_storage_forecast(info)
+    if forecast:
+        lines.append(f"• {forecast}")
+    return "\n".join(lines)
+
+
+async def _maybe_send_storage_alert(info: StorageInfo, app: "Application") -> None:
+    """Push one-shot alert to admins when usage crosses STORAGE_ALERT_PERCENT.
+
+    The `_STORAGE_ALERT_STATE["above"]` flag is set on first crossing into
+    the alert region and cleared when usage drops below — so a sustained
+    high-usage period sends exactly one push, not one per snapshot cycle.
+    """
+    above = info.used_percent >= STORAGE_ALERT_PERCENT
+    if above and not _STORAGE_ALERT_STATE["above"]:
+        _STORAGE_ALERT_STATE["above"] = True
+        text = (
+            f"⚠️ Хранилище NAS заполнено на {info.used_percent:.0f}%.\n"
+            f"Занято {format_bytes(info.used_bytes)} из {format_bytes(info.total_bytes)} "
+            f"({format_bytes(info.free_bytes)} свободно).\n"
+            f"Откройте /admin для подробностей."
+        )
+        for admin_id in ADMIN_CHAT_IDS:
+            try:
+                await app.bot.send_message(chat_id=admin_id, text=text)
+            except Exception:
+                logger.warning("Storage alert send failed chat=%s", admin_id, exc_info=True)
+    elif not above and _STORAGE_ALERT_STATE["above"]:
+        _STORAGE_ALERT_STATE["above"] = False
+
+
+async def _run_storage_snapshot_gated(app: "Application") -> None:
+    """Take a disk-usage snapshot at most every 6h; fires alert on threshold crossing.
+
+    Runs from `_run_task_maintenance_cycle` every 180s. The gate uses
+    module-scope timestamp so the cadence persists across cycles. Feature
+    is no-op when `/storage` mount isn't present.
+    """
+    global _next_storage_snapshot_at
+    info = get_storage_info(STORAGE_MOUNT_PATH)
+    if info is None:
+        return  # mount missing → feature disabled
+
+    now_ts = time.time()
+    if _next_storage_snapshot_at is not None and now_ts < _next_storage_snapshot_at:
+        # Even when gated for snapshot writes, still check the alert — fresh
+        # readings shouldn't be ignored just because we don't want to spam
+        # the history file. The alert itself is debounced via _STORAGE_ALERT_STATE.
+        await _maybe_send_storage_alert(info, app)
+        return
+
+    state_store.append_storage_snapshot({
+        "ts": datetime.now(DISPLAY_TIMEZONE).isoformat(timespec="seconds"),
+        "used_bytes": info.used_bytes,
+        "free_bytes": info.free_bytes,
+    })
+    _next_storage_snapshot_at = now_ts + 6 * 3600
+
+    await _maybe_send_storage_alert(info, app)
+
+
 def _format_admin_movie_discovery_summary() -> str:
     """Compact movie-discovery block for the main /admin panel.
 
@@ -1138,6 +1282,10 @@ async def _build_admin_panel_text() -> str:
         "🎬 <b>Новинки</b>",
         _format_admin_movie_discovery_summary(),
     ]
+    storage_block = _format_admin_storage_section()
+    if storage_block:
+        lines.append("")
+        lines.append(storage_block)
     return "\n".join(lines)
 
 
