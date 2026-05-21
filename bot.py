@@ -491,6 +491,10 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
         bullets.append(
             "• 🔍 Поиск и скачивание торрентов — просто пришлите название фильма"
         )
+    if VOICE_SEARCH_ENABLED and search_enabled:
+        bullets.append(
+            "• 🎙 Можно искать голосом — запишите голосовое сообщение, бот распознает"
+        )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         bullets.append(
             "• 🎬 Подборка свежих фильмов и сериалов с рейтингом Кинопоиска — /new"
@@ -500,7 +504,7 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
             "• ▶️ Открытие готового контента в Plex одной кнопкой"
         )
     bullets.append(
-        "• 🔔 Подписки на новые серии и автоуведомления когда всё готово"
+        "• 🔔 Подписка на сериал — уведомление каждой серии или одно когда сезон выйдет целиком"
     )
     return "\n".join(bullets) if joined else bullets
 
@@ -7482,6 +7486,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         main_bullets.append(
             f"• 🔍 Пришлите название фильма{kp_hint} — найду и предложу варианты"
         )
+    if VOICE_SEARCH_ENABLED and search_enabled:
+        main_bullets.append(
+            "• 🎙 Или запишите голосом — бот распознает и запустит поиск"
+        )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         main_bullets.append(
             "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
@@ -7524,6 +7532,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         main_bullets.append(
             f"• 🔍 Пришлите название фильма/сериала{kp_hint} — найду и предложу варианты"
         )
+    if VOICE_SEARCH_ENABLED and search_enabled:
+        main_bullets.append(
+            "• 🎙 Или запишите голосовое сообщение — распознаю и запущу тот же поиск"
+        )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         main_bullets.append(
             "• 🎬 /new — рейтинг свежих фильмов и сериалов с КП-оценкой и пометкой «уже в Plex»"
@@ -7537,7 +7549,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     extras: list[str] = []
     extras.append("• Прислать .torrent-файл или magnet-ссылку — добавлю в Download Station")
     if search_enabled:
-        extras.append("• Подписаться на новые серии сериала прямо из карточки результата поиска")
+        extras.append(
+            "• Подписаться на новые серии сериала из карточки результата — две кнопки «📺 Серии» (каждая серия) или «🎯 Сезон» (один push когда сезон выйдет целиком)"
+        )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
 

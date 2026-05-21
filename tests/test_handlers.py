@@ -294,6 +294,65 @@ class HelpCommandTests(unittest.TestCase):
         # Subscription bullets appear when search sources are configured.
         self.assertIn("Подписаться на новые серии", text)
 
+    def test_help_mentions_voice_search_when_enabled(self):
+        """Voice-search line surfaces only when OPENAI_API_KEY is configured."""
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "VOICE_SEARCH_ENABLED", True),
+        ):
+            asyncio.run(help_command(update, context))
+        text = update.message.reply_text.call_args.args[0]
+        # Voice search bullet present (use emoji to avoid false positive on the
+        # word «голос» appearing in unrelated context).
+        self.assertIn("🎙", text)
+
+    def test_help_omits_voice_when_disabled(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "VOICE_SEARCH_ENABLED", False),
+        ):
+            asyncio.run(help_command(update, context))
+        text = update.message.reply_text.call_args.args[0]
+        self.assertNotIn("🎙", text)
+
+    def test_help_mentions_both_subscription_modes(self):
+        """Confirms the «📺 Серии / 🎯 Сезон» wording survived later edits."""
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "VOICE_SEARCH_ENABLED", True),
+        ):
+            asyncio.run(help_command(update, context))
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("📺", text)  # per-episode mode
+        self.assertIn("🎯", text)  # season-complete mode
+
 
 class StartCommandTests(unittest.TestCase):
     """Welcome messages: authenticated /start + access-pending response.
