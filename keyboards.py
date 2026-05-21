@@ -120,10 +120,13 @@ def _admin_panel_keyboard(
         [
             InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
         ],
-        [InlineKeyboardButton("🎬 Трекеры новинок", callback_data=_admin_callback("movie_trackers"))],
         [
-            InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
-            InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
+            # Two movie-related drill-downs share a row to save vertical space on
+            # mobile. «🎬 Новинки» opens the discovery-status screen (filters,
+            # sources, KP cache management); «🎬 Трекеры новинок» opens the
+            # tracker enable/disable picker for movie ranking.
+            InlineKeyboardButton("🎬 Новинки", callback_data=_admin_callback("movie_status")),
+            InlineKeyboardButton("🎬 Трекеры новинок", callback_data=_admin_callback("movie_trackers")),
         ],
     ]
 
@@ -146,6 +149,27 @@ def _admin_panel_keyboard(
         )])
 
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _admin_movie_status_keyboard(*, show_kp_buttons: bool) -> InlineKeyboardMarkup:
+    """Drill-down keyboard for «🎬 Новинки» admin screen.
+
+    ``show_kp_buttons`` toggles visibility of the KP cache management buttons
+    (force-refresh / clear) — they're meaningful only when KINOPOISK_API_KEY
+    is configured. Hidden when KP is disabled, keeping the screen to a single
+    «⬅️ Назад» / «✖️ Закрыть» row.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if show_kp_buttons:
+        rows.append([
+            InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
+            InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
+        ])
+    rows.append([
+        InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home")),
+        InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
+    ])
     return InlineKeyboardMarkup(rows)
 
 

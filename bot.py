@@ -70,6 +70,7 @@ from keyboards import (
     _admin_kp_cache_cleared_keyboard,
     _admin_kp_cache_confirm_keyboard,
     _admin_kp_force_refresh_keyboard,
+    _admin_movie_status_keyboard,
     _admin_panel_keyboard,
     _access_approval_keyboard,
     _access_callback,
@@ -949,7 +950,51 @@ def _format_kp_api_stats_line(cache: dict) -> str:
     )
 
 
-def _format_admin_movie_discovery_line() -> str:
+def _format_admin_movie_discovery_summary() -> str:
+    """Compact movie-discovery block for the main /admin panel.
+
+    Shows only dynamic state worth glancing at: status, cache freshness +
+    card count, KP API budget today (if KP configured), and subscriber
+    count (if any). All static config (sources, filters, intervals, tracker
+    rating breakdown, KP cache size) lives in the «🎬 Новинки» drill-down
+    rendered by _format_admin_movie_discovery_details().
+    """
+    if not MOVIE_DISCOVERY_ENABLED:
+        return "• Статус: выключены"
+
+    cache = state_store.load_movie_discovery_cache()
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    updated_at = str(cache.get("updated_at") or "ещё не обновлялись")
+    sources_present = rutracker_client is not None or jackett_client is not None
+    status = "включены" if sources_present else "включены, но нет источников"
+
+    lines = [
+        f"• Статус: {status}",
+        f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}",
+    ]
+
+    kp_stats_line = _format_kp_api_stats_line(cache)
+    if kp_stats_line:
+        lines.append(kp_stats_line)
+
+    movie_sub_count = len(_get_movie_subscriptions())
+    if movie_sub_count:
+        lines.append(f"• Подписок на /new: {movie_sub_count}")
+
+    return "\n".join(lines)
+
+
+def _format_admin_movie_discovery_details() -> str:
+    """Full movie-discovery configuration screen — drill-down from main panel.
+
+    Includes everything that used to be inline on the main panel: source list,
+    quality/year/age filters, Rutracker time-machine range, Jackett date
+    constraints, auto-update interval, Jackett tracker rating breakdown,
+    plus a separate KP-cache section (entry count + match/miss split + budget).
+    """
+    if not MOVIE_DISCOVERY_ENABLED:
+        return "🎬 <b>Новинки</b>\n\n• Статус: выключены"
+
     cache = state_store.load_movie_discovery_cache()
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     updated_at = str(cache.get("updated_at") or "ещё не обновлялись")
@@ -961,13 +1006,9 @@ def _format_admin_movie_discovery_line() -> str:
         sources.append("Jackett")
     source_text = ", ".join(sources) if sources else "нет источников"
 
-    if not MOVIE_DISCOVERY_ENABLED:
-        return "• Статус: выключены"
-
-    status = "включены" if sources else "включены, но нет источников"
-    kp_stats_line = _format_kp_api_stats_line(cache)
     lines = [
-        f"• Статус: {status}",
+        "🎬 <b>Новинки</b> — настройки и обслуживание",
+        "",
         f"• Источники: {source_text}",
         f"• Общие фильтры: {qualities} · КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}",
         f"• Rutracker: {_movie_rutracker_tm_label(MOVIE_DISCOVERY_RUTRACKER_TM)}",
@@ -976,15 +1017,8 @@ def _format_admin_movie_discovery_line() -> str:
         f"• Автообновление: раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч",
         f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}",
     ]
-    if kp_stats_line:
-        lines.append(kp_stats_line)
 
-    # Subscriber count
-    movie_sub_count = len(_get_movie_subscriptions())
-    if movie_sub_count:
-        lines.append(f"• Подписок на /new: {movie_sub_count}")
-
-    # Tracker rating status
+    # Tracker rating breakdown
     md_settings = _load_movie_discovery_settings()
     known_ids: list[str] = md_settings.get("jackett_trackers_known") or []
     if known_ids:
@@ -998,6 +1032,26 @@ def _format_admin_movie_discovery_line() -> str:
         if enabled_ids_raw is not None:
             tracker_line += f" ({len(enabled_sorted)}/{len(known_ids)})"
         lines.append(f"• Трекеры рейтинга: {tracker_line}")
+
+    # KP API section — separate block. Only meaningful if KP is enabled.
+    if KINOPOISK_ENABLED:
+        kp_stats_line = _format_kp_api_stats_line(cache)
+        kp_cache_dict = cache.get("kp_cache") if isinstance(cache.get("kp_cache"), dict) else {}
+        total_entries = len(kp_cache_dict)
+        matched = sum(1 for e in kp_cache_dict.values() if isinstance(e, dict) and e.get("kp_id"))
+
+        lines.append("")
+        lines.append("<b>KP API</b>")
+        if kp_stats_line:
+            lines.append(kp_stats_line)
+        lines.append(f"• Записей в кэше: {total_entries} ({matched} с матчем)")
+
+    # Subscriber count (kept here too — operator may want it next to other
+    # operational details when troubleshooting why pushes go/don't go).
+    movie_sub_count = len(_get_movie_subscriptions())
+    if movie_sub_count:
+        lines.append("")
+        lines.append(f"• Подписок на /new: {movie_sub_count}")
 
     return "\n".join(lines)
 
@@ -1049,7 +1103,7 @@ async def _build_admin_panel_text() -> str:
         "<i>Живой статус сервисов — в разделе «Диагностика».</i>",
         "",
         "🎬 <b>Новинки</b>",
-        _format_admin_movie_discovery_line(),
+        _format_admin_movie_discovery_summary(),
     ]
     return "\n".join(lines)
 
@@ -7349,6 +7403,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         asyncio.create_task(_recompute_movie_discovery_from_cache())
         text, keyboard = await _movie_trackers_panel()
         await _safe_edit_callback(query, text, reply_markup=keyboard)
+        return
+
+    if action == "movie_status":
+        # Drill-down opened from main /admin via «🎬 Новинки». Shows full
+        # discovery configuration + KP cache info; KP management buttons are
+        # hidden when KINOPOISK_API_KEY is not configured.
+        await _safe_edit_callback(
+            query,
+            _format_admin_movie_discovery_details(),
+            parse_mode="HTML",
+            reply_markup=_admin_movie_status_keyboard(show_kp_buttons=KINOPOISK_ENABLED),
+        )
         return
 
     await _safe_edit_callback(query, "🛠️ Обновляю админ-панель…")

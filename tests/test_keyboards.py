@@ -5,6 +5,7 @@ from keyboards import (
     _admin_kp_cache_cleared_keyboard,
     _admin_kp_cache_confirm_keyboard,
     _admin_kp_force_refresh_keyboard,
+    _admin_movie_status_keyboard,
     _admin_panel_keyboard,
     _final_notification_keyboard,
     _jackett_select_keyboard,
@@ -83,17 +84,30 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["🔔 Подписки"], "admin:subscriptions")
         self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
-    def test_admin_panel_keyboard_has_kp_cache_clear_button(self) -> None:
+    def test_admin_panel_keyboard_movie_row_has_two_buttons(self) -> None:
+        """Main panel groups «🎬 Новинки» (drill-down) and «🎬 Трекеры новинок»
+        into a single row to save vertical space on mobile."""
         keyboard = _admin_panel_keyboard()
+        movie_row = next(
+            (row for row in keyboard.inline_keyboard
+             if any(b.text.startswith("🎬") for b in row)),
+            None,
+        )
+        self.assertIsNotNone(movie_row, "movie button row must exist")
+        labels = [b.text for b in movie_row]
+        callbacks = {b.text: b.callback_data for b in movie_row}
+        self.assertEqual(labels, ["🎬 Новинки", "🎬 Трекеры новинок"])
+        self.assertEqual(callbacks["🎬 Новинки"], "admin:movie_status")
+        self.assertEqual(callbacks["🎬 Трекеры новинок"], "admin:movie_trackers")
 
-        buttons = {
-            button.text: button.callback_data
-            for row in keyboard.inline_keyboard
-            for button in row
-        }
-
-        self.assertIn("🗑 Очистить KP кеш", buttons, "KP cache clear button must be present")
-        self.assertEqual(buttons["🗑 Очистить KP кеш"], "admin:clear_kp_cache")
+    def test_admin_panel_keyboard_kp_buttons_moved_to_drilldown(self) -> None:
+        """KP cache management buttons are no longer on the main panel —
+        they live inside the «🎬 Новинки» drill-down so the main panel
+        stays short on mobile."""
+        keyboard = _admin_panel_keyboard()
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertNotIn("🔄 Обновить KP кэш", labels)
+        self.assertNotIn("🗑 Очистить KP кеш", labels)
 
     def test_admin_diagnostics_keyboard_can_return_home(self) -> None:
         keyboard = _admin_diagnostics_keyboard()
@@ -268,14 +282,24 @@ class AdminKpForceRefreshKeyboardTests(unittest.TestCase):
                 self.assertEqual(buttons["⬅️ Назад"], "admin:home")
                 self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
-    def test_admin_panel_has_force_refresh_button(self) -> None:
-        buttons = self._buttons(_admin_panel_keyboard())
-        self.assertIn("🔄 Обновить KP кэш", buttons)
+    def test_movie_status_drilldown_with_kp_shows_management_buttons(self) -> None:
+        """KP cache buttons are now scoped to the «🎬 Новинки» drill-down.
+        They appear when KINOPOISK_API_KEY is configured."""
+        buttons = self._buttons(_admin_movie_status_keyboard(show_kp_buttons=True))
         self.assertEqual(buttons["🔄 Обновить KP кэш"], "admin:force_kp_refresh")
+        self.assertEqual(buttons["🗑 Очистить KP кеш"], "admin:clear_kp_cache")
+        # Drill-down screens always end with both «⬅️ Назад» and «✖️ Закрыть».
+        self.assertEqual(buttons["⬅️ Назад"], "admin:home")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
-    def test_admin_panel_still_has_clear_button(self) -> None:
-        buttons = self._buttons(_admin_panel_keyboard())
-        self.assertIn("🗑 Очистить KP кеш", buttons)
+    def test_movie_status_drilldown_without_kp_hides_management_buttons(self) -> None:
+        """When KINOPOISK_API_KEY is empty the drill-down hides KP buttons —
+        they'd be dead-ends. Only navigation remains."""
+        buttons = self._buttons(_admin_movie_status_keyboard(show_kp_buttons=False))
+        self.assertNotIn("🔄 Обновить KP кэш", buttons)
+        self.assertNotIn("🗑 Очистить KP кеш", buttons)
+        self.assertEqual(buttons["⬅️ Назад"], "admin:home")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
 
 class SearchResultsKeyboardTests(unittest.TestCase):
