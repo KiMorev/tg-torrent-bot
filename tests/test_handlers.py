@@ -1361,6 +1361,113 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             await _run_movie_discovery_notifications(cache, app)
         app.bot.send_message.assert_not_called()
 
+    # ---- False-push protection: A (skip on first refresh after startup) ----
+
+    async def test_skip_push_true_suppresses_notification_entirely(self):
+        """Layer A: caller passes skip_push=True on the very first refresh
+        after startup (cold Jackett). Cache is fully populated but no push
+        fires — we wait for the next refresh to reconfirm stability."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [self._make_card("Транзиентный", kp_id=99)]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app, skip_push=True)
+        app.bot.send_message.assert_not_called()
+
+    # ---- False-push protection: B (regression guard) ----
+
+    async def test_regression_above_60pct_skips_push(self):
+        """Layer B: if removed_pct from prev top-10 exceeds 60%, the whole
+        push cycle is skipped (likely an unstable refresh — Jackett
+        warm-up carried over, or a source briefly outaged)."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        # Prev top-10 had kp_ids 1..10; current has only 1, 2, 3, 11, 12, 13
+        # → 7 of 10 prev are missing = 70% removed.
+        cache = {
+            "cards": [self._make_card(str(i), kp_id=i) for i in (1, 2, 3, 11, 12, 13)],
+            "prev_top10_kp_ids": list(range(1, 11)),
+        }
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_not_called()
+
+    async def test_regression_at_50pct_still_pushes(self):
+        """Below the 60% threshold the push proceeds (consensus then filters
+        individual kp_ids — but the cycle as a whole isn't blocked)."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        # Prev top-10 = [1..10], current = [1..5, 11..15] — 5/10 = 50% removed.
+        cache = {
+            "cards": [self._make_card(str(i), kp_id=i) for i in [1, 2, 3, 4, 5, 11, 12, 13, 14, 15]],
+            "prev_top10_kp_ids": list(range(1, 11)),
+        }
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        # At least one push went out (for kp_ids 1..5 which are in both top-10s).
+        self.assertTrue(app.bot.send_message.called)
+
+    # ---- False-push protection: C-lite (consensus filter) ----
+
+    async def test_consensus_blocks_kp_id_not_in_prev_top10(self):
+        """Layer C-lite: a kp_id present in the current top-10 but NOT in the
+        previous top-10 is suppressed — wait one more cycle for confirmation
+        before pushing. This is what would have blocked the «Грехи Запада»
+        false push observed in the cold-Jackett bug.
+
+        Prev top-10 = [1, 2, 3, 4]. Current top-10 = [1, 2, 3, 99].
+        Common = 3/4 → only 25% removed → regression guard passes.
+        kp=99 is new (not in prev) → consensus blocks it.
+        kp=1,2,3 are confirmed → eligible for push.
+        """
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "cards": [
+                self._make_card("Confirmed-A", kp_id=1),
+                self._make_card("Confirmed-B", kp_id=2),
+                self._make_card("Confirmed-C", kp_id=3),
+                self._make_card("Transient", kp_id=99),
+            ],
+            "prev_top10_kp_ids": [1, 2, 3, 4],
+        }
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        kwargs = app.bot.send_message.call_args.kwargs
+        self.assertIn("Confirmed-A", kwargs["text"])
+        self.assertNotIn("Transient", kwargs["text"])
+
+    async def test_consensus_disabled_when_no_prev_top10(self):
+        """If `prev_top10_kp_ids` is absent (e.g. first refresh ever, fresh
+        install), the consensus filter is bypassed — otherwise the very first
+        refresh on a fresh cache could never push anything."""
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [self._make_card("Новый", kp_id=1)]}  # no prev_top10_kp_ids
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_called_once()
+
 
 class RestoreFirstSeenFromPreviousTests(unittest.TestCase):
     """Tests for _restore_first_seen_from_previous — keeps the original first_seen_at

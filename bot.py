@@ -1900,6 +1900,11 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     # See CLAUDE.md → "Movie discovery" markers for what this lets us reconstruct.
     _prev_for_log = _load_movie_discovery_cache()
     _prev_cards_for_log = _prev_for_log.get("cards") or []
+    # Capture previous top-10 kp_ids for the consensus check in notifications
+    # (C-lite: a film is pushed only when it appears in two consecutive top-10s).
+    _prev_top10_kp_ids = [
+        c.get("kp_id") for c in _prev_cards_for_log[:10] if c.get("kp_id")
+    ]
     _rutracker_paused = False
     try:
         if rutracker_client is not None and hasattr(rutracker_client, "_cooldown_until"):
@@ -2096,6 +2101,12 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
             ",".join(map(str, list(_removed_log)[:20])) or "-",
         )
 
+    # Persist previous top-10 alongside new cards. The consensus filter in
+    # _run_movie_discovery_notifications reads this to decide whether a kp_id
+    # in the new top-10 is "confirmed" (was also in the previous top-10) or
+    # "transient" (appeared just now — wait for next cycle to validate).
+    cache["prev_top10_kp_ids"] = _prev_top10_kp_ids
+
     _save_movie_discovery_cache(cache)
     debug_report = {
         "updated_at": now_text,
@@ -2270,7 +2281,12 @@ async def _send_movie_notification_push_to_user(
         return False
 
 
-async def _run_movie_discovery_notifications(cache: dict, app: "Application") -> None:
+async def _run_movie_discovery_notifications(
+    cache: dict,
+    app: "Application",
+    *,
+    skip_push: bool = False,
+) -> None:
     """Send /new notifications to subscribers about films they haven't seen yet.
 
     Per-user semantics: each subscriber has their own ``movie_seen_by_user`` set.
@@ -2282,14 +2298,33 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
     the window we DON'T mark anything as seen. The diff against seen-set self-heals
     on the next in-window refresh — no separate pending queue needed.
 
-    Replaces the legacy global ``movie_notify_last_run_at`` + ``first_seen_at``
-    logic which had two issues: (1) false positives when films oscillated between
-    positions 11+ and the top-10, and (2) inability to bring new subscribers
-    up-to-date on existing top-10 films.
+    False-push protection (three layers, all motivated by the observed bug
+    where cold-Jackett-after-restart produced a transient top-10 containing a
+    film that vanished on the next stable refresh):
+
+      A. ``skip_push=True`` — caller (the movie discovery loop) sets this on the
+         very first refresh after startup. Cold Jackett can't be trusted; we
+         still write the cache so `/new` works, but don't notify anyone.
+
+      B. Regression guard — if removed_pct from the previous top-10 exceeds
+         60%, the refresh is "unstable" (likely the same Jackett warm-up
+         scenario carrying over to a non-first cycle). Skip push entirely.
+
+      C. Consensus filter — only push kp_ids that appear in BOTH the current
+         top-10 AND the previous top-10 (stored in ``cache.prev_top10_kp_ids``).
+         A genuinely-new film waits one cycle for confirmation; a transient
+         dies before reaching the user.
     """
     top_cards = (cache.get("cards") or [])[:10]
     if not top_cards:
         logger.info("movie_discovery: notify skipped — no cards in cache")
+        return
+
+    if skip_push:
+        # Layer A: first refresh after startup. The cache is now updated and
+        # available via /new, but we don't push — the next regular refresh
+        # will reconfirm what's actually stable.
+        logger.info("movie_discovery: notify skipped — first refresh after startup")
         return
 
     subs = _get_movie_subscriptions()
@@ -2303,10 +2338,28 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
         logger.info("movie_discovery: notify skipped — out of notification window")
         return
 
+    # Layer B: regression guard. If most of the previous top-10 has disappeared,
+    # this refresh is unstable — likely cold-Jackett aftermath, or a transient
+    # outage of one of the sources. Skip the whole push cycle.
+    prev_top10_kp_ids: list[int] = list(cache.get("prev_top10_kp_ids") or [])
+    prev_top10_set = {kp for kp in prev_top10_kp_ids if kp}
+    if prev_top10_set:
+        current_kp_set = {c.get("kp_id") for c in top_cards if c.get("kp_id")}
+        common = prev_top10_set & current_kp_set
+        removed_pct = (len(prev_top10_set) - len(common)) / len(prev_top10_set) * 100
+        if removed_pct > 60:
+            logger.warning(
+                "movie_discovery: notify skipped — regression detected "
+                "removed_pct=%.0f%% prev_top10=%d current_common=%d",
+                removed_pct, len(prev_top10_set), len(common),
+            )
+            return
+
     logger.info(
-        "movie_discovery: notify start subscribers=%d top10_kp=[%s]",
+        "movie_discovery: notify start subscribers=%d top10_kp=[%s] prev_top10_kp=[%s]",
         len(subs),
         ",".join(str(c.get("kp_id") or "-") for c in top_cards),
+        ",".join(str(kp) for kp in prev_top10_kp_ids) or "-",
     )
 
     for chat_id_str in list(subs.keys()):
@@ -2319,9 +2372,14 @@ async def _run_movie_discovery_notifications(cache: dict, app: "Application") ->
         #   - notified_at: bot has already pushed it once → avoid duplicate push
         #   - shown_at: user has already opened /new and seen the film → push
         #     would be redundant
+        # Plus Layer C: only push kp_ids confirmed by appearing in the previous
+        # top-10. A film entering the top-10 for the first time has to survive
+        # one more cycle before its push is allowed.
         new_for_user = [
             c for c in top_cards
-            if not _is_card_notified(c, chat_id) and not _is_card_shown_in_new(c, chat_id)
+            if not _is_card_notified(c, chat_id)
+            and not _is_card_shown_in_new(c, chat_id)
+            and (not prev_top10_set or c.get("kp_id") in prev_top10_set)
         ]
         if not new_for_user:
             logger.info(
@@ -2372,7 +2430,11 @@ async def _movie_discovery_loop(app: "Application") -> None:
         if is_first:
             logger.info("movie_discovery: first refresh after startup BEGIN")
         cache = await _refresh_movie_discovery_cache()
-        await _run_movie_discovery_notifications(cache, app)
+        # Layer A of false-push protection: the very first refresh after
+        # startup runs against a cold Jackett (its indexer cache hasn't
+        # warmed up yet), so the resulting top-10 may contain transients.
+        # We update the cache so /new works, but suppress the push.
+        await _run_movie_discovery_notifications(cache, app, skip_push=is_first)
         if is_first:
             logger.info("movie_discovery: first refresh after startup DONE")
             first_refresh_done = True

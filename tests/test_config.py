@@ -84,7 +84,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.movie_discovery_rutracker_tm, 32)
         self.assertTrue(settings.movie_discovery_jackett_require_date)
         self.assertEqual(settings.movie_discovery_jackett_max_age_days, 32)
-        self.assertEqual(settings.movie_discovery_limit, 20)
+        self.assertEqual(settings.movie_discovery_limit, 30)
         self.assertEqual(settings.movie_discovery_min_kp_rating, 6.0)
         self.assertEqual(settings.movie_discovery_qualities, "1080p")
         self.assertFalse(settings.plex_enabled)
