@@ -342,6 +342,21 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         self.assertNotIn("↩️ Повторить через Jackett", labels_switch)
         self.assertNotIn("🔄 Сменить трекеры", labels_retry)
 
+    def test_partial_result_offers_two_subscribe_modes(self) -> None:
+        """A partial result must offer both «📺 Серии» (per_episode) and
+        «🎯 Сезон» (season_complete) so the user picks notify mode at subscribe time."""
+        results = [{"title": "Series S01", "partial": True}]
+        keyboard = _search_results_keyboard(results)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        # Per-episode button
+        per_episode_label = next((t for t in buttons if t.startswith("⬇️📺 Серии")), None)
+        self.assertIsNotNone(per_episode_label, "per-episode subscribe button must exist")
+        self.assertTrue(buttons[per_episode_label].startswith("srch:sub:"))
+        # Season-complete button
+        season_label = next((t for t in buttons if t.startswith("⬇️🎯 Сезон")), None)
+        self.assertIsNotNone(season_label, "season-complete subscribe button must exist")
+        self.assertTrue(buttons[season_label].startswith("srch:sub_season:"))
+
     def test_neither_button_shown_by_default(self) -> None:
         keyboard = _search_results_keyboard([])
         labels = [b.text for row in keyboard.inline_keyboard for b in row]

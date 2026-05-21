@@ -57,7 +57,17 @@ def build_jackett_subscription(
     result: dict,
     seen_results: list[dict],
     added_at: str,
+    notify_mode: str = "per_episode",
 ) -> dict:
+    """Build a Jackett subscription dict.
+
+    ``notify_mode`` controls when push notifications fire:
+      - ``per_episode``: notify on every detected episode-end advance (default,
+        preserves legacy behaviour).
+      - ``season_complete``: silently advance state, notify only when
+        ``new_end >= total_episodes`` — one consolidated push per season.
+    Both modes still trigger auto-download so Plex gets every episode file.
+    """
     title = str(result.get("title") or "")
     query = str(query or title)
     episode_info = _parse_episode_info(title)
@@ -75,6 +85,7 @@ def build_jackett_subscription(
         "seen_titles": [r["title"] for r in seen_results if r.get("title")],
         "added_at": added_at,
         "last_check": added_at,
+        "notify_mode": notify_mode,
     }
     if episode_info:
         sub["last_episode_end"] = episode_info[0]

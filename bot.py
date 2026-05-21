@@ -835,19 +835,32 @@ def _can_manage_subscription(chat_id: int | None, sub: dict | None) -> bool:
 def _admin_subscriptions_keyboard(subs: dict[str, dict]) -> InlineKeyboardMarkup:
     rows = []
     for index, (key, sub) in enumerate(subs.items(), 1):
+        # Toggle button shows the CURRENT mode (📺 per_episode, 🎯 season_complete).
+        # Tapping flips to the other mode. Same callback for both subscription
+        # types — the handler reads the type from the loaded sub dict.
+        current_mode = sub.get("notify_mode") or "per_episode"
+        mode_label = "📺→🎯" if current_mode == "per_episode" else "🎯→📺"
         if sub.get("type") == "jackett":
             rows.append([
                 InlineKeyboardButton(
                     f"🗑️ {index}. Jackett",
                     callback_data=f"{SUB_CALLBACK_PREFIX}:admin_jackett_unsub:{key}",
-                )
+                ),
+                InlineKeyboardButton(
+                    mode_label,
+                    callback_data=f"{SUB_CALLBACK_PREFIX}:admin_set_mode:{key}",
+                ),
             ])
         else:
             rows.append([
                 InlineKeyboardButton(
                     f"🗑️ {index}. Rutracker",
                     callback_data=f"{SUB_CALLBACK_PREFIX}:admin_unsub:{key}",
-                )
+                ),
+                InlineKeyboardButton(
+                    mode_label,
+                    callback_data=f"{SUB_CALLBACK_PREFIX}:admin_set_mode:{key}",
+                ),
             ])
 
     rows.append([
@@ -872,6 +885,10 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
 
     for index, (key, sub) in enumerate(subs.items(), 1):
         owner = _subscription_owner_label(sub.get("chat_id"), approved_users)
+        notify_mode = sub.get("notify_mode") or "per_episode"
+        mode_label = (
+            "🎯 сезон целиком" if notify_mode == "season_complete" else "📺 каждая серия"
+        )
         if sub.get("type") == "jackett":
             query_text = html_module.escape(str(sub.get("query") or key))
             last_check = html_module.escape(str(sub.get("last_check") or "—"))
@@ -885,6 +902,7 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
                 f"   Трекер: {tracker}\n"
                 f"   Тема: {title or query_text}\n"
                 f"   Серии: {ep_end} из {total}\n"
+                f"   Режим: {mode_label}\n"
                 f"   Запрос: {query_text}\n"
                 f"   Проверено: {last_check}"
             )
@@ -897,7 +915,8 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
             f"\n{index}. 🔎 <b>Rutracker</b>\n"
             f"   Владелец: {owner}\n"
             f"   Тема: {title}\n"
-            f"   Серии: {ep_end} из {total}"
+            f"   Серии: {ep_end} из {total}\n"
+            f"   Режим: {mode_label}"
         )
         if sub.get("unavailable_at"):
             reason = html_module.escape(str(sub.get("unavailable_reason") or "тема недоступна"))
@@ -6072,6 +6091,7 @@ async def _download_and_add(
     index: int,
     *,
     subscribe: bool = False,
+    notify_mode: str = "per_episode",
     _skip_plex_check: bool = False,
 ) -> int:
     """Shared implementation for direct-download and direct-subscribe from the results list.
@@ -6102,6 +6122,7 @@ async def _download_and_add(
                 "type": "search",
                 "index": index,
                 "subscribe": subscribe,
+                "notify_mode": notify_mode,
             }
             await query.edit_message_text(
                 _plex_confirm_text(plex_check, display_title, req_quality),
@@ -6287,9 +6308,13 @@ async def _download_and_add(
                     result=result,
                     seen_results=context.user_data.get("srch_results", []),
                     added_at=now_text,
+                    notify_mode=notify_mode,
                 )
                 state_store.save_topic_subscriptions(subs)
-                logger.info("Jackett subscription added: key=%s query=%s", sub_key, subs[sub_key]["query"])
+                logger.info(
+                    "Jackett subscription added: key=%s query=%s notify_mode=%s",
+                    sub_key, subs[sub_key]["query"], notify_mode,
+                )
             else:
                 # Rutracker topic subscription (existing logic)
                 episode_info = _parse_episode_info(title)
@@ -6301,11 +6326,12 @@ async def _download_and_add(
                         "last_episode_end": episode_info[0],
                         "total_episodes": episode_info[1],
                         "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
+                        "notify_mode": notify_mode,
                     }
                     state_store.save_topic_subscriptions(subs)
                     logger.info(
-                        "Subscription added: topic=%s chat=%s episodes=%s/%s",
-                        topic_id, chat_id, episode_info[0], episode_info[1],
+                        "Subscription added: topic=%s chat=%s episodes=%s/%s notify_mode=%s",
+                        topic_id, chat_id, episode_info[0], episode_info[1], notify_mode,
                     )
 
         added_msg = _task_added_message(
@@ -6378,7 +6404,7 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def search_direct_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Нажатие «🔔 Следить» прямо в списке результатов."""
+    """Нажатие «⬇️📺 Серии» в списке результатов: подписка с per-episode push."""
     query = update.callback_query
     await query.answer()
     try:
@@ -6386,7 +6412,31 @@ async def search_direct_subscribe(update: Update, context: ContextTypes.DEFAULT_
     except (ValueError, IndexError):
         await query.edit_message_text("Ошибка при разборе запроса.")
         return ConversationHandler.END
-    return await _download_and_add(query, context, index, subscribe=True)
+    return await _download_and_add(
+        query, context, index, subscribe=True, notify_mode="per_episode",
+    )
+
+
+async def search_direct_subscribe_season_complete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Нажатие «⬇️🎯 Сезон» в списке результатов: подписка с тихим режимом.
+
+    Бот скачивает каждую новую серию (Plex получает файлы как обычно), но
+    push'и пользователю придут только когда сезон закроется (`new_end >=
+    total_episodes`). Полезно для тех кто марафонит — один push на сезон
+    вместо одного на каждую серию.
+    """
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+    return await _download_and_add(
+        query, context, index, subscribe=True, notify_mode="season_complete",
+    )
 
 
 async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -6403,6 +6453,7 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
         return await _download_and_add(
             query, context, pending["index"],
             subscribe=pending.get("subscribe", False),
+            notify_mode=pending.get("notify_mode", "per_episode"),
             _skip_plex_check=True,
         )
 
@@ -6767,6 +6818,30 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text, keyboard = _build_admin_subscriptions_view()
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
+    elif action == "admin_set_mode":
+        # Toggle notify_mode of an existing subscription. Works for both
+        # Rutracker and Jackett — the type is stored on the sub dict itself.
+        if not _is_admin_chat(chat_id):
+            await query.edit_message_text("Только администратор может управлять всеми подписками.")
+            return
+
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.get(topic_id)
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.")
+            return
+        current = sub.get("notify_mode") or "per_episode"
+        new_mode = "season_complete" if current == "per_episode" else "per_episode"
+        sub["notify_mode"] = new_mode
+        state_store.save_topic_subscriptions(subs)
+        logger.info(
+            "Subscription mode toggled: key=%s %s → %s by chat=%s",
+            topic_id, current, new_mode, chat_id,
+        )
+
+        text, keyboard = _build_admin_subscriptions_view()
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+
 
 async def _check_jackett_sub_via_rutracker_direct(
     app: Application,
@@ -7018,6 +7093,8 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             short_q = search_query[:40] + "…" if len(search_query) > 40 else search_query
             episode_info = _parse_episode_info(candidate.title)
             progress = f"\nСерии: {episode_info[0]} из {episode_info[1]}" if episode_info else ""
+            notify_mode = sub.get("notify_mode") or "per_episode"
+            is_complete = bool(episode_info and episode_info[0] >= episode_info[1] > 0)
 
             # Try to auto-download the update (same as Rutracker subscription behaviour).
             task_id: str | None = None
@@ -7032,6 +7109,27 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     "Subscription auto-download failed for %s: %s — sending notify-only",
                     key, dl_err,
                 )
+
+            # Season-complete mode: silently advance subscription state and skip
+            # the push until the season is fully out. Download has already happened
+            # above so Plex sees every episode regardless.
+            if notify_mode == "season_complete" and not is_complete:
+                checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                if sub.get("version") == JACKETT_SUBSCRIPTION_SCHEMA:
+                    apply_jackett_subscription_match(sub, candidate, checked_at)
+                else:
+                    seen_titles = list(dict.fromkeys([
+                        *sub.get("seen_titles", []),
+                        *(r.title for r in new_results),
+                    ]))
+                    sub["seen_titles"] = seen_titles[-100:]
+                    sub["last_check"] = checked_at
+                changed = True
+                logger.info(
+                    "Jackett subscription silent advance (season_complete): key=%s title=%s",
+                    key, candidate.title,
+                )
+                continue
 
             # Build notification text depending on whether auto-download succeeded.
             if task_id is not None:
@@ -7255,6 +7353,7 @@ async def _check_subscriptions(app: Application) -> None:
 
             chat_id = sub.get("chat_id")
             is_complete = new_end >= new_total
+            notify_mode = sub.get("notify_mode") or "per_episode"
 
             safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
             temp_path = _temp_path(safe_name)
@@ -7278,6 +7377,18 @@ async def _check_subscriptions(app: Application) -> None:
                         temp_path.unlink()
                 except OSError:
                     pass
+
+            # Season-complete mode: file is already downloaded above, but the
+            # push is suppressed until the whole season is out. Advance
+            # last_episode_end silently so the next check compares correctly.
+            if notify_mode == "season_complete" and not is_complete:
+                sub["last_episode_end"] = new_end
+                logger.info(
+                    "Subscription silent advance (season_complete): topic=%s episodes=%s→%s/%s",
+                    topic_id, last_end, new_end, new_total,
+                )
+                changed = True
+                continue
 
             pending = _rutracker_subscription_pending_payload(
                 title=new_title,
@@ -8948,6 +9059,7 @@ def main() -> None:
                 SEARCH_RESULTS: [
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
                     CallbackQueryHandler(search_direct_subscribe, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub:\d+$"),
+                    CallbackQueryHandler(search_direct_subscribe_season_complete, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_season:\d+$"),
                     CallbackQueryHandler(search_results_page, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:res_page:"),
                     CallbackQueryHandler(search_series_entry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:series_base$"),
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),

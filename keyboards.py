@@ -589,15 +589,25 @@ def _search_results_keyboard(
     ]
     rows.append(dl_row)
 
-    # One row per partial result with a combined download+subscribe button.
+    # One row per partial result with two subscribe buttons — let the user pick
+    # their notification mode at subscribe time:
+    #   📺 «Серии» (per_episode) — push on each new episode batch (current behavior).
+    #   🎯 «Сезон» (season_complete) — silent until the whole season is released,
+    #     then one consolidated push. Useful for marathon viewers.
+    # Both buttons trigger the same download + subscribe flow; they differ only
+    # in the `notify_mode` field stored on the subscription.
     for i, result in enumerate(visible):
         if result.get("partial"):
             index = start + i
             rows.append([
                 InlineKeyboardButton(
-                    f"⬇️+🔔 Подписка {index + 1}",
+                    f"⬇️📺 Серии {index + 1}",
                     callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub:{index}",
-                )
+                ),
+                InlineKeyboardButton(
+                    f"⬇️🎯 Сезон {index + 1}",
+                    callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_season:{index}",
+                ),
             ])
 
     if total_pages > 1:

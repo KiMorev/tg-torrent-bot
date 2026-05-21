@@ -924,6 +924,112 @@ class SubscriptionCheckTests(unittest.TestCase):
         mock_rt.download_torrent.assert_called_once_with("123")
         self.assertEqual(mock_app.bot.send_message.await_count, 2)
 
+    def test_season_complete_mode_silent_when_not_finished(self) -> None:
+        """notify_mode=season_complete: bot still downloads the new episodes
+        (so Plex gets the files), but suppresses the push and silently
+        advances last_episode_end. No notification fires until new_end ≥ total."""
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 3 из 10",
+                "last_episode_end": 3,
+                "total_episodes": 10,
+                "notify_mode": "season_complete",
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 5 из 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "dbid_1"
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(5, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        updated = self._store.load_topic_subscriptions()["123"]
+        # State advanced silently
+        self.assertEqual(updated["last_episode_end"], 5)
+        # No pending notification (we explicitly suppressed)
+        self.assertNotIn("pending_notification", updated)
+        # File was downloaded — Plex gets episodes regardless of mode
+        mock_ds.create_torrent_file.assert_called_once()
+        # No push sent to user
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_season_complete_mode_pushes_on_completion(self) -> None:
+        """When new_end ≥ total_episodes the push fires even in season_complete
+        mode — the user finally gets one consolidated «сезон готов» notification."""
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 9 из 10",
+                "last_episode_end": 9,
+                "total_episodes": 10,
+                "notify_mode": "season_complete",
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 10 из 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "dbid_1"
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(10, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        mock_app.bot.send_message.assert_awaited()
+
+    def test_legacy_subscription_without_notify_mode_defaults_to_per_episode(self) -> None:
+        """Backwards compat: subscriptions saved before notify_mode existed
+        should keep firing per-episode notifications (no silent regression)."""
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 3 из 10",
+                "last_episode_end": 3,
+                "total_episodes": 10,
+                # NOTE: no notify_mode field — legacy data shape
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 5 из 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "dbid_1"
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(5, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        # Push fired even though new_end (5) < total (10) — that's per_episode behavior.
+        mock_app.bot.send_message.assert_awaited()
+
     def test_complete_rutracker_subscription_removed_only_after_notification_delivered(self) -> None:
         self._store.save_topic_subscriptions({
             "123": {
