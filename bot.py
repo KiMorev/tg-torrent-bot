@@ -125,6 +125,7 @@ from plex import (
     _normalise_resolution as _plex_normalise_resolution,
 )
 from storage import STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info
+from voice_transcription import transcribe_audio
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
@@ -262,6 +263,9 @@ PENDING_DOWNLOADS_ENABLED = settings.pending_downloads_enabled
 PENDING_DOWNLOADS_INTERVAL_SECONDS = settings.pending_downloads_interval_seconds
 PENDING_DOWNLOADS_TTL_HOURS = settings.pending_downloads_ttl_hours
 STORAGE_ALERT_PERCENT = settings.storage_alert_percent
+OPENAI_API_KEY = settings.openai_api_key
+VOICE_SEARCH_ENABLED = settings.voice_search_enabled and bool(OPENAI_API_KEY)
+VOICE_MAX_SECONDS = settings.voice_max_seconds
 
 # kinopoiskapiunofficial.tech free tier: 500 requests/day
 _KP_DAILY_LIMIT = 500
@@ -8728,6 +8732,115 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _do_process_magnet(progress_message, context, magnet_uri, chat_id=chat_id)
 
 
+async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ConversationHandler entry point for voice messages.
+
+    Pipeline: voice → download OGG → Whisper API → use transcription as a
+    regular search query. We reuse the existing search-options flow, so
+    the only difference from typing is the upfront transcription step.
+
+    Hard-coded safeguards: feature-flag (VOICE_SEARCH_ENABLED), max duration
+    (VOICE_MAX_SECONDS), graceful degradation on any failure (Whisper down,
+    empty transcription, network errors → user sees friendly message,
+    nothing is charged to OpenAI for non-200 responses).
+    """
+    if not _is_allowed(update):
+        await _reply_access_pending(update, context)
+        return ConversationHandler.END
+
+    voice = update.message.voice
+    if voice is None:
+        return ConversationHandler.END
+
+    if not VOICE_SEARCH_ENABLED:
+        await update.message.reply_text(
+            "🎙 Голосовой поиск не настроен. Пришлите текстовое сообщение."
+        )
+        return ConversationHandler.END
+
+    if voice.duration and voice.duration > VOICE_MAX_SECONDS:
+        await update.message.reply_text(
+            f"🎙 Голосовое слишком длинное ({voice.duration}с, лимит {VOICE_MAX_SECONDS}с). "
+            "Запишите короче или пришлите текстом."
+        )
+        return ConversationHandler.END
+
+    status = await update.message.reply_text("🎙 Распознаю…")
+
+    # Download voice file to a temporary path. Telegram returns OGG/Opus.
+    temp_path: Path | None = None
+    try:
+        tg_file = await context.bot.get_file(voice.file_id)
+        safe_name = _safe_filename(f"voice_{voice.file_id}.ogg")
+        temp_path = _temp_path(safe_name)
+        await tg_file.download_to_drive(custom_path=str(temp_path))
+    except Exception:
+        logger.warning("Failed to download voice file id=%s", voice.file_id, exc_info=True)
+        await _safe_edit_message(
+            status,
+            "🎙 Не удалось скачать голосовое. Попробуйте ещё раз или напишите текстом.",
+        )
+        return ConversationHandler.END
+
+    # Whisper call runs in a thread — it's a blocking HTTP request that
+    # can take 1-5 seconds; we don't want to block the event loop.
+    try:
+        transcription = await asyncio.to_thread(
+            transcribe_audio, temp_path, OPENAI_API_KEY,
+        )
+    finally:
+        try:
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+    if not transcription:
+        await _safe_edit_message(
+            status,
+            "🎙 Не получилось распознать. Скажите ещё раз отчётливее или напишите текстом.",
+        )
+        return ConversationHandler.END
+
+    logger.info(
+        "Voice search: chat=%s duration=%ss → %r",
+        _chat_id(update), voice.duration, transcription[:80],
+    )
+
+    # Hand off to the existing search flow. We replicate the relevant
+    # prefix of `search_got_query` rather than call it directly — the
+    # search_got_query expects update.message.text which is None on voice.
+    query_text = _normalize_season_in_query(transcription)
+
+    # Clean up any stale conversation state (matches text_message_entry).
+    _cleanup_plex_pending(context.user_data.pop("plex_pending", None))
+    for stale_key in (
+        "srch_series_query", "srch_series_success_text", "srch_series_success_task_id",
+        "srch_picked_quality", "srch_plex_seasons",
+    ):
+        context.user_data.pop(stale_key, None)
+
+    if rutracker_client is None and jackett_client is None:
+        await _safe_edit_message(
+            status,
+            "🎙 Услышал: «{}»\n\nНо ни Rutracker, ни Jackett не настроены — поиск невозможен."
+            .format(html_module.escape(query_text)),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    context.user_data["srch_query"] = query_text
+    await _safe_edit_message(
+        status,
+        f"🎙 Услышал: «{html_module.escape(query_text)}»\n\nЗапрос: «{html_module.escape(query_text)}»",
+        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
+        parse_mode="HTML",
+    )
+    context.user_data["srch_ui_msg_id"] = status.message_id
+    context.user_data["srch_ui_chat_id"] = update.effective_chat.id
+    return SEARCH_OPTIONS
+
+
 async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """ConversationHandler entry point for all plain text messages.
 
@@ -9029,6 +9142,8 @@ def main() -> None:
             # Every plain text message (KP links, search queries, magnets)
             # is routed by text_message_entry.
             MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
+            # Voice messages → Whisper API transcription → same search flow.
+            MessageHandler(filters.VOICE, voice_message_entry),
             # Jackett subscription "view results" entry point.
             CallbackQueryHandler(
                 search_jackett_check_entry,
@@ -9046,6 +9161,8 @@ def main() -> None:
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
+                    # New voice → re-transcribe and restart with the new query.
+                    MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_ADVANCED: [
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quality:"),
@@ -9055,6 +9172,8 @@ def main() -> None:
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
+                    # New voice → re-transcribe and restart with the new query.
+                    MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_RESULTS: [
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
@@ -9076,6 +9195,8 @@ def main() -> None:
                     CallbackQueryHandler(movie_new_back, pattern=r"^new:back$"),
                     # New text → treat as a fresh query, restarting the flow.
                     MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_entry),
+                    # New voice → re-transcribe and restart with the new query.
+                    MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_SEASON_SELECT: [
                     CallbackQueryHandler(search_season_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season:\d+$"),

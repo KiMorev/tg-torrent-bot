@@ -151,6 +151,9 @@ class AppSettings:
     pending_downloads_file: Path
     storage_alert_percent: int
     storage_history_file: Path
+    openai_api_key: str
+    voice_search_enabled: bool
+    voice_max_seconds: int
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
@@ -271,4 +274,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         storage_history_file=Path(
             env.get("STORAGE_HISTORY_FILE", str(state_dir / "storage_history.json"))
         ),
+        openai_api_key=env.get("OPENAI_API_KEY", "").strip(),
+        voice_search_enabled=env_bool(env, "VOICE_SEARCH_ENABLED", True),
+        voice_max_seconds=max(5, min(600, env_int(env, "VOICE_MAX_SECONDS", 30))),
     )

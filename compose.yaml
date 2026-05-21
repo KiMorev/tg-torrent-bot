@@ -77,6 +77,9 @@ services:
       PENDING_DOWNLOADS_INTERVAL_SECONDS: "${PENDING_DOWNLOADS_INTERVAL_SECONDS:-300}"
       PENDING_DOWNLOADS_TTL_HOURS: "${PENDING_DOWNLOADS_TTL_HOURS:-24}"
       STORAGE_ALERT_PERCENT: "${STORAGE_ALERT_PERCENT:-90}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      VOICE_SEARCH_ENABLED: "${VOICE_SEARCH_ENABLED:-true}"
+      VOICE_MAX_SECONDS: "${VOICE_MAX_SECONDS:-30}"
 
   # Watchtower auto-updates labelled containers when a new image digest appears in GHCR.
   # Polls every 5 minutes. Only the tg_torrent_drop container is watched (label filter).
