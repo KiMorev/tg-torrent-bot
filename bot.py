@@ -466,6 +466,34 @@ async def _send_access_request_to_admins(update: Update, context: ContextTypes.D
     return sent
 
 
+def _build_value_props(*, joined: bool = True) -> str | list[str]:
+    """Compose the bullet list of features available to an approved user.
+
+    Each bullet is conditioned on the corresponding configuration flag so a
+    minimal install (no Plex, no Movie discovery, no Kinopoisk) doesn't
+    promise capabilities it doesn't have. Reused by the unauthenticated
+    welcome (_reply_access_pending) and the authenticated /start.
+    """
+    search_enabled = RUTRACKER_ENABLED or JACKETT_ENABLED
+    bullets: list[str] = []
+    if MOVIE_DISCOVERY_ENABLED and search_enabled:
+        bullets.append(
+            "• 🎬 Подборка свежих фильмов и сериалов с рейтингом Кинопоиска — /new"
+        )
+    if search_enabled:
+        bullets.append(
+            "• 🔍 Поиск и скачивание торрентов — просто пришлите название фильма"
+        )
+    if PLEX_ENABLED:
+        bullets.append(
+            "• ▶️ Открытие готового контента в Plex одной кнопкой"
+        )
+    bullets.append(
+        "• 🔔 Подписки на новые серии и автоуведомления когда всё готово"
+    )
+    return "\n".join(bullets) if joined else bullets
+
+
 async def _reply_access_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = _chat_id(update)
     sent_to_admin = await _send_access_request_to_admins(update, context)
@@ -477,9 +505,14 @@ async def _reply_access_pending(update: Update, context: ContextTypes.DEFAULT_TY
 
     if update.effective_message:
         await update.effective_message.reply_text(
-            "Доступ пока не настроен.\n"
-            f"Ваш chat_id: {chat_id}\n"
-            f"{tail}"
+            "👋 Это <b>CineDownload</b> — помощник для домашнего киносервера на базе Plex.\n"
+            "\n"
+            "После одобрения вам будут доступны:\n"
+            f"{_build_value_props()}\n"
+            "\n"
+            f"Ваш chat_id: <code>{chat_id}</code>\n"
+            f"{tail}",
+            parse_mode="HTML",
         )
 
 
@@ -7082,17 +7115,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply_access_pending(update, context)
         return
 
-    if RUTRACKER_ENABLED or JACKETT_ENABLED:
-        kp_hint = " или ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
-        search_hint = f"Напишите название фильма{kp_hint} — бот найдёт торрент сам.\n"
-    else:
-        search_hint = ""
-    await update.message.reply_text(
-        "Пришлите .torrent файлом или magnet-ссылку сообщением.\n"
-        f"{search_hint}"
-        "Откройте /status, чтобы смотреть загрузки и управлять ими.\n"
-        "Команды доступны через меню Telegram."
+    search_enabled = RUTRACKER_ENABLED or JACKETT_ENABLED
+    kp_hint = " или ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
+
+    main_bullets: list[str] = []
+    if MOVIE_DISCOVERY_ENABLED and search_enabled:
+        main_bullets.append(
+            "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
+        )
+    if search_enabled:
+        main_bullets.append(
+            f"• 🔍 Пришлите название фильма{kp_hint} — найду и предложу варианты"
+        )
+    main_bullets.append("• 📋 /status — текущие загрузки и недавняя история")
+
+    auto_bullets: list[str] = ["• когда скачивание завершилось"]
+    auto_bullets.append("• когда вышла новая серия в подписке")
+    if PLEX_ENABLED:
+        auto_bullets.append("• когда контент появился в Plex")
+
+    text = (
+        "👋 Готов к работе!\n"
+        "\n"
+        "<b>Главное:</b>\n"
+        f"{chr(10).join(main_bullets)}\n"
+        "\n"
+        "<b>Уведомления приходят сами:</b>\n"
+        f"{chr(10).join(auto_bullets)}\n"
+        "\n"
+        "Подробнее — /help."
     )
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

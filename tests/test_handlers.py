@@ -60,6 +60,8 @@ from bot import (
     admin_callback,
     admin_command,
     help_command,
+    start,
+    _reply_access_pending,
     movie_new_close_callback,
     movie_new_command,
     movie_new_refresh_callback,
@@ -256,6 +258,102 @@ class HelpCommandTests(unittest.TestCase):
         text = update.message.reply_text.call_args.args[0]
         self.assertIn("/admin открывает админ-панель с диагностикой и главной сводкой", text)
         self.assertIn("/users управляет доступом пользователей", text)
+
+
+class StartCommandTests(unittest.TestCase):
+    """Welcome messages: authenticated /start + access-pending response.
+
+    These exist to lock in the post-rewrite centre of gravity (movie
+    discovery + Plex + auto-notifications) and to ensure regressions don't
+    silently revert to the legacy "send a .torrent or magnet" wording.
+    """
+
+    def test_start_for_approved_user_prioritises_new_and_mentions_help(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(
+                load_approved_chat_ids=MagicMock(return_value=set()),
+            )),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+        ):
+            asyncio.run(start(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        # Centre of gravity: /new comes first.
+        self.assertIn("/new", text)
+        # /help is referenced at the bottom — confirms we didn't drop it again.
+        self.assertIn("/help", text)
+        # Legacy framing must be gone: bot should not lead with magnet/.torrent talk.
+        self.assertNotIn(".torrent файлом", text)
+        self.assertNotIn("magnet-ссылку сообщением", text)
+        # /status still mentioned as one of the entry points.
+        self.assertIn("/status", text)
+        # Order check: /new bullet must appear before the free-text search bullet.
+        self.assertLess(text.index("/new"), text.index("Пришлите название"))
+
+    def test_start_omits_search_bullet_when_no_search_sources(self):
+        """If neither Rutracker nor Jackett is configured, the search bullet
+        and the /new bullet (which depends on search sources) both disappear."""
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(
+                load_approved_chat_ids=MagicMock(return_value=set()),
+            )),
+            patch.object(bot, "RUTRACKER_ENABLED", False),
+            patch.object(bot, "JACKETT_ENABLED", False),
+            patch.object(bot, "KINOPOISK_ENABLED", False),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+        ):
+            asyncio.run(start(update, context))
+        text = update.message.reply_text.call_args.args[0]
+        self.assertNotIn("Пришлите название", text)
+        # /new also gone — relies on search sources for the actual download step.
+        self.assertNotIn("/new", text)
+        # /status survives as a baseline entry point.
+        self.assertIn("/status", text)
+
+    def test_access_pending_introduces_bot_and_lists_value_props(self):
+        update = _make_message_update(chat_id=999)
+        context = _make_context()
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", set()),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(
+                load_approved_chat_ids=MagicMock(return_value=set()),
+            )),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_send_access_request_to_admins",
+                        AsyncMock(return_value=False)),
+        ):
+            asyncio.run(_reply_access_pending(update, context))
+
+        text = update.effective_message.reply_text.call_args.args[0]
+        # Brand mention — replaces the old terse "Доступ пока не настроен" only message.
+        self.assertIn("CineDownload", text)
+        # User's chat_id is still shown (admin needs it).
+        self.assertIn("999", text)
+        # Tail string for the "couldn't reach admin" branch.
+        self.assertIn("Передайте этот chat_id администратору", text)
+        # At least one value-prop bullet (with emoji prefix) is present.
+        self.assertTrue(
+            any(marker in text for marker in ("🎬", "🔍", "▶️", "🔔")),
+            "expected at least one value-prop bullet",
+        )
 
 
 # ---------------------------------------------------------------------------
