@@ -125,7 +125,12 @@ from plex import (
     _normalise_resolution as _plex_normalise_resolution,
 )
 from storage import STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info
-from voice_transcription import transcribe_audio
+from voice_transcription import (
+    check_api_key as voice_check_api_key,
+    estimate_cost_usd as voice_estimate_cost_usd,
+    transcribe_audio,
+    transcribe_audio_detailed,
+)
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
@@ -1022,6 +1027,28 @@ _STORAGE_ALERT_STATE: dict[str, bool] = {"above": False}
 _next_storage_snapshot_at: float | None = None
 
 
+def _format_admin_voice_alert() -> str | None:
+    """Surface a one-line warning in the main /admin panel when the voice
+    search feature is configured but broken.
+
+    Triggers on: invalid API key (last_error.type=="auth") or exhausted
+    quota (last_error.type=="quota_exceeded"). Other transient errors stay
+    in the diagnostics view; they self-recover.
+    """
+    if not VOICE_SEARCH_ENABLED:
+        return None
+    usage = state_store.load_voice_usage()
+    last_error = usage.get("last_error") if isinstance(usage.get("last_error"), dict) else None
+    if not last_error:
+        return None
+    err_type = str(last_error.get("type") or "")
+    if err_type == "quota_exceeded":
+        return "⚠️ 🎙 Голосовой поиск: исчерпан баланс/лимит OpenAI"
+    if err_type == "auth":
+        return "⚠️ 🎙 Голосовой поиск: ключ OpenAI невалиден"
+    return None
+
+
 def _format_storage_forecast(info: StorageInfo) -> str | None:
     """7-day linear extrapolation to STORAGE_ALERT_PERCENT.
 
@@ -1309,6 +1336,10 @@ async def _build_admin_panel_text() -> str:
     if storage_block:
         lines.append("")
         lines.append(storage_block)
+    voice_alert = _format_admin_voice_alert()
+    if voice_alert:
+        lines.append("")
+        lines.append(voice_alert)
     return "\n".join(lines)
 
 
@@ -4798,6 +4829,9 @@ async def _build_diagnostics_text() -> str:
         plex_client=plex_client,
         plex_cache_info=_plex_cache_info() if plex_client else None,
         plex_deeplink_base_url=PLEX_DEEPLINK_BASE_URL,
+        voice_search_enabled=VOICE_SEARCH_ENABLED,
+        openai_api_key=OPENAI_API_KEY,
+        voice_usage=state_store.load_voice_usage(),
     )
     return format_diagnostics(report)
 
@@ -8732,6 +8766,55 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _do_process_magnet(progress_message, context, magnet_uri, chat_id=chat_id)
 
 
+def _voice_record_usage(
+    *,
+    duration_sec: float,
+    text: str,
+    outcome: str,  # "ok" | "error"
+    error_label: str | None,
+) -> None:
+    """Append a voice-search request to the rolling usage file.
+
+    Keeps a single monthly bucket (auto-resets when the month rolls over) plus
+    `last_request` and `last_error` records for /admin diagnostics. Cheap enough
+    to call synchronously inside the voice handler — one JSON load/save.
+    """
+    now = datetime.now(DISPLAY_TIMEZONE)
+    current_month = now.strftime("%Y-%m")
+    usage = state_store.load_voice_usage()
+    if usage.get("month") != current_month:
+        usage = {
+            "month": current_month,
+            "request_count": 0,
+            "total_seconds": 0.0,
+            "estimated_cost_usd": 0.0,
+            "last_request": None,
+            "last_error": usage.get("last_error"),  # preserve last_error across month rollover
+        }
+
+    if outcome == "ok":
+        usage["request_count"] = int(usage.get("request_count", 0)) + 1
+        usage["total_seconds"] = float(usage.get("total_seconds", 0.0)) + duration_sec
+        usage["estimated_cost_usd"] = float(usage.get("estimated_cost_usd", 0.0)) + voice_estimate_cost_usd(duration_sec)
+
+    last_record = {
+        "ts": now.isoformat(timespec="seconds"),
+        "duration_sec": round(duration_sec, 1),
+        "text_preview": (text or "")[:80],
+        "outcome": outcome,
+    }
+    usage["last_request"] = last_record
+
+    if outcome == "error" and error_label:
+        usage["last_error"] = {
+            "ts": now.isoformat(timespec="seconds"),
+            "type": error_label,
+            "text_preview": (text or "")[:80],
+        }
+
+    state_store.save_voice_usage(usage)
+
+
 async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """ConversationHandler entry point for voice messages.
 
@@ -8784,9 +8867,10 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Whisper call runs in a thread — it's a blocking HTTP request that
     # can take 1-5 seconds; we don't want to block the event loop.
+    voice_duration = float(voice.duration or 0)
     try:
-        transcription = await asyncio.to_thread(
-            transcribe_audio, temp_path, OPENAI_API_KEY,
+        transcription, error_label = await asyncio.to_thread(
+            transcribe_audio_detailed, temp_path, OPENAI_API_KEY,
         )
     finally:
         try:
@@ -8796,11 +8880,50 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
     if not transcription:
+        # Record the failure for /admin diagnostics — operators want to know
+        # which type of error happened (quota_exceeded, auth, timeout, …).
+        try:
+            _voice_record_usage(
+                duration_sec=voice_duration,
+                text="",
+                outcome="error",
+                error_label=error_label or "unknown",
+            )
+        except Exception:
+            logger.warning("Failed to record voice usage failure", exc_info=True)
+
+        # User-facing message stays friendly; details are for the admin only.
+        friendly_hint = (
+            "🎙 Не получилось распознать."
+        )
+        if error_label == "quota_exceeded":
+            friendly_hint = (
+                "🎙 OpenAI: исчерпан баланс/лимит. Скажите админу или напишите текстом."
+            )
+        elif error_label == "auth":
+            friendly_hint = (
+                "🎙 OpenAI: ключ невалиден. Скажите админу или напишите текстом."
+            )
+        elif error_label == "timeout":
+            friendly_hint = (
+                "🎙 OpenAI не отвечает (таймаут). Попробуйте ещё раз через минуту."
+            )
         await _safe_edit_message(
             status,
-            "🎙 Не получилось распознать. Скажите ещё раз отчётливее или напишите текстом.",
+            friendly_hint + " Можно прислать текстом.",
         )
         return ConversationHandler.END
+
+    # Success — record the usage for /admin display.
+    try:
+        _voice_record_usage(
+            duration_sec=voice_duration,
+            text=transcription,
+            outcome="ok",
+            error_label=None,
+        )
+    except Exception:
+        logger.warning("Failed to record voice usage success", exc_info=True)
 
     logger.info(
         "Voice search: chat=%s duration=%ss → %r",

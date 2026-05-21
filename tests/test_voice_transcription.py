@@ -199,8 +199,9 @@ class VoiceMessageEntryTests(unittest.TestCase):
             patch.object(bot, "VOICE_SEARCH_ENABLED", True),
             patch.object(bot, "OPENAI_API_KEY", "sk-test"),
             patch.object(bot, "VOICE_MAX_SECONDS", 30),
-            patch.object(bot, "transcribe_audio", return_value=None),
+            patch.object(bot, "transcribe_audio_detailed", return_value=(None, "network")),
             patch.object(bot, "_safe_edit_message", new=AsyncMock()) as edit_mock,
+            patch.object(bot, "_voice_record_usage"),  # silence usage recording in test
         ):
             asyncio.run(bot.voice_message_entry(update, context))
 
@@ -230,9 +231,10 @@ class VoiceMessageEntryTests(unittest.TestCase):
             patch.object(bot, "VOICE_SEARCH_ENABLED", True),
             patch.object(bot, "OPENAI_API_KEY", "sk-test"),
             patch.object(bot, "VOICE_MAX_SECONDS", 30),
-            patch.object(bot, "transcribe_audio", return_value="Дюна часть вторая"),
+            patch.object(bot, "transcribe_audio_detailed", return_value=("Дюна часть вторая", None)),
             patch.object(bot, "rutracker_client", MagicMock()),
             patch.object(bot, "_safe_edit_message", new=AsyncMock()) as edit_mock,
+            patch.object(bot, "_voice_record_usage"),  # silence usage recording in test
         ):
             asyncio.run(bot.voice_message_entry(update, context))
 
@@ -242,6 +244,111 @@ class VoiceMessageEntryTests(unittest.TestCase):
         last_call_text = edit_mock.call_args.args[1]
         self.assertIn("Услышал", last_call_text)
         self.assertIn("Дюна часть вторая", last_call_text)
+
+
+class TranscribeAudioDetailedTests(unittest.TestCase):
+    """Extra coverage for the (text, error_label) tuple return shape."""
+
+    def _audio(self) -> Path:
+        f = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        f.write(b"fake")
+        f.close()
+        return Path(f.name)
+
+    def test_returns_no_key_label_when_key_empty(self):
+        path = self._audio()
+        try:
+            text, err = voice_transcription.transcribe_audio_detailed(path, "")
+            self.assertIsNone(text)
+            self.assertEqual(err, "no_key")
+        finally:
+            path.unlink()
+
+    def test_classifies_401_as_auth(self):
+        mock_response = MagicMock(status_code=401, text="invalid api key")
+        path = self._audio()
+        try:
+            with patch.object(voice_transcription.requests, "post", return_value=mock_response):
+                text, err = voice_transcription.transcribe_audio_detailed(path, "sk-bad")
+            self.assertIsNone(text)
+            self.assertEqual(err, "auth")
+        finally:
+            path.unlink()
+
+    def test_classifies_429_with_quota_body_as_quota_exceeded(self):
+        mock_response = MagicMock(
+            status_code=429,
+            text='{"error":{"type":"insufficient_quota","message":"..."}}',
+        )
+        path = self._audio()
+        try:
+            with patch.object(voice_transcription.requests, "post", return_value=mock_response):
+                text, err = voice_transcription.transcribe_audio_detailed(path, "sk-test")
+            self.assertEqual(err, "quota_exceeded")
+        finally:
+            path.unlink()
+
+    def test_classifies_429_without_quota_body_as_rate_limit(self):
+        mock_response = MagicMock(status_code=429, text='{"error":"too many requests"}')
+        path = self._audio()
+        try:
+            with patch.object(voice_transcription.requests, "post", return_value=mock_response):
+                _text, err = voice_transcription.transcribe_audio_detailed(path, "sk-test")
+            self.assertEqual(err, "rate_limit")
+        finally:
+            path.unlink()
+
+    def test_classifies_timeout(self):
+        path = self._audio()
+        try:
+            with patch.object(
+                voice_transcription.requests, "post",
+                side_effect=_requests.exceptions.Timeout("read timed out"),
+            ):
+                _text, err = voice_transcription.transcribe_audio_detailed(path, "sk-test")
+            self.assertEqual(err, "timeout")
+        finally:
+            path.unlink()
+
+
+class CheckApiKeyTests(unittest.TestCase):
+    """check_api_key pings /v1/models — no audio file involved."""
+
+    def test_returns_false_for_empty_key(self):
+        is_valid, err = voice_transcription.check_api_key("")
+        self.assertFalse(is_valid)
+        self.assertEqual(err, "no_key")
+
+    def test_returns_true_on_200(self):
+        with patch.object(
+            voice_transcription.requests, "get",
+            return_value=MagicMock(status_code=200, text="..."),
+        ):
+            is_valid, err = voice_transcription.check_api_key("sk-test")
+        self.assertTrue(is_valid)
+        self.assertIsNone(err)
+
+    def test_returns_auth_label_on_401(self):
+        with patch.object(
+            voice_transcription.requests, "get",
+            return_value=MagicMock(status_code=401, text="invalid"),
+        ):
+            is_valid, err = voice_transcription.check_api_key("sk-bad")
+        self.assertFalse(is_valid)
+        self.assertEqual(err, "auth")
+
+
+class EstimateCostTests(unittest.TestCase):
+    def test_zero_for_zero_duration(self):
+        self.assertEqual(voice_transcription.estimate_cost_usd(0), 0.0)
+
+    def test_six_tenths_of_a_cent_per_minute(self):
+        # 60 seconds at $0.006/min = $0.006
+        self.assertAlmostEqual(voice_transcription.estimate_cost_usd(60), 0.006, places=5)
+
+    def test_handles_partial_minute(self):
+        # 30 seconds = $0.003
+        self.assertAlmostEqual(voice_transcription.estimate_cost_usd(30), 0.003, places=5)
 
 
 if __name__ == "__main__":

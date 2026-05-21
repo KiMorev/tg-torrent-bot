@@ -418,5 +418,103 @@ class PlexDeeplinkDiagnosticTests(unittest.TestCase):
         self.assertIn("недоступен", svc.summary)
 
 
+class VoiceSearchDiagnosticTests(unittest.TestCase):
+    """Voice-search block: key validity, usage counters, last_error surfacing."""
+
+    def _voice_service(self, report):
+        return next(s for s in report.services if s.name == "Голосовой поиск")
+
+    def _run(
+        self,
+        *,
+        enabled: bool,
+        api_key: str,
+        usage: dict | None = None,
+        check_result: tuple[bool, str | None] = (True, None),
+    ):
+        with unittest.mock.patch(
+            "voice_transcription.check_api_key",
+            return_value=check_result,
+        ):
+            return run_diagnostics(
+                rutracker_client=None,
+                jackett_client=None,
+                ds_client=FakeDownloadStation([]),
+                tracker_service=FakeTrackerService(trackers=[]),
+                display_timezone=timezone.utc,
+                voice_search_enabled=enabled,
+                openai_api_key=api_key,
+                voice_usage=usage or {},
+            )
+
+    def test_disabled_when_feature_off(self):
+        report = self._run(enabled=False, api_key="")
+        svc = self._voice_service(report)
+        self.assertEqual(svc.status, "disabled")
+        self.assertIn("не настроен", svc.summary)
+
+    def test_disabled_when_key_empty(self):
+        report = self._run(enabled=True, api_key="")
+        svc = self._voice_service(report)
+        self.assertEqual(svc.status, "disabled")
+
+    def test_ok_when_key_valid_and_no_recent_error(self):
+        usage = {
+            "month": "2026-05",
+            "request_count": 12,
+            "total_seconds": 78.5,
+            "estimated_cost_usd": 0.078,
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage,
+                           check_result=(True, None))
+        svc = self._voice_service(report)
+        self.assertEqual(svc.status, "ok")
+        self.assertIn("2026-05", " ".join(svc.details))
+        self.assertIn("12 ", " ".join(svc.details))  # request count
+
+    def test_error_when_key_invalid(self):
+        report = self._run(enabled=True, api_key="sk-bad",
+                           check_result=(False, "auth"))
+        svc = self._voice_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("ключ невалиден", svc.summary)
+
+    def test_error_when_quota_exceeded_from_ping(self):
+        report = self._run(enabled=True, api_key="sk-test",
+                           check_result=(False, "quota_exceeded"))
+        svc = self._voice_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("квота", svc.summary)
+
+    def test_error_when_last_error_is_quota_even_if_key_valid(self):
+        """Quota can flicker — key works now, but last actual call hit the cap.
+        We still surface as error so operator tops up the balance."""
+        usage = {
+            "month": "2026-05",
+            "request_count": 142,
+            "last_error": {"ts": "2026-05-22T10:00:00", "type": "quota_exceeded"},
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage,
+                           check_result=(True, None))
+        svc = self._voice_service(report)
+        self.assertEqual(svc.status, "error")
+
+    def test_renders_last_request_when_present(self):
+        usage = {
+            "month": "2026-05",
+            "request_count": 1,
+            "last_request": {
+                "ts": "2026-05-22T14:18:00",
+                "outcome": "ok",
+                "text_preview": "Дюна часть вторая",
+            },
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage,
+                           check_result=(True, None))
+        svc = self._voice_service(report)
+        joined = " ".join(svc.details)
+        self.assertIn("Дюна часть вторая", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

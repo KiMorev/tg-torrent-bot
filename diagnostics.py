@@ -387,6 +387,110 @@ def _plural_ru(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
+def _voice_search_diagnostic(
+    *,
+    enabled: bool,
+    api_key: str,
+    usage: dict,
+) -> ServiceDiagnostic:
+    """Voice-search status: key validity (live ping to /v1/models) + monthly
+    usage counter (from our local state, not OpenAI) + last error.
+
+    States:
+      disabled — feature off (no key or VOICE_SEARCH_ENABLED=false)
+      ok       — key valid, no recent quota/auth error
+      warn     — key valid but last_error within last 24h is non-terminal
+                 (timeout/network/rate_limit)
+      error    — key invalid (401), insufficient_quota seen recently, or
+                 OpenAI completely unreachable
+    """
+    name = "Голосовой поиск"
+    icon = "🎙"
+
+    if not enabled or not api_key:
+        return ServiceDiagnostic(
+            name, "disabled",
+            _summary("disabled", icon, name, "не настроен"),
+            ["   Установите OPENAI_API_KEY в .env, чтобы включить голосовой поиск."],
+        )
+
+    # Lazy import — avoid pulling voice_transcription into diagnostics test runs
+    # that don't need it.
+    from voice_transcription import check_api_key
+
+    is_valid, key_error = check_api_key(api_key)
+
+    details: list[str] = []
+
+    # Usage block — always rendered when the feature is configured, even if the
+    # key check failed. Operator wants to know "what did I spend this month".
+    month = str(usage.get("month") or "—")
+    count = int(usage.get("request_count") or 0)
+    seconds = float(usage.get("total_seconds") or 0.0)
+    cost = float(usage.get("estimated_cost_usd") or 0.0)
+    details.append(
+        f"   За {month}: {count} {_plural_ru(count, 'запрос', 'запроса', 'запросов')} · "
+        f"{seconds:.1f}с · ~${cost:.2f}"
+    )
+
+    last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
+    if last_request:
+        ts = str(last_request.get("ts") or "—")
+        outcome = str(last_request.get("outcome") or "—")
+        preview = str(last_request.get("text_preview") or "")
+        outcome_label = "✅" if outcome == "ok" else "❌"
+        if preview:
+            details.append(f"   Последний: {ts} {outcome_label} «{preview}»")
+        else:
+            details.append(f"   Последний: {ts} {outcome_label}")
+
+    last_error = usage.get("last_error") if isinstance(usage.get("last_error"), dict) else None
+
+    # Determine overall status
+    if not is_valid:
+        # Key check failed — terminal.
+        if key_error == "auth":
+            summary_msg = "ключ невалиден"
+        elif key_error == "quota_exceeded":
+            summary_msg = "превышена квота / нет баланса"
+        elif key_error == "timeout":
+            summary_msg = "OpenAI недоступен (таймаут)"
+        elif key_error == "network":
+            summary_msg = "OpenAI недоступен (сеть)"
+        else:
+            summary_msg = f"ошибка ({key_error})"
+        if last_error:
+            details.append(
+                f"   Последняя ошибка ({last_error.get('ts', '—')}): {last_error.get('type', '—')}"
+            )
+        return ServiceDiagnostic(
+            name, "error",
+            _summary("error", icon, name, summary_msg),
+            details,
+        )
+
+    # Key valid — check whether last_error is recent and severe.
+    if last_error:
+        err_type = str(last_error.get("type") or "")
+        details.append(
+            f"   Последняя ошибка ({last_error.get('ts', '—')}): {err_type}"
+        )
+        if err_type in ("quota_exceeded", "auth"):
+            # Terminal types — surface as error even if current ping succeeded
+            # (quota can flicker, balance topped up between calls).
+            return ServiceDiagnostic(
+                name, "error",
+                _summary("error", icon, name, f"последняя ошибка: {err_type}"),
+                details,
+            )
+
+    return ServiceDiagnostic(
+        name, "ok",
+        _summary("ok", icon, name, "настроен · ключ валиден"),
+        details,
+    )
+
+
 def run_diagnostics(
     *,
     rutracker_client,
@@ -397,6 +501,9 @@ def run_diagnostics(
     plex_client=None,
     plex_cache_info: dict | None = None,
     plex_deeplink_base_url: str = "",
+    voice_search_enabled: bool = False,
+    openai_api_key: str = "",
+    voice_usage: dict | None = None,
 ) -> DiagnosticsReport:
     return DiagnosticsReport(
         [
@@ -406,6 +513,11 @@ def run_diagnostics(
             _public_trackers_diagnostic(tracker_service, display_timezone),
             _plex_diagnostic(plex_client, plex_cache_info),
             _plex_deeplink_diagnostic(plex_deeplink_base_url),
+            _voice_search_diagnostic(
+                enabled=voice_search_enabled,
+                api_key=openai_api_key,
+                usage=voice_usage or {},
+            ),
         ]
     )
 

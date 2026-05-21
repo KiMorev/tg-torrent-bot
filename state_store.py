@@ -29,6 +29,7 @@ class JsonStateStore:
         task_meta_file: Path | None = None,
         pending_downloads_file: Path | None = None,
         storage_history_file: Path | None = None,
+        voice_usage_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -41,6 +42,7 @@ class JsonStateStore:
         self.task_meta_file = task_meta_file
         self.pending_downloads_file = pending_downloads_file
         self.storage_history_file = storage_history_file
+        self.voice_usage_file = voice_usage_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -455,6 +457,32 @@ class JsonStateStore:
             and isinstance(e.get("ts"), str)
             and isinstance(e.get("used_bytes"), int)
         ]
+
+    # ---- Voice search usage stats (for /admin → 🧭 Диагностика block) ----
+
+    def load_voice_usage(self) -> dict:
+        """Return the voice-search usage record, or an empty dict.
+
+        Shape:
+            {
+              "month": "YYYY-MM",
+              "request_count": int,
+              "total_seconds": float,
+              "estimated_cost_usd": float,
+              "last_request": {"ts", "duration_sec", "text_preview", "outcome"},
+              "last_error": {"ts", "type", "raw"} | None,
+            }
+        Counters reset on month rollover (handled by record_voice_usage).
+        """
+        if not self.voice_usage_file:
+            return {}
+        payload = self.load_json_file(self.voice_usage_file, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def save_voice_usage(self, payload: dict) -> None:
+        if not self.voice_usage_file:
+            return
+        self.save_json_file(self.voice_usage_file, payload, "voice usage")
 
     def append_storage_snapshot(self, snapshot: dict, max_age_days: int = 30) -> None:
         """Append a snapshot, prune entries older than `max_age_days`, save atomically.
