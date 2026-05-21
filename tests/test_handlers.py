@@ -223,7 +223,7 @@ class IsAllowedTests(unittest.TestCase):
 
 
 class HelpCommandTests(unittest.TestCase):
-    def test_help_mentions_jackett_only_search(self):
+    def test_help_shows_search_bullet_when_only_jackett_configured(self):
         update = _make_message_update(chat_id=100)
         context = _make_context()
 
@@ -234,14 +234,20 @@ class HelpCommandTests(unittest.TestCase):
             patch.object(bot, "RUTRACKER_ENABLED", False),
             patch.object(bot, "JACKETT_ENABLED", True),
             patch.object(bot, "KINOPOISK_ENABLED", False),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
         ):
             asyncio.run(help_command(update, context))
 
         text = update.message.reply_text.call_args.args[0]
-        self.assertIn("сразу откроется поиск через Jackett", text)
-        self.assertNotIn("/search", text)
+        # Free-text search bullet is present (Jackett alone counts as a search source).
+        self.assertIn("Пришлите название фильма/сериала", text)
+        # Without KP API key we don't suggest pasting Kinopoisk links.
+        self.assertNotIn("ссылку с Кинопоиска", text)
+        # Legacy "сразу откроется поиск" framing is gone.
+        self.assertNotIn("сразу откроется поиск", text)
 
-    def test_help_mentions_admin_diagnostics_for_admins(self):
+    def test_help_mentions_admin_commands_for_admins(self):
         update = _make_message_update(chat_id=300)
         context = _make_context()
 
@@ -252,12 +258,41 @@ class HelpCommandTests(unittest.TestCase):
             patch.object(bot, "RUTRACKER_ENABLED", True),
             patch.object(bot, "JACKETT_ENABLED", True),
             patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
         ):
             asyncio.run(help_command(update, context))
 
         text = update.message.reply_text.call_args.args[0]
-        self.assertIn("/admin открывает админ-панель с диагностикой и главной сводкой", text)
-        self.assertIn("/users управляет доступом пользователей", text)
+        # Admin-only commands appear in the «Служебное» section.
+        self.assertIn("/admin", text)
+        self.assertIn("/users", text)
+        # /status text varies between admin (мои/все) and non-admin (ваши).
+        self.assertIn("переключатель «мои / все»", text)
+
+    def test_help_priority_order_search_then_new(self):
+        """Same ordering principle as /start: free-text search before /new."""
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+        ):
+            asyncio.run(help_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertLess(text.index("Пришлите название"), text.index("/new"))
+        # Plex push bullet is shown when PLEX_ENABLED.
+        self.assertIn("Plex", text)
+        # Subscription bullets appear when search sources are configured.
+        self.assertIn("Подписаться на новые серии", text)
 
 
 class StartCommandTests(unittest.TestCase):
@@ -268,7 +303,7 @@ class StartCommandTests(unittest.TestCase):
     silently revert to the legacy "send a .torrent or magnet" wording.
     """
 
-    def test_start_for_approved_user_prioritises_new_and_mentions_help(self):
+    def test_start_for_approved_user_prioritises_search_and_mentions_help(self):
         update = _make_message_update(chat_id=100)
         context = _make_context()
         with (
@@ -295,8 +330,9 @@ class StartCommandTests(unittest.TestCase):
         self.assertNotIn("magnet-ссылку сообщением", text)
         # /status still mentioned as one of the entry points.
         self.assertIn("/status", text)
-        # Order check: /new bullet must appear before the free-text search bullet.
-        self.assertLess(text.index("/new"), text.index("Пришлите название"))
+        # Order check: free-text search bullet comes BEFORE /new
+        # (user prefers active "i know what i want" framing over discovery).
+        self.assertLess(text.index("Пришлите название"), text.index("/new"))
 
     def test_start_omits_search_bullet_when_no_search_sources(self):
         """If neither Rutracker nor Jackett is configured, the search bullet

@@ -476,13 +476,13 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
     """
     search_enabled = RUTRACKER_ENABLED or JACKETT_ENABLED
     bullets: list[str] = []
-    if MOVIE_DISCOVERY_ENABLED and search_enabled:
-        bullets.append(
-            "• 🎬 Подборка свежих фильмов и сериалов с рейтингом Кинопоиска — /new"
-        )
     if search_enabled:
         bullets.append(
             "• 🔍 Поиск и скачивание торрентов — просто пришлите название фильма"
+        )
+    if MOVIE_DISCOVERY_ENABLED and search_enabled:
+        bullets.append(
+            "• 🎬 Подборка свежих фильмов и сериалов с рейтингом Кинопоиска — /new"
         )
     if PLEX_ENABLED:
         bullets.append(
@@ -7119,13 +7119,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     kp_hint = " или ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
 
     main_bullets: list[str] = []
-    if MOVIE_DISCOVERY_ENABLED and search_enabled:
-        main_bullets.append(
-            "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
-        )
     if search_enabled:
         main_bullets.append(
             f"• 🔍 Пришлите название фильма{kp_hint} — найду и предложу варианты"
+        )
+    if MOVIE_DISCOVERY_ENABLED and search_enabled:
+        main_bullets.append(
+            "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
         )
     main_bullets.append("• 📋 /status — текущие загрузки и недавняя история")
 
@@ -7154,42 +7154,59 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _reply_access_pending(update, context)
         return
 
-    if RUTRACKER_ENABLED or JACKETT_ENABLED:
-        kp_hint = " или вставьте ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
-        source_hint = "по Rutracker" if RUTRACKER_ENABLED else "через Jackett"
-        search_lines = (
-            f"- напишите название фильма/сериала{kp_hint} — сразу откроется поиск {source_hint};\n"
-        )
-    else:
-        search_lines = ""
-    movie_lines = ""
-    if MOVIE_DISCOVERY_ENABLED and (RUTRACKER_ENABLED or JACKETT_ENABLED):
-        movie_lines = (
-            "- /new показывает кэш новинок фильмов и мультфильмов: свежие годы, 1080p/2160p, "
-            "без сериалов, CAM/TS и adult-раздач;\n"
-        )
-    admin_lines = ""
+    search_enabled = RUTRACKER_ENABLED or JACKETT_ENABLED
+    kp_hint = " или ссылку с Кинопоиска" if KINOPOISK_ENABLED else ""
     chat_id = update.effective_chat.id if update.effective_chat else None
-    if _is_admin_chat(chat_id):
-        admin_lines = (
-            "- /admin открывает админ-панель с диагностикой и главной сводкой;\n"
-            "- /users управляет доступом пользователей;\n"
-            "- /status показывает все загрузки с переключателем «мои / все»;\n"
+    is_admin = _is_admin_chat(chat_id)
+
+    # ---- Главное: точки входа в правильном приоритете
+    main_bullets: list[str] = []
+    if search_enabled:
+        main_bullets.append(
+            f"• 🔍 Пришлите название фильма/сериала{kp_hint} — найду и предложу варианты"
         )
+    if MOVIE_DISCOVERY_ENABLED and search_enabled:
+        main_bullets.append(
+            "• 🎬 /new — рейтинг свежих фильмов и сериалов с КП-оценкой и пометкой «уже в Plex»"
+        )
+    if is_admin:
+        main_bullets.append("• 📋 /status — все загрузки (переключатель «мои / все»)")
     else:
-        admin_lines = "- /status показывает ваши загрузки;\n"
+        main_bullets.append("• 📋 /status — ваши загрузки и недавняя история")
+
+    # ---- Можно ещё: вторичные способы
+    extras: list[str] = []
+    extras.append("• Прислать .torrent-файл или magnet-ссылку — добавлю в Download Station")
+    if search_enabled:
+        extras.append("• Подписаться на новые серии сериала прямо из карточки результата поиска")
+    if MOVIE_DISCOVERY_ENABLED and search_enabled:
+        extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
+
+    # ---- Уведомления приходят сами
+    auto: list[str] = ["• когда скачивание завершилось или упало с ошибкой"]
+    if search_enabled:
+        auto.append("• когда вышла новая серия в подписке")
+    if PLEX_ENABLED:
+        auto.append("• когда контент появился в Plex (с кнопкой «▶️ Открыть в Plex»)")
+
+    # ---- Служебное
+    service: list[str] = ["• /ping — проверка связи", "• /id — показать ваш chat_id"]
+    if is_admin:
+        service.append("• /admin — админ-панель (диагностика, пользователи, подписки)")
+        service.append("• /users — управление доступом пользователей")
+
+    sections: list[str] = []
+    if main_bullets:
+        sections.append("<b>Главное:</b>\n" + "\n".join(main_bullets))
+    if extras:
+        sections.append("<b>Можно ещё:</b>\n" + "\n".join(extras))
+    if auto:
+        sections.append("<b>Уведомления приходят сами:</b>\n" + "\n".join(auto))
+    sections.append("<b>Служебное:</b>\n" + "\n".join(service))
+
     await update.message.reply_text(
-        "Что умею:\n"
-        "- принимаю .torrent файлы и magnet-ссылки, добавляю задачи в Download Station;\n"
-        "- добавляю public-трекеры к новым задачам, если это включено;\n"
-        "- присылаю уведомление с кнопками, когда загрузка завершилась или остановилась с ошибкой;\n"
-        "- даю кнопки управления задачами: обновить статус, пауза, запуск, удаление;\n"
-        "- могу удалить завершённые задачи из списка вручную или автоматически;\n"
-        f"{search_lines}"
-        f"{movie_lines}"
-        f"{admin_lines}"
-        "- /ping проверяет связь с ботом;\n"
-        "- /id показывает ваш chat_id",
+        "\n\n".join(sections),
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("✖️ Закрыть", callback_data="help:close")]]
         ),
