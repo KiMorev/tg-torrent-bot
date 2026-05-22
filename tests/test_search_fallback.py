@@ -552,6 +552,89 @@ class AudioSubsFilterIntegrationTests(unittest.TestCase):
         self.assertNotIn("WEB-DL", text)
 
 
+class SupplementReleasesForFailedQueriesTests(unittest.TestCase):
+    """Pinned behaviour for the «year disappears from /new when its
+    query timed out / errored» bug. See _supplement_releases_for_failed_queries."""
+
+    def test_empty_failed_specs_does_nothing(self):
+        releases_out: list[dict] = []
+        n = bot._supplement_releases_for_failed_queries(
+            failed_specs=[],
+            releases_out=releases_out,
+            prev_all_releases=[{"year": 2026, "quality": "1080p"}],
+        )
+        self.assertEqual(n, 0)
+        self.assertEqual(releases_out, [])
+
+    def test_supplements_releases_matching_failed_year_quality(self):
+        """2026 1080p query failed → take 2026 1080p releases from prev cache."""
+        prev_all = [
+            {"year": 2026, "quality": "1080p", "title": "A 2026 1080p"},
+            {"year": 2026, "quality": "2160p", "title": "B 2026 2160p"},
+            {"year": 2025, "quality": "1080p", "title": "C 2025 1080p"},
+            {"year": 2026, "quality": "1080p", "title": "D 2026 1080p"},
+        ]
+        releases_out: list[dict] = []
+        n = bot._supplement_releases_for_failed_queries(
+            failed_specs=[(2026, "1080p")],
+            releases_out=releases_out,
+            prev_all_releases=prev_all,
+        )
+        self.assertEqual(n, 2)  # A and D
+        titles = [r["title"] for r in releases_out]
+        self.assertIn("A 2026 1080p", titles)
+        self.assertIn("D 2026 1080p", titles)
+        self.assertNotIn("B 2026 2160p", titles)  # wrong quality
+        self.assertNotIn("C 2025 1080p", titles)  # wrong year
+
+    def test_supplements_multiple_failed_specs(self):
+        """Both year-queries failed → take both from prev cache."""
+        prev_all = [
+            {"year": 2026, "quality": "1080p"},
+            {"year": 2026, "quality": "2160p"},
+            {"year": 2025, "quality": "1080p"},
+            {"year": 2024, "quality": "1080p"},
+        ]
+        releases_out: list[dict] = []
+        n = bot._supplement_releases_for_failed_queries(
+            failed_specs=[(2026, "1080p"), (2025, "1080p")],
+            releases_out=releases_out,
+            prev_all_releases=prev_all,
+        )
+        self.assertEqual(n, 2)
+
+    def test_handles_non_dict_entries_gracefully(self):
+        """Defensive: bad data in prev_all_releases shouldn't crash."""
+        prev_all = [None, "garbage", {"year": 2026, "quality": "1080p"}, 42]
+        releases_out: list[dict] = []
+        n = bot._supplement_releases_for_failed_queries(
+            failed_specs=[(2026, "1080p")],
+            releases_out=releases_out,
+            prev_all_releases=prev_all,
+        )
+        self.assertEqual(n, 1)
+
+    def test_quality_comparison_is_case_insensitive(self):
+        """Releases store quality as "1080p" but spec might come with
+        different casing — match should be case-insensitive."""
+        prev_all = [{"year": 2026, "quality": "1080P"}]
+        releases_out: list[dict] = []
+        n = bot._supplement_releases_for_failed_queries(
+            failed_specs=[(2026, "1080p")],
+            releases_out=releases_out,
+            prev_all_releases=prev_all,
+        )
+        self.assertEqual(n, 1)
+
+    def test_does_not_supplement_when_prev_releases_is_not_list(self):
+        n = bot._supplement_releases_for_failed_queries(
+            failed_specs=[(2026, "1080p")],
+            releases_out=[],
+            prev_all_releases=None,  # type: ignore
+        )
+        self.assertEqual(n, 0)
+
+
 class RutrackerOnlyInstallKeepsFatalErrorTests(unittest.TestCase):
     """Pure-Rutracker install (no Jackett configured) → RutrackerError stays
     fatal — no fallback to soften the blow."""

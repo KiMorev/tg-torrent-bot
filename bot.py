@@ -1988,6 +1988,38 @@ def _restore_first_seen_from_previous(
             card["first_seen_at"] = old_ts
 
 
+def _supplement_releases_for_failed_queries(
+    *,
+    failed_specs: list[tuple[int | None, str]],
+    releases_out: list[dict],
+    prev_all_releases: list,
+) -> int:
+    """Copy releases from `prev_all_releases` into `releases_out` (in place)
+    for every (year, quality) spec that fetched zero results due to errors.
+
+    The point is to preserve last refresh's content for a year/quality combo
+    when ALL upstream sources errored for it this time around — instead of
+    silently letting the cache regress to «only the years/qualities that
+    happened to load». See the 2026-1080p-timed-out bug for the original
+    observation. Pure function, isolated for testability.
+
+    Returns the count of supplemented releases (for logging).
+    """
+    if not failed_specs or not isinstance(prev_all_releases, list):
+        return 0
+    failed_set = set(failed_specs)
+    supplemented = 0
+    for prev_rel in prev_all_releases:
+        if not isinstance(prev_rel, dict):
+            continue
+        rel_year = prev_rel.get("year")
+        rel_quality = (prev_rel.get("quality") or "").lower()
+        if (rel_year, rel_quality) in failed_set:
+            releases_out.append(prev_rel)
+            supplemented += 1
+    return supplemented
+
+
 async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
@@ -2051,7 +2083,26 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     reason_counts = Counter()
     source_counts = Counter()
 
+    # Track which (year, quality) query specs ended up with errors AND no
+    # results. For those, we'll supplement from the previous cache after the
+    # loop instead of letting a partial fetch silently overwrite the good
+    # state (the «2026 1080p timed out, 2025 1080p worked → /new becomes
+    # all-2025» bug). One key per query string so we can also handle the
+    # multi-quality case (1080p+2160p).
+    failed_query_specs: list[tuple[int | None, str]] = []
+
     for search_query in queries:
+        # Parse year and quality from query string «YYYY <quality>».
+        parts = search_query.split()
+        try:
+            query_year: int | None = int(parts[0])
+        except (ValueError, IndexError):
+            query_year = None
+        query_quality = parts[1].lower() if len(parts) > 1 else ""
+
+        query_had_error = False
+        query_had_results = False
+
         if jackett_client is not None:
             try:
                 results = await asyncio.to_thread(
@@ -2077,9 +2128,11 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
                     audit_rows.append(_movie_discovery_audit_row(search_query, "jackett", result, release, reason))
                     if release:
                         releases.append(release)
+                        query_had_results = True
             except JackettError:
                 logger.warning("Movie discovery Jackett search failed: %s", search_query, exc_info=True)
                 reason_counts["jackett:error"] += 1
+                query_had_error = True
 
         if rutracker_client is not None:
             try:
@@ -2100,9 +2153,39 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
                     audit_rows.append(_movie_discovery_audit_row(search_query, "rutracker", result, release, reason))
                     if release:
                         releases.append(release)
+                        query_had_results = True
             except RutrackerError:
                 logger.warning("Movie discovery Rutracker search failed: %s", search_query, exc_info=True)
                 reason_counts["rutracker:error"] += 1
+                query_had_error = True
+
+        # If a query had ANY upstream error AND 0 accepted results, that's
+        # a SUSPICIOUS empty (probably the «year ABC» fetch was broken, not
+        # genuinely empty). Distinguish from clean-zero (no errors, just
+        # nothing to find) which we leave alone.
+        if query_had_error and not query_had_results and query_year is not None:
+            failed_query_specs.append((query_year, query_quality))
+            logger.warning(
+                "movie_discovery: query %r had errors and 0 accepted results — "
+                "will supplement from prev cache to avoid losing year=%s/quality=%s",
+                search_query, query_year, query_quality,
+            )
+
+    # Supplement releases from previous cache for failed (year, quality) specs.
+    # Without this, a partial Jackett/Rutracker outage replaces the well-curated
+    # top-10 with whatever fragments DID load — which is how «2026 disappears,
+    # /new fills with mediocre 2025» happens.
+    if failed_query_specs:
+        prev_for_supplement = _load_movie_discovery_cache()
+        supplemented = _supplement_releases_for_failed_queries(
+            failed_specs=failed_query_specs,
+            releases_out=releases,
+            prev_all_releases=prev_for_supplement.get("all_releases") or [],
+        )
+        logger.info(
+            "movie_discovery: supplemented %d releases from prev cache for failed specs: %s",
+            supplemented, failed_query_specs,
+        )
 
     logger.info(
         "movie_discovery: sources fetched jackett_raw=%d rutracker_raw=%d accepted=%d errors=jackett:%d,rutracker:%d",
