@@ -5210,10 +5210,18 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # After the first send we always edit-in-place regardless of origin.
     edit_fn = loading_msg.edit_text if loading_msg is not None else send_fn
 
-    # --- Search: Rutracker first, Jackett as fallback on error ---
+    # --- Search: Jackett first (preferred), Rutracker direct as fallback ON ERROR only ---
+    #
+    # Critical distinction (see CLAUDE.md → "Search fallback policy"):
+    #   - Jackett ERRORED    → try Rutracker direct as alternative source
+    #   - Jackett RETURNED [] → trust as authoritative «no matches», SKIP Rutracker
+    #     fallback (it's currently broken at search/login pages anyway) and go
+    #     straight to the no-results screen so the user sees did-you-mean.
     results_data = []
     banner = ""
     source = "rutracker"
+    jackett_errored = False
+    jackett_err_msg = ""
 
     if jackett_client:
         # --- Jackett-first: use pre-selected indexers (default to Rutracker indexer) ---
@@ -5226,8 +5234,10 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 context.user_data["srch_jackett_selected"] = selected
             except JackettError as e:
                 logger.warning("Jackett get_indexers failed at search start: %s", e)
+                jackett_errored = True
+                jackett_err_msg = str(e)
                 if rutracker_client:
-                    banner = f"⚠️ Jackett недоступен, ищу напрямую в Rutracker"
+                    banner = "⚠️ Jackett недоступен, ищу напрямую в Rutracker"
                     # fall through to Rutracker path below
                 else:
                     await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
@@ -5235,7 +5245,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
         selected: set[str] = context.user_data.get("srch_jackett_selected", set())
 
-        if selected:  # Jackett search
+        if selected and not jackett_errored:  # Jackett search
             try:
                 j_results_raw = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -5252,6 +5262,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     if isinstance(e, asyncio.TimeoutError) else str(e)
                 )
                 logger.error("Jackett search failed in _run_search: %s", raw_err)
+                jackett_errored = True
+                jackett_err_msg = raw_err
                 if rutracker_client:
                     banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
                     # fall through to Rutracker path
@@ -5277,14 +5289,43 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                         "tracker_name": r.tracker,
                     })
                 source = "jackett"
+                logger.info(
+                    "Search: Jackett returned %d results for %r",
+                    len(j_results_raw), search_query,
+                )
 
-    if not results_data and rutracker_client:
-        # Direct Rutracker search: either Jackett not configured, or Jackett failed/returned nothing
+    # Rutracker direct path runs in two distinct contexts:
+    #   A) Jackett client not configured at all → Rutracker is the ONLY source,
+    #      so RutrackerError is fatal (existing behaviour).
+    #   B) Jackett configured but errored → Rutracker is a fallback,
+    #      so RutrackerError is NON-fatal — we fall through to the no-results
+    #      screen with did-you-mean + a banner explaining both sources failed.
+    # We do NOT enter Rutracker when Jackett succeeded with 0 results — that's
+    # an authoritative «no match», and trying Rutracker direct (often broken)
+    # only swaps the friendly no-results screen for a hard error dead-end.
+    rutracker_is_only_source = (jackett_client is None) and (rutracker_client is not None)
+    rutracker_is_fallback = jackett_errored and not results_data and (rutracker_client is not None)
+
+    if rutracker_is_only_source or rutracker_is_fallback:
         try:
             rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
         except RutrackerError as rt_err:
-            await edit_fn(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
-            return ConversationHandler.END
+            if rutracker_is_only_source:
+                # Context A — pure-Rutracker install. Nothing to fall back to.
+                await edit_fn(
+                    _friendly_error("rutracker", str(rt_err)),
+                    reply_markup=_search_error_keyboard(), parse_mode="HTML",
+                )
+                return ConversationHandler.END
+            # Context B — both sources down. Build a banner and fall through to
+            # the no-results screen below (which has did-you-mean suggestions).
+            logger.warning("Rutracker fallback also failed for %r: %s", search_query, rt_err)
+            banner = (
+                f"⚠️ Оба источника недоступны.\n"
+                f"Jackett: {jackett_err_msg[:60]}\n"
+                f"Rutracker: {str(rt_err)[:60]}"
+            )
+            rt_results = []
         for r in rt_results:
             ep = _parse_episode_info(r.title)
             partial = ep is not None and ep[0] < ep[1]
@@ -5302,7 +5343,17 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "torrent_url": None,
                 "tracker_name": "rutracker",
             })
-        source = "rutracker"
+        if rt_results:
+            source = "rutracker"
+
+    # Diagnostic for the search-fallback investigation: log when we DIDN'T fall
+    # back to Rutracker because Jackett successfully returned 0 results.
+    if not results_data and not jackett_errored and jackett_client is not None:
+        logger.info(
+            "Search: skipping Rutracker fallback for %r — Jackett returned 0 "
+            "(treating as authoritative no-match, will show did-you-mean)",
+            search_query,
+        )
 
     if not results_data and not rutracker_client and not jackett_client:
         await edit_fn("Поиск недоступен: не настроен ни Rutracker, ни Jackett.", reply_markup=_search_error_keyboard(), parse_mode="HTML")
@@ -5311,9 +5362,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     if not results_data:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(search_query)
+        # Compose text: optional banner (e.g. «both sources down») + the
+        # standard «nothing found» tail.
+        no_results_text = f"По запросу «{search_query}» ничего не найдено."
+        if banner:
+            no_results_text = f"{no_results_text}\n{banner}"
+        no_results_text = f"{no_results_text}\nПопробуйте ослабить фильтры или другой запрос."
         await edit_fn(
-            f"По запросу «{search_query}» ничего не найдено.\n"
-            "Попробуйте ослабить фильтры или другой запрос.",
+            no_results_text,
             reply_markup=_no_results_keyboard(
                 has_quality=has_quality,
                 jackett_can_expand=jackett_can_expand,
