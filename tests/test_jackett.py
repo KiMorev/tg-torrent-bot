@@ -219,6 +219,47 @@ class ParseIndexerStatusesTests(unittest.TestCase):
         statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
         self.assertEqual(statuses[0].indexer_id, "rutracker")
 
+    def test_status_2_with_results_is_treated_as_ok(self):
+        """Torznab Status=2 is a WARNING, not a failure. Indexers reporting
+        Status=2 alongside Results>0 actually did their job — the warning
+        is for non-fatal issues like «captcha solved with delay» or «one
+        sub-request timed out but I still got data». Don't mark as failed."""
+        from jackett import JackettIndexerStatus
+        status_warn_with_data = JackettIndexerStatus(
+            indexer_id="rutracker", name="RT",
+            status=2, results=50, error="",
+        )
+        self.assertTrue(status_warn_with_data.is_ok)
+
+    def test_status_2_with_zero_results_is_failed(self):
+        """Status=2 + Results=0 = actually got nothing back. Treat as failed
+        so the supplement step pulls prev cache for this indexer."""
+        from jackett import JackettIndexerStatus
+        warn_no_data = JackettIndexerStatus(
+            indexer_id="eztv", name="EZTV",
+            status=2, results=0, error="",
+        )
+        self.assertFalse(warn_no_data.is_ok)
+
+    def test_status_1_always_failed(self):
+        """Status=1 is a definitive error. Even if Results were somehow >0
+        the indexer reported a problem we should respect — but in practice
+        Status=1 comes with Results=0."""
+        from jackett import JackettIndexerStatus
+        err = JackettIndexerStatus(
+            indexer_id="noname-club", name="NN",
+            status=1, results=0, error="Challenge detected",
+        )
+        self.assertFalse(err.is_ok)
+
+    def test_status_0_always_ok(self):
+        from jackett import JackettIndexerStatus
+        ok = JackettIndexerStatus(
+            indexer_id="kinozal", name="KZ",
+            status=0, results=18, error="",
+        )
+        self.assertTrue(ok.is_ok)
+
     def test_skips_malformed_entries(self):
         import json as _json
         payload = {

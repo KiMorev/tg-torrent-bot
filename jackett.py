@@ -88,7 +88,23 @@ class JackettIndexerStatus:
 
     @property
     def is_ok(self) -> bool:
-        return self.status == 0
+        """Indexer contributed usefully to the search response.
+
+        Torznab status semantics observed in real Jackett responses:
+          0 → OK, no issues
+          1 → Error (definitive failure, usually with Error message)
+          2 → Warning (potentially benign — indexer often returns Results>0
+              alongside it; the warning is about non-fatal issues like
+              «captcha solved with delay», «one sub-request timed out but
+              I still got data», etc.)
+
+        We treat «contributed Results > 0» as success regardless of status:
+        if the indexer gave us real data, it did its job. Only Results=0
+        with non-zero Status is a real miss (no data + something went wrong).
+        """
+        if self.status == 0:
+            return True
+        return self.results > 0
 
 
 def _synchronized(method):

@@ -2127,13 +2127,16 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
                 except Exception:
                     statuses = []
                 for st in statuses:
-                    if not st.is_ok or (st.results == 0 and st.error):
-                        failed_indexer_ids.add(st.indexer_id)
-                        logger.warning(
-                            "movie_discovery: Jackett indexer %r failed for %r "
-                            "(status=%d results=%d error=%r) — will supplement from prev",
-                            st.indexer_id, search_query, st.status, st.results, st.error[:120],
-                        )
+                    if st.is_ok:
+                        # Healthy or status>0 with Results>0 (Torznab warning,
+                        # data still came back). Log at debug level — no action.
+                        continue
+                    failed_indexer_ids.add(st.indexer_id)
+                    logger.warning(
+                        "movie_discovery: Jackett indexer %r failed for %r "
+                        "(status=%d results=%d error=%r) — will supplement from prev",
+                        st.indexer_id, search_query, st.status, st.results, st.error[:120],
+                    )
                 for result in results:
                     release, reason = _movie_evaluate_result(
                         result,
@@ -2722,18 +2725,53 @@ async def _movie_discovery_loop(app: "Application") -> None:
             list(indexers) if isinstance(indexers, list) else [],
         )
 
+    def _read_card_count() -> int:
+        cache = _load_movie_discovery_cache()
+        return len(cache.get("cards") or [])
+
+    async def _maybe_send_startup_ready(failed_indexers: list, card_count: int) -> bool:
+        """Send the «poisk razogret» admin notification when conditions are met.
+
+        Ready = bot is functional and /new has content. Does NOT require all
+        indexers to be perfectly healthy — some indexers (e.g. noname-club
+        without FlareSolverr) may be permanently degraded; we shouldn't
+        block the startup signal on them.
+
+        Conditions: cards present AND (no failed indexers OR streak gave up).
+        The streak-based escape ensures the signal still fires for setups
+        with persistent partial failures, just after we've stopped retrying.
+        Returns True if sent.
+        """
+        if startup_ready_notified or card_count <= 0:
+            return False
+        if failed_indexers and fail_streak < len(_MOVIE_DISCOVERY_RETRY_BACKOFF):
+            # Still retrying — defer ready until we either recover or give up.
+            return False
+        text = "✅ Поиск разогрет, бот полноценно функционирует."
+        if failed_indexers:
+            text += f"\n(индексеры с проблемами: {', '.join(failed_indexers)} — содержимое /new восполнено из прошлого кэша)"
+        await _notify_admins(app, text)
+        return True
+
     try:
         logger.info("movie_discovery: loop started — first refresh now, interval=%dh", MOVIE_DISCOVERY_INTERVAL_HOURS)
         # Immediate first refresh.
         await _run_background_step("movie discovery refresh", _refresh_and_notify)
         failed_specs, failed_indexers = _read_degradation_signal()
+        card_count = _read_card_count()
         if failed_specs or failed_indexers:
             fail_streak = 1
             current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
             logger.info(
-                "movie_discovery: first refresh degraded (failed_specs=%s, failed_indexers=%s) — retry in %ds",
-                failed_specs or "none", failed_indexers or "none", current_interval,
+                "movie_discovery: first refresh degraded (failed_specs=%s, failed_indexers=%s, cards=%d) — retry in %ds",
+                failed_specs or "none", failed_indexers or "none", card_count, current_interval,
             )
+            # Try to send ready signal even on degraded refresh — if we have
+            # cards in cache, the bot IS functional. The condition inside
+            # _maybe_send_startup_ready prevents firing too early when we
+            # still plan retries.
+            if await _maybe_send_startup_ready(failed_indexers, card_count):
+                startup_ready_notified = True
         else:
             await _notify_admins(
                 app, "✅ Поиск разогрет, бот полноценно функционирует.",
@@ -2744,13 +2782,20 @@ async def _movie_discovery_loop(app: "Application") -> None:
             await asyncio.sleep(current_interval)
             await _run_background_step("movie discovery refresh", _refresh_and_notify)
             failed_specs, failed_indexers = _read_degradation_signal()
+            card_count = _read_card_count()
             if failed_specs or failed_indexers:
                 fail_streak += 1
                 current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
                 logger.info(
-                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s, failed_indexers=%s) — retry in %ds",
-                    fail_streak, failed_specs or "none", failed_indexers or "none", current_interval,
+                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s, failed_indexers=%s, cards=%d) — retry in %ds",
+                    fail_streak, failed_specs or "none", failed_indexers or "none", card_count, current_interval,
                 )
+                # After backoff is exhausted (fail_streak >= len(BACKOFF)) the
+                # partial failure is persistent — fire ready anyway so the
+                # admin isn't left hanging forever on a permanently broken
+                # indexer (e.g. noname-club without FlareSolverr).
+                if await _maybe_send_startup_ready(failed_indexers, card_count):
+                    startup_ready_notified = True
             else:
                 was_degraded = fail_streak > 0
                 if was_degraded:
