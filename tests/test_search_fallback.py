@@ -635,6 +635,99 @@ class SupplementReleasesForFailedQueriesTests(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class BuildSearchClustersTests(unittest.TestCase):
+    """Proposal #1 cluster detection — groups results by (normalized_title, year)."""
+
+    def test_single_film_makes_single_cluster(self):
+        results = [
+            {"title": "Дюна часть вторая 2024 1080p WEB-DL"},
+            {"title": "Дюна часть вторая 2024 2160p BDRemux"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["count"], 2)
+        self.assertEqual(clusters[0]["year"], 2024)
+
+    def test_franchise_makes_multiple_clusters(self):
+        results = [
+            {"title": "Дюна 1984 BDRip"},
+            {"title": "Дюна 2021 1080p"},
+            {"title": "Дюна 2021 2160p"},
+            {"title": "Дюна часть вторая 2024 1080p"},
+            {"title": "Дюна часть вторая 2024 2160p"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        # We expect 3 distinct films: 1984, 2021, 2024
+        self.assertEqual(len(clusters), 3)
+        years = [c["year"] for c in clusters]
+        # Sort: newest first
+        self.assertEqual(years, sorted(years, reverse=True))
+
+    def test_should_show_picker_when_multiple_real_clusters(self):
+        results = [
+            {"title": "Матрица 1999 1080p"},
+            {"title": "Матрица 1999 720p"},
+            {"title": "Матрица Воскрешение 2021 1080p"},
+            {"title": "Матрица Воскрешение 2021 2160p"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        self.assertTrue(bot._should_show_cluster_picker(clusters))
+
+    def test_should_not_show_picker_for_single_film(self):
+        results = [
+            {"title": "Дюна часть вторая 2024 1080p"},
+            {"title": "Дюна часть вторая 2024 2160p"},
+            {"title": "Дюна часть вторая 2024 BDRip"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        self.assertFalse(bot._should_show_cluster_picker(clusters))
+
+    def test_should_not_show_picker_when_one_cluster_dominates(self):
+        """One film with 10 releases + one with 1 release → don't fragment
+        the UX for a single noise result. Real-cluster threshold is ≥2 releases."""
+        results = (
+            [{"title": f"Аркейн 2024 ep{i} 1080p"} for i in range(10)]
+            + [{"title": "Аркейн Origins 2018 trailer"}]
+        )
+        clusters = bot._build_search_clusters(results)
+        self.assertFalse(bot._should_show_cluster_picker(clusters))
+
+
+class DidmeanPrefetchCleanupTests(unittest.TestCase):
+    """Proposal #2 prefetch cleanup — _cancel_didmean_prefetch must cancel
+    in-flight asyncio.Task and pop the slot, safely on no-op too."""
+
+    def test_noop_when_slot_empty(self):
+        context = MagicMock()
+        context.user_data = {}
+        # Must not raise
+        bot._cancel_didmean_prefetch(context)
+        self.assertNotIn("srch_didmean_prefetch", context.user_data)
+
+    def test_cancels_running_task(self):
+        context = MagicMock()
+        # Mock task: not done, has .cancel()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_task.cancel = MagicMock()
+        context.user_data = {"srch_didmean_prefetch": ("Дюна", mock_task)}
+        bot._cancel_didmean_prefetch(context)
+        mock_task.cancel.assert_called_once()
+        self.assertNotIn("srch_didmean_prefetch", context.user_data)
+
+    def test_skips_cancel_when_already_done(self):
+        context = MagicMock()
+        mock_task = MagicMock()
+        mock_task.done.return_value = True
+        mock_task.cancel = MagicMock()
+        context.user_data = {"srch_didmean_prefetch": ("Дюна", mock_task)}
+        bot._cancel_didmean_prefetch(context)
+        # Done task — no point cancelling (it's already finished)
+        mock_task.cancel.assert_not_called()
+        # But slot still popped
+        self.assertNotIn("srch_didmean_prefetch", context.user_data)
+
+
 class FailedIndexerPartitioningTests(unittest.TestCase):
     """Verify _refresh_movie_discovery_cache splits failed_indexer_ids
     into 'enabled-for-rating' (gates retry/ready) vs 'disabled' (info-only).

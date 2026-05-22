@@ -85,6 +85,7 @@ from keyboards import (
     _search_advanced_keyboard,
     _search_after_add_keyboard,
     _download_error_keyboard,
+    _cluster_picker_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
     _search_options_keyboard,
@@ -5680,6 +5681,106 @@ def _format_quality_stats(buckets: dict[str, list[dict]], exclude: str | None = 
     return ", ".join(parts)
 
 
+def _cancel_didmean_prefetch(context) -> None:
+    """Cancel an in-flight did-you-mean prefetch task and pop the slot.
+
+    Safe to call even when no prefetch exists. Used at every search-lifecycle
+    exit point (search_cancel, search_timeout, new _run_search start, etc.)
+    to avoid zombie background tasks accumulating.
+    """
+    prefetch = context.user_data.pop("srch_didmean_prefetch", None)
+    if not prefetch:
+        return
+    _query, task = prefetch
+    if not task.done():
+        task.cancel()
+        logger.info("movie_discovery: didmean prefetch cancelled (query=%r)", _query)
+
+
+async def _didmean_prefetch_jackett(
+    base_query: str,
+    indexers: list[str],
+) -> list | None:
+    """Background helper: run the slow Jackett.search() call so the result
+    is ready when the user taps the did-you-mean suggestion button.
+
+    Returns the raw JackettResult list on success, None on any failure.
+    Intentionally narrow scope — we only prefetch the SLOW network part
+    (Jackett 2-5 sec network round-trip). The downstream processing
+    (parsing, filtering, scoring) is fast and stays in _run_search on
+    the click path. This minimises wasted work when the user picks a
+    different suggestion or none.
+    """
+    if jackett_client is None or not base_query:
+        return None
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                jackett_client.search,
+                base_query,
+                indexers=indexers,
+                fetch_limit=JACKETT_FETCH_LIMIT,
+            ),
+            timeout=45.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.info("movie_discovery: didmean prefetch failed for %r: %s", base_query, exc)
+        return None
+
+
+def _build_search_clusters(results_data: list[dict]) -> list[dict]:
+    """Group search results by (normalized_title, year) — used for the
+    «Какую Дюну?» picker when one query returns multiple distinct films.
+
+    Returns a list of cluster dicts, each:
+        {
+          "key": "<title>|<year>",         # for callback_data
+          "title": "Дюна",                 # display title (best from cluster)
+          "year": 2024,                    # or None if unparseable
+          "count": 12,                     # number of releases
+          "indices": [0, 3, 7, ...],       # positions in results_data
+        }
+
+    Sort: by year descending, then count descending — newest + most-seeded
+    films first so users tap the freshest match more easily.
+    """
+    clusters: dict[tuple[str, int | None], dict] = {}
+    for idx, r in enumerate(results_data):
+        title = r.get("title") or ""
+        normalized = _normalize_movie_title(title)
+        year = _movie_extract_year(title)
+        key = (normalized.lower(), year)
+        if key not in clusters:
+            clusters[key] = {
+                "key": f"{normalized}|{year if year else '?'}",
+                "title": normalized or title,
+                "year": year,
+                "count": 0,
+                "indices": [],
+            }
+        clusters[key]["count"] += 1
+        clusters[key]["indices"].append(idx)
+    # Sort: newer films first, then by release count
+    return sorted(
+        clusters.values(),
+        key=lambda c: (
+            -(c["year"] or 0),
+            -c["count"],
+            c["title"],
+        ),
+    )
+
+
+def _should_show_cluster_picker(clusters: list[dict]) -> bool:
+    """Show picker only when results genuinely span ≥2 distinct films with
+    ≥2 releases each. Otherwise the picker is a useless extra tap (single
+    film already, or one cluster dominates and the rest are noise)."""
+    real_clusters = [c for c in clusters if c["count"] >= 2]
+    return len(real_clusters) >= 2
+
+
 def _no_results_flags(context: ContextTypes.DEFAULT_TYPE, search_query: str) -> tuple[bool, bool]:
     """Compute (has_quality, jackett_can_expand) for ``_no_results_keyboard``.
 
@@ -5713,6 +5814,16 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
          show a fallback button to retry without the quality filter.
     """
     context.user_data["srch_search_query"] = search_query
+    # New search invalidates any stashed cluster picker state from a previous
+    # query — we don't want stale «Показать все» buttons pointing at old
+    # results_full from the prior search.
+    context.user_data.pop("srch_results_full", None)
+    context.user_data.pop("srch_clusters", None)
+    # Check for in-flight didmean prefetch BEFORE Strategy-2 splitting — we
+    # need base_query to compare. If the prefetched query matches the current
+    # base, we'll use its raw Jackett results below; otherwise we cancel it
+    # to free the asyncio.Task.
+    prefetch = context.user_data.get("srch_didmean_prefetch")
     # Strategy 2: search WITHOUT user-preference tokens (quality / audio / subs),
     # classify + filter client-side. See _split_query_settings for rationale.
     # base_query is what actually goes to Jackett/Rutracker; the rest are
@@ -5779,15 +5890,57 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
         if selected and not jackett_errored:  # Jackett search
             try:
-                j_results_raw = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        jackett_client.search,
-                        base_query,  # quality suffix stripped — we filter client-side
-                        indexers=list(selected),
-                        fetch_limit=JACKETT_FETCH_LIMIT,
-                    ),
-                    timeout=45.0,
-                )
+                # PR2 prefetch hit: if a previous did-you-mean prefetch fired
+                # for THIS exact base_query, use its result instead of doing a
+                # fresh network call. Massive UX win for the «typo → tap
+                # suggestion → instant» flow.
+                if (prefetch and prefetch[0] == base_query
+                        and not prefetch[1].cancelled()):
+                    prefetch_task = prefetch[1]
+                    if prefetch_task.done():
+                        cached = prefetch_task.result()
+                        if cached is not None:
+                            j_results_raw = list(cached)
+                            logger.info(
+                                "Search: didmean prefetch HIT for %r — %d results from cache",
+                                base_query, len(j_results_raw),
+                            )
+                        else:
+                            j_results_raw = None  # prefetch failed → fall back
+                    else:
+                        # Still running — wait briefly. If it completes in <5s
+                        # we save the rest; if not, fall back to fresh call.
+                        try:
+                            cached = await asyncio.wait_for(
+                                asyncio.shield(prefetch_task), timeout=5.0,
+                            )
+                            j_results_raw = list(cached) if cached is not None else None
+                            if j_results_raw is not None:
+                                logger.info(
+                                    "Search: didmean prefetch awaited (%d results) for %r",
+                                    len(j_results_raw), base_query,
+                                )
+                        except (asyncio.TimeoutError, Exception):
+                            j_results_raw = None
+                    # Consume the slot whether hit/miss — it served its purpose.
+                    context.user_data.pop("srch_didmean_prefetch", None)
+                else:
+                    j_results_raw = None
+                    # Different query — prefetch is stale, cancel it.
+                    if prefetch:
+                        _cancel_didmean_prefetch(context)
+
+                if j_results_raw is None:
+                    # Normal path: no prefetch or prefetch unusable.
+                    j_results_raw = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            jackett_client.search,
+                            base_query,  # quality suffix stripped — we filter client-side
+                            indexers=list(selected),
+                            fetch_limit=JACKETT_FETCH_LIMIT,
+                        ),
+                        timeout=45.0,
+                    )
             except (JackettError, asyncio.TimeoutError) as e:
                 raw_err = (
                     "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
@@ -5899,6 +6052,25 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         # be guessing variations of «Дюра 1080p» — it should be fixing «Дюра»
         # back to «Дюна».
         suggestions = await _gpt_get_did_you_mean(base_query)
+        # Prefetch (Proposal #2): fire a background Jackett search for the
+        # TOP-1 suggestion while the user reads the buttons. If they tap it,
+        # _run_search will pick up the result instantly. Top-1 only — saves
+        # Jackett load vs prefetching all 3 (most users tap the first or
+        # nothing at all).
+        if suggestions and jackett_client is not None:
+            _cancel_didmean_prefetch(context)  # belt-and-suspenders
+            top_suggestion = suggestions[0]
+            top_base, _q, _a, _s = _split_query_settings(top_suggestion)
+            indexer_list = list(context.user_data.get("srch_jackett_selected") or [])
+            if top_base and indexer_list:
+                prefetch_task = asyncio.create_task(
+                    _didmean_prefetch_jackett(top_base, indexer_list)
+                )
+                context.user_data["srch_didmean_prefetch"] = (top_base, prefetch_task)
+                logger.info(
+                    "Search: didmean prefetch started for top suggestion %r (base=%r)",
+                    top_suggestion, top_base,
+                )
         # Compose text: optional banner (e.g. «both sources down») + framing
         # that emphasises did-you-mean buttons when we have any.
         no_results_text = f"По запросу «{search_query}» ничего не найдено."
@@ -6013,6 +6185,42 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "Search: %s bucket empty, falling back to all qualities (%d total) for %r",
                 preferred_quality, len(results_data), base_query,
             )
+
+    # --- Cluster picker (Proposal #1): when the same query returns ≥2
+    # distinct (title, year) films with ≥2 releases each, show a picker
+    # «Какую Дюну вы ищете?» so the user can narrow to one film in one tap.
+    # Common single-film queries skip this entirely (conditional show).
+    # Skip when a season filter is active — user asked for specific season,
+    # showing «which series?» would conflict with their intent.
+    _maybe_season = _extract_season_from_query(search_query)
+    if _maybe_season is None:
+        clusters = _build_search_clusters(results_data)
+        if _should_show_cluster_picker(clusters):
+            # Stash full results + clusters for the picker callback. The user
+            # may choose a single cluster (filter) or «show all» (use original).
+            context.user_data["srch_results_full"] = list(results_data)
+            context.user_data["srch_clusters"] = clusters
+            context.user_data["srch_source"] = source
+            # Banner: combine source-fallback + filter banners (quality/audio/subs).
+            # combined_banner isn't computed until after season filter further
+            # down, so we build it inline here for the picker case.
+            picker_banner = "\n".join(
+                b for b in (banner, *filter_banner_parts, quality_banner) if b
+            )
+            context.user_data["srch_banner"] = picker_banner
+            picker_text = (
+                f"По запросу «{search_query}» найдено разных фильмов: "
+                f"{len([c for c in clusters if c['count'] >= 2])}.\n"
+                "Выберите один или покажите все раздачи."
+            )
+            await edit_fn(
+                picker_text,
+                reply_markup=_cluster_picker_keyboard(
+                    [c for c in clusters if c["count"] >= 2]
+                ),
+                parse_mode="HTML",
+            )
+            return SEARCH_RESULTS
 
     # --- Step 1: season filter ---
     season_num = _extract_season_from_query(search_query)
@@ -6137,6 +6345,83 @@ async def search_quick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     base = context.user_data.get("srch_query", "")
     settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
     return await _execute_search(query, context, _build_search_query(base, settings))
+
+
+async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle cluster picker selection from the «Какую Дюну?» screen.
+
+    Callback format: «srch:cluster:<idx>» where idx is an integer (cluster
+    index in srch_clusters) or the literal «all» to bypass filtering.
+
+    Reads the stashed `srch_results_full` (set in _run_search when the
+    picker was shown), filters it to the chosen cluster's indices, and
+    re-renders the standard results screen. Stays in SEARCH_RESULTS state.
+    """
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":", 2)
+    if len(parts) < 3:
+        await query.edit_message_text("Не удалось разобрать выбор кластера.")
+        return SEARCH_RESULTS
+    pick = parts[2]
+
+    full = context.user_data.get("srch_results_full") or []
+    clusters = context.user_data.get("srch_clusters") or []
+    if not full or not clusters:
+        await query.edit_message_text(
+            "Данные кластера потеряны — начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
+        return SEARCH_RESULTS
+
+    # «all» → show every result (skip the cluster filter); otherwise pick by idx.
+    if pick == "all":
+        results_data = list(full)
+    else:
+        try:
+            cluster_idx = int(pick)
+        except ValueError:
+            await query.edit_message_text("Неверный индекс кластера.")
+            return SEARCH_RESULTS
+        # The picker only shows clusters with count >= 2 (see _should_show_cluster_picker),
+        # so re-filter to that subset and index into it — matches keyboard order.
+        visible = [c for c in clusters if c["count"] >= 2]
+        if cluster_idx < 0 or cluster_idx >= len(visible):
+            await query.edit_message_text("Кластер не найден.")
+            return SEARCH_RESULTS
+        chosen = visible[cluster_idx]
+        indices = set(chosen.get("indices") or [])
+        results_data = [r for i, r in enumerate(full) if i in indices]
+
+    # Standard post-cluster render: sort by score, mark top as recommended,
+    # delegate to the existing results keyboard. Picker state is cleaned out
+    # so subsequent _run_search calls start fresh.
+    if results_data:
+        results_data.sort(key=_score_result, reverse=True)
+        results_data[0]["recommended"] = True
+
+    search_query = context.user_data.get("srch_search_query", "")
+    source = context.user_data.get("srch_source", "")
+    banner = context.user_data.get("srch_banner", "")
+
+    context.user_data["srch_results"] = results_data
+    context.user_data["srch_results_page"] = 0
+    # Picker state consumed — don't leave it lying around to confuse the next search.
+    context.user_data.pop("srch_results_full", None)
+    context.user_data.pop("srch_clusters", None)
+
+    await query.edit_message_text(
+        _build_results_text(results_data, search_query, 0, banner=banner),
+        reply_markup=_search_results_keyboard(
+            results_data, page=0,
+            show_switch_trackers=bool(jackett_client and source == "jackett"),
+            show_retry_jackett=bool(jackett_client and source == "rutracker"),
+            show_direct_rutracker=bool(rutracker_client and source == "jackett"),
+        ),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    return SEARCH_RESULTS
 
 
 async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -7183,6 +7468,9 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
     except (ValueError, IndexError):
         await query.edit_message_text("Ошибка при разборе запроса.")
         return ConversationHandler.END
+    # User committed to a result — any in-flight did-you-mean prefetch is now
+    # irrelevant. Cancel to free the asyncio.Task.
+    _cancel_didmean_prefetch(context)
     return await _download_and_add(query, context, index, subscribe=False)
 
 
@@ -7349,8 +7637,13 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
+        # Cluster picker state (Proposal #1 — preserved between picker render
+        # and the user's cluster choice; cleaned out at conversation exit).
+        "srch_results_full", "srch_clusters",
     ):
         context.user_data.pop(key, None)
+    # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
+    _cancel_didmean_prefetch(context)
 
     return ConversationHandler.END
 
@@ -7402,8 +7695,13 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
+        # Cluster picker state (Proposal #1 — preserved between picker render
+        # and the user's cluster choice; cleaned out at conversation exit).
+        "srch_results_full", "srch_clusters",
     ):
         context.user_data.pop(key, None)
+    # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
+    _cancel_didmean_prefetch(context)
 
     return ConversationHandler.END
 
@@ -9984,6 +10282,10 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "srch_picked_quality", "srch_plex_seasons",
     ):
         context.user_data.pop(stale_key, None)
+    # User typed new text — any in-flight did-you-mean prefetch is stale.
+    # (_run_search would cancel it too on mismatch, but explicit cancel here
+    # avoids a brief window where the task keeps running.)
+    _cancel_didmean_prefetch(context)
 
     # 1. Magnet link — handle immediately, don't start a search conversation.
     magnet_uri = _find_magnet(text)
@@ -10301,6 +10603,7 @@ def main() -> None:
                     CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
                     CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
                     CallbackQueryHandler(search_didmean, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:didmean:"),
+                    CallbackQueryHandler(search_pick_cluster, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cluster:"),
                     CallbackQueryHandler(search_retry_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry_dl:\d+$"),
                     CallbackQueryHandler(search_queue_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:queue_dl:\d+$"),
                     CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),

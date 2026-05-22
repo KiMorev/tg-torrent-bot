@@ -462,6 +462,36 @@ def _no_results_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _cluster_picker_keyboard(clusters: list[dict]) -> InlineKeyboardMarkup:
+    """Keyboard for the «which film?» picker shown when one search query
+    returned releases spanning multiple distinct (title, year) tuples.
+
+    Each cluster gets one row with the film identity + release count.
+    Final rows: «📋 Показать все» (skip filter) and «❌ Отмена».
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, cluster in enumerate(clusters):
+        year_str = f" ({cluster['year']})" if cluster.get("year") else ""
+        label = f"🎬 {cluster['title']}{year_str} · {cluster['count']} разд."
+        # Trim label if too long (Telegram limit ~64 chars)
+        if len(label) > 60:
+            label = label[:57] + "…"
+        rows.append([InlineKeyboardButton(
+            label,
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:cluster:{idx}",
+        )])
+    total = sum(c["count"] for c in clusters)
+    rows.append([InlineKeyboardButton(
+        f"📋 Показать все {total} раздач",
+        callback_data=f"{SEARCH_CALLBACK_PREFIX}:cluster:all",
+    )])
+    rows.append([InlineKeyboardButton(
+        "❌ Отмена",
+        callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel",
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
 def _search_error_keyboard() -> InlineKeyboardMarkup:
     """Shown after a fatal search error (both sources unavailable).
 
