@@ -210,6 +210,174 @@ class DidYouMeanTests(unittest.TestCase):
         self.assertEqual(err, "network")
 
 
+class ExplainMovieCardTests(unittest.TestCase):
+    """PR2: 1-line «why this film» explanation generator."""
+
+    def _fake_chat_response(self, text: str):
+        return ({
+            "text": '{"text": "%s"}' % text,
+            "input_tokens": 250, "output_tokens": 50, "model": "gpt-4o-mini",
+        }, None)
+
+    def test_returns_explanation_text(self):
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response("Sci-fi эпик Вильнёва — для фанатов оригинала"),
+        ):
+            text, err = gpt_features.explain_movie_card(
+                title="Дюна: Часть вторая",
+                year=2024,
+                rating=8.4,
+                genres=["sci-fi"],
+                synopsis="Пол Атрейдес объединяется с Чани...",
+                api_key="sk-test",
+            )
+        self.assertEqual(text, "Sci-fi эпик Вильнёва — для фанатов оригинала")
+        self.assertIsNone(err)
+
+    def test_empty_title_returns_empty_error(self):
+        text, err = gpt_features.explain_movie_card(
+            title="", year=2024, rating=None, genres=[], api_key="sk-test",
+        )
+        self.assertIsNone(text)
+        self.assertEqual(err, "empty")
+
+    def test_propagates_chat_error(self):
+        with patch.object(
+            gpt_features, "chat_completion", return_value=(None, "quota_exceeded"),
+        ):
+            text, err = gpt_features.explain_movie_card(
+                title="X", year=2024, rating=7.0, genres=[], api_key="sk-test",
+            )
+        self.assertIsNone(text)
+        self.assertEqual(err, "quota_exceeded")
+
+    def test_truncates_overly_long_response(self):
+        long_text = "Ы" * 200
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response(long_text),
+        ):
+            text, _err = gpt_features.explain_movie_card(
+                title="X", year=2024, rating=7.0, genres=[], api_key="sk-test",
+            )
+        self.assertLessEqual(len(text), 130)
+        self.assertTrue(text.endswith("…"))
+
+    def test_works_without_synopsis(self):
+        """Synopsis-less mode: prompt notes «нет — опирайся только на жанр и
+        название», call still succeeds (just less specific result)."""
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response("Атмосферный sci-fi для…"),
+        ):
+            text, _err = gpt_features.explain_movie_card(
+                title="X", year=2024, rating=7.0,
+                genres=["sci-fi"], synopsis="",
+                api_key="sk-test",
+            )
+        self.assertEqual(text, "Атмосферный sci-fi для…")
+
+
+class EnrichTop10WithExplanationsTests(unittest.TestCase):
+    """bot._enrich_top10_with_explanations orchestrates KP synopsis fetch
+    + GPT explanation generation for the top-10 of /new only."""
+
+    def setUp(self):
+        import bot
+        self.bot = bot
+
+    def _make_cache(self, n_cards: int, with_explanation: list[bool] = None):
+        cards = []
+        kp_cache = {}
+        for i in range(n_cards):
+            kp_id = 1000 + i
+            cards.append({
+                "title": f"Film {i}", "year": 2024, "rating": 7.5,
+                "genres": ["drama"], "kp_id": kp_id,
+            })
+            entry = {"kp_id": kp_id, "title": f"Film {i}"}
+            if with_explanation and i < len(with_explanation) and with_explanation[i]:
+                entry["explanation"] = f"Cached explanation {i}"
+                entry["synopsis"] = "Cached synopsis"
+            kp_cache[f"film {i}|2024"] = entry
+        return {"cards": cards, "kp_cache": kp_cache}
+
+    def test_skips_when_gpt_disabled_branch_handled_in_caller(self):
+        """The helper itself doesn't check GPT_ENABLED — caller does. So if
+        we call it directly, it tries to generate. Verified by other tests
+        that mock chat_completion."""
+        # Smoke test: no cards → no work, no exceptions.
+        import asyncio
+        cache = {"cards": [], "kp_cache": {}}
+        asyncio.run(self.bot._enrich_top10_with_explanations(cache))
+
+    def test_only_processes_top10_not_all_30(self):
+        """Cards 11-30 must NOT have GPT/KP calls made for them."""
+        import asyncio
+        cache = self._make_cache(30)
+
+        explain_calls = []
+        def fake_explain(*, title, **_kw):
+            explain_calls.append(title)
+            return ("OK explanation", None)
+
+        with (
+            patch.object(self.bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(self.bot, "GPT_MODEL", "gpt-4o-mini"),
+            patch.object(self.bot, "kinopoisk_client",
+                         MagicMock(get_film_synopsis=MagicMock(return_value="syn"))),
+            patch.object(self.bot, "gpt_features_explain_movie_card", side_effect=fake_explain),
+            patch.object(self.bot, "_gpt_record_usage"),
+        ):
+            asyncio.run(self.bot._enrich_top10_with_explanations(cache))
+
+        # Only the first 10 cards' titles were used in GPT calls
+        self.assertEqual(len(explain_calls), 10)
+        self.assertEqual(explain_calls[0], "Film 0")
+        self.assertEqual(explain_calls[-1], "Film 9")
+
+    def test_reuses_cached_explanations(self):
+        """If kp_cache entry already has `explanation`, no new GPT call."""
+        import asyncio
+        # All 10 top-10 cards already have cached explanations
+        cache = self._make_cache(10, with_explanation=[True] * 10)
+
+        explain_mock = MagicMock(return_value=("new", None))
+        with (
+            patch.object(self.bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(self.bot, "kinopoisk_client",
+                         MagicMock(get_film_synopsis=MagicMock(return_value="syn"))),
+            patch.object(self.bot, "gpt_features_explain_movie_card", explain_mock),
+            patch.object(self.bot, "_gpt_record_usage"),
+        ):
+            asyncio.run(self.bot._enrich_top10_with_explanations(cache))
+
+        # No new GPT calls
+        explain_mock.assert_not_called()
+        # Cached explanation attached to card
+        self.assertEqual(cache["cards"][0]["explanation"], "Cached explanation 0")
+
+    def test_graceful_fallback_on_gpt_error(self):
+        """GPT timeout → card simply has no explanation, no exception."""
+        import asyncio
+        cache = self._make_cache(3)
+
+        with (
+            patch.object(self.bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(self.bot, "kinopoisk_client",
+                         MagicMock(get_film_synopsis=MagicMock(return_value="syn"))),
+            patch.object(self.bot, "gpt_features_explain_movie_card",
+                         return_value=(None, "timeout")),
+            patch.object(self.bot, "_gpt_record_usage"),
+        ):
+            asyncio.run(self.bot._enrich_top10_with_explanations(cache))
+
+        # No card got an explanation, no crash
+        for card in cache["cards"][:3]:
+            self.assertNotIn("explanation", card)
+
+
 class GptValidateKpMatchTests(unittest.TestCase):
     """bot.py wrapper around kp_confidence_check — graceful behaviour matters."""
 

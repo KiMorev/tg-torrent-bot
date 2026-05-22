@@ -542,6 +542,7 @@ def _kp_cache_store(
 ) -> None:
     key = _kp_cache_key(title, year)
     if match is not None:
+        existing = kp_cache.get(key) if isinstance(kp_cache.get(key), dict) else {}
         kp_cache[key] = {
             "kp_id": match.kp_id,
             "title": match.title,
@@ -553,6 +554,12 @@ def _kp_cache_store(
             "cached_at": now_iso,
             # Jitter spreads expiry over a window to prevent thundering-herd re-queries
             "ttl_days": _KP_CACHE_TTL_FOUND_DAYS + random.randint(0, _KP_CACHE_TTL_JITTER_MAX_DAYS),
+            # Preserve PR2 enrichment (synopsis + GPT explanation) across
+            # refreshes — these don't expire when KP metadata gets refreshed.
+            # The films themselves are static so the description / explanation
+            # stay valid indefinitely.
+            "synopsis": existing.get("synopsis"),
+            "explanation": existing.get("explanation"),
         }
     else:
         kp_cache[key] = {"kp_id": None, "cached_at": now_iso}

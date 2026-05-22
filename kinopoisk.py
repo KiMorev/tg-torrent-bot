@@ -116,6 +116,32 @@ class KinopoiskClient:
         })
 
     @_synchronized
+    def get_film_synopsis(self, kp_id: int) -> str | None:
+        """Fetch the KP `description` field for a film by numeric ID.
+
+        Used to enrich /new cards with GPT-generated 1-line explanations
+        («💭 Завершение саги Вильнёва…»). Best-effort: returns None on any
+        network/API error — the caller treats absence as «no synopsis,
+        generate explanation from title+genres only».
+
+        Lightweight wrapper over /v2.2/films/{id}: same endpoint as
+        get_film_info but we only need the `description` field, so no
+        director lookup or full KinopoiskInfo construction.
+        """
+        time.sleep(_KP_REQUEST_INTERVAL)
+        try:
+            resp = self._session.get(
+                f"{_API_BASE}/v2.2/films/{kp_id}",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError, TypeError) as e:
+            logger.warning("KP get_film_synopsis failed for kp_id=%s: %s", kp_id, e)
+            return None
+        synopsis = (data.get("description") or "").strip()
+        return synopsis or None
+
     def get_film_info(self, kp_id: int) -> KinopoiskInfo:
         """Fetch film/series details by Kinopoisk numeric ID."""
         try:

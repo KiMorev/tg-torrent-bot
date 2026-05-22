@@ -133,6 +133,7 @@ from voice_transcription import (
 )
 from gpt_client import estimate_chat_cost_usd
 from gpt_features import did_you_mean as gpt_did_you_mean
+from gpt_features import explain_movie_card as gpt_features_explain_movie_card
 from gpt_features import kp_confidence_check as gpt_kp_confidence_check
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
@@ -1880,6 +1881,13 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
             plex_mark = ""
         tracker_labels = _movie_card_tracker_labels(card)
         tracker_text = f" · {html_module.escape(tracker_labels)}" if tracker_labels else ""
+        # PR2: GPT-generated 1-line «why this film» explanation, shown only
+        # for top-10 cards that have a cached explanation. Italic + 💭 icon
+        # to distinguish from objective metadata above.
+        explanation_text = ""
+        explanation = card.get("explanation")
+        if explanation:
+            explanation_text = f"\n   💭 <i>{html_module.escape(str(explanation))}</i>"
         lines.append(
             f"\n{index}. <b>{title}</b>{plex_mark}{new_mark}\n"
             f"   {year}{rating_text}\n"
@@ -1887,7 +1895,7 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
             f"{html_module.escape(str(card.get('best_size') or '?'))}, "
             f"сидов {html_module.escape(str(card.get('best_seeders') or 0))}\n"
             f"   Раздач: {html_module.escape(str(card.get('release_count') or len(card.get('releases') or [])))}{tracker_text}"
-            f"{genres_text}{kp_text}"
+            f"{explanation_text}{genres_text}{kp_text}"
         )
     return "\n".join(lines)
 
@@ -2195,6 +2203,12 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     # in the new top-10 is "confirmed" (was also in the previous top-10) or
     # "transient" (appeared just now — wait for next cycle to validate).
     cache["prev_top10_kp_ids"] = _prev_top10_kp_ids
+
+    # PR2: enrich top-10 cards with GPT explanations + KP synopsis.
+    # Runs synchronously but each call is bounded (~2-3 sec) and cached
+    # forever in kp_cache, so steady-state cost is near-zero.
+    if GPT_ENABLED:
+        await _enrich_top10_with_explanations(cache)
 
     _save_movie_discovery_cache(cache)
     debug_report = {
@@ -9256,6 +9270,99 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
         error_label=error,
     )
     return suggestions
+
+
+async def _enrich_top10_with_explanations(cache: dict) -> None:
+    """Generate 1-line GPT explanations for the top-10 cards in /new.
+
+    Runs at the end of _refresh_movie_discovery_cache (only if GPT_ENABLED).
+    Two-step enrichment per card:
+      1. Fetch synopsis from KP if missing (cached in kp_cache forever).
+      2. Generate explanation via GPT if missing (also cached forever).
+
+    Both steps gracefully skip on errors — card simply won't have an
+    explanation line in the renderer. Already-cached explanations are
+    reused, so this is near-free for unchanged top-10s.
+
+    Why only top-10: that's what /new renders. Cards at positions 11-30
+    are buffer/spares; generating for them wastes GPT/KP budget on
+    content the user may never see. If a buffer card rises into top-10
+    on the next refresh, it gets enriched then.
+    """
+    cards = cache.get("cards") or []
+    top10 = cards[:10]
+    if not top10:
+        return
+
+    kp_cache = cache.get("kp_cache") if isinstance(cache.get("kp_cache"), dict) else {}
+    cache["kp_cache"] = kp_cache  # ensure dict back-reference
+
+    generated = 0
+    skipped_cached = 0
+    for card in top10:
+        kp_id = card.get("kp_id")
+        if not kp_id:
+            continue  # no KP match → nothing to look up / generate against
+
+        # Find the kp_cache entry for this card. kp_cache is keyed by
+        # _kp_cache_key(title, year), not by kp_id — iterate to find a
+        # match. Small N (top-10) → fine.
+        cache_entry = None
+        for entry in kp_cache.values():
+            if isinstance(entry, dict) and entry.get("kp_id") == kp_id:
+                cache_entry = entry
+                break
+        if cache_entry is None:
+            continue
+
+        # Step 1: synopsis (KP call, cached forever).
+        synopsis = cache_entry.get("synopsis")
+        if synopsis is None and kinopoisk_client is not None:
+            try:
+                synopsis = await asyncio.to_thread(
+                    kinopoisk_client.get_film_synopsis, kp_id,
+                )
+            except Exception:
+                logger.warning("KP synopsis fetch failed for kp_id=%s", kp_id, exc_info=True)
+                synopsis = ""  # cache as empty string to avoid re-trying every refresh
+            cache_entry["synopsis"] = synopsis
+
+        # Step 2: GPT explanation (cached forever).
+        explanation = cache_entry.get("explanation")
+        if not explanation:
+            text, error = await asyncio.to_thread(
+                gpt_features_explain_movie_card,
+                title=str(card.get("title") or ""),
+                year=card.get("year"),
+                rating=card.get("rating"),
+                genres=card.get("genres") or [],
+                synopsis=synopsis or "",
+                api_key=OPENAI_API_KEY,
+                model=GPT_MODEL,
+            )
+            # Rough token estimate for the usage tracker — refine later if
+            # /admin numbers look off vs OpenAI dashboard.
+            approx_in = 200 + (len(synopsis or "") // 4)
+            _gpt_record_usage(
+                feature="explain_card",
+                input_tokens=approx_in,
+                output_tokens=60,
+                error_label=error,
+            )
+            if text:
+                explanation = text
+                cache_entry["explanation"] = explanation
+                generated += 1
+
+        if explanation:
+            card["explanation"] = explanation
+        else:
+            skipped_cached += 1
+
+    logger.info(
+        "movie_discovery: top10 explanations — generated=%d cached=%d total_top10=%d",
+        generated, len(top10) - generated - skipped_cached, len(top10),
+    )
 
 
 def _gpt_validate_kp_match(query: str, match) -> bool:
