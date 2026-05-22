@@ -416,6 +416,7 @@ def _no_results_keyboard(
     *,
     has_quality: bool,
     jackett_can_expand: bool,
+    suggestions: list[str] | None = None,
 ) -> InlineKeyboardMarkup:
     """Shown on a 'no results' dead-end. Offers to relax filters and retry.
 
@@ -426,10 +427,20 @@ def _no_results_keyboard(
     - ``jackett_can_expand``: Jackett is configured AND ``srch_jackett_selected``
       is a strict subset of available indexers — offer to broaden.
     - Both flags True → also offer the combined retry.
+    - ``suggestions``: optional GPT-generated «did you mean …» variations.
+      Each becomes a button that re-runs the search with that text.
 
     Always ends with Cancel so the screen never dead-ends.
     """
     rows: list[list[InlineKeyboardButton]] = []
+    # GPT suggestions go FIRST — they're the most likely fix for typos.
+    for suggestion in (suggestions or [])[:3]:
+        if not suggestion:
+            continue
+        rows.append([InlineKeyboardButton(
+            f"🔍 {suggestion}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:didmean:{suggestion}",
+        )])
     if has_quality:
         rows.append([InlineKeyboardButton(
             "🔍 Без фильтра качества",

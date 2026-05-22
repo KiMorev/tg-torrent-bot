@@ -43,6 +43,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         pending_downloads_file=settings.pending_downloads_file,
         storage_history_file=settings.storage_history_file,
         voice_usage_file=settings.voice_usage_file,
+        gpt_usage_file=settings.gpt_usage_file,
     )
     rutracker_client = (
         RutrackerClient(

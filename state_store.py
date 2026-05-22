@@ -30,6 +30,7 @@ class JsonStateStore:
         pending_downloads_file: Path | None = None,
         storage_history_file: Path | None = None,
         voice_usage_file: Path | None = None,
+        gpt_usage_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -43,6 +44,7 @@ class JsonStateStore:
         self.pending_downloads_file = pending_downloads_file
         self.storage_history_file = storage_history_file
         self.voice_usage_file = voice_usage_file
+        self.gpt_usage_file = gpt_usage_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -483,6 +485,36 @@ class JsonStateStore:
         if not self.voice_usage_file:
             return
         self.save_json_file(self.voice_usage_file, payload, "voice usage")
+
+    # ---- GPT chat usage stats (per-feature: kp_confidence, did_you_mean, ...) ----
+
+    def load_gpt_usage(self) -> dict:
+        """Return GPT chat usage record, or empty dict.
+
+        Shape mirrors voice_usage but adds per-feature breakdown:
+            {
+              "month": "YYYY-MM",
+              "features": {
+                "kp_confidence": {"calls": int, "input_tokens": int,
+                                  "output_tokens": int, "estimated_cost_usd": float},
+                "did_you_mean":  {...same...},
+                "explain_card":  {...same...},   # PR2
+                "quality_parse": {...same...},   # PR3
+                "plex_unmatched":{...same...},   # PR4
+              },
+              "last_error": {"ts", "feature", "type"} | None,
+            }
+        Per-feature buckets reset monthly together with the top-level counter.
+        """
+        if not self.gpt_usage_file:
+            return {}
+        payload = self.load_json_file(self.gpt_usage_file, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def save_gpt_usage(self, payload: dict) -> None:
+        if not self.gpt_usage_file:
+            return
+        self.save_json_file(self.gpt_usage_file, payload, "gpt usage")
 
     def append_storage_snapshot(self, snapshot: dict, max_age_days: int = 30) -> None:
         """Append a snapshot, prune entries older than `max_age_days`, save atomically.

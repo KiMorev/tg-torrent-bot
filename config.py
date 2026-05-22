@@ -155,6 +155,9 @@ class AppSettings:
     voice_search_enabled: bool
     voice_max_seconds: int
     voice_usage_file: Path
+    gpt_enabled: bool
+    gpt_model: str
+    gpt_usage_file: Path
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
@@ -279,4 +282,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         voice_search_enabled=env_bool(env, "VOICE_SEARCH_ENABLED", True),
         voice_max_seconds=max(5, min(600, env_int(env, "VOICE_MAX_SECONDS", 30))),
         voice_usage_file=Path(env.get("VOICE_USAGE_FILE", str(state_dir / "voice_usage.json"))),
+        gpt_enabled=env_bool(env, "GPT_ENABLED", True),
+        gpt_model=env.get("GPT_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+        gpt_usage_file=Path(env.get("GPT_USAGE_FILE", str(state_dir / "gpt_usage.json"))),
     )

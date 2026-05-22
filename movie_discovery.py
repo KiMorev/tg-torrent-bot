@@ -609,6 +609,7 @@ def build_cards(
     kinopoisk_client=None,
     kp_cache: dict | None = None,
     max_stale_refresh: int | None = _KP_MAX_STALE_REFRESH_PER_RUN,
+    kp_match_validator=None,  # Callable[[str, KinopoiskMovieMatch], bool] | None
 ) -> dict:
     """Build scored movie cards from raw releases.
 
@@ -695,6 +696,12 @@ def build_cards(
                         search_title, search_year, alt_title=card.get("alt_title", "")
                     )
                     kp_searches_this_run += 1
+                    # GPT validator: ask "does this match feel right?". If it
+                    # says no, discard the match — better to leave the card
+                    # without KP enrichment than show wrong rating/title.
+                    if match is not None and kp_match_validator is not None:
+                        if not kp_match_validator(search_title, match):
+                            match = None
                     _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
                     if match is not None:
                         year_ok = not (
@@ -724,6 +731,10 @@ def build_cards(
                     search_title, search_year, alt_title=card.get("alt_title", "")
                 )
                 kp_searches_this_run += 1
+                # GPT validator (same as stale-refresh branch above).
+                if match is not None and kp_match_validator is not None:
+                    if not kp_match_validator(search_title, match):
+                        match = None
                 _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
                 if match is not None:
                     year_ok = not (

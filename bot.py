@@ -131,6 +131,9 @@ from voice_transcription import (
     transcribe_audio,
     transcribe_audio_detailed,
 )
+from gpt_client import estimate_chat_cost_usd
+from gpt_features import did_you_mean as gpt_did_you_mean
+from gpt_features import kp_confidence_check as gpt_kp_confidence_check
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
@@ -271,6 +274,8 @@ STORAGE_ALERT_PERCENT = settings.storage_alert_percent
 OPENAI_API_KEY = settings.openai_api_key
 VOICE_SEARCH_ENABLED = settings.voice_search_enabled and bool(OPENAI_API_KEY)
 VOICE_MAX_SECONDS = settings.voice_max_seconds
+GPT_ENABLED = settings.gpt_enabled and bool(OPENAI_API_KEY)
+GPT_MODEL = settings.gpt_model
 
 # kinopoiskapiunofficial.tech free tier: 500 requests/day
 _KP_DAILY_LIMIT = 500
@@ -2112,6 +2117,7 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
         min_kp_rating=MOVIE_DISCOVERY_MIN_KP_RATING,
         kinopoisk_client=kinopoisk_client,
         kp_cache=prev_kp_cache,
+        kp_match_validator=_gpt_validate_kp_match,
         max_stale_refresh=max_stale_kp_refresh,
     )
     # Restore first_seen_at from the previous cache for cards that already existed.
@@ -5067,12 +5073,14 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         })
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
+        suggestions = await _gpt_get_did_you_mean(search_query)
         # Direct Rutracker path — Jackett expansion is irrelevant here.
         await query.edit_message_text(
             f"По запросу «{search_query}» ничего не найдено в Rutracker.",
             reply_markup=_no_results_keyboard(
                 has_quality=has_quality,
                 jackett_can_expand=False,
+                suggestions=suggestions,
             ),
         )
         return SEARCH_RESULTS
@@ -5302,12 +5310,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     if not results_data:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+        suggestions = await _gpt_get_did_you_mean(search_query)
         await edit_fn(
             f"По запросу «{search_query}» ничего не найдено.\n"
             "Попробуйте ослабить фильтры или другой запрос.",
             reply_markup=_no_results_keyboard(
                 has_quality=has_quality,
                 jackett_can_expand=jackett_can_expand,
+                suggestions=suggestions,
             ),
         )
         return SEARCH_RESULTS
@@ -5424,6 +5434,29 @@ async def search_quick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     base = context.user_data.get("srch_query", "")
     return await _execute_search(query, context, f"{base} 1080p")
+
+
+async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Run search with a GPT-suggested alternative query.
+
+    Triggered by tapping one of the «🔍 <текст>» suggestion buttons on a
+    no-results screen. The suggestion text travels in callback_data after
+    the `srch:didmean:` prefix; we extract it, replace srch_query, and
+    re-enter the standard search pipeline.
+    """
+    query = update.callback_query
+    await query.answer()
+    # Callback data shape: «srch:didmean:<text>». Strip the prefix; preserve
+    # the text verbatim (it can contain spaces / special chars but no «:»).
+    prefix = f"{SEARCH_CALLBACK_PREFIX}:didmean:"
+    raw = query.data or ""
+    suggestion = raw[len(prefix):].strip() if raw.startswith(prefix) else ""
+    if not suggestion:
+        await query.edit_message_text("Подсказка потеряна. Начните поиск заново.")
+        return ConversationHandler.END
+    context.user_data["srch_query"] = suggestion
+    context.user_data["srch_search_query"] = suggestion
+    return await _execute_search(query, context, suggestion)
 
 
 async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8829,6 +8862,131 @@ def _voice_record_usage(
     state_store.save_voice_usage(usage)
 
 
+async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
+    """Return up to 3 GPT-suggested alternative queries, or empty list.
+
+    Cheap to call (~$0.00005 per request, only fires on 0 results). Failures
+    silently degrade to empty list — the «no results» screen still works
+    with just the existing «без качества» / «все трекеры» / «отмена» buttons.
+    """
+    if not GPT_ENABLED:
+        return []
+    try:
+        suggestions, error = await asyncio.to_thread(
+            gpt_did_you_mean,
+            query=search_query,
+            api_key=OPENAI_API_KEY,
+            model=GPT_MODEL,
+        )
+    except Exception:
+        logger.warning("did_you_mean call failed", exc_info=True)
+        return []
+    # Same conservative token estimate as kp_confidence — refine later if needed.
+    _gpt_record_usage(
+        feature="did_you_mean",
+        input_tokens=100,
+        output_tokens=120,
+        error_label=error,
+    )
+    return suggestions
+
+
+def _gpt_validate_kp_match(query: str, match) -> bool:
+    """Ask GPT whether the KP-search result actually matches the torrent query.
+
+    Returns True (= accept the match) when GPT is disabled, when GPT errors
+    (we'd rather show possibly-imperfect KP data than nothing), or when GPT
+    is confident enough (confidence >= KP_CONFIDENCE_THRESHOLD).
+
+    Returns False (= reject and treat as no-match) only when GPT explicitly
+    picks "none" or returns low confidence. This protects /new from showing
+    cards with wrong KP rating / title attached to the wrong film.
+
+    Called synchronously from inside _movie_build_cards (which itself runs
+    in a worker thread), so blocking HTTP is fine.
+    """
+    if not GPT_ENABLED or match is None:
+        return True
+
+    candidates = [{
+        "title_ru": match.title_ru or "",
+        "title_en": match.title_en or "",
+        "year": match.year,
+        "rating": match.rating,
+        "genres": match.genres or [],
+    }]
+
+    pick, confidence, error = gpt_kp_confidence_check(
+        query=query,
+        candidates=candidates,
+        api_key=OPENAI_API_KEY,
+        model=GPT_MODEL,
+    )
+    # Approximate token usage: prompt ~150 + 1 candidate row, response ~50.
+    # We don't get exact counts from gpt_features (it discards them), so
+    # estimate conservatively — refine later if /admin numbers look off.
+    _gpt_record_usage(
+        feature="kp_confidence",
+        input_tokens=200,
+        output_tokens=50,
+        error_label=error,
+    )
+
+    if error:
+        # GPT unreachable / quota / etc. — fall back to accepting the match
+        # so the user doesn't lose KP enrichment due to OpenAI hiccups.
+        return True
+    return pick is not None
+
+
+def _gpt_record_usage(
+    *,
+    feature: str,  # "kp_confidence" | "did_you_mean" | "explain_card" | "quality_parse" | "plex_unmatched"
+    input_tokens: int,
+    output_tokens: int,
+    error_label: str | None,
+) -> None:
+    """Track GPT call into the monthly per-feature usage bucket.
+
+    Cheap (one JSON load/save) so it's safe to call synchronously from
+    each GPT feature wrapper. Counters reset on calendar month rollover;
+    last_error persists across rollover so the operator still sees the
+    last problem after a month boundary.
+    """
+    now = datetime.now(DISPLAY_TIMEZONE)
+    current_month = now.strftime("%Y-%m")
+    usage = state_store.load_gpt_usage()
+    if usage.get("month") != current_month:
+        usage = {
+            "month": current_month,
+            "features": {},
+            "last_error": usage.get("last_error"),
+        }
+
+    features = usage.setdefault("features", {})
+    bucket = features.setdefault(feature, {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "estimated_cost_usd": 0.0,
+    })
+    bucket["calls"] = int(bucket.get("calls", 0)) + 1
+    bucket["input_tokens"] = int(bucket.get("input_tokens", 0)) + max(0, input_tokens)
+    bucket["output_tokens"] = int(bucket.get("output_tokens", 0)) + max(0, output_tokens)
+    bucket["estimated_cost_usd"] = float(bucket.get("estimated_cost_usd", 0.0)) + estimate_chat_cost_usd(
+        input_tokens, output_tokens,
+    )
+
+    if error_label:
+        usage["last_error"] = {
+            "ts": now.isoformat(timespec="seconds"),
+            "feature": feature,
+            "type": error_label,
+        }
+
+    state_store.save_gpt_usage(usage)
+
+
 async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """ConversationHandler entry point for voice messages.
 
@@ -9321,6 +9479,7 @@ def main() -> None:
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),
                     CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
                     CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
+                    CallbackQueryHandler(search_didmean, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:didmean:"),
                     CallbackQueryHandler(search_retry_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry_dl:\d+$"),
                     CallbackQueryHandler(search_queue_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:queue_dl:\d+$"),
                     CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
