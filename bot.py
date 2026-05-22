@@ -5183,47 +5183,100 @@ _QUALITY_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Trailing filter tokens added by _build_search_query (audio/subs flags).
+# Stripped before sending the query to trackers, then applied client-side
+# via the _detect_has_original_audio / _detect_has_subs heuristics below.
+_FILTER_TOKEN_RE = re.compile(
+    r"\s+(Original|Sub)\b",
+    re.IGNORECASE,
+)
 
-def _split_query_quality(search_query: str) -> tuple[str, str | None]:
-    """Strip the trailing quality token (1080p / 2160p / 720p / 480p / 4k / hdr)
-    from a search query and return (base_query, preferred_quality_normalised).
+# Patterns for client-side filtering (Strategy 2 for audio/subs).
+# Torrent titles use a wide vocabulary for «has original audio» and
+# «has subtitles» — these regexes catch the most common variants; misses
+# degrade to «result kept» (better false-positive than false-negative
+# given that we're filtering for an OPTIONAL user preference).
+_AUDIO_ORIG_RE = re.compile(
+    r"\b(orig(?:inal)?|dual|mvo|avo|dvo|nvo|"
+    r"Лиценз|"  # "Лиценз"(ия)
+    r"Дубляж)\b",
+    re.IGNORECASE,
+)
+_SUBS_RE = re.compile(
+    r"\b(subs?|forced|hardsub|softsub|"
+    r"субтит)\w*",
+    re.IGNORECASE,
+)
 
-    The bot tacks on a quality suffix to the user's bare query as a UX
-    affordance. But appending it to the actual tracker call has two costs:
-      1. Trackers index quality strings inconsistently — many real 1080p
-         torrents don't say «1080p» in the title verbatim (BDRip, BDRemux,
-         WEB-DL with no explicit resolution token, …).
-      2. When a film exists ONLY in non-preferred quality, we get 0 results
-         and lose the information that the film exists at all.
 
-    Strategy 2: search without the suffix, classify results client-side via
-    movie_discovery.detect_quality, filter to the preferred bucket. If the
-    preferred bucket is empty but others have content, show all + banner.
+def _detect_has_original_audio(title: str) -> bool:
+    """Heuristic: does the torrent title indicate presence of an original
+    (non-dubbed) audio track? Looks for dual-track / MVO / AVO / DVO /
+    Лицензия / Дубляж markers used by Russian release groups."""
+    return bool(_AUDIO_ORIG_RE.search(title))
+
+
+def _detect_has_subs(title: str) -> bool:
+    """Heuristic: subtitles present? Matches Sub / Subs / Forced / Hardsub /
+    Softsub / субтитры variants."""
+    return bool(_SUBS_RE.search(title))
+
+
+def _split_query_settings(search_query: str) -> tuple[str, str | None, bool, bool]:
+    """Strip user-preference tokens from a search query and return
+    (base_query, preferred_quality, audio_required, subs_required).
+
+    Strategy 2: send the clean base to Jackett/Rutracker (one network call,
+    independent of filters), then apply quality/audio/subs as CLIENT-SIDE
+    filters. See _split_query_quality (legacy single-token helper) for the
+    original rationale — this extends it to cover audio + subs.
+
+    Quality tokens stripped: 1080p / 720p / 2160p / 480p / 4k / uhd / hdr.
+    Filter flags detected: «Original» (audio preference), «Sub» (subs preference).
+    Tokens may appear in any order and any amount of whitespace.
 
     Returns:
-        (base_query, preferred_quality)  — preferred_quality is "1080p" /
-        "720p" / "2160p" / None. None means «no quality filter requested».
-
-    Examples:
-        "Дюна 1080p"     → ("Дюна", "1080p")
-        "Дюна 2024"      → ("Дюна 2024", None)
-        "Дюна часть 2 2160p" → ("Дюна часть 2", "2160p")
-        "Дюна 4k"        → ("Дюна", "2160p")
+        (base_query, preferred_quality, audio_required, subs_required)
+        Quality normalised to {1080p, 720p, 2160p, 480p} or None.
+        Audio/subs default to False when not present.
     """
     s = search_query.strip()
+    audio_required = False
+    subs_required = False
+    # Iteratively pull trailing filter tokens until no more match — they may
+    # have been appended in any order ("base 1080p Original Sub" or
+    # "base Sub Original 1080p").
+    while True:
+        m = _FILTER_TOKEN_RE.search(s)
+        if not m:
+            break
+        token = m.group(1).lower()
+        if token == "original":
+            audio_required = True
+        elif token == "sub":
+            subs_required = True
+        s = (s[: m.start()] + s[m.end():]).strip()
+    # Quality is exclusive (only one quality token expected at a time).
     m = _QUALITY_SUFFIX_RE.search(s)
-    if not m:
-        return (s, None)
-    base = s[: m.start()].strip()
-    token = m.group(1).lower()
-    normalised = {
-        "4k": "2160p", "uhd": "2160p", "2160p": "2160p",
-        "1080p": "1080p",
-        "720p": "720p",
-        "480p": "480p",
-        "hdr": "2160p",  # HDR usually implies 2160p in our user base
-    }.get(token, token)
-    return (base or s, normalised)
+    preferred_quality: str | None = None
+    if m:
+        token = m.group(1).lower()
+        preferred_quality = {
+            "4k": "2160p", "uhd": "2160p", "2160p": "2160p",
+            "1080p": "1080p",
+            "720p": "720p",
+            "480p": "480p",
+            "hdr": "2160p",
+        }.get(token, token)
+        s = s[: m.start()].strip()
+    return (s or search_query.strip(), preferred_quality, audio_required, subs_required)
+
+
+def _split_query_quality(search_query: str) -> tuple[str, str | None]:
+    """Backwards-compat wrapper around _split_query_settings — returns only
+    (base, quality) for callers that don't care about audio/subs flags."""
+    base, quality, _audio, _subs = _split_query_settings(search_query)
+    return (base, quality)
 
 
 def _classify_results_by_quality(results: list[dict]) -> dict[str, list[dict]]:
@@ -5291,14 +5344,28 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
          show a fallback button to retry without the quality filter.
     """
     context.user_data["srch_search_query"] = search_query
-    # Strategy 2: search WITHOUT quality suffix, classify + filter client-side.
-    # See _split_query_quality docstring for rationale. base_query is what
-    # actually goes to Jackett/Rutracker; preferred_quality is applied as a
-    # post-filter on the raw results.
-    base_query, preferred_quality = _split_query_quality(search_query)
+    # Strategy 2: search WITHOUT user-preference tokens (quality / audio / subs),
+    # classify + filter client-side. See _split_query_settings for rationale.
+    # base_query is what actually goes to Jackett/Rutracker; the rest are
+    # applied as post-filters on the raw results.
+    base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
     context.user_data["srch_preferred_quality"] = preferred_quality
 
-    loading_msg = await send_fn(f"🔍 Ищу «{search_query}»…")
+    # Loading message: show the user a clean «what we're looking for» rather
+    # than the technical query with appended tokens. Reflects the structure
+    # transparently — base on top, filters below as a sub-line.
+    filter_parts: list[str] = []
+    if preferred_quality:
+        filter_parts.append(preferred_quality)
+    if audio_required:
+        filter_parts.append("оригинальная дорожка")
+    if subs_required:
+        filter_parts.append("субтитры")
+    loading_text = f"🔍 Ищу «{base_query}»…"
+    if filter_parts:
+        loading_text += f"\n⚙️ {' · '.join(filter_parts)}"
+
+    loading_msg = await send_fn(loading_text)
     if loading_msg is not None:
         context.user_data["srch_ui_msg_id"] = loading_msg.message_id
         context.user_data["srch_ui_chat_id"] = loading_msg.chat_id
@@ -5488,7 +5555,60 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         )
         return SEARCH_RESULTS
 
-    # --- Strategy 2: client-side quality filter ---
+    # --- Strategy 2: client-side filters (quality + audio + subs) ---
+    # Apply audio/subs FIRST (they're presence flags — narrows the pool but
+    # doesn't change the quality landscape). Quality filter runs after so the
+    # «found in other quality» banner reflects what's actually available
+    # given the audio/subs preference.
+    filter_banner_parts: list[str] = []
+    if audio_required:
+        before = len(results_data)
+        results_data = [r for r in results_data if _detect_has_original_audio(r.get("title", ""))]
+        dropped = before - len(results_data)
+        if dropped > 0:
+            filter_banner_parts.append(
+                f"⚙️ Оставлены {len(results_data)}/{before} с оригинальной дорожкой "
+                f"(скрыто {dropped})"
+            )
+            logger.info(
+                "Search: audio filter kept %d/%d for %r",
+                len(results_data), before, base_query,
+            )
+    if subs_required:
+        before = len(results_data)
+        results_data = [r for r in results_data if _detect_has_subs(r.get("title", ""))]
+        dropped = before - len(results_data)
+        if dropped > 0:
+            filter_banner_parts.append(
+                f"⚙️ Оставлены {len(results_data)}/{before} с субтитрами "
+                f"(скрыто {dropped})"
+            )
+            logger.info(
+                "Search: subs filter kept %d/%d for %r",
+                len(results_data), before, base_query,
+            )
+
+    # If audio/subs filter wiped everything but we DID have results before —
+    # show no-results with a helpful banner. Otherwise fall through to quality
+    # filter (which has its own «empty bucket → show all» recovery).
+    if not results_data and filter_banner_parts:
+        has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+        suggestions = await _gpt_get_did_you_mean(base_query)
+        text = (
+            f"По запросу «{search_query}» ничего не найдено.\n"
+            + "\n".join(filter_banner_parts)
+            + "\nПопробуйте отключить фильтры аудио/субтитров в настройках."
+        )
+        await edit_fn(
+            text,
+            reply_markup=_no_results_keyboard(
+                has_quality=has_quality,
+                jackett_can_expand=jackett_can_expand,
+                suggestions=suggestions,
+            ),
+        )
+        return SEARCH_RESULTS
+
     # Classify all results by detected quality (1080p / 2160p / 720p / other).
     # If the user asked for a specific quality:
     #   - filter to that bucket if non-empty (standard case)
@@ -5577,9 +5697,11 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     results_data.sort(key=_score_result, reverse=True)
     results_data[0]["recommended"] = True
 
-    # Combine the source banner (Jackett-fallback message) with the quality
-    # filter banner (Strategy 2 stats). Either may be empty.
-    combined_banner = "\n".join(b for b in (banner, quality_banner) if b)
+    # Combine all banners (in display order): source-fallback message,
+    # audio/subs filter stats, quality filter stats. Any may be empty.
+    combined_banner = "\n".join(
+        b for b in (banner, *filter_banner_parts, quality_banner) if b
+    )
 
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
@@ -5636,20 +5758,28 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def search_quick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Быстрый поиск с 1080p."""
+    """Quick search using the user's current settings (quality / audio / subs).
+
+    Renamed from the legacy «Быстрый поиск с 1080p» — quality is no longer
+    hardcoded; we honour whatever the user picked in /search settings.
+    """
     query = update.callback_query
     await query.answer()
     base = context.user_data.get("srch_query", "")
-    return await _execute_search(query, context, f"{base} 1080p")
+    settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+    return await _execute_search(query, context, _build_search_query(base, settings))
 
 
 async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Run search with a GPT-suggested alternative query.
+    """Run search with a GPT-suggested alternative query, preserving the
+    user's existing search settings (quality, audio, subs).
 
     Triggered by tapping one of the «🔍 <текст>» suggestion buttons on a
-    no-results screen. The suggestion text travels in callback_data after
-    the `srch:didmean:` prefix; we extract it, replace srch_query, and
-    re-enter the standard search pipeline.
+    no-results screen. The suggestion is a clean TITLE fix; we re-attach
+    the user's preferences via _build_search_query so the new search keeps
+    «1080p / Original / Sub» filtering intent — otherwise tapping
+    «Дюна» on a «Дюра 1080p» miss would silently drop the quality
+    preference and show unrelated qualities.
     """
     query = update.callback_query
     await query.answer()
@@ -5661,9 +5791,11 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not suggestion:
         await query.edit_message_text("Подсказка потеряна. Начните поиск заново.")
         return ConversationHandler.END
+    settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+    full_query = _build_search_query(suggestion, settings)
     context.user_data["srch_query"] = suggestion
-    context.user_data["srch_search_query"] = suggestion
-    return await _execute_search(query, context, suggestion)
+    context.user_data["srch_search_query"] = full_query
+    return await _execute_search(query, context, full_query)
 
 
 async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

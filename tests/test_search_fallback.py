@@ -342,6 +342,216 @@ class QualityFilterIntegrationTests(unittest.TestCase):
         self.assertNotIn("показаны", text)
 
 
+class SplitQuerySettingsTests(unittest.TestCase):
+    """Extended helper: strips quality + audio + subs tokens in any order."""
+
+    def test_strips_quality_only(self):
+        self.assertEqual(
+            bot._split_query_settings("Дюна 1080p"),
+            ("Дюна", "1080p", False, False),
+        )
+
+    def test_strips_audio_flag(self):
+        self.assertEqual(
+            bot._split_query_settings("Дюна Original"),
+            ("Дюна", None, True, False),
+        )
+
+    def test_strips_subs_flag(self):
+        self.assertEqual(
+            bot._split_query_settings("Дюна Sub"),
+            ("Дюна", None, False, True),
+        )
+
+    def test_strips_all_three_in_canonical_order(self):
+        self.assertEqual(
+            bot._split_query_settings("Дюна 1080p Original Sub"),
+            ("Дюна", "1080p", True, True),
+        )
+
+    def test_strips_flags_in_any_order(self):
+        # The build-search-query order is quality/audio/subs, but be defensive
+        # against user-supplied orderings.
+        base, quality, audio, subs = bot._split_query_settings("Дюна Sub Original 1080p")
+        self.assertEqual(base, "Дюна")
+        self.assertEqual(quality, "1080p")
+        self.assertTrue(audio)
+        self.assertTrue(subs)
+
+
+class AudioSubsDetectionTests(unittest.TestCase):
+    def test_detects_original_audio_dual(self):
+        self.assertTrue(bot._detect_has_original_audio("Dune 2024 1080p Dual"))
+
+    def test_detects_original_audio_mvo(self):
+        self.assertTrue(bot._detect_has_original_audio("Дюна (2024) MVO"))
+
+    def test_detects_original_audio_keyword(self):
+        self.assertTrue(bot._detect_has_original_audio("Dune 2024 ORIGINAL"))
+
+    def test_does_not_detect_original_on_dubbed_only(self):
+        self.assertFalse(bot._detect_has_original_audio("Dune 2024 1080p WEB-DL"))
+
+    def test_detects_subs(self):
+        self.assertTrue(bot._detect_has_subs("Dune 2024 SUB"))
+        self.assertTrue(bot._detect_has_subs("Dune 2024 forced"))
+        self.assertTrue(bot._detect_has_subs("Дюна субтитры"))
+
+    def test_does_not_detect_subs_on_plain_title(self):
+        self.assertFalse(bot._detect_has_subs("Dune 2024 1080p"))
+
+
+class LoadingMessageWordingTests(unittest.TestCase):
+    """Verify the loading message shows the base query + filter sub-line."""
+
+    def test_loading_text_with_quality_only(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = []
+        send_fn, _msg = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Дюна 1080p"))
+
+        loading_text = send_fn.call_args.args[0]
+        self.assertIn("«Дюна»", loading_text)
+        self.assertIn("⚙️", loading_text)
+        self.assertIn("1080p", loading_text)
+
+    def test_loading_text_with_quality_and_audio_and_subs(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = []
+        send_fn, _msg = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Дюна 1080p Original Sub"))
+
+        loading_text = send_fn.call_args.args[0]
+        self.assertIn("«Дюна»", loading_text)
+        self.assertIn("оригинальная дорожка", loading_text)
+        self.assertIn("субтитры", loading_text)
+
+    def test_loading_text_without_filters(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = []
+        send_fn, _msg = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Дюна 2024"))
+
+        loading_text = send_fn.call_args.args[0]
+        self.assertIn("«Дюна 2024»", loading_text)
+        # No filter sub-line — year is part of the title, not a tracked setting
+        self.assertNotIn("⚙️", loading_text)
+
+
+class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
+    """search_didmean must keep the user's quality/audio/subs choices when
+    re-running the search with a typo-corrected title."""
+
+    def test_didmean_preserves_quality_preference(self):
+        """User searched «Дюра 1080p» → typo → taps «Дюна» suggestion →
+        bot must search for «Дюна 1080p», not bare «Дюна»."""
+        query = MagicMock()
+        query.data = "srch:didmean:Дюна"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1, chat_id=100))
+        update = MagicMock(callback_query=query)
+        context = MagicMock()
+        context.user_data = {
+            "srch_query": "Дюра",
+            "srch_search_query": "Дюра 1080p",
+            "srch_settings": {"quality": "1080p", "audio": False, "subs": False},
+        }
+
+        # Capture what _execute_search is called with
+        with patch.object(bot, "_execute_search", new=AsyncMock(return_value=0)) as exec_mock:
+            asyncio.run(bot.search_didmean(update, context))
+
+        called_args = exec_mock.call_args.args
+        # third arg is the search_query passed to _run_search
+        self.assertEqual(called_args[2], "Дюна 1080p")
+        # context.user_data must reflect the new query/title
+        self.assertEqual(context.user_data["srch_query"], "Дюна")
+        self.assertEqual(context.user_data["srch_search_query"], "Дюна 1080p")
+
+    def test_didmean_preserves_audio_and_subs(self):
+        query = MagicMock()
+        query.data = "srch:didmean:Аркейн"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1, chat_id=100))
+        update = MagicMock(callback_query=query)
+        context = MagicMock()
+        context.user_data = {
+            "srch_query": "Аркаин",
+            "srch_search_query": "Аркаин 1080p Original Sub",
+            "srch_settings": {"quality": "1080p", "audio": True, "subs": True},
+        }
+
+        with patch.object(bot, "_execute_search", new=AsyncMock(return_value=0)) as exec_mock:
+            asyncio.run(bot.search_didmean(update, context))
+
+        called_args = exec_mock.call_args.args
+        full = called_args[2]
+        self.assertIn("Аркейн", full)
+        self.assertIn("1080p", full)
+        self.assertIn("Original", full)
+        self.assertIn("Sub", full)
+
+
+class AudioSubsFilterIntegrationTests(unittest.TestCase):
+    """Strategy 2 applied to audio/subs — client-side post-filter on results."""
+
+    def _make_jackett_result(self, title: str):
+        r = MagicMock()
+        r.title = title
+        r.topic_url = "https://example.com/x"
+        r.tracker = "rt"
+        r.size = "5 GB"
+        r.seeders = 10
+        r.magnet_url = ""
+        r.torrent_url = ""
+        return r
+
+    def test_audio_filter_drops_dub_only_results(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            self._make_jackett_result("Dune 2024 1080p Dual"),       # has original
+            self._make_jackett_result("Dune 2024 1080p WEB-DL"),     # dub only
+            self._make_jackett_result("Дюна (2024) MVO 1080p"),      # has original
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Dune Original"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        # Filter banner mentions audio
+        self.assertIn("оригинальной дорожкой", text)
+        # Dub-only result must not appear
+        self.assertNotIn("WEB-DL", text)
+
+
 class RutrackerOnlyInstallKeepsFatalErrorTests(unittest.TestCase):
     """Pure-Rutracker install (no Jackett configured) → RutrackerError stays
     fatal — no fallback to soften the blow."""
