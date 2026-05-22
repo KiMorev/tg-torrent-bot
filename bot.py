@@ -5073,10 +5073,19 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         })
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
-        suggestions = await _gpt_get_did_you_mean(search_query)
+        # Strip quality suffix before asking GPT — same reasoning as the main
+        # Strategy-2 path (see _split_query_quality docstring).
+        clean_query, _ = _split_query_quality(search_query)
+        suggestions = await _gpt_get_did_you_mean(clean_query)
         # Direct Rutracker path — Jackett expansion is irrelevant here.
+        text = f"По запросу «{search_query}» ничего не найдено в Rutracker."
+        if suggestions:
+            text += (
+                "\n\n🤖 Возможно вы имели в виду — попробуйте вариант ниже "
+                "или измените запрос вручную."
+            )
         await query.edit_message_text(
-            f"По запросу «{search_query}» ничего не найдено в Rutracker.",
+            text,
             reply_markup=_no_results_keyboard(
                 has_quality=has_quality,
                 jackett_can_expand=False,
@@ -5169,6 +5178,86 @@ async def _refresh_jackett_torrent_url(
     return None
 
 
+_QUALITY_SUFFIX_RE = re.compile(
+    r"\s+(2160p|4k|uhd|1080p|720p|480p|hdr)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _split_query_quality(search_query: str) -> tuple[str, str | None]:
+    """Strip the trailing quality token (1080p / 2160p / 720p / 480p / 4k / hdr)
+    from a search query and return (base_query, preferred_quality_normalised).
+
+    The bot tacks on a quality suffix to the user's bare query as a UX
+    affordance. But appending it to the actual tracker call has two costs:
+      1. Trackers index quality strings inconsistently — many real 1080p
+         torrents don't say «1080p» in the title verbatim (BDRip, BDRemux,
+         WEB-DL with no explicit resolution token, …).
+      2. When a film exists ONLY in non-preferred quality, we get 0 results
+         and lose the information that the film exists at all.
+
+    Strategy 2: search without the suffix, classify results client-side via
+    movie_discovery.detect_quality, filter to the preferred bucket. If the
+    preferred bucket is empty but others have content, show all + banner.
+
+    Returns:
+        (base_query, preferred_quality)  — preferred_quality is "1080p" /
+        "720p" / "2160p" / None. None means «no quality filter requested».
+
+    Examples:
+        "Дюна 1080p"     → ("Дюна", "1080p")
+        "Дюна 2024"      → ("Дюна 2024", None)
+        "Дюна часть 2 2160p" → ("Дюна часть 2", "2160p")
+        "Дюна 4k"        → ("Дюна", "2160p")
+    """
+    s = search_query.strip()
+    m = _QUALITY_SUFFIX_RE.search(s)
+    if not m:
+        return (s, None)
+    base = s[: m.start()].strip()
+    token = m.group(1).lower()
+    normalised = {
+        "4k": "2160p", "uhd": "2160p", "2160p": "2160p",
+        "1080p": "1080p",
+        "720p": "720p",
+        "480p": "480p",
+        "hdr": "2160p",  # HDR usually implies 2160p in our user base
+    }.get(token, token)
+    return (base or s, normalised)
+
+
+def _classify_results_by_quality(results: list[dict]) -> dict[str, list[dict]]:
+    """Group results by detected quality bucket (Plex-normalised string).
+
+    Returns a dict mapping {"720p": [...], "1080p": [...], "2160p": [...],
+    "480p": [...], "other": [...]} — only non-empty buckets are present.
+    Reuses movie_discovery.detect_quality which already handles BDRip /
+    BDRemux / WEB-DL / etc. fallbacks correctly.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for r in results:
+        q = _movie_detect_quality(r.get("title", "")) or "other"
+        buckets.setdefault(q, []).append(r)
+    return buckets
+
+
+def _format_quality_stats(buckets: dict[str, list[dict]], exclude: str | None = None) -> str:
+    """Human-readable list of other-than-preferred quality counts.
+
+    Example: buckets = {1080p: [..28..], 720p: [..12..], 2160p: [..7..]},
+             exclude = "1080p"
+             → "720p × 12, 2160p × 7"
+    Order is fixed (highest quality first) for stable display.
+    """
+    order = ["2160p", "1080p", "720p", "480p", "other"]
+    parts = [
+        f"{q} × {len(buckets[q])}"
+        for q in order
+        if q in buckets and q != exclude and buckets[q]
+    ]
+    return ", ".join(parts)
+
+
 def _no_results_flags(context: ContextTypes.DEFAULT_TYPE, search_query: str) -> tuple[bool, bool]:
     """Compute (has_quality, jackett_can_expand) for ``_no_results_keyboard``.
 
@@ -5202,6 +5291,13 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
          show a fallback button to retry without the quality filter.
     """
     context.user_data["srch_search_query"] = search_query
+    # Strategy 2: search WITHOUT quality suffix, classify + filter client-side.
+    # See _split_query_quality docstring for rationale. base_query is what
+    # actually goes to Jackett/Rutracker; preferred_quality is applied as a
+    # post-filter on the raw results.
+    base_query, preferred_quality = _split_query_quality(search_query)
+    context.user_data["srch_preferred_quality"] = preferred_quality
+
     loading_msg = await send_fn(f"🔍 Ищу «{search_query}»…")
     if loading_msg is not None:
         context.user_data["srch_ui_msg_id"] = loading_msg.message_id
@@ -5250,7 +5346,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 j_results_raw = await asyncio.wait_for(
                     asyncio.to_thread(
                         jackett_client.search,
-                        search_query,
+                        base_query,  # quality suffix stripped — we filter client-side
                         indexers=list(selected),
                         fetch_limit=JACKETT_FETCH_LIMIT,
                     ),
@@ -5308,7 +5404,9 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     if rutracker_is_only_source or rutracker_is_fallback:
         try:
-            rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
+            # Same Strategy 2 reasoning as Jackett above — pass base_query
+            # so the tracker doesn't text-filter on «1080p».
+            rt_results = await asyncio.to_thread(rutracker_client.search, base_query)
         except RutrackerError as rt_err:
             if rutracker_is_only_source:
                 # Context A — pure-Rutracker install. Nothing to fall back to.
@@ -5361,13 +5459,25 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     if not results_data:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
-        suggestions = await _gpt_get_did_you_mean(search_query)
-        # Compose text: optional banner (e.g. «both sources down») + the
-        # standard «nothing found» tail.
+        # Did-you-mean: pass the BASE query (no quality suffix). GPT shouldn't
+        # be guessing variations of «Дюра 1080p» — it should be fixing «Дюра»
+        # back to «Дюна».
+        suggestions = await _gpt_get_did_you_mean(base_query)
+        # Compose text: optional banner (e.g. «both sources down») + framing
+        # that emphasises did-you-mean buttons when we have any.
         no_results_text = f"По запросу «{search_query}» ничего не найдено."
         if banner:
             no_results_text = f"{no_results_text}\n{banner}"
-        no_results_text = f"{no_results_text}\nПопробуйте ослабить фильтры или другой запрос."
+        if suggestions:
+            no_results_text = (
+                f"{no_results_text}\n\n"
+                "🤖 Возможно вы имели в виду — попробуйте вариант ниже "
+                "или измените запрос вручную."
+            )
+        else:
+            no_results_text = (
+                f"{no_results_text}\nПопробуйте ослабить фильтры или другой запрос."
+            )
         await edit_fn(
             no_results_text,
             reply_markup=_no_results_keyboard(
@@ -5377,6 +5487,43 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             ),
         )
         return SEARCH_RESULTS
+
+    # --- Strategy 2: client-side quality filter ---
+    # Classify all results by detected quality (1080p / 2160p / 720p / other).
+    # If the user asked for a specific quality:
+    #   - filter to that bucket if non-empty (standard case)
+    #   - else show ALL with a banner «в <quality> ничего, есть в других»
+    #     (avoids the «0 results» dead-end when the film exists in other quality)
+    quality_banner = ""
+    if preferred_quality:
+        buckets = _classify_results_by_quality(results_data)
+        preferred_bucket = buckets.get(preferred_quality) or []
+        if preferred_bucket:
+            other_stats = _format_quality_stats(buckets, exclude=preferred_quality)
+            stats_suffix = f". Также есть: {other_stats}" if other_stats else ""
+            quality_banner = (
+                f"🎬 Найдено {len(results_data)} раздач, "
+                f"показаны {len(preferred_bucket)} в {preferred_quality}{stats_suffix}."
+            )
+            results_data = preferred_bucket
+            logger.info(
+                "Search: quality filter %s kept %d/%d for %r",
+                preferred_quality, len(preferred_bucket), len(results_data) + sum(
+                    len(v) for k, v in buckets.items() if k != preferred_quality
+                ), base_query,
+            )
+        else:
+            # Preferred bucket empty but other qualities have content → show
+            # everything with a banner. Better than hiding behind no-results.
+            other_stats = _format_quality_stats(buckets)
+            quality_banner = (
+                f"⚠️ В {preferred_quality} ничего не найдено. "
+                f"Показаны все качества: {other_stats}."
+            )
+            logger.info(
+                "Search: %s bucket empty, falling back to all qualities (%d total) for %r",
+                preferred_quality, len(results_data), base_query,
+            )
 
     # --- Step 1: season filter ---
     season_num = _extract_season_from_query(search_query)
@@ -5430,13 +5577,17 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     results_data.sort(key=_score_result, reverse=True)
     results_data[0]["recommended"] = True
 
+    # Combine the source banner (Jackett-fallback message) with the quality
+    # filter banner (Strategy 2 stats). Either may be empty.
+    combined_banner = "\n".join(b for b in (banner, quality_banner) if b)
+
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
-    context.user_data["srch_banner"] = banner
+    context.user_data["srch_banner"] = combined_banner
     context.user_data["srch_source"] = source
 
     await edit_fn(
-        _build_results_text(results_data, search_query, 0, banner=banner),
+        _build_results_text(results_data, search_query, 0, banner=combined_banner),
         reply_markup=_search_results_keyboard(
             results_data, page=0,
             show_switch_trackers=bool(jackett_client and source == "jackett"),

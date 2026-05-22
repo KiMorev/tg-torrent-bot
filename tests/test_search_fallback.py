@@ -176,6 +176,172 @@ class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
         self.assertTrue(any("альтернатива" in lbl for lbl in labels))
 
 
+class SplitQueryQualityTests(unittest.TestCase):
+    """Strategy 2: extract base + preferred quality from full search query."""
+
+    def test_extracts_1080p_suffix(self):
+        self.assertEqual(bot._split_query_quality("Дюна 1080p"), ("Дюна", "1080p"))
+
+    def test_extracts_2160p_suffix(self):
+        self.assertEqual(bot._split_query_quality("Аркейн 2160p"), ("Аркейн", "2160p"))
+
+    def test_normalises_4k_to_2160p(self):
+        self.assertEqual(bot._split_query_quality("Барби 4k"), ("Барби", "2160p"))
+
+    def test_normalises_uhd_to_2160p(self):
+        self.assertEqual(bot._split_query_quality("Дюна UHD"), ("Дюна", "2160p"))
+
+    def test_no_suffix_means_no_filter(self):
+        self.assertEqual(bot._split_query_quality("Дюна 2024"), ("Дюна 2024", None))
+
+    def test_year_not_misread_as_quality(self):
+        # Year (4 digits) shouldn't be confused with a quality token.
+        self.assertEqual(bot._split_query_quality("Аркейн 2024"), ("Аркейн 2024", None))
+
+    def test_multiword_title_preserved(self):
+        self.assertEqual(
+            bot._split_query_quality("Дюна часть вторая 1080p"),
+            ("Дюна часть вторая", "1080p"),
+        )
+
+
+class ClassifyResultsByQualityTests(unittest.TestCase):
+    def test_groups_by_detected_quality(self):
+        results = [
+            {"title": "Dune 2024 1080p WEB-DL"},
+            {"title": "Dune 2024 2160p UHD"},
+            {"title": "Dune 2024 720p BDRip"},
+            {"title": "Dune 2024 1080p BDRemux"},
+            {"title": "Dune 2024 some weird release"},  # → "other"
+        ]
+        buckets = bot._classify_results_by_quality(results)
+        self.assertEqual(len(buckets["1080p"]), 2)
+        self.assertEqual(len(buckets["2160p"]), 1)
+        self.assertEqual(len(buckets["720p"]), 1)
+        self.assertEqual(len(buckets.get("other", [])), 1)
+
+
+class FormatQualityStatsTests(unittest.TestCase):
+    def test_orders_highest_quality_first(self):
+        buckets = {
+            "720p": [1, 2, 3],
+            "1080p": [1, 2, 3, 4, 5],
+            "2160p": [1, 2],
+        }
+        stats = bot._format_quality_stats(buckets)
+        # 2160p should appear before 1080p before 720p
+        self.assertEqual(stats, "2160p × 2, 1080p × 5, 720p × 3")
+
+    def test_excludes_preferred_bucket(self):
+        buckets = {"1080p": [1, 2, 3], "720p": [1]}
+        stats = bot._format_quality_stats(buckets, exclude="1080p")
+        self.assertEqual(stats, "720p × 1")
+
+
+class QualityFilterIntegrationTests(unittest.TestCase):
+    """Strategy 2: end-to-end behaviour of the search → classify → filter chain."""
+
+    def test_preferred_quality_filters_results(self):
+        """User asks for 1080p, Jackett returns mixed → only 1080p shown,
+        banner mentions other qualities."""
+        mock_jackett = MagicMock()
+        # 4 fake results: 2 in 1080p, 1 in 720p, 1 in 2160p
+        results = []
+        for title in [
+            "Dune 2024 1080p WEB-DL", "Dune 2024 1080p BDRip",
+            "Dune 2024 720p", "Dune 2024 2160p UHD",
+        ]:
+            r = MagicMock()
+            r.title = title
+            r.topic_url = "https://example.com/x"
+            r.tracker = "rt"
+            r.size = "5 GB"
+            r.seeders = 10
+            r.magnet_url = ""
+            r.torrent_url = ""
+            results.append(r)
+        mock_jackett.search.return_value = results
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Dune 1080p"))
+
+        # Jackett was called with the base query, NOT «Dune 1080p»
+        called_with = mock_jackett.search.call_args[0][0]
+        self.assertEqual(called_with, "Dune")
+        # Final rendered text contains banner with quality stats
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Найдено 4", text)
+        self.assertIn("показаны 2 в 1080p", text)
+        self.assertIn("2160p × 1", text)
+        self.assertIn("720p × 1", text)
+
+    def test_preferred_quality_empty_shows_all_with_banner(self):
+        """User asks for 1080p, Jackett returns only 720p+2160p → ALL shown
+        with banner «в 1080p ничего, показаны все качества»."""
+        mock_jackett = MagicMock()
+        results = []
+        for title in ["Dune 2024 720p", "Dune 2024 2160p UHD"]:
+            r = MagicMock()
+            r.title = title
+            r.topic_url = "https://example.com/x"
+            r.tracker = "rt"
+            r.size = "5 GB"
+            r.seeders = 10
+            r.magnet_url = ""
+            r.torrent_url = ""
+            results.append(r)
+        mock_jackett.search.return_value = results
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Dune 1080p"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("В 1080p ничего не найдено", text)
+        self.assertIn("720p × 1", text)
+        self.assertIn("2160p × 1", text)
+
+    def test_no_quality_preference_no_banner(self):
+        """User searched without quality → no quality stats banner clutter."""
+        mock_jackett = MagicMock()
+        r = MagicMock()
+        r.title = "Dune 2024 1080p"
+        r.topic_url = "https://example.com/x"
+        r.tracker = "rt"
+        r.size = "5 GB"
+        r.seeders = 10
+        r.magnet_url = ""
+        r.torrent_url = ""
+        mock_jackett.search.return_value = [r]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Dune 2024"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        # No "Найдено N показаны M" banner — single result, no filter
+        self.assertNotIn("показаны", text)
+
+
 class RutrackerOnlyInstallKeepsFatalErrorTests(unittest.TestCase):
     """Pure-Rutracker install (no Jackett configured) → RutrackerError stays
     fatal — no fallback to soften the blow."""
