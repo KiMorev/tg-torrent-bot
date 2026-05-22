@@ -635,6 +635,113 @@ class SupplementReleasesForFailedQueriesTests(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class EnrichTopResultsWithMetadataTests(unittest.IsolatedAsyncioTestCase):
+    """PR3: cache + parallel GPT enrichment of search result titles."""
+
+    async def test_uses_cache_for_known_titles_no_gpt_call(self):
+        """Pre-populated cache → enrichment attaches parsed_meta without
+        a single GPT call."""
+        results = [
+            {"title": "Dune 2024 2160p"},
+            {"title": "Dune 2024 1080p"},
+        ]
+        # Cache pre-loaded with both titles' hashes already parsed
+        h1 = bot._title_hash("Dune 2024 2160p")
+        h2 = bot._title_hash("Dune 2024 1080p")
+        precooked_cache = {
+            h1: {"quality": "2160p", "source": "UHD", "hdr": "HDR10",
+                 "audio": None, "langs": ["RUS"], "release_group": None, "edition": None},
+            h2: {"quality": "1080p", "source": "BDRip", "hdr": None,
+                 "audio": None, "langs": ["RUS"], "release_group": None, "edition": None},
+        }
+
+        mock_parse = MagicMock(return_value=({"quality": "?"}, None))
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "state_store", MagicMock(
+                load_torrent_titles_cache=MagicMock(return_value=precooked_cache),
+                save_torrent_titles_cache=MagicMock(),
+            )),
+            patch.object(bot, "gpt_features_parse_torrent_title", mock_parse),
+        ):
+            await bot._enrich_top_results_with_metadata(results, max_n=5)
+
+        # No GPT calls because both hits
+        mock_parse.assert_not_called()
+        self.assertEqual(results[0]["parsed_meta"]["quality"], "2160p")
+        self.assertEqual(results[1]["parsed_meta"]["quality"], "1080p")
+
+    async def test_runs_gpt_for_misses_and_writes_back_to_cache(self):
+        """Empty cache → GPT runs for each title; results attached + cache saved."""
+        results = [{"title": "Inception 2010 1080p BluRay"}]
+        empty_cache: dict = {}
+        save_mock = MagicMock()
+        gpt_response = ({"quality": "1080p", "source": "BluRay", "hdr": None,
+                         "audio": "DTS", "langs": ["ENG"],
+                         "release_group": "FGT", "edition": None}, None)
+        gpt_parse_mock = MagicMock(return_value=gpt_response)
+
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(bot, "GPT_MODEL", "gpt-4o-mini"),
+            patch.object(bot, "state_store", MagicMock(
+                load_torrent_titles_cache=MagicMock(return_value=empty_cache),
+                save_torrent_titles_cache=save_mock,
+            )),
+            patch.object(bot, "gpt_features_parse_torrent_title", gpt_parse_mock),
+            patch.object(bot, "_gpt_record_usage"),
+        ):
+            await bot._enrich_top_results_with_metadata(results, max_n=5)
+
+        gpt_parse_mock.assert_called_once()
+        self.assertEqual(results[0]["parsed_meta"]["source"], "BluRay")
+        # Cache was saved with the new entry
+        save_mock.assert_called_once()
+        saved_cache = save_mock.call_args.args[0]
+        h = bot._title_hash("Inception 2010 1080p BluRay")
+        self.assertIn(h, saved_cache)
+
+    async def test_noop_when_gpt_disabled(self):
+        """GPT_ENABLED=False → function returns without touching anything."""
+        results = [{"title": "Some Movie"}]
+        mock_state = MagicMock()
+        with (
+            patch.object(bot, "GPT_ENABLED", False),
+            patch.object(bot, "state_store", mock_state),
+        ):
+            await bot._enrich_top_results_with_metadata(results, max_n=5)
+        mock_state.load_torrent_titles_cache.assert_not_called()
+        self.assertNotIn("parsed_meta", results[0])
+
+    async def test_only_top_n_processed(self):
+        """Results beyond max_n are not parsed (cost control)."""
+        results = [{"title": f"Movie {i}"} for i in range(20)]
+        gpt_parse_mock = MagicMock(return_value=(
+            {"quality": "1080p", "source": None, "hdr": None, "audio": None,
+             "langs": [], "release_group": None, "edition": None}, None,
+        ))
+
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(bot, "state_store", MagicMock(
+                load_torrent_titles_cache=MagicMock(return_value={}),
+                save_torrent_titles_cache=MagicMock(),
+            )),
+            patch.object(bot, "gpt_features_parse_torrent_title", gpt_parse_mock),
+            patch.object(bot, "_gpt_record_usage"),
+        ):
+            await bot._enrich_top_results_with_metadata(results, max_n=5)
+
+        # Only first 5 enriched
+        self.assertEqual(gpt_parse_mock.call_count, 5)
+        for r in results[:5]:
+            self.assertIn("parsed_meta", r)
+        for r in results[5:]:
+            self.assertNotIn("parsed_meta", r)
+
+
 class BuildSearchClustersTests(unittest.TestCase):
     """Proposal #1 cluster detection — groups results by (normalized_title, year)."""
 

@@ -108,6 +108,112 @@ def kp_confidence_check(
     return (pick_idx, confidence, None)
 
 
+def parse_torrent_title(
+    *,
+    title: str,
+    api_key: str,
+    model: str = "gpt-4o-mini",
+) -> tuple[dict | None, str | None]:
+    """Parse a raw torrent title into structured metadata for clean UI badges.
+
+    Torrent titles emitted by Jackett/Rutracker are a wall of dot-separated
+    tokens that mix language flags, audio formats, HDR variants, source
+    labels, release groups and so on. Our existing regex code extracts only
+    resolution. GPT can pull the rest reliably with a tiny per-call cost.
+
+    Returns ``(parsed_meta, error_label)``. On success ``parsed_meta`` is a
+    dict with these keys (any can be None if not detected):
+
+      quality       — "2160p" / "1080p" / "720p" / "480p"
+      source        — "UHD BDRemux" / "BDRip" / "WEB-DL" / "WEBRip" / "HDTV" / …
+      hdr           — "HDR10" / "HDR10+" / "Dolby Vision" / "HDR10+/DV" / None
+      audio         — "TrueHD 7.1 Atmos" / "DTS-HD MA 5.1" / "AC3 5.1" / …
+      langs         — list of ISO-ish codes ["RUS", "ENG", "UKR"]
+      release_group — "AMS" / "D-Z0N3" / "EbP" / "NTb" / None
+      edition       — "Theatrical" / "Director's Cut" / "IMAX" / None
+
+    Caller MUST cache the result — torrents are immutable, no point re-parsing.
+    """
+    if not title:
+        return (None, "empty")
+
+    # Hard cap on input length — typical title is 80-200 chars; longer ones
+    # are extreme edge cases and unlikely to add useful info.
+    capped_title = title[:300]
+
+    system_prompt = (
+        "Извлеки структурированные метаданные из заголовка раздачи фильма/"
+        "сериала. Заголовки часто dot-separated, могут содержать смесь языков, "
+        "форматов, кодеков, имён релиз-групп.\n"
+        "\n"
+        "Reply with strict JSON of the shape:\n"
+        '{"quality": "2160p"|"1080p"|"720p"|"480p"|null, '
+        '"source": "UHD BDRemux"|"BDRip"|"WEB-DL"|"WEBRip"|"HDTV"|"DVDRip"|...|null, '
+        '"hdr": "HDR10"|"HDR10+"|"Dolby Vision"|"HDR10+/DV"|null, '
+        '"audio": "<audio format string>"|null, '
+        '"langs": ["RUS","ENG",...], '
+        '"release_group": "<group abbrev>"|null, '
+        '"edition": "Theatrical"|"Director\'s Cut"|"IMAX"|"Extended"|null}\n'
+        "\n"
+        "Examples (input → output):\n"
+        "\n"
+        '«Dune.Part.Two.2024.EUR.2160p.UHD.BDRemux.HDR10+.DV.TrueHD.7.1.Atmos.RUS.UKR.ENG-AMS» →\n'
+        '{"quality":"2160p","source":"UHD BDRemux","hdr":"HDR10+/DV",'
+        '"audio":"TrueHD 7.1 Atmos","langs":["RUS","UKR","ENG"],'
+        '"release_group":"AMS","edition":"Theatrical"}\n'
+        "\n"
+        '«Inception.2010.1080p.BluRay.x264.DTS-HD.MA.5.1-FGT» →\n'
+        '{"quality":"1080p","source":"BluRay","hdr":null,'
+        '"audio":"DTS-HD MA 5.1","langs":[],'
+        '"release_group":"FGT","edition":null}\n'
+        "\n"
+        '«Аркейн / Arcane S02 2024 WEB-DL 1080p AAC 2.0 Multi» →\n'
+        '{"quality":"1080p","source":"WEB-DL","hdr":null,'
+        '"audio":"AAC 2.0","langs":["RUS","ENG"],'
+        '"release_group":null,"edition":null}\n'
+        "\n"
+        'Если поле невозможно определить — null. Список языков ["RUS","ENG"] '
+        'на основе явных upper-case кодов или явного «Multi» (тогда [\"RUS\",\"ENG\"]).'
+    )
+
+    result, error = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": capped_title},
+        ],
+        api_key=api_key,
+        model=model,
+        max_tokens=200,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+    )
+    if error or not result:
+        return (None, error)
+
+    try:
+        data = json.loads(result["text"])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return (None, "parse")
+
+    # Normalise types: langs must be list, others string-or-None.
+    parsed: dict[str, object] = {}
+    for key in ("quality", "source", "hdr", "audio", "release_group", "edition"):
+        val = data.get(key)
+        parsed[key] = str(val).strip() if val and isinstance(val, (str, int)) else None
+    raw_langs = data.get("langs")
+    if isinstance(raw_langs, list):
+        parsed["langs"] = [str(l).strip().upper() for l in raw_langs if l]
+    else:
+        parsed["langs"] = []
+
+    logger.info(
+        "GPT parse_torrent_title: %s → q=%s src=%s hdr=%s audio=%s langs=%s",
+        title[:60], parsed.get("quality"), parsed.get("source"),
+        parsed.get("hdr"), parsed.get("audio"), parsed.get("langs"),
+    )
+    return (parsed, None)
+
+
 def explain_movie_card(
     *,
     title: str,

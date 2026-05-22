@@ -210,6 +210,83 @@ class DidYouMeanTests(unittest.TestCase):
         self.assertEqual(err, "network")
 
 
+class ParseTorrentTitleTests(unittest.TestCase):
+    """PR3: structured-metadata extraction from raw torrent titles."""
+
+    def _fake_chat_response(self, payload: dict):
+        import json as _json
+        return ({
+            "text": _json.dumps(payload),
+            "input_tokens": 200, "output_tokens": 80, "model": "gpt-4o-mini",
+        }, None)
+
+    def test_returns_structured_meta_for_realistic_title(self):
+        payload = {
+            "quality": "2160p", "source": "UHD BDRemux",
+            "hdr": "HDR10+/DV", "audio": "TrueHD 7.1 Atmos",
+            "langs": ["RUS", "UKR", "ENG"],
+            "release_group": "AMS", "edition": "Theatrical",
+        }
+        with patch.object(gpt_features, "chat_completion",
+                          return_value=self._fake_chat_response(payload)):
+            meta, err = gpt_features.parse_torrent_title(
+                title="Dune.Part.Two.2024.2160p.UHD.BDRemux.HDR10+.DV.AMS",
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(meta["quality"], "2160p")
+        self.assertEqual(meta["source"], "UHD BDRemux")
+        self.assertEqual(meta["hdr"], "HDR10+/DV")
+        self.assertEqual(meta["audio"], "TrueHD 7.1 Atmos")
+        self.assertEqual(meta["langs"], ["RUS", "UKR", "ENG"])
+        self.assertEqual(meta["release_group"], "AMS")
+        self.assertEqual(meta["edition"], "Theatrical")
+
+    def test_handles_minimal_title_with_mostly_nulls(self):
+        """Short title without tech tokens → GPT returns mostly null fields."""
+        payload = {
+            "quality": None, "source": None, "hdr": None, "audio": None,
+            "langs": [], "release_group": None, "edition": None,
+        }
+        with patch.object(gpt_features, "chat_completion",
+                          return_value=self._fake_chat_response(payload)):
+            meta, err = gpt_features.parse_torrent_title(
+                title="Some movie", api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertIsNone(meta["quality"])
+        self.assertEqual(meta["langs"], [])
+
+    def test_empty_title_returns_empty_error(self):
+        meta, err = gpt_features.parse_torrent_title(
+            title="", api_key="sk-test",
+        )
+        self.assertIsNone(meta)
+        self.assertEqual(err, "empty")
+
+    def test_propagates_chat_error(self):
+        with patch.object(gpt_features, "chat_completion",
+                          return_value=(None, "quota_exceeded")):
+            meta, err = gpt_features.parse_torrent_title(
+                title="X 2024 1080p", api_key="sk-test",
+            )
+        self.assertIsNone(meta)
+        self.assertEqual(err, "quota_exceeded")
+
+    def test_normalizes_langs_uppercase(self):
+        """langs in response may come lowercase or mixed; we standardize."""
+        payload = {
+            "quality": "1080p", "source": None, "hdr": None, "audio": None,
+            "langs": ["rus", "Eng"], "release_group": None, "edition": None,
+        }
+        with patch.object(gpt_features, "chat_completion",
+                          return_value=self._fake_chat_response(payload)):
+            meta, _ = gpt_features.parse_torrent_title(
+                title="X 1080p multi", api_key="sk-test",
+            )
+        self.assertEqual(meta["langs"], ["RUS", "ENG"])
+
+
 class ExplainMovieCardTests(unittest.TestCase):
     """PR2: 1-line «why this film» explanation generator."""
 

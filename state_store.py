@@ -31,6 +31,7 @@ class JsonStateStore:
         storage_history_file: Path | None = None,
         voice_usage_file: Path | None = None,
         gpt_usage_file: Path | None = None,
+        torrent_titles_cache_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -45,6 +46,7 @@ class JsonStateStore:
         self.storage_history_file = storage_history_file
         self.voice_usage_file = voice_usage_file
         self.gpt_usage_file = gpt_usage_file
+        self.torrent_titles_cache_file = torrent_titles_cache_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -515,6 +517,25 @@ class JsonStateStore:
         if not self.gpt_usage_file:
             return
         self.save_json_file(self.gpt_usage_file, payload, "gpt usage")
+
+    # ---- Torrent-title parsed-metadata cache (PR3) ----
+
+    def load_torrent_titles_cache(self) -> dict:
+        """Return the GPT-parsed-torrent-titles cache.
+
+        Shape: {title_hash_hex: parsed_meta_dict}. Torrent titles never
+        change (they're file-naming snapshots), so cached parses are valid
+        forever — no TTL needed. Capped via LRU eviction in the caller.
+        """
+        if not self.torrent_titles_cache_file:
+            return {}
+        payload = self.load_json_file(self.torrent_titles_cache_file, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def save_torrent_titles_cache(self, payload: dict) -> None:
+        if not self.torrent_titles_cache_file:
+            return
+        self.save_json_file(self.torrent_titles_cache_file, payload, "torrent titles cache")
 
     def append_storage_snapshot(self, snapshot: dict, max_age_days: int = 30) -> None:
         """Append a snapshot, prune entries older than `max_age_days`, save atomically.

@@ -158,6 +158,7 @@ class AppSettings:
     gpt_enabled: bool
     gpt_model: str
     gpt_usage_file: Path
+    torrent_titles_cache_file: Path
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
@@ -285,4 +286,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         gpt_enabled=env_bool(env, "GPT_ENABLED", True),
         gpt_model=env.get("GPT_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
         gpt_usage_file=Path(env.get("GPT_USAGE_FILE", str(state_dir / "gpt_usage.json"))),
+        torrent_titles_cache_file=Path(env.get(
+            "TORRENT_TITLES_CACHE_FILE",
+            str(state_dir / "torrent_titles_cache.json"),
+        )),
     )

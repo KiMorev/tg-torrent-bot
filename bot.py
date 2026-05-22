@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import html as html_module
 import json
 import logging
@@ -136,6 +137,7 @@ from gpt_client import estimate_chat_cost_usd
 from gpt_features import did_you_mean as gpt_did_you_mean
 from gpt_features import explain_movie_card as gpt_features_explain_movie_card
 from gpt_features import kp_confidence_check as gpt_kp_confidence_check
+from gpt_features import parse_torrent_title as gpt_features_parse_torrent_title
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
@@ -5323,11 +5325,48 @@ def _build_results_text(results_data: list[dict], search_query: str, page: int, 
             f'<a href="{html_module.escape(url)}">{title_escaped}</a>'
             if url else title_escaped
         )
+        # PR3: if GPT pre-parsed the title, render compact badge lines below
+        # the title. Falls back to old behaviour (just size+seeders) when
+        # parsed_meta is absent (GPT disabled / cache miss / parse failed).
+        meta_lines = _format_parsed_meta_lines(r.get("parsed_meta"))
         lines.append(
             f"\n{icon} {index + 1}. {tracker_prefix}{title_linked}"
             f"\n   📦 {r['size']} | 🌱 {r['seeders']}{ep_note}"
+            f"{meta_lines}"
         )
     return "\n".join(lines)
+
+
+def _format_parsed_meta_lines(meta: dict | None) -> str:
+    """Render GPT-parsed torrent metadata as a single extra indented line
+    appended below the size/seeders row. Returns empty string when no meta.
+
+    Format example:
+        \\n   🎬 2160p UHD BDRemux · HDR10+/DV · TrueHD 7.1 Atmos · 🌐 RUS/UKR/ENG
+    """
+    if not isinstance(meta, dict):
+        return ""
+    badges: list[str] = []
+    # Quality + source as one compact chunk
+    qs_parts: list[str] = []
+    if meta.get("quality"):
+        qs_parts.append(str(meta["quality"]))
+    if meta.get("source"):
+        qs_parts.append(str(meta["source"]))
+    if qs_parts:
+        badges.append(" ".join(qs_parts))
+    if meta.get("hdr"):
+        badges.append(str(meta["hdr"]))
+    if meta.get("audio"):
+        badges.append(str(meta["audio"]))
+    langs = meta.get("langs")
+    if isinstance(langs, list) and langs:
+        badges.append("🌐 " + "/".join(str(l) for l in langs))
+    if meta.get("edition"):
+        badges.append(str(meta["edition"]))
+    if not badges:
+        return ""
+    return f"\n   🎬 {html_module.escape(' · '.join(badges))}"
 
 
 async def _show_jackett_selector(
@@ -6274,6 +6313,11 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     results_data.sort(key=_score_result, reverse=True)
     results_data[0]["recommended"] = True
 
+    # PR3: enrich top-10 with GPT-parsed metadata (badges in card UI).
+    # Runs after sort so the right results get the badges (top of list);
+    # cache makes repeat searches instant. Silent no-op when GPT_ENABLED=false.
+    await _enrich_top_results_with_metadata(results_data, max_n=10)
+
     # Combine all banners (in display order): source-fallback message,
     # audio/subs filter stats, quality filter stats. Any may be empty.
     combined_banner = "\n".join(
@@ -6399,6 +6443,11 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
     if results_data:
         results_data.sort(key=_score_result, reverse=True)
         results_data[0]["recommended"] = True
+
+    # PR3: enrich top-10 of the cluster slice. Cluster results are typically
+    # a subset of what was fetched, so most are likely cache hits (we already
+    # enriched the full set in _run_search above) — fast in practice.
+    await _enrich_top_results_with_metadata(results_data, max_n=10)
 
     search_query = context.user_data.get("srch_search_query", "")
     source = context.user_data.get("srch_source", "")
@@ -9886,6 +9935,93 @@ def _voice_record_usage(
         }
 
     state_store.save_voice_usage(usage)
+
+
+def _title_hash(title: str) -> str:
+    """Compact 16-char sha1 prefix used as the key in torrent_titles_cache.
+
+    Collisions at 16 hex chars (64 bits) are astronomical for our cache size
+    (max ~5000 entries) — birthday paradox kicks in around 2^32 entries.
+    Trade-off: shorter keys → smaller JSON storage; negligible collision risk.
+    """
+    return hashlib.sha1((title or "").encode("utf-8")).hexdigest()[:16]
+
+
+_TITLE_CACHE_MAX_ENTRIES = 5000
+_TITLE_CACHE_EVICT_BATCH = 500
+
+
+async def _enrich_top_results_with_metadata(
+    results_data: list[dict], max_n: int = 10,
+) -> None:
+    """Mutate top-N results in place, attaching `parsed_meta` from a GPT
+    parse of each title. Cache hits are instant; misses parallelize via
+    asyncio.gather so the total wall time for 10 misses is ~one round-trip,
+    not 10x sequential.
+
+    Silently no-op when GPT_ENABLED is false — gives a clean fallback path
+    (results render with raw titles as before).
+    """
+    if not GPT_ENABLED or not results_data:
+        return
+    cache = state_store.load_torrent_titles_cache()
+    # Step 1: hit-or-miss classification (in-place attach for hits).
+    misses: list[tuple[str, dict]] = []
+    for r in results_data[:max_n]:
+        title = r.get("title") or ""
+        if not title:
+            continue
+        h = _title_hash(title)
+        cached = cache.get(h)
+        if isinstance(cached, dict):
+            r["parsed_meta"] = cached
+        else:
+            misses.append((h, r))
+
+    if not misses:
+        return
+
+    # Step 2: parallel GPT-parse the misses.
+    tasks = [
+        asyncio.to_thread(
+            gpt_features_parse_torrent_title,
+            title=r["title"], api_key=OPENAI_API_KEY, model=GPT_MODEL,
+        )
+        for (_h, r) in misses
+    ]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Step 3: attach parsed_meta + update cache + record usage.
+    cache_dirty = False
+    for (h, r), outcome in zip(misses, outcomes):
+        if isinstance(outcome, Exception):
+            logger.warning(
+                "parse_torrent_title raised for %r: %s", r.get("title", "")[:60], outcome,
+            )
+            continue
+        meta, err = outcome
+        _gpt_record_usage(
+            feature="quality_parse",
+            input_tokens=200, output_tokens=80,
+            error_label=err,
+        )
+        if meta:
+            r["parsed_meta"] = meta
+            cache[h] = meta
+            cache_dirty = True
+
+    # Step 4: LRU-cap the cache so disk doesn't grow unbounded.
+    if cache_dirty and len(cache) > _TITLE_CACHE_MAX_ENTRIES:
+        # Drop oldest (Python dicts preserve insertion order) — simple LRU.
+        for old_h in list(cache.keys())[:_TITLE_CACHE_EVICT_BATCH]:
+            cache.pop(old_h, None)
+        logger.info(
+            "Title cache evicted %d oldest entries (size now %d)",
+            _TITLE_CACHE_EVICT_BATCH, len(cache),
+        )
+
+    if cache_dirty:
+        state_store.save_torrent_titles_cache(cache)
 
 
 async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
