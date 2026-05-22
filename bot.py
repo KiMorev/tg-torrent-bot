@@ -2281,6 +2281,11 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
             ",".join(map(str, list(_removed_log)[:20])) or "-",
         )
 
+    # Persist failed query specs so the discovery loop can detect a partial
+    # outage and schedule an opportunistic retry sooner than the normal 12h
+    # interval. List-of-lists JSON-friendly format; tuples come back as lists.
+    cache["last_failed_specs"] = [[year, quality] for (year, quality) in failed_query_specs]
+
     # Persist previous top-10 alongside new cards. The consensus filter in
     # _run_movie_discovery_notifications reads this to decide whether a kp_id
     # in the new top-10 is "confirmed" (was also in the previous top-10) or
@@ -2601,6 +2606,27 @@ async def _run_movie_discovery_notifications(
             )
 
 
+# Exponential backoff schedule when a refresh comes back with failed query
+# specs (partial Jackett/Rutracker outage). After this many consecutive
+# failures we give up and fall back to the normal interval — bashing the
+# upstream every 30 minutes when it's clearly down for hours hurts more
+# than it helps.
+_MOVIE_DISCOVERY_RETRY_BACKOFF = {1: 180, 2: 600, 3: 1800}  # 3 min / 10 min / 30 min
+
+
+async def _notify_admins(app: "Application", text: str) -> None:
+    """Send a one-off informational message to every ADMIN_CHAT_IDS chat.
+
+    Used for startup-ready / recovery signals — failures are silent
+    (admin chat might be unreachable too; we just log and move on).
+    """
+    for admin_chat_id in ADMIN_CHAT_IDS:
+        try:
+            await app.bot.send_message(chat_id=admin_chat_id, text=text)
+        except Exception:
+            logger.warning("Failed to send admin notification to %s", admin_chat_id, exc_info=True)
+
+
 async def _movie_discovery_loop(app: "Application") -> None:
     if not _movie_discovery_enabled():
         logger.info("Movie discovery disabled")
@@ -2625,12 +2651,67 @@ async def _movie_discovery_loop(app: "Application") -> None:
             logger.info("movie_discovery: first refresh after startup DONE")
             first_refresh_done = True
 
+    # Track refresh outcomes across iterations:
+    # - fail_streak counts consecutive degraded refreshes (sets shorter retry
+    #   interval, falling back to the normal one after _MOVIE_DISCOVERY_RETRY_BACKOFF
+    #   exhausts — no point bashing upstream forever).
+    # - startup_ready_notified ensures the «✅ Bot ready» admin push fires
+    #   exactly once per process lifetime, on the first clean refresh.
+    fail_streak = 0
+    startup_ready_notified = False
+    current_interval = interval
+
+    def _read_last_failed_specs() -> list:
+        cache = _load_movie_discovery_cache()
+        specs = cache.get("last_failed_specs")
+        return list(specs) if isinstance(specs, list) else []
+
     try:
         logger.info("movie_discovery: loop started — first refresh now, interval=%dh", MOVIE_DISCOVERY_INTERVAL_HOURS)
+        # Immediate first refresh.
         await _run_background_step("movie discovery refresh", _refresh_and_notify)
+        failed_specs = _read_last_failed_specs()
+        if failed_specs:
+            fail_streak = 1
+            current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
+            logger.info(
+                "movie_discovery: first refresh degraded (failed_specs=%s) — retry in %ds",
+                failed_specs, current_interval,
+            )
+        else:
+            await _notify_admins(
+                app, "✅ Поиск разогрет, бот полноценно функционирует.",
+            )
+            startup_ready_notified = True
+
         while True:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(current_interval)
             await _run_background_step("movie discovery refresh", _refresh_and_notify)
+            failed_specs = _read_last_failed_specs()
+            if failed_specs:
+                fail_streak += 1
+                current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
+                logger.info(
+                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s) — retry in %ds",
+                    fail_streak, failed_specs, current_interval,
+                )
+            else:
+                was_degraded = fail_streak > 0
+                if was_degraded:
+                    logger.info(
+                        "movie_discovery: recovered after %d failed refreshes",
+                        fail_streak,
+                    )
+                    await _notify_admins(
+                        app, f"✅ Поиск восстановился после {fail_streak} неудачных попыток.",
+                    )
+                if not startup_ready_notified:
+                    await _notify_admins(
+                        app, "✅ Поиск разогрет, бот полноценно функционирует.",
+                    )
+                    startup_ready_notified = True
+                fail_streak = 0
+                current_interval = interval
     except asyncio.CancelledError:
         logger.info("Movie discovery loop stopped")
         raise

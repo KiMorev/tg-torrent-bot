@@ -635,6 +635,47 @@ class SupplementReleasesForFailedQueriesTests(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class MovieDiscoveryBackoffConstantsTests(unittest.TestCase):
+    """Pinned: the backoff schedule and admin-notification constants are
+    accessible from the loop. Sanity: ordered shorter→longer intervals."""
+
+    def test_backoff_intervals_are_increasing(self):
+        b = bot._MOVIE_DISCOVERY_RETRY_BACKOFF
+        self.assertLess(b[1], b[2])
+        self.assertLess(b[2], b[3])
+
+    def test_backoff_first_retry_is_under_5_min(self):
+        # First retry should be fast — Jackett's per-query cache often warms
+        # within a couple of minutes after the bot started polling.
+        self.assertLessEqual(bot._MOVIE_DISCOVERY_RETRY_BACKOFF[1], 300)
+
+
+class NotifyAdminsTests(unittest.IsolatedAsyncioTestCase):
+    """_notify_admins fans a message out to every ADMIN_CHAT_IDS entry,
+    swallows per-chat errors so a flaky admin doesn't break startup signal."""
+
+    async def test_sends_to_each_admin(self):
+        app = MagicMock()
+        app.bot = MagicMock()
+        app.bot.send_message = AsyncMock()
+        with patch.object(bot, "ADMIN_CHAT_IDS", {100, 200, 300}):
+            await bot._notify_admins(app, "test")
+        # All three got the message
+        self.assertEqual(app.bot.send_message.await_count, 3)
+        # Same text payload for each
+        texts = [c.kwargs["text"] for c in app.bot.send_message.await_args_list]
+        self.assertEqual(set(texts), {"test"})
+
+    async def test_swallows_per_chat_send_failure(self):
+        app = MagicMock()
+        app.bot = MagicMock()
+        # First send raises, second succeeds — loop should not abort.
+        app.bot.send_message = AsyncMock(side_effect=[RuntimeError("blocked"), None])
+        with patch.object(bot, "ADMIN_CHAT_IDS", {100, 200}):
+            await bot._notify_admins(app, "test")  # must not raise
+        self.assertEqual(app.bot.send_message.await_count, 2)
+
+
 class RutrackerOnlyInstallKeepsFatalErrorTests(unittest.TestCase):
     """Pure-Rutracker install (no Jackett configured) → RutrackerError stays
     fatal — no fallback to soften the blow."""
