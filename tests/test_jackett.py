@@ -171,6 +171,71 @@ class ParseJsonResultsTests(unittest.TestCase):
         self.assertEqual(results[0].magnet_url, "magnet:?xt=urn:btih:abc123")
 
 
+class ParseIndexerStatusesTests(unittest.TestCase):
+    """JackettClient.parse_indexer_statuses extracts per-indexer status from
+    the `Indexers` field — used by movie discovery to detect partial Jackett
+    outages (e.g. one tracker timed out while others responded) without
+    relying on coarse «total results» heuristics."""
+
+    def test_returns_empty_when_field_missing(self):
+        # Plain Results response with no Indexers field → empty list, not crash.
+        json_text = '{"Results": []}'
+        statuses = JackettClient.parse_indexer_statuses(json_text)
+        self.assertEqual(statuses, [])
+
+    def test_returns_empty_for_invalid_json(self):
+        statuses = JackettClient.parse_indexer_statuses("not json")
+        self.assertEqual(statuses, [])
+
+    def test_parses_mix_of_ok_and_failed_indexers(self):
+        import json as _json
+        payload = {
+            "Results": [],
+            "Indexers": [
+                {"ID": "rutracker", "Name": "RuTracker", "Status": 0, "Results": 100, "Error": ""},
+                {"ID": "nnmclub", "Name": "NNM-Club", "Status": 1, "Results": 0, "Error": "Read timeout"},
+                {"ID": "kinozal", "Name": "Kinozal", "Status": 0, "Results": 50, "Error": ""},
+            ],
+        }
+        statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
+        self.assertEqual(len(statuses), 3)
+        by_id = {s.indexer_id: s for s in statuses}
+        self.assertTrue(by_id["rutracker"].is_ok)
+        self.assertEqual(by_id["rutracker"].results, 100)
+        self.assertFalse(by_id["nnmclub"].is_ok)
+        self.assertEqual(by_id["nnmclub"].error, "Read timeout")
+        self.assertTrue(by_id["kinozal"].is_ok)
+
+    def test_lowercases_indexer_id(self):
+        """Tracker IDs need consistent casing for merge logic — Jackett may
+        return them with different cases across versions / indexers."""
+        import json as _json
+        payload = {
+            "Results": [],
+            "Indexers": [
+                {"ID": "RUTracker", "Name": "RT", "Status": 0, "Results": 5, "Error": ""},
+            ],
+        }
+        statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
+        self.assertEqual(statuses[0].indexer_id, "rutracker")
+
+    def test_skips_malformed_entries(self):
+        import json as _json
+        payload = {
+            "Results": [],
+            "Indexers": [
+                {"ID": "ok", "Status": 0, "Results": 5, "Error": ""},
+                "garbage string",
+                {"ID": "broken", "Status": "not-an-int"},  # ValueError on int()
+                {"ID": "also-ok", "Status": 0, "Results": 1, "Error": ""},
+            ],
+        }
+        statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
+        # garbage + broken are skipped, two real ones survive
+        self.assertEqual(len(statuses), 2)
+        self.assertEqual({s.indexer_id for s in statuses}, {"ok", "also-ok"})
+
+
 class ParseXmlResultsTests(unittest.TestCase):
     """Tests for _parse_results — correct <enclosure> / magneturl handling."""
 

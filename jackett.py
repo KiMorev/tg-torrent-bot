@@ -65,6 +65,32 @@ class JackettResult:
     published_at: str = ""
 
 
+@dataclass
+class JackettIndexerStatus:
+    """Per-indexer status reported by Jackett in the `Indexers` field of the
+    /api/v2.0/indexers/all/results response.
+
+    Status: 0 = OK, 1 = Error (per Torznab spec).
+    Results: number of items this indexer contributed.
+    Error: human-readable error string when Status=1, empty otherwise.
+
+    We surface this to the caller so it can distinguish a clean Jackett
+    response from a partial-failure response (some indexers timed out /
+    blocked / returned empty). Critical for the «cold-start per-indexer
+    cache wipes content» bug — without this signal we could only guess
+    from raw result counts that something went wrong.
+    """
+    indexer_id: str
+    name: str
+    status: int
+    results: int
+    error: str
+
+    @property
+    def is_ok(self) -> bool:
+        return self.status == 0
+
+
 def _synchronized(method):
     def wrapper(self, *args, **kwargs):
         with self._lock:
@@ -244,7 +270,7 @@ class JackettClient:
             for tid in effective:
                 base.append(("Tracker[]", tid))
 
-        def _do_search(params: list[tuple[str, str]]) -> list[JackettResult]:
+        def _do_search(params: list[tuple[str, str]]) -> tuple[list[JackettResult], list[JackettIndexerStatus]]:
             try:
                 resp = self._session.get(url, params=params, timeout=(10, 40))
                 resp.raise_for_status()
@@ -253,15 +279,29 @@ class JackettClient:
                 raise JackettError(f"Ошибка подключения к Jackett: {_sanitize_error_text(e, self._api_key)}") from e
             except requests.RequestException as e:
                 raise JackettError(f"Ошибка подключения к Jackett: {_sanitize_error_text(e, self._api_key)}") from e
-            return self._parse_json_results(resp.text, limit)
+            return self._parse_json_results(resp.text, limit), self.parse_indexer_statuses(resp.text)
 
-        results = _do_search(base)
+        results, statuses = _do_search(base)
         # Fallback: retry without category filter if nothing found
         if not results and categories:
             base_no_cat = [(k, v) for k, v in base if k != "Category[]"]
-            results = _do_search(base_no_cat)
+            results, statuses = _do_search(base_no_cat)
+
+        # Stash the latest per-indexer status on the instance so callers that
+        # need it (movie discovery — to detect partial outages and merge prev
+        # cache for only the failed indexers) can read it after the call,
+        # without changing the public search() signature for the many other
+        # callers that don't care.
+        self._last_indexer_statuses = statuses
 
         return results
+
+    def get_last_indexer_statuses(self) -> list[JackettIndexerStatus]:
+        """Return per-indexer statuses from the most recent successful search.
+        Empty list if no search has been performed or the response didn't
+        carry the Indexers field. See JackettIndexerStatus docstring for
+        what this is used for."""
+        return list(getattr(self, "_last_indexer_statuses", []))
 
     @_synchronized
     def download_torrent(self, torrent_url: str) -> bytes:
@@ -392,6 +432,37 @@ class JackettClient:
         except KeyError as e:
             result["error"] = f"Ошибка разбора ответа: {e}"
         return result
+
+    @staticmethod
+    def parse_indexer_statuses(json_text: str) -> list[JackettIndexerStatus]:
+        """Extract per-indexer status from a Jackett /results response.
+
+        Returns empty list if the `Indexers` field is absent or malformed —
+        callers should treat that as «no per-indexer signal available» and
+        fall back to coarser detection (e.g. whole-Jackett error).
+        """
+        try:
+            data = __import__("json").loads(json_text)
+        except ValueError:
+            return []
+        indexers = data.get("Indexers") if isinstance(data, dict) else None
+        if not isinstance(indexers, list):
+            return []
+        statuses: list[JackettIndexerStatus] = []
+        for entry in indexers:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                statuses.append(JackettIndexerStatus(
+                    indexer_id=(entry.get("ID") or "").strip().lower(),
+                    name=(entry.get("Name") or "").strip(),
+                    status=int(entry.get("Status") or 0),
+                    results=int(entry.get("Results") or 0),
+                    error=(entry.get("Error") or "").strip(),
+                ))
+            except (TypeError, ValueError):
+                continue
+        return statuses
 
     def _parse_json_results(self, json_text: str, limit: int | None = None) -> list[JackettResult]:
         """Parse Jackett JSON API response (/api/v2.0/indexers/all/results)."""

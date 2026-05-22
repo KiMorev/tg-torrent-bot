@@ -1997,13 +1997,11 @@ def _supplement_releases_for_failed_queries(
     """Copy releases from `prev_all_releases` into `releases_out` (in place)
     for every (year, quality) spec that fetched zero results due to errors.
 
-    The point is to preserve last refresh's content for a year/quality combo
-    when ALL upstream sources errored for it this time around — instead of
-    silently letting the cache regress to «only the years/qualities that
-    happened to load». See the 2026-1080p-timed-out bug for the original
-    observation. Pure function, isolated for testability.
+    Superseded in normal flow by _merge_releases_with_previous (Strategy 3
+    always-merges). Kept around so tests and any future targeted-supplement
+    callers still work — by-and-large redundant when always-merge is on.
 
-    Returns the count of supplemented releases (for logging).
+    Returns the count of supplemented releases.
     """
     if not failed_specs or not isinstance(prev_all_releases, list):
         return 0
@@ -2090,6 +2088,13 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
     # all-2025» bug). One key per query string so we can also handle the
     # multi-quality case (1080p+2160p).
     failed_query_specs: list[tuple[int | None, str]] = []
+    # Per-indexer failure tracking via Jackett's `Indexers` field (Status=1 or
+    # Results=0+Error). Union across all queries — if any query saw an indexer
+    # fail, we'll supplement its prev releases. This catches the case where
+    # Jackett OVERALL responded fine but a specific indexer was silently
+    # broken or returned a degraded snapshot — exactly the «cards=23,
+    # added=12, removed=19» churn observed in production.
+    failed_indexer_ids: set[str] = set()
 
     for search_query in queries:
         # Parse year and quality from query string «YYYY <quality>».
@@ -2112,6 +2117,23 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
                     categories="2000",
                 )
                 source_counts["jackett_raw"] += len(results)
+                # Surface per-indexer statuses from this Jackett response.
+                # Each entry tells us whether a specific indexer succeeded,
+                # failed, or returned 0 results. We aggregate failures across
+                # all queries so the post-loop supplement step can fill in
+                # just the missing trackers from prev cache.
+                try:
+                    statuses = jackett_client.get_last_indexer_statuses()
+                except Exception:
+                    statuses = []
+                for st in statuses:
+                    if not st.is_ok or (st.results == 0 and st.error):
+                        failed_indexer_ids.add(st.indexer_id)
+                        logger.warning(
+                            "movie_discovery: Jackett indexer %r failed for %r "
+                            "(status=%d results=%d error=%r) — will supplement from prev",
+                            st.indexer_id, search_query, st.status, st.results, st.error[:120],
+                        )
                 for result in results:
                     release, reason = _movie_evaluate_result(
                         result,
@@ -2171,20 +2193,41 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
                 search_query, query_year, query_quality,
             )
 
-    # Supplement releases from previous cache for failed (year, quality) specs.
-    # Without this, a partial Jackett/Rutracker outage replaces the well-curated
-    # top-10 with whatever fragments DID load — which is how «2026 disappears,
-    # /new fills with mediocre 2025» happens.
-    if failed_query_specs:
+    # Per-indexer aware supplement: for each Jackett indexer that this
+    # refresh's response marks as failed (Status=1 / Results=0 / Error in
+    # Indexers field), take the prev refresh's releases that came FROM
+    # that specific tracker. We don't need to supplement for indexers
+    # that responded cleanly — those replies are authoritative.
+    if failed_indexer_ids or failed_query_specs:
         prev_for_supplement = _load_movie_discovery_cache()
-        supplemented = _supplement_releases_for_failed_queries(
-            failed_specs=failed_query_specs,
-            releases_out=releases,
-            prev_all_releases=prev_for_supplement.get("all_releases") or [],
-        )
+        prev_all = prev_for_supplement.get("all_releases") or []
+        supplemented = 0
+        if failed_indexer_ids and isinstance(prev_all, list):
+            # Match prev releases by tracker field — those came from indexers
+            # that just failed in the current refresh.
+            failed_indexer_set = set(failed_indexer_ids)
+            for prev_rel in prev_all:
+                if not isinstance(prev_rel, dict):
+                    continue
+                tracker = (prev_rel.get("tracker") or "").lower()
+                if tracker in failed_indexer_set:
+                    releases.append(prev_rel)
+                    supplemented += 1
+        # Backwards-compat: also supplement for (year, quality) specs where
+        # NO source returned anything at all (covers Jackett-process-down case
+        # where we don't have per-indexer info — supplement everything for
+        # those year-quality combos).
+        if failed_query_specs:
+            supplemented += _supplement_releases_for_failed_queries(
+                failed_specs=failed_query_specs,
+                releases_out=releases,
+                prev_all_releases=prev_all,
+            )
         logger.info(
-            "movie_discovery: supplemented %d releases from prev cache for failed specs: %s",
-            supplemented, failed_query_specs,
+            "movie_discovery: supplemented %d releases from prev cache "
+            "(failed_indexers=%s failed_specs=%s)",
+            supplemented, failed_indexer_ids or "none",
+            failed_query_specs or "none",
         )
 
     logger.info(
@@ -2281,10 +2324,16 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
             ",".join(map(str, list(_removed_log)[:20])) or "-",
         )
 
-    # Persist failed query specs so the discovery loop can detect a partial
+    # Persist failure signals so the discovery loop can detect a partial
     # outage and schedule an opportunistic retry sooner than the normal 12h
-    # interval. List-of-lists JSON-friendly format; tuples come back as lists.
+    # interval. Two distinct signals:
+    #   - last_failed_specs: queries where NO source returned anything (whole-
+    #     query outage, e.g. Jackett process down).
+    #   - last_failed_indexer_ids: specific Jackett indexers that this refresh
+    #     could not get data from (per-indexer Status=1 / Results=0+Error).
+    # Either being non-empty means «degraded refresh, retry sooner».
     cache["last_failed_specs"] = [[year, quality] for (year, quality) in failed_query_specs]
+    cache["last_failed_indexer_ids"] = sorted(failed_indexer_ids)
 
     # Persist previous top-10 alongside new cards. The consensus filter in
     # _run_movie_discovery_notifications reads this to decide whether a kp_id
@@ -2661,22 +2710,29 @@ async def _movie_discovery_loop(app: "Application") -> None:
     startup_ready_notified = False
     current_interval = interval
 
-    def _read_last_failed_specs() -> list:
+    def _read_degradation_signal() -> tuple[list, list]:
+        """Return (failed_specs, failed_indexer_ids) from the most recent
+        refresh. Either non-empty means the refresh was degraded — caller
+        schedules the next retry sooner than the normal 12h interval."""
         cache = _load_movie_discovery_cache()
         specs = cache.get("last_failed_specs")
-        return list(specs) if isinstance(specs, list) else []
+        indexers = cache.get("last_failed_indexer_ids")
+        return (
+            list(specs) if isinstance(specs, list) else [],
+            list(indexers) if isinstance(indexers, list) else [],
+        )
 
     try:
         logger.info("movie_discovery: loop started — first refresh now, interval=%dh", MOVIE_DISCOVERY_INTERVAL_HOURS)
         # Immediate first refresh.
         await _run_background_step("movie discovery refresh", _refresh_and_notify)
-        failed_specs = _read_last_failed_specs()
-        if failed_specs:
+        failed_specs, failed_indexers = _read_degradation_signal()
+        if failed_specs or failed_indexers:
             fail_streak = 1
             current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
             logger.info(
-                "movie_discovery: first refresh degraded (failed_specs=%s) — retry in %ds",
-                failed_specs, current_interval,
+                "movie_discovery: first refresh degraded (failed_specs=%s, failed_indexers=%s) — retry in %ds",
+                failed_specs or "none", failed_indexers or "none", current_interval,
             )
         else:
             await _notify_admins(
@@ -2687,13 +2743,13 @@ async def _movie_discovery_loop(app: "Application") -> None:
         while True:
             await asyncio.sleep(current_interval)
             await _run_background_step("movie discovery refresh", _refresh_and_notify)
-            failed_specs = _read_last_failed_specs()
-            if failed_specs:
+            failed_specs, failed_indexers = _read_degradation_signal()
+            if failed_specs or failed_indexers:
                 fail_streak += 1
                 current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
                 logger.info(
-                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s) — retry in %ds",
-                    fail_streak, failed_specs, current_interval,
+                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s, failed_indexers=%s) — retry in %ds",
+                    fail_streak, failed_specs or "none", failed_indexers or "none", current_interval,
                 )
             else:
                 was_degraded = fail_streak > 0
