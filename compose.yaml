@@ -107,12 +107,12 @@ services:
         {{- if .Report -}}
           {{- with .Report -}}
             {{- if .Updated -}}
-        🔄 CineDownload обновлён
+        🔄 PlexLoader обновлён
         {{range .Updated}}• {{.Name}} → {{.LatestImageID.ShortID}}
         {{end -}}
             {{- end -}}
             {{- if .Failed -}}
-        ⚠️ Не удалось обновить CineDownload
+        ⚠️ Не удалось обновить PlexLoader
         {{range .Failed}}• {{.Name}}: {{.Error}}
         {{end -}}
             {{- end -}}

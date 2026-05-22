@@ -439,7 +439,7 @@ class StartCommandTests(unittest.TestCase):
 
         text = update.effective_message.reply_text.call_args.args[0]
         # Brand mention — replaces the old terse "Доступ пока не настроен" only message.
-        self.assertIn("CineDownload", text)
+        self.assertIn("PlexLoader", text)
         # User's chat_id is still shown (admin needs it).
         self.assertIn("999", text)
         # Tail string for the "couldn't reach admin" branch.

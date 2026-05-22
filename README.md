@@ -1,13 +1,19 @@
-# CineDownload
+# PlexLoader
 
-> **Версия 1.0**
+> **Версия 1.0** · 🧠 умный AI-поиск
 
 [![tests](https://github.com/KiMorev/tg-torrent-bot/actions/workflows/test.yml/badge.svg)](https://github.com/KiMorev/tg-torrent-bot/actions/workflows/test.yml)
 [![ghcr](https://img.shields.io/badge/ghcr.io-kimorev%2Ftg--torrent--bot-blue?logo=docker)](https://github.com/KiMorev/tg-torrent-bot/pkgs/container/tg-torrent-bot)
 
-Telegram-помощник для домашнего киносервера на базе Synology + Plex.
+Telegram-помощник для домашнего киносервера на базе Synology + Plex с **умным AI-поиском**.
 
 Ищет фильмы и сериалы по нескольким трекерам (через Jackett или прямо в Rutracker), ведёт ленту новинок с фильтрацией по рейтингу Кинопоиска, проверяет наличие в Plex до скачивания, и присылает push-уведомление с прямой ссылкой на просмотр когда файл появился в библиотеке. Сами раздачи — `.torrent` и magnet — скачиваются в Synology Download Station в фоне, без участия пользователя.
+
+**🧠 AI-фичи** (когда настроен `OPENAI_API_KEY`):
+- Автоисправление опечаток в поиске («Дюра» → «Дюна» одним тапом)
+- Проверка GPT'ом привязки фильма к Кинопоиску — меньше неверных матчей в `/new`
+- Короткие пояснения «почему этот фильм» в карточках `/new`
+- Голосовой поиск через Whisper — записать voice вместо ввода названия
 
 ---
 

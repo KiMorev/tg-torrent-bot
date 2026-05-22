@@ -497,6 +497,11 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
         bullets.append(
             "• 🔍 Поиск и скачивание торрентов — просто пришлите название фильма"
         )
+    if GPT_ENABLED and search_enabled:
+        bullets.append(
+            "• 🧠 Умный поиск с AI: автоисправление опечаток, подсказки, "
+            "пояснения «почему этот фильм» в карточках /new"
+        )
     if VOICE_SEARCH_ENABLED and search_enabled:
         bullets.append(
             "• 🎙 Можно искать голосом — запишите голосовое сообщение, бот распознает"
@@ -526,7 +531,7 @@ async def _reply_access_pending(update: Update, context: ContextTypes.DEFAULT_TY
 
     if update.effective_message:
         await update.effective_message.reply_text(
-            "👋 Это <b>CineDownload</b> — помощник для домашнего киносервера на базе Plex.\n"
+            "👋 Это <b>PlexLoader</b> — 🧠 умный помощник для домашнего киносервера на базе Plex.\n"
             "\n"
             "После одобрения вам будут доступны:\n"
             f"{_build_value_props()}\n"
@@ -8237,11 +8242,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if PLEX_ENABLED:
         auto_bullets.append("• когда контент появился в Plex")
 
+    # Smart-search teaser when GPT is configured — single short line, не
+    # хочется засорять welcome подробным списком (это уже в /help).
+    smart_teaser = ""
+    if GPT_ENABLED and search_enabled:
+        smart_teaser = (
+            "\n🧠 <b>Умный поиск:</b> AI правит опечатки, проверяет привязку к Кинопоиску, "
+            "объясняет «почему этот фильм» в /new. Подробнее — /help.\n"
+        )
+
     text = (
         "👋 Готов к работе!\n"
         "\n"
         "<b>Главное:</b>\n"
         f"{chr(10).join(main_bullets)}\n"
+        f"{smart_teaser}"
         "\n"
         "<b>Уведомления приходят сами:</b>\n"
         f"{chr(10).join(auto_bullets)}\n"
@@ -8291,6 +8306,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
 
+    # ---- 🧠 Умный поиск с AI (показываем только когда реально работает)
+    smart_lines: list[str] = []
+    if GPT_ENABLED and search_enabled:
+        smart_lines.append("• AI ловит опечатки: «Дюра» → подскажу «Дюна»")
+        smart_lines.append("• AI проверяет привязку фильма к Кинопоиску — меньше неверных матчей")
+        if MOVIE_DISCOVERY_ENABLED:
+            smart_lines.append("• 💭 короткое объяснение «почему этот фильм» в карточках /new")
+
     # ---- Уведомления приходят сами
     auto: list[str] = ["• когда скачивание завершилось или упало с ошибкой"]
     if search_enabled:
@@ -8309,6 +8332,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         sections.append("<b>Главное:</b>\n" + "\n".join(main_bullets))
     if extras:
         sections.append("<b>Можно ещё:</b>\n" + "\n".join(extras))
+    if smart_lines:
+        sections.append("<b>🧠 Умный поиск:</b>\n" + "\n".join(smart_lines))
     if auto:
         sections.append("<b>Уведомления приходят сами:</b>\n" + "\n".join(auto))
     sections.append("<b>Служебное:</b>\n" + "\n".join(service))

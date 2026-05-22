@@ -1,6 +1,6 @@
-# CineDownload Architecture
+# PlexLoader Architecture
 
-> Mid-level architecture of CineDownload — Telegram-бот для домашнего киносервера
+> Mid-level architecture of PlexLoader — Telegram-бот для домашнего киносервера
 > на базе Synology + Plex. Документ описывает как взаимодействуют все
 > компоненты: от железа и сетевой инфраструктуры до бизнес-флоу
 > доставки фильма пользователю.
