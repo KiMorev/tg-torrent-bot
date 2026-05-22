@@ -2329,14 +2329,36 @@ async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_
 
     # Persist failure signals so the discovery loop can detect a partial
     # outage and schedule an opportunistic retry sooner than the normal 12h
-    # interval. Two distinct signals:
+    # interval. Three signals split by user intent:
     #   - last_failed_specs: queries where NO source returned anything (whole-
     #     query outage, e.g. Jackett process down).
-    #   - last_failed_indexer_ids: specific Jackett indexers that this refresh
-    #     could not get data from (per-indexer Status=1 / Results=0+Error).
-    # Either being non-empty means «degraded refresh, retry sooner».
+    #   - last_failed_indexer_ids_enabled: indexers the USER wants in /new
+    #     rating (via /admin → 🎬 Трекеры новинок) that failed. These ARE
+    #     degradation — we should retry to recover them, and they block the
+    #     «ready» notification until backoff exhausts.
+    #   - last_failed_indexer_ids_disabled: indexers user doesn't include in
+    #     /new rating but Jackett still queries (different layer of config).
+    #     Logged for visibility, but NOT degradation — user already opted out.
+    # Partition is based on jackett_trackers_enabled. None means «all enabled».
+    enabled_for_rating = (
+        set(md_settings["jackett_trackers_enabled"])
+        if md_settings.get("jackett_trackers_enabled") is not None
+        else None
+    )
+    if enabled_for_rating is None:
+        failed_enabled = set(failed_indexer_ids)
+        failed_disabled: set[str] = set()
+    else:
+        failed_enabled = failed_indexer_ids & enabled_for_rating
+        failed_disabled = failed_indexer_ids - enabled_for_rating
     cache["last_failed_specs"] = [[year, quality] for (year, quality) in failed_query_specs]
-    cache["last_failed_indexer_ids"] = sorted(failed_indexer_ids)
+    cache["last_failed_indexer_ids"] = sorted(failed_enabled)  # gating signal
+    cache["last_failed_indexer_ids_disabled"] = sorted(failed_disabled)  # info-only
+    if failed_disabled:
+        logger.info(
+            "movie_discovery: failed indexers not in rating (info-only, no retry): %s",
+            sorted(failed_disabled),
+        )
 
     # Persist previous top-10 alongside new cards. The consensus filter in
     # _run_movie_discovery_notifications reads this to decide whether a kp_id
@@ -2713,23 +2735,35 @@ async def _movie_discovery_loop(app: "Application") -> None:
     startup_ready_notified = False
     current_interval = interval
 
-    def _read_degradation_signal() -> tuple[list, list]:
-        """Return (failed_specs, failed_indexer_ids) from the most recent
-        refresh. Either non-empty means the refresh was degraded — caller
-        schedules the next retry sooner than the normal 12h interval."""
+    def _read_degradation_signal() -> tuple[list, list, list]:
+        """Return (failed_specs, failed_enabled_ids, failed_disabled_ids).
+
+        - failed_specs / failed_enabled_ids are the «gating» signals: either
+          non-empty triggers retry backoff and blocks the ready notification.
+        - failed_disabled_ids is info-only: indexers Jackett queries but the
+          user excluded from /new rating (e.g. broken Cloudflare-protected
+          ones). Surfaced in the ready message so the admin sees them, but
+          doesn't drive retry/backoff.
+        """
         cache = _load_movie_discovery_cache()
         specs = cache.get("last_failed_specs")
-        indexers = cache.get("last_failed_indexer_ids")
+        enabled = cache.get("last_failed_indexer_ids")
+        disabled = cache.get("last_failed_indexer_ids_disabled")
         return (
             list(specs) if isinstance(specs, list) else [],
-            list(indexers) if isinstance(indexers, list) else [],
+            list(enabled) if isinstance(enabled, list) else [],
+            list(disabled) if isinstance(disabled, list) else [],
         )
 
     def _read_card_count() -> int:
         cache = _load_movie_discovery_cache()
         return len(cache.get("cards") or [])
 
-    async def _maybe_send_startup_ready(failed_indexers: list, card_count: int) -> bool:
+    async def _maybe_send_startup_ready(
+        failed_enabled: list,
+        failed_disabled: list,
+        card_count: int,
+    ) -> bool:
         """Send the «poisk razogret» admin notification when conditions are met.
 
         Ready = bot is functional and /new has content. Does NOT require all
@@ -2737,19 +2771,28 @@ async def _movie_discovery_loop(app: "Application") -> None:
         without FlareSolverr) may be permanently degraded; we shouldn't
         block the startup signal on them.
 
-        Conditions: cards present AND (no failed indexers OR streak gave up).
-        The streak-based escape ensures the signal still fires for setups
-        with persistent partial failures, just after we've stopped retrying.
-        Returns True if sent.
+        Two failure groups (partitioned in _refresh_movie_discovery_cache):
+          - failed_enabled: user wants these in /new rating → they GATE the
+            ready signal (defer while retrying, ready once backoff exhausts).
+          - failed_disabled: user excluded these from /new → info-only,
+            never gates ready, just listed for admin awareness.
         """
         if startup_ready_notified or card_count <= 0:
             return False
-        if failed_indexers and fail_streak < len(_MOVIE_DISCOVERY_RETRY_BACKOFF):
-            # Still retrying — defer ready until we either recover or give up.
+        if failed_enabled and fail_streak < len(_MOVIE_DISCOVERY_RETRY_BACKOFF):
+            # Still retrying enabled-rating failures — defer ready.
             return False
         text = "✅ Поиск разогрет, бот полноценно функционирует."
-        if failed_indexers:
-            text += f"\n(индексеры с проблемами: {', '.join(failed_indexers)} — содержимое /new восполнено из прошлого кэша)"
+        if failed_enabled:
+            text += (
+                f"\n⚠️ Индексеры рейтинга с проблемами: {', '.join(failed_enabled)}"
+                "\n   Содержимое /new восполнено из прошлого кэша."
+            )
+        if failed_disabled:
+            text += (
+                f"\nℹ️ Прочие индексеры (не влияют на /new): {', '.join(failed_disabled)}"
+                "\n   — отключены или сломаны на стороне трекера."
+            )
         await _notify_admins(app, text)
         return True
 
@@ -2757,44 +2800,58 @@ async def _movie_discovery_loop(app: "Application") -> None:
         logger.info("movie_discovery: loop started — first refresh now, interval=%dh", MOVIE_DISCOVERY_INTERVAL_HOURS)
         # Immediate first refresh.
         await _run_background_step("movie discovery refresh", _refresh_and_notify)
-        failed_specs, failed_indexers = _read_degradation_signal()
+        failed_specs, failed_enabled, failed_disabled = _read_degradation_signal()
         card_count = _read_card_count()
-        if failed_specs or failed_indexers:
+        if failed_specs or failed_enabled:
             fail_streak = 1
             current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
             logger.info(
-                "movie_discovery: first refresh degraded (failed_specs=%s, failed_indexers=%s, cards=%d) — retry in %ds",
-                failed_specs or "none", failed_indexers or "none", card_count, current_interval,
+                "movie_discovery: first refresh degraded (failed_specs=%s, "
+                "failed_enabled=%s, failed_disabled=%s, cards=%d) — retry in %ds",
+                failed_specs or "none", failed_enabled or "none",
+                failed_disabled or "none", card_count, current_interval,
             )
             # Try to send ready signal even on degraded refresh — if we have
             # cards in cache, the bot IS functional. The condition inside
             # _maybe_send_startup_ready prevents firing too early when we
             # still plan retries.
-            if await _maybe_send_startup_ready(failed_indexers, card_count):
+            if await _maybe_send_startup_ready(failed_enabled, failed_disabled, card_count):
                 startup_ready_notified = True
         else:
-            await _notify_admins(
-                app, "✅ Поиск разогрет, бот полноценно функционирует.",
-            )
+            # All clean — send ready immediately, but still mention disabled
+            # failures if there were any (info-only).
+            if failed_disabled:
+                await _notify_admins(
+                    app,
+                    "✅ Поиск разогрет, бот полноценно функционирует."
+                    f"\nℹ️ Прочие индексеры (не влияют на /new): {', '.join(failed_disabled)}"
+                    "\n   — отключены или сломаны на стороне трекера.",
+                )
+            else:
+                await _notify_admins(
+                    app, "✅ Поиск разогрет, бот полноценно функционирует.",
+                )
             startup_ready_notified = True
 
         while True:
             await asyncio.sleep(current_interval)
             await _run_background_step("movie discovery refresh", _refresh_and_notify)
-            failed_specs, failed_indexers = _read_degradation_signal()
+            failed_specs, failed_enabled, failed_disabled = _read_degradation_signal()
             card_count = _read_card_count()
-            if failed_specs or failed_indexers:
+            if failed_specs or failed_enabled:
                 fail_streak += 1
                 current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
                 logger.info(
-                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s, failed_indexers=%s, cards=%d) — retry in %ds",
-                    fail_streak, failed_specs or "none", failed_indexers or "none", card_count, current_interval,
+                    "movie_discovery: degraded refresh (streak=%d, failed_specs=%s, "
+                    "failed_enabled=%s, failed_disabled=%s, cards=%d) — retry in %ds",
+                    fail_streak, failed_specs or "none", failed_enabled or "none",
+                    failed_disabled or "none", card_count, current_interval,
                 )
                 # After backoff is exhausted (fail_streak >= len(BACKOFF)) the
                 # partial failure is persistent — fire ready anyway so the
                 # admin isn't left hanging forever on a permanently broken
                 # indexer (e.g. noname-club without FlareSolverr).
-                if await _maybe_send_startup_ready(failed_indexers, card_count):
+                if await _maybe_send_startup_ready(failed_enabled, failed_disabled, card_count):
                     startup_ready_notified = True
             else:
                 was_degraded = fail_streak > 0

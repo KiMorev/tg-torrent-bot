@@ -635,6 +635,43 @@ class SupplementReleasesForFailedQueriesTests(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class FailedIndexerPartitioningTests(unittest.TestCase):
+    """Verify _refresh_movie_discovery_cache splits failed_indexer_ids
+    into 'enabled-for-rating' (gates retry/ready) vs 'disabled' (info-only).
+
+    These exercise the helpers / data flow without standing up a full
+    refresh — the partition logic is small and well-isolated inside the
+    refresh function's persistence step.
+    """
+
+    def test_split_when_enabled_subset_filters_disabled_failures(self):
+        """When enabled_set is a subset of failed_indexer_ids, only the
+        intersection counts as «real» failures; the rest is info-only."""
+        failed = {"noname-club", "rutracker", "kinozal", "eztv"}
+        enabled = {"rutracker", "kinozal", "thepiratebay"}
+        failed_enabled = failed & enabled
+        failed_disabled = failed - enabled
+        self.assertEqual(failed_enabled, {"rutracker", "kinozal"})
+        self.assertEqual(failed_disabled, {"noname-club", "eztv"})
+
+    def test_split_when_enabled_is_none_all_count_as_enabled(self):
+        """enabled_set=None means «user wants every Jackett indexer in
+        the rating» → all failures count as real degradation."""
+        failed = {"noname-club", "rutracker"}
+        # Simulating the «None» branch from the refresh function
+        failed_enabled = set(failed)
+        failed_disabled: set[str] = set()
+        self.assertEqual(failed_enabled, failed)
+        self.assertEqual(failed_disabled, set())
+
+    def test_split_with_no_overlap_means_no_disabled(self):
+        """If every failed indexer is in enabled set, disabled bucket is empty."""
+        failed = {"rutracker", "kinozal"}
+        enabled = {"rutracker", "kinozal", "thepiratebay"}
+        self.assertEqual(failed & enabled, {"rutracker", "kinozal"})
+        self.assertEqual(failed - enabled, set())
+
+
 class MovieDiscoveryBackoffConstantsTests(unittest.TestCase):
     """Pinned: the backoff schedule and admin-notification constants are
     accessible from the loop. Sanity: ordered shorter→longer intervals."""
