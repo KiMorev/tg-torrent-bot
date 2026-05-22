@@ -491,6 +491,107 @@ def _voice_search_diagnostic(
     )
 
 
+_GPT_FEATURE_LABELS = {
+    "kp_confidence": "🎯 KP confidence",
+    "did_you_mean": "🔎 Did-you-mean",
+    "explain_card": "📝 Объяснения карточек",
+    "quality_parse": "🏷 Парсинг качества",
+    "plex_unmatched": "🧹 Plex unmatched fix",
+}
+
+
+def _gpt_chat_diagnostic(
+    *,
+    enabled: bool,
+    api_key: str,
+    usage: dict,
+    model: str = "gpt-4o-mini",
+) -> ServiceDiagnostic:
+    """GPT chat usage status: per-feature monthly call counts + estimated
+    cost. Mirrors `_voice_search_diagnostic` for the OpenAI Whisper side.
+
+    Key validity is NOT re-pinged here (voice diagnostic already does that
+    against the same OPENAI_API_KEY — pinging twice would just double the
+    network noise). Instead we infer health from our own usage record:
+      ok       — feature configured, no recent quota/auth error
+      error    — last_error is `auth` or `quota_exceeded` (terminal)
+      warn     — last_error is transient (timeout/network/rate_limit)
+      disabled — feature off or no key
+    """
+    name = "GPT chat"
+    icon = "🧠"
+
+    if not enabled or not api_key:
+        return ServiceDiagnostic(
+            name, "disabled",
+            _summary("disabled", icon, name, "не настроен"),
+            ["   Установите OPENAI_API_KEY и GPT_ENABLED=true для GPT-улучшений поиска."],
+        )
+
+    details: list[str] = [f"   Модель: <code>{model}</code>"]
+
+    month = str(usage.get("month") or "—")
+    features = usage.get("features") if isinstance(usage.get("features"), dict) else {}
+
+    total_calls = 0
+    total_cost = 0.0
+    total_in_tokens = 0
+    total_out_tokens = 0
+    for f_data in features.values():
+        if not isinstance(f_data, dict):
+            continue
+        total_calls += int(f_data.get("calls") or 0)
+        total_cost += float(f_data.get("estimated_cost_usd") or 0.0)
+        total_in_tokens += int(f_data.get("input_tokens") or 0)
+        total_out_tokens += int(f_data.get("output_tokens") or 0)
+
+    details.append(
+        f"   За {month}: {total_calls} "
+        f"{_plural_ru(total_calls, 'запрос', 'запроса', 'запросов')} · "
+        f"~${total_cost:.3f} (in {total_in_tokens}, out {total_out_tokens} ток.)"
+    )
+
+    # Per-feature breakdown — only show features that actually fired.
+    for feature_key, feature_data in sorted(features.items()):
+        if not isinstance(feature_data, dict):
+            continue
+        calls = int(feature_data.get("calls") or 0)
+        if calls == 0:
+            continue
+        cost = float(feature_data.get("estimated_cost_usd") or 0.0)
+        label = _GPT_FEATURE_LABELS.get(feature_key, feature_key)
+        details.append(
+            f"     • {label}: {calls} "
+            f"{_plural_ru(calls, 'вызов', 'вызова', 'вызовов')} · ~${cost:.3f}"
+        )
+
+    last_error = usage.get("last_error") if isinstance(usage.get("last_error"), dict) else None
+    if last_error:
+        ts = str(last_error.get("ts") or "—")
+        err_type = str(last_error.get("type") or "—")
+        feature = str(last_error.get("feature") or "—")
+        details.append(f"   Последняя ошибка ({ts}, {feature}): {err_type}")
+
+        if err_type in ("quota_exceeded", "auth"):
+            return ServiceDiagnostic(
+                name, "error",
+                _summary("error", icon, name, f"последняя ошибка: {err_type}"),
+                details,
+            )
+        if err_type in ("timeout", "network", "rate_limit", "server_error"):
+            return ServiceDiagnostic(
+                name, "warn",
+                _summary("warn", icon, name, f"transient ошибка: {err_type}"),
+                details,
+            )
+
+    return ServiceDiagnostic(
+        name, "ok",
+        _summary("ok", icon, name, "настроен · GPT-улучшения активны"),
+        details,
+    )
+
+
 def run_diagnostics(
     *,
     rutracker_client,
@@ -504,6 +605,9 @@ def run_diagnostics(
     voice_search_enabled: bool = False,
     openai_api_key: str = "",
     voice_usage: dict | None = None,
+    gpt_enabled: bool = False,
+    gpt_model: str = "gpt-4o-mini",
+    gpt_usage: dict | None = None,
 ) -> DiagnosticsReport:
     return DiagnosticsReport(
         [
@@ -517,6 +621,12 @@ def run_diagnostics(
                 enabled=voice_search_enabled,
                 api_key=openai_api_key,
                 usage=voice_usage or {},
+            ),
+            _gpt_chat_diagnostic(
+                enabled=gpt_enabled,
+                api_key=openai_api_key,
+                usage=gpt_usage or {},
+                model=gpt_model,
             ),
         ]
     )

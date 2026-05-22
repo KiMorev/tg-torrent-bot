@@ -516,5 +516,113 @@ class VoiceSearchDiagnosticTests(unittest.TestCase):
         self.assertIn("Дюна часть вторая", joined)
 
 
+class GptChatDiagnosticTests(unittest.TestCase):
+    """GPT chat usage block: per-feature monthly counts, cost, last_error."""
+
+    def _gpt_service(self, report):
+        return next(s for s in report.services if s.name == "GPT chat")
+
+    def _run(
+        self,
+        *,
+        enabled: bool,
+        api_key: str,
+        usage: dict | None = None,
+        model: str = "gpt-4o-mini",
+    ):
+        return run_diagnostics(
+            rutracker_client=None,
+            jackett_client=None,
+            ds_client=FakeDownloadStation([]),
+            tracker_service=FakeTrackerService(trackers=[]),
+            display_timezone=timezone.utc,
+            gpt_enabled=enabled,
+            openai_api_key=api_key,
+            gpt_usage=usage or {},
+            gpt_model=model,
+        )
+
+    def test_disabled_when_feature_off(self):
+        report = self._run(enabled=False, api_key="")
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "disabled")
+
+    def test_disabled_when_key_empty(self):
+        report = self._run(enabled=True, api_key="")
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "disabled")
+
+    def test_ok_with_no_calls_yet(self):
+        report = self._run(enabled=True, api_key="sk-test", usage={"month": "2026-05"})
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "ok")
+        joined = " ".join(svc.details)
+        self.assertIn("0", joined)  # 0 requests this month
+        self.assertIn("gpt-4o-mini", joined)
+
+    def test_renders_per_feature_breakdown(self):
+        usage = {
+            "month": "2026-05",
+            "features": {
+                "kp_confidence": {
+                    "calls": 23, "input_tokens": 4600, "output_tokens": 690,
+                    "estimated_cost_usd": 0.00112,
+                },
+                "did_you_mean": {
+                    "calls": 5, "input_tokens": 500, "output_tokens": 400,
+                    "estimated_cost_usd": 0.00033,
+                },
+            },
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage)
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "ok")
+        joined = " ".join(svc.details)
+        # Total monthly aggregate
+        self.assertIn("28", joined)  # 23 + 5 = 28
+        # Per-feature lines
+        self.assertIn("KP confidence", joined)
+        self.assertIn("Did-you-mean", joined)
+        self.assertIn("23", joined)  # KP calls
+        self.assertIn("5", joined)   # did-you-mean calls
+
+    def test_omits_features_with_zero_calls(self):
+        """Per-feature breakdown should hide features that never fired
+        (avoid clutter as we add more features later)."""
+        usage = {
+            "month": "2026-05",
+            "features": {
+                "kp_confidence": {"calls": 10, "input_tokens": 200, "output_tokens": 50, "estimated_cost_usd": 0.0001},
+                "explain_card": {"calls": 0, "input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0},
+            },
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage)
+        svc = self._gpt_service(report)
+        joined = " ".join(svc.details)
+        self.assertIn("KP confidence", joined)
+        self.assertNotIn("Объяснения карточек", joined)
+
+    def test_error_on_quota_exceeded(self):
+        usage = {
+            "month": "2026-05",
+            "features": {"did_you_mean": {"calls": 14, "input_tokens": 1000, "output_tokens": 800, "estimated_cost_usd": 0.001}},
+            "last_error": {"ts": "2026-05-22T10:00", "feature": "did_you_mean", "type": "quota_exceeded"},
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage)
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "error")
+        self.assertIn("quota_exceeded", svc.summary)
+
+    def test_warn_on_transient_error(self):
+        usage = {
+            "month": "2026-05",
+            "features": {"kp_confidence": {"calls": 5, "input_tokens": 100, "output_tokens": 30, "estimated_cost_usd": 0.00005}},
+            "last_error": {"ts": "2026-05-22T10:00", "feature": "kp_confidence", "type": "timeout"},
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage)
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "warn")
+
+
 if __name__ == "__main__":
     unittest.main()

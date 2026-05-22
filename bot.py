@@ -1058,6 +1058,27 @@ def _format_admin_voice_alert() -> str | None:
     return None
 
 
+def _format_admin_gpt_alert() -> str | None:
+    """Mirror of _format_admin_voice_alert for the GPT chat usage side.
+
+    Same trigger semantics — terminal OpenAI errors on chat completions
+    bubble up to the main /admin panel so the operator sees them without
+    drilling into Диагностика.
+    """
+    if not GPT_ENABLED:
+        return None
+    usage = state_store.load_gpt_usage()
+    last_error = usage.get("last_error") if isinstance(usage.get("last_error"), dict) else None
+    if not last_error:
+        return None
+    err_type = str(last_error.get("type") or "")
+    if err_type == "quota_exceeded":
+        return "⚠️ 🧠 GPT chat: исчерпан баланс/лимит OpenAI"
+    if err_type == "auth":
+        return "⚠️ 🧠 GPT chat: ключ OpenAI невалиден"
+    return None
+
+
 def _format_storage_forecast(info: StorageInfo) -> str | None:
     """7-day linear extrapolation to STORAGE_ALERT_PERCENT.
 
@@ -1349,6 +1370,10 @@ async def _build_admin_panel_text() -> str:
     if voice_alert:
         lines.append("")
         lines.append(voice_alert)
+    gpt_alert = _format_admin_gpt_alert()
+    if gpt_alert:
+        lines.append("")
+        lines.append(gpt_alert)
     return "\n".join(lines)
 
 
@@ -4842,6 +4867,9 @@ async def _build_diagnostics_text() -> str:
         voice_search_enabled=VOICE_SEARCH_ENABLED,
         openai_api_key=OPENAI_API_KEY,
         voice_usage=state_store.load_voice_usage(),
+        gpt_enabled=GPT_ENABLED,
+        gpt_model=GPT_MODEL,
+        gpt_usage=state_store.load_gpt_usage(),
     )
     return format_diagnostics(report)
 
