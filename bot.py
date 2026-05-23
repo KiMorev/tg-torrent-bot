@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -11035,6 +11036,7 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
 # our purposes (films don't un-exist). Saves ~1s per repeat lookup.
 _kp_exists_cache: dict[str, bool] = {}
 _KP_EXISTS_CACHE_MAX = 500  # rough upper bound; LRU eviction below
+_KP_VERIFY_TITLE_MATCH_RATIO = 0.86
 
 
 def _kp_exists_cache_get(norm_title: str) -> bool | None:
@@ -11047,6 +11049,12 @@ def _kp_exists_cache_put(norm_title: str, exists: bool) -> None:
         for old in list(_kp_exists_cache.keys())[:100]:
             _kp_exists_cache.pop(old, None)
     _kp_exists_cache[norm_title] = exists
+
+
+def _kp_verify_norm_title(title: str) -> str:
+    norm = _normalize_movie_title(title or "").lower()
+    norm = re.sub(r"\b(?:19|20)\d{2}\b", " ", norm)
+    return re.sub(r"\s+", " ", norm).strip()
 
 
 def _kp_verify_title_sync(title: str, *, default_on_unknown: bool = True) -> bool:
@@ -11077,10 +11085,59 @@ def _kp_verify_title_sync(title: str, *, default_on_unknown: bool = True) -> boo
         logger.debug("KP verify error for %r: %s — falling back to %s",
                      title, exc, default_on_unknown)
         return default_on_unknown
-    exists = match is not None
+    exists = _kp_match_plausibly_equals_query(title, match)
     _kp_exists_cache_put(norm, exists)
-    logger.debug("KP verify %r → %s", title, exists)
+    logger.debug("KP verify %r → %s (match=%r)", title, exists, match)
     return exists
+
+
+def _kp_match_plausibly_equals_query(
+    query: str,
+    match,
+) -> bool:
+    """Guard against overly fuzzy KP keyword hits.
+
+    KP `search-by-keyword` may return a semantically related title even when
+    the queried title itself does not exist. For did-you-mean suppression we
+    only want to treat the query as "exists on KP" when the returned title is
+    plausibly the same film/series name.
+    """
+    if match is None:
+        return False
+
+    q_norm = _kp_verify_norm_title(query)
+    if not q_norm:
+        return False
+    q_compact = q_norm.replace(" ", "")
+    q_tokens = {t for t in q_norm.split() if len(t) >= 3}
+
+    candidates = []
+    for raw in (getattr(match, "title_ru", ""), getattr(match, "title_en", ""), getattr(match, "title", "")):
+        norm = _kp_verify_norm_title(str(raw))
+        if norm:
+            candidates.append(norm)
+
+    if not candidates:
+        return False
+
+    for cand_norm in candidates:
+        cand_compact = cand_norm.replace(" ", "")
+        if q_compact == cand_compact:
+            return True
+        if len(q_compact) >= 6 and len(cand_compact) >= 6:
+            if SequenceMatcher(None, q_compact, cand_compact).ratio() >= _KP_VERIFY_TITLE_MATCH_RATIO:
+                return True
+        cand_tokens = {t for t in cand_norm.split() if len(t) >= 3}
+        if q_tokens and cand_tokens:
+            overlap = len(q_tokens & cand_tokens) / max(len(q_tokens), len(cand_tokens))
+            if overlap >= 0.8:
+                return True
+
+    logger.info(
+        "KP verify rejected fuzzy hit: query=%r match=%r/%r",
+        query, getattr(match, "title_ru", ""), getattr(match, "title_en", ""),
+    )
+    return False
 
 
 async def _kp_verify_titles(titles: list[str]) -> dict[str, bool]:

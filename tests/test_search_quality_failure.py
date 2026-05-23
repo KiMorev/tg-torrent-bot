@@ -78,11 +78,29 @@ class KpVerifyTitleSyncTests(unittest.TestCase):
         # Make cache empty before each test so we don't leak state.
         bot._kp_exists_cache.clear()
 
+    def _match(self, title_ru: str = "", title_en: str = ""):
+        match = MagicMock()
+        match.title_ru = title_ru
+        match.title_en = title_en
+        match.title = title_ru or title_en
+        return match
+
     def test_returns_true_when_kp_has_match(self):
         kp = MagicMock()
-        kp.search_movie.return_value = MagicMock()  # truthy = found
+        kp.search_movie.return_value = self._match(title_en="Drive")
         with patch.object(bot, "kinopoisk_client", kp):
             self.assertTrue(bot._kp_verify_title_sync("Drive"))
+
+    def test_returns_false_when_kp_only_has_loose_suggestion(self):
+        """KP keyword search may return a 'maybe you meant' result. That must
+        not suppress GPT did-you-mean for the original typo."""
+        kp = MagicMock()
+        kp.search_movie.return_value = self._match(
+            title_ru="Земля гангстеров",
+            title_en="Gangster Land",
+        )
+        with patch.object(bot, "kinopoisk_client", kp):
+            self.assertFalse(bot._kp_verify_title_sync("ганстерленд", default_on_unknown=False))
 
     def test_returns_false_when_kp_has_no_match(self):
         kp = MagicMock()
@@ -114,7 +132,7 @@ class KpVerifyTitleSyncTests(unittest.TestCase):
 
     def test_cache_hit_skips_kp_call(self):
         kp = MagicMock()
-        kp.search_movie.return_value = MagicMock()
+        kp.search_movie.return_value = self._match(title_en="Drive")
         with patch.object(bot, "kinopoisk_client", kp):
             bot._kp_verify_title_sync("Drive")
             bot._kp_verify_title_sync("Drive")
@@ -124,12 +142,21 @@ class KpVerifyTitleSyncTests(unittest.TestCase):
 
     def test_cache_eviction_when_oversized(self):
         kp = MagicMock()
-        kp.search_movie.return_value = MagicMock()
+        kp.search_movie.side_effect = lambda title: self._match(title_ru=title)
         with patch.object(bot, "kinopoisk_client", kp):
             for i in range(bot._KP_EXISTS_CACHE_MAX + 50):
                 bot._kp_verify_title_sync(f"title{i}")
         # Cache stayed within bound.
         self.assertLessEqual(len(bot._kp_exists_cache), bot._KP_EXISTS_CACHE_MAX)
+
+    def test_rejects_fuzzy_semantic_match(self):
+        kp = MagicMock()
+        kp.search_movie.return_value = self._match(
+            title_ru="Земля гангстеров",
+            title_en="Gangster Land",
+        )
+        with patch.object(bot, "kinopoisk_client", kp):
+            self.assertFalse(bot._kp_verify_title_sync("Ганстерленд"))
 
 
 class KpVerifyTitlesParallelTests(unittest.IsolatedAsyncioTestCase):
@@ -140,7 +167,21 @@ class KpVerifyTitlesParallelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_per_title_results(self):
         kp = MagicMock()
-        kp.search_movie.side_effect = lambda t: MagicMock() if t in {"Drive", "Snatch"} else None
+        def fake_search(t):
+            if t == "Drive":
+                match = MagicMock()
+                match.title_ru = "Драйв"
+                match.title_en = "Drive"
+                match.title = "Драйв"
+                return match
+            if t == "Snatch":
+                match = MagicMock()
+                match.title_ru = "Большой куш"
+                match.title_en = "Snatch"
+                match.title = "Большой куш"
+                return match
+            return None
+        kp.search_movie.side_effect = fake_search
         with patch.object(bot, "kinopoisk_client", kp):
             out = await bot._kp_verify_titles(["Drive", "FakeMovie", "Snatch"])
         self.assertEqual(out["Drive"], True)
@@ -157,7 +198,13 @@ class KpVerifyTitlesParallelTests(unittest.IsolatedAsyncioTestCase):
         def fake_search(t):
             if t == "broken":
                 raise RuntimeError("explosion")
-            return MagicMock() if t == "ok" else None
+            if t == "ok":
+                match = MagicMock()
+                match.title_ru = "ok"
+                match.title_en = ""
+                match.title = "ok"
+                return match
+            return None
         kp.search_movie.side_effect = fake_search
         with patch.object(bot, "kinopoisk_client", kp):
             out = await bot._kp_verify_titles(["ok", "broken", "missing"])
@@ -198,7 +245,7 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         message.edit_text = AsyncMock(return_value=message)
 
         async def send_fn(text, **kw):
-            message.edit_text(text, **kw)  # store first call
+            await message.edit_text(text, **kw)  # store first call
             return message
 
         if jackett_search_raises:
@@ -280,7 +327,7 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         message.edit_text = AsyncMock(return_value=message)
 
         async def send_fn(text, **kw):
-            message.edit_text(text, **kw)
+            await message.edit_text(text, **kw)
             return message
 
         mock_jackett = MagicMock(
@@ -330,7 +377,7 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         message.edit_text = AsyncMock(return_value=message)
 
         async def send_fn(text, **kw):
-            message.edit_text(text, **kw)
+            await message.edit_text(text, **kw)
             return message
 
         mock_jackett = MagicMock(
@@ -356,6 +403,57 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         keyboard = kwargs["reply_markup"].inline_keyboard
         labels = [b.text for row in keyboard for b in row]
         self.assertFalse(any("Wrong Suggestion" in lbl for lbl in labels))
+
+    async def test_loose_kp_suggestion_does_not_suppress_did_you_mean(self):
+        """KP keyword search can return the site's 'maybe you meant' result.
+        That is not proof that the original typo is a real title."""
+        ctx = self._make_context(
+            jackett_selected={"rutracker"},
+            jackett_indexers=[{"id": "rutracker"}],
+        )
+        message = MagicMock()
+        message.message_id = 1
+        message.chat_id = 100
+        message.edit_text = AsyncMock(return_value=message)
+
+        async def send_fn(text, **kw):
+            await message.edit_text(text, **kw)
+            return message
+
+        def _match(title_ru: str, title_en: str = ""):
+            match = MagicMock()
+            match.title_ru = title_ru
+            match.title_en = title_en
+            match.title = title_ru or title_en
+            return match
+
+        kp = MagicMock()
+        kp.search_movie.side_effect = lambda title: (
+            _match("Земля гангстеров", "Gangster Land")
+            if title == "ганстерленд"
+            else _match("Земля гангстеров", "Gangster Land")
+            if title == "Земля гангстеров"
+            else None
+        )
+        mock_jackett = MagicMock(
+            search=MagicMock(return_value=[]),
+            get_indexers=MagicMock(return_value=[{"id": "rutracker"}]),
+        )
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "kinopoisk_client", kp),
+            patch.object(bot, "_gpt_get_did_you_mean",
+                         new=AsyncMock(return_value=["Земля гангстеров"])),
+        ):
+            await bot._run_search(send_fn, ctx, "ганстерленд")
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Возможно", text)
+        keyboard = kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in keyboard for b in row]
+        self.assertTrue(any("Земля гангстеров" in lbl for lbl in labels))
 
 
 class GptPromptOrderingTests(unittest.TestCase):
