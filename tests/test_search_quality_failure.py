@@ -159,61 +159,6 @@ class KpVerifyTitleSyncTests(unittest.TestCase):
             self.assertFalse(bot._kp_verify_title_sync("Ганстерленд"))
 
 
-class KpVerifyTitlesParallelTests(unittest.IsolatedAsyncioTestCase):
-    """_kp_verify_titles — parallel verification of multiple titles."""
-
-    def setUp(self):
-        bot._kp_exists_cache.clear()
-
-    async def test_returns_per_title_results(self):
-        kp = MagicMock()
-        def fake_search(t):
-            if t == "Drive":
-                match = MagicMock()
-                match.title_ru = "Драйв"
-                match.title_en = "Drive"
-                match.title = "Драйв"
-                return match
-            if t == "Snatch":
-                match = MagicMock()
-                match.title_ru = "Большой куш"
-                match.title_en = "Snatch"
-                match.title = "Большой куш"
-                return match
-            return None
-        kp.search_movie.side_effect = fake_search
-        with patch.object(bot, "kinopoisk_client", kp):
-            out = await bot._kp_verify_titles(["Drive", "FakeMovie", "Snatch"])
-        self.assertEqual(out["Drive"], True)
-        self.assertEqual(out["FakeMovie"], False)
-        self.assertEqual(out["Snatch"], True)
-
-    async def test_empty_list_returns_empty_dict(self):
-        self.assertEqual(await bot._kp_verify_titles([]), {})
-
-    async def test_per_title_exceptions_become_permissive_true(self):
-        """When a single title's check explodes, treat as True (permissive)
-        rather than failing the whole batch."""
-        kp = MagicMock()
-        def fake_search(t):
-            if t == "broken":
-                raise RuntimeError("explosion")
-            if t == "ok":
-                match = MagicMock()
-                match.title_ru = "ok"
-                match.title_en = ""
-                match.title = "ok"
-                return match
-            return None
-        kp.search_movie.side_effect = fake_search
-        with patch.object(bot, "kinopoisk_client", kp):
-            out = await bot._kp_verify_titles(["ok", "broken", "missing"])
-        self.assertTrue(out["ok"])
-        # «broken» raised — permissive True
-        self.assertTrue(out["broken"])
-        self.assertFalse(out["missing"])
-
-
 class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
     """End-to-end-ish checks on _run_search no-results path: which message
     text/keyboard does the user actually see for each failure mode?"""
@@ -269,8 +214,6 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "_gpt_get_did_you_mean",
                          new=AsyncMock(return_value=["Suggestion A"])),
             patch.object(bot, "_kp_verify_title_sync", return_value=True),
-            patch.object(bot, "_kp_verify_titles",
-                         new=AsyncMock(return_value={"Suggestion A": True})),
         ):
             await bot._run_search(send_fn, ctx, "Some Title")
 
@@ -310,13 +253,10 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         # «временный сбой» branch must NOT fire — coverage wasn't lost.
         self.assertNotIn("временный сбой", text.lower())
 
-    async def test_all_suggestions_dropped_by_kp_falls_through_to_fallback_text(self):
-        """Regression guard: if GPT returns 3 suggestions but KP confirms
-        all 3 are hallucinations and drops them, the no-results screen must
-        NOT promise «попробуйте вариант ниже» (because no variants will
-        actually render in the keyboard). It must show the fallback text
-        («ослабить фильтры или другой запрос») and a buttons-less keyboard.
-        """
+    async def test_gpt_suggestions_are_not_kp_filtered(self):
+        """GPT suggestions are recovery hints, not authoritative metadata.
+        Do not drop them through KP keyword search: aliases/transliteration can
+        make valid suggestions look like mismatches."""
         ctx = self._make_context(
             jackett_selected={"rutracker"},
             jackett_indexers=[{"id": "rutracker"}],
@@ -337,31 +277,62 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(bot, "jackett_client", mock_jackett),
             patch.object(bot, "rutracker_client", MagicMock()),
-            # GPT returned 3 hallucinated titles
             patch.object(bot, "_gpt_get_did_you_mean",
                          new=AsyncMock(return_value=["Fake1", "Fake2", "Fake3"])),
-            # KP says original query doesn't exist either
             patch.object(bot, "_kp_verify_title_sync", return_value=False),
-            # KP says all 3 suggestions are hallucinations
-            patch.object(bot, "_kp_verify_titles",
-                         new=AsyncMock(return_value={"Fake1": False, "Fake2": False, "Fake3": False})),
         ):
             await bot._run_search(send_fn, ctx, "WeirdQuery")
 
         args, kwargs = message.edit_text.call_args
         text = args[0] if args else kwargs.get("text", "")
 
-        # The «попробуйте вариант ниже» promise must NOT appear — we have
-        # no variants to offer (all dropped).
-        self.assertNotIn("вариант ниже", text.lower())
-        self.assertNotIn("возможно вы имели в виду", text.lower())
-        # Fallback wording fires instead.
-        self.assertIn("ослабить фильтры", text.lower())
+        self.assertIn("вариант ниже", text.lower())
+        self.assertIn("возможно вы имели в виду", text.lower())
 
-        # Keyboard must not contain any of the dropped suggestion labels.
         keyboard = kwargs["reply_markup"].inline_keyboard
         labels = [b.text for row in keyboard for b in row]
-        self.assertFalse(any("Fake" in lbl for lbl in labels))
+        self.assertTrue(any("Fake1" in lbl for lbl in labels))
+        self.assertTrue(any("Fake2" in lbl for lbl in labels))
+        self.assertTrue(any("Fake3" in lbl for lbl in labels))
+
+    async def test_no_results_text_uses_clean_query_not_quality_suffix(self):
+        """Search runs by base query and filters quality client-side, so the
+        user-facing no-results text should not pretend we searched for the
+        technical query with appended quality."""
+        ctx = self._make_context(
+            jackett_selected={"rutracker"},
+            jackett_indexers=[{"id": "rutracker"}],
+        )
+        message = MagicMock()
+        message.message_id = 1
+        message.chat_id = 100
+        message.edit_text = AsyncMock(return_value=message)
+
+        async def send_fn(text, **kw):
+            await message.edit_text(text, **kw)
+            return message
+
+        mock_jackett = MagicMock(
+            search=MagicMock(return_value=[]),
+            get_indexers=MagicMock(return_value=[{"id": "rutracker"}]),
+        )
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "_gpt_get_did_you_mean",
+                         new=AsyncMock(return_value=[])),
+            patch.object(bot, "_kp_verify_title_sync", return_value=False),
+        ):
+            await bot._run_search(send_fn, ctx, "ганстерленд 1080p")
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("По запросу «ганстерленд» ничего не найдено.", text)
+        self.assertNotIn("«ганстерленд 1080p»", text)
+
+        keyboard = kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in keyboard for b in row]
+        self.assertTrue(any("Без фильтра качества" in lbl for lbl in labels))
 
     async def test_original_query_on_kp_swaps_message(self):
         """Bug B: when KP confirms the user's query is a real film, show
@@ -390,8 +361,6 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "_gpt_get_did_you_mean",
                          new=AsyncMock(return_value=["Wrong Suggestion"])),
             patch.object(bot, "_kp_verify_title_sync", return_value=True),
-            patch.object(bot, "_kp_verify_titles",
-                         new=AsyncMock(return_value={"Wrong Suggestion": True})),
         ):
             await bot._run_search(send_fn, ctx, "Гангстерленд")
 

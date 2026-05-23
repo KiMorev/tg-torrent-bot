@@ -6187,6 +6187,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # base_query is what actually goes to Jackett/Rutracker; the rest are
     # applied as post-filters on the raw results.
     base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
+    display_query = base_query or search_query
     context.user_data["srch_preferred_quality"] = preferred_quality
 
     # Loading message: show the user a clean «what we're looking for» rather
@@ -6500,21 +6501,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 original_kp_match = False
                 suggestions = []
 
-            # === KP-verify GPT suggestions (Problem C) ====================
-            # Drop hallucinated titles. KP doesn't lie about existence; GPT
-            # occasionally does. Permissive on KP errors — better to keep
-            # a maybe-valid suggestion than drop a real one due to flaky KP.
-            if suggestions:
-                verified = await _kp_verify_titles(list(suggestions))
-                kept = [s for s in suggestions if verified.get(s, True)]
-                dropped = [s for s in suggestions if not verified.get(s, True)]
-                if dropped:
-                    logger.info(
-                        "Search: did-you-mean dropped %d non-existent titles "
-                        "for %r: %s (kept %d)",
-                        len(dropped), search_query, dropped, len(kept),
-                    )
-                suggestions = kept
             # If user's original query IS on KP, swap GPT suggestions for a
             # single «искать снова» hint — they didn't mistype.
             if original_kp_match:
@@ -6543,7 +6529,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 )
         # Compose text: optional banner (e.g. «both sources down») + framing
         # that emphasises did-you-mean buttons when we have any.
-        no_results_text = f"По запросу «{search_query}» ничего не найдено."
+        no_results_text = f"По запросу «{display_query}» ничего не найдено."
         if banner:
             no_results_text = f"{no_results_text}\n{banner}"
         if multi_tracker_coverage_lost:
@@ -11021,16 +11007,17 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
     return suggestions
 
 
-# ─── KP verification for did-you-mean (Problems B + C) ─────────────────────
+# ─── KP verification for original-query did-you-mean suppression ───────────
 #
-# Two failure modes the bare GPT did-you-mean exhibits:
-#   B) User's original query is a REAL title that just wasn't on trackers
-#      this minute (Jackett timeout, etc). GPT doesn't know it's real, tries
-#      to «fix» it into a similar-sounding film and confuses the user.
-#   C) GPT hallucinates titles that don't exist anywhere — sound plausible,
-#      look like a typo fix, but are fictional.
-# KP API knows what's real. We verify both the user's query AND each GPT
-# suggestion against KP before showing the buttons.
+# One failure mode the bare GPT did-you-mean exhibits:
+# User's original query is a REAL title that just wasn't on trackers this
+# minute (Jackett timeout, etc). GPT doesn't know it's real, tries to «fix»
+# it into a similar-sounding film and confuses the user.
+# KP API knows what's real, but keyword search is fuzzy and aliases are messy
+# (localized title vs original title vs transliteration). We only use KP to
+# suppress did-you-mean when the user's original query plausibly matches the
+# returned KP title. GPT suggestions are intentionally not KP-filtered: a bad
+# suggestion is cheap, while dropping a useful alias makes the recovery UI fail.
 
 # In-process cache: KP verification of a normalized title is immutable for
 # our purposes (films don't un-exist). Saves ~1s per repeat lookup.
@@ -11062,7 +11049,7 @@ def _kp_verify_title_sync(title: str, *, default_on_unknown: bool = True) -> boo
 
     ``default_on_unknown`` controls what we return when KP can't give a
     definite answer (client is None, network fails, KP API errors out):
-      • True  — for suggestion verification: «don't drop on flaky infra»
+      • True  — for callers that want permissive behaviour on flaky infra
       • False — for original-query verification: «don't suppress did-you-mean
         on flaky infra» (otherwise a single KP outage would silently strip
         all suggestions even when the original is a typo)
@@ -11138,29 +11125,6 @@ def _kp_match_plausibly_equals_query(
         query, getattr(match, "title_ru", ""), getattr(match, "title_en", ""),
     )
     return False
-
-
-async def _kp_verify_titles(titles: list[str]) -> dict[str, bool]:
-    """Parallel KP verification of multiple titles. Returns a dict
-    ``{title → bool}`` where True means «KP found it (or check failed —
-    keep it)» and False means «KP confirms it doesn't exist».
-
-    Uses ``asyncio.gather(to_thread(...))`` so all checks run in parallel
-    rather than serially. With ~1s per KP call this collapses a 4-title
-    check from 4s to ~1s.
-    """
-    if not titles:
-        return {}
-    coros = [asyncio.to_thread(_kp_verify_title_sync, t) for t in titles]
-    results = await asyncio.gather(*coros, return_exceptions=True)
-    out: dict[str, bool] = {}
-    for title, res in zip(titles, results):
-        if isinstance(res, Exception):
-            logger.debug("KP verify task raised for %r: %s", title, res)
-            out[title] = True  # permissive
-        else:
-            out[title] = bool(res)
-    return out
 
 
 def _is_rutracker_only_indexer_set(
