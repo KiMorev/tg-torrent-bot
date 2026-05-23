@@ -263,6 +263,59 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         # «временный сбой» branch must NOT fire — coverage wasn't lost.
         self.assertNotIn("временный сбой", text.lower())
 
+    async def test_all_suggestions_dropped_by_kp_falls_through_to_fallback_text(self):
+        """Regression guard: if GPT returns 3 suggestions but KP confirms
+        all 3 are hallucinations and drops them, the no-results screen must
+        NOT promise «попробуйте вариант ниже» (because no variants will
+        actually render in the keyboard). It must show the fallback text
+        («ослабить фильтры или другой запрос») and a buttons-less keyboard.
+        """
+        ctx = self._make_context(
+            jackett_selected={"rutracker"},
+            jackett_indexers=[{"id": "rutracker"}],
+        )
+        message = MagicMock()
+        message.message_id = 1
+        message.chat_id = 100
+        message.edit_text = AsyncMock(return_value=message)
+
+        async def send_fn(text, **kw):
+            message.edit_text(text, **kw)
+            return message
+
+        mock_jackett = MagicMock(
+            search=MagicMock(return_value=[]),
+            get_indexers=MagicMock(return_value=[{"id": "rutracker"}]),
+        )
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            # GPT returned 3 hallucinated titles
+            patch.object(bot, "_gpt_get_did_you_mean",
+                         new=AsyncMock(return_value=["Fake1", "Fake2", "Fake3"])),
+            # KP says original query doesn't exist either
+            patch.object(bot, "_kp_verify_title_sync", return_value=False),
+            # KP says all 3 suggestions are hallucinations
+            patch.object(bot, "_kp_verify_titles",
+                         new=AsyncMock(return_value={"Fake1": False, "Fake2": False, "Fake3": False})),
+        ):
+            await bot._run_search(send_fn, ctx, "WeirdQuery")
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+
+        # The «попробуйте вариант ниже» promise must NOT appear — we have
+        # no variants to offer (all dropped).
+        self.assertNotIn("вариант ниже", text.lower())
+        self.assertNotIn("возможно вы имели в виду", text.lower())
+        # Fallback wording fires instead.
+        self.assertIn("ослабить фильтры", text.lower())
+
+        # Keyboard must not contain any of the dropped suggestion labels.
+        keyboard = kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in keyboard for b in row]
+        self.assertFalse(any("Fake" in lbl for lbl in labels))
+
     async def test_original_query_on_kp_swaps_message(self):
         """Bug B: when KP confirms the user's query is a real film, show
         the «есть на КП, но в трекерах сейчас нет» branch instead of
