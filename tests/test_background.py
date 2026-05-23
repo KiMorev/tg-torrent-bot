@@ -949,6 +949,115 @@ class SubscriptionCheckTests(unittest.TestCase):
         mock_rt.download_torrent.assert_called_once_with("123")
         self.assertEqual(mock_app.bot.send_message.await_count, 2)
 
+    def test_rutracker_notify_only_does_not_claim_download(self) -> None:
+        from subscription_policy import DOWNLOAD_NOTIFY_ONLY, NOTIFY_EACH_UPDATE
+
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 1 из 10",
+                "last_episode_end": 1,
+                "total_episodes": 10,
+                "notify_policy": NOTIFY_EACH_UPDATE,
+                "download_policy": DOWNLOAD_NOTIFY_ONLY,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 2 из 10"
+        mock_ds = MagicMock()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(2, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("Авто-загрузка отключена", text)
+        self.assertNotIn("Download Station", text)
+        mock_rt.download_torrent.assert_not_called()
+        mock_ds.create_torrent_file.assert_not_called()
+        updated = self._store.load_topic_subscriptions()["123"]
+        self.assertEqual(updated["last_episode_end"], 2)
+
+    def test_complete_rutracker_notify_only_removes_after_manual_notification(self) -> None:
+        from subscription_policy import DOWNLOAD_NOTIFY_ONLY, NOTIFY_EACH_UPDATE
+
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 9 из 10",
+                "last_episode_end": 9,
+                "total_episodes": 10,
+                "notify_policy": NOTIFY_EACH_UPDATE,
+                "download_policy": DOWNLOAD_NOTIFY_ONLY,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 10 из 10"
+        mock_ds = MagicMock()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(10, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("сезон завершён", text)
+        self.assertIn("Авто-загрузка отключена", text)
+        self.assertNotIn("Download Station", text)
+        self.assertNotIn("123", self._store.load_topic_subscriptions())
+        mock_rt.download_torrent.assert_not_called()
+        mock_ds.create_torrent_file.assert_not_called()
+
+    def test_rutracker_subscription_empty_task_id_keeps_state_for_retry(self) -> None:
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series / 1 из 10",
+                "last_episode_end": 1,
+                "total_episodes": 10,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series / 2 из 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = ""
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(2, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+            patch.object(bot, "_remember_task_owner") as remember_owner,
+            self.assertLogs("tg_torrent_drop", level="WARNING"),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        updated = self._store.load_topic_subscriptions()["123"]
+        self.assertEqual(updated["last_episode_end"], 1)
+        self.assertNotIn("pending_notification", updated)
+        mock_app.bot.send_message.assert_not_awaited()
+        remember_owner.assert_not_called()
+
     def test_season_complete_mode_silent_when_not_finished(self) -> None:
         """notify_mode=season_complete: bot still downloads the new episodes
         (so Plex gets the files), but suppresses the push and silently

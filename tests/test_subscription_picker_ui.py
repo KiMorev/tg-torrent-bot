@@ -167,6 +167,17 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
         # Step 2 must offer the only_when_complete option.
         self.assertTrue(any("Одним торрентом" in l for l in labels))
 
+    def test_silent_notify_hides_notify_only_download_choice(self):
+        update = MagicMock(callback_query=_make_query(
+            f"srch:sub_set_notify:0:{NOTIFY_SILENT}"
+        ))
+        ctx = _make_context()
+        asyncio.run(bot.search_subscribe_set_notify(update, ctx))
+
+        kb = update.callback_query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertFalse(any("только уведомления" in l.lower() for l in labels))
+
     def test_step2_commits_with_both_axes(self):
         update = MagicMock(callback_query=_make_query(
             f"srch:sub_set_download:0:{DOWNLOAD_ONLY_WHEN_COMPLETE}"
@@ -189,6 +200,21 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
         self.assertEqual(captured["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
         # Notify stash should be popped to prevent leakage into next session.
         self.assertNotIn("srch_sub_notify_policy", ctx.user_data)
+
+    def test_step2_rejects_silent_notify_only_pair(self):
+        update = MagicMock(callback_query=_make_query(
+            f"srch:sub_set_download:0:{DOWNLOAD_NOTIFY_ONLY}"
+        ))
+        ctx = _make_context()
+        ctx.user_data["srch_sub_notify_policy"] = NOTIFY_SILENT
+
+        with patch.object(bot, "_download_and_add", AsyncMock()) as dl:
+            asyncio.run(bot.search_subscribe_set_download(update, ctx))
+
+        dl.assert_not_awaited()
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("ничего не делает", text)
+        self.assertEqual(ctx.user_data.get("srch_sub_notify_policy"), NOTIFY_SILENT)
 
 
 class SearchSubscribeBackToResultsTests(unittest.TestCase):

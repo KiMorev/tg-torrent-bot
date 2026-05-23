@@ -184,6 +184,10 @@ class PoliciesSummaryTests(unittest.TestCase):
         self.assertIn("каждой", s)
         self.assertIn("каждую", s)
 
+    def test_respects_legacy_notify_mode(self):
+        s = policies_summary_ru({"notify_mode": "season_complete"})
+        self.assertIn("финал", s.lower())
+
 
 class JackettSubscriptionBuilderTests(unittest.TestCase):
     """build_jackett_subscription should accept the new policy fields and

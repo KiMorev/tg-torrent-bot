@@ -78,7 +78,8 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, sub: dict, *, ds_raises: Exception | None = None,
-             new_title: str = "Show S1E1-5 of 10") -> dict:
+             new_title: str = "Show S1E1-5 of 10",
+             task_id: str = "task-99") -> dict:
         """Drive _check_jackett_sub_via_rutracker_direct with a stubbed
         rutracker + ds client. Returns the resulting sub dict."""
         key = "jackett:abc"
@@ -90,7 +91,7 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
         if ds_raises:
             ds.create_torrent_file.side_effect = ds_raises
         else:
-            ds.create_torrent_file.return_value = "task-99"
+            ds.create_torrent_file.return_value = task_id
         app = MagicMock()
         app.bot.send_message = AsyncMock()
 
@@ -100,6 +101,7 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
             patch.object(bot, "_remember_task_owner"),
             patch.object(bot, "_remember_task_meta"),
             patch.object(bot, "_build_task_meta_from_title", return_value={}),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
         ):
             handled = asyncio.run(
                 bot._check_jackett_sub_via_rutracker_direct(app, subs, key, sub)
@@ -119,6 +121,14 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
         result = self._run(sub, ds_raises=DownloadStationError("DSM 119"))
         # State frozen at 1 so next check retries the same update.
         self.assertEqual(result["sub"]["last_episode_end"], 1)
+
+    def test_state_does_not_advance_when_ds_returns_empty_task_id(self):
+        sub = _jackett_rt_sub(last_end=1, total=10)
+        result = self._run(sub, task_id="")
+        self.assertEqual(result["sub"]["last_episode_end"], 1)
+        text = result["send"].await_args.kwargs.get("text", "")
+        self.assertIn("скачать не удалось", text)
+        self.assertNotIn("задача добавлена", text)
         # But the notification with manual-link should still fire.
         result["send"].assert_awaited_once()
         text = result["send"].await_args.kwargs.get("text", "")

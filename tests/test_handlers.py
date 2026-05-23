@@ -701,6 +701,46 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Подписки", text)
         self.assertIn("Jackett", text)
 
+    def test_admin_subscription_mode_toggle_updates_policy_fields(self):
+        from subscription_policy import (
+            DOWNLOAD_NOTIFY_ONLY,
+            NOTIFY_EACH_UPDATE,
+            NOTIFY_FINAL_ONLY,
+        )
+
+        update = _make_callback_update(chat_id=300, callback_data="sub:admin_set_mode:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Клиника",
+                    "last_episode_end": 1,
+                    "total_episodes": 2,
+                    "notify_mode": "per_episode",
+                    "notify_policy": NOTIFY_EACH_UPDATE,
+                    "download_policy": DOWNLOAD_NOTIFY_ONLY,
+                },
+            })
+            with (
+                patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+            sub = store.load_topic_subscriptions()["123"]
+            self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
+            self.assertEqual(sub["notify_mode"], "season_complete")
+            # The admin quick-toggle changes only notifications; download
+            # preferences must not be silently overwritten.
+            self.assertEqual(sub["download_policy"], DOWNLOAD_NOTIFY_ONLY)
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("при финале", text)
+        self.assertIn("без загрузки", text)
+
     def test_non_owner_cannot_delete_subscription(self):
         update = _make_callback_update(chat_id=100, callback_data="sub:unsub:123")
         context = _make_context()

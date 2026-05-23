@@ -154,8 +154,7 @@ def should_download(sub: dict, *, is_complete: bool) -> bool:
 def policies_summary_ru(sub: dict) -> str:
     """Compact human-readable description of a subscription's policy pair.
     For use in admin diagnostics and subscription-list UI."""
-    n = sub.get("notify_policy") or NOTIFY_EACH_UPDATE
-    d = sub.get("download_policy") or DOWNLOAD_AUTO_EACH_UPDATE
+    n, d = _resolved_policies(sub)
     n_label = {
         NOTIFY_EACH_UPDATE: "📺 о каждой",
         NOTIFY_FINAL_ONLY:  "🎯 при финале",

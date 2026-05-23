@@ -872,11 +872,8 @@ def _can_manage_subscription(chat_id: int | None, sub: dict | None) -> bool:
 def _admin_subscriptions_keyboard(subs: dict[str, dict]) -> InlineKeyboardMarkup:
     rows = []
     for index, (key, sub) in enumerate(subs.items(), 1):
-        # Toggle button shows the CURRENT mode (📺 per_episode, 🎯 season_complete).
-        # Tapping flips to the other mode. Same callback for both subscription
-        # types — the handler reads the type from the loaded sub dict.
-        current_mode = sub.get("notify_mode") or "per_episode"
-        mode_label = "📺→🎯" if current_mode == "per_episode" else "🎯→📺"
+        # Toggle only the notification axis. The download policy is preserved.
+        mode_label = _admin_subscription_toggle_label(sub)
         if sub.get("type") == "jackett":
             rows.append([
                 InlineKeyboardButton(
@@ -922,10 +919,7 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
 
     for index, (key, sub) in enumerate(subs.items(), 1):
         owner = _subscription_owner_label(sub.get("chat_id"), approved_users)
-        notify_mode = sub.get("notify_mode") or "per_episode"
-        mode_label = (
-            "🎯 сезон целиком" if notify_mode == "season_complete" else "📺 каждая серия"
-        )
+        mode_label = html_module.escape(policies_summary_ru(sub))
         if sub.get("type") == "jackett":
             query_text = html_module.escape(str(sub.get("query") or key))
             last_check = html_module.escape(str(sub.get("last_check") or "—"))
@@ -5912,6 +5906,10 @@ def _extract_rutracker_topic_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def _rutracker_topic_url(topic_id: str) -> str:
+    return f"https://rutracker.org/forum/viewtopic.php?t={topic_id}"
+
+
 async def _refresh_jackett_torrent_url(
     jackett_client,
     result: dict,
@@ -8253,8 +8251,10 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
 # preset is the unique new capability 1.3 unlocks — previously impossible.
 from subscription_policy import (
     NOTIFY_EACH_UPDATE, NOTIFY_FINAL_ONLY, NOTIFY_SILENT,
+    VALID_DOWNLOAD_POLICIES, VALID_NOTIFY_POLICIES,
     DOWNLOAD_AUTO_EACH_UPDATE, DOWNLOAD_ONLY_WHEN_COMPLETE,
     DOWNLOAD_NOTIFY_ONLY,
+    policies_summary_ru,
 )
 
 _SUB_PRESETS = {
@@ -8263,6 +8263,48 @@ _SUB_PRESETS = {
     "after":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_ONLY_WHEN_COMPLETE),
     "notify": (NOTIFY_EACH_UPDATE, DOWNLOAD_NOTIFY_ONLY),
 }
+
+
+def _legacy_notify_mode_for_policy(notify_policy: str) -> str:
+    return "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
+
+
+def _subscription_policy_pair_does_nothing(notify_policy: str, download_policy: str) -> bool:
+    return notify_policy == NOTIFY_SILENT and download_policy == DOWNLOAD_NOTIFY_ONLY
+
+
+def _admin_subscription_toggle_label(sub: dict) -> str:
+    notify_policy = sub.get("notify_policy")
+    if notify_policy not in VALID_NOTIFY_POLICIES:
+        legacy_mode = str(sub.get("notify_mode") or "per_episode")
+        notify_policy = (
+            NOTIFY_FINAL_ONLY if legacy_mode == "season_complete" else NOTIFY_EACH_UPDATE
+        )
+    if notify_policy == NOTIFY_FINAL_ONLY:
+        return "🎯→📺"
+    if notify_policy == NOTIFY_SILENT:
+        return "🔇→📺"
+    return "📺→🎯"
+
+
+def _toggle_subscription_notify_policy(sub: dict) -> tuple[str, str]:
+    """Toggle only the notification axis, preserving the download policy."""
+    from subscription_policy import migrate_subscription_in_place
+
+    migrate_subscription_in_place(sub)
+    current = str(sub.get("notify_policy") or NOTIFY_EACH_UPDATE)
+    if current == NOTIFY_FINAL_ONLY:
+        new_policy = NOTIFY_EACH_UPDATE
+    elif current == NOTIFY_SILENT:
+        new_policy = NOTIFY_EACH_UPDATE
+    else:
+        new_policy = NOTIFY_FINAL_ONLY
+
+    sub["notify_policy"] = new_policy
+    sub["notify_mode"] = _legacy_notify_mode_for_policy(new_policy)
+    if sub.get("download_policy") not in VALID_DOWNLOAD_POLICIES:
+        sub["download_policy"] = DOWNLOAD_AUTO_EACH_UPDATE
+    return current, new_policy
 
 
 def _subscribe_picker_text(result: dict) -> str:
@@ -8390,18 +8432,22 @@ def _advanced_download_text(result: dict, notify_policy: str) -> str:
     )
 
 
-def _advanced_download_keyboard(index: int) -> InlineKeyboardMarkup:
+def _advanced_download_keyboard(index: int, notify_policy: str = NOTIFY_EACH_UPDATE) -> InlineKeyboardMarkup:
     prefix = SEARCH_CALLBACK_PREFIX
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("⬇️ Каждую серию по мере выхода",
                               callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_AUTO_EACH_UPDATE}")],
         [InlineKeyboardButton("📦 Одним торрентом, когда сезон закроется",
                               callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_ONLY_WHEN_COMPLETE}")],
-        [InlineKeyboardButton("⏸ Не скачивать (только уведомления)",
-                              callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_NOTIFY_ONLY}")],
-        [InlineKeyboardButton("⬅️ Назад",
-                              callback_data=f"{prefix}:sub_advanced:{index}")],
-    ])
+    ]
+    if notify_policy != NOTIFY_SILENT:
+        rows.append([
+            InlineKeyboardButton("⏸ Не скачивать (только уведомления)",
+                                 callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_NOTIFY_ONLY}")
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"{prefix}:sub_advanced:{index}")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def search_subscribe_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8438,6 +8484,9 @@ async def search_subscribe_set_notify(update: Update, context: ContextTypes.DEFA
     except (ValueError, IndexError):
         await query.edit_message_text("Ошибка при разборе запроса.")
         return ConversationHandler.END
+    if notify_policy not in VALID_NOTIFY_POLICIES:
+        await query.edit_message_text("Неизвестный режим уведомлений.")
+        return ConversationHandler.END
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
@@ -8448,7 +8497,7 @@ async def search_subscribe_set_notify(update: Update, context: ContextTypes.DEFA
     context.user_data["srch_sub_notify_policy"] = notify_policy
     await query.edit_message_text(
         _advanced_download_text(results[index], notify_policy),
-        reply_markup=_advanced_download_keyboard(index),
+        reply_markup=_advanced_download_keyboard(index, notify_policy),
         parse_mode="HTML",
     )
     return SEARCH_RESULTS
@@ -8464,10 +8513,26 @@ async def search_subscribe_set_download(update: Update, context: ContextTypes.DE
     except (ValueError, IndexError):
         await query.edit_message_text("Ошибка при разборе запроса.")
         return ConversationHandler.END
+    if download_policy not in VALID_DOWNLOAD_POLICIES:
+        await query.edit_message_text("Неизвестный режим загрузки.")
+        return ConversationHandler.END
 
     notify_policy = str(
         context.user_data.pop("srch_sub_notify_policy", None) or NOTIFY_EACH_UPDATE
     )
+    if _subscription_policy_pair_does_nothing(notify_policy, download_policy):
+        results = context.user_data.get("srch_results", [])
+        if 0 <= index < len(results):
+            context.user_data["srch_sub_notify_policy"] = notify_policy
+            await query.edit_message_text(
+                _advanced_download_text(results[index], notify_policy)
+                + "\n\nТакой режим ничего не делает: уведомления выключены и загрузка тоже.",
+                reply_markup=_advanced_download_keyboard(index, notify_policy),
+                parse_mode="HTML",
+            )
+            return SEARCH_RESULTS
+        await query.edit_message_text("Такой режим ничего не делает: уведомления выключены и загрузка тоже.")
+        return ConversationHandler.END
     legacy_notify_mode = (
         "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
     )
@@ -8946,8 +9011,8 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     elif action == "admin_set_mode":
-        # Toggle notify_mode of an existing subscription. Works for both
-        # Rutracker and Jackett — the type is stored on the sub dict itself.
+        # Toggle the notification axis of an existing subscription. Works for
+        # both Rutracker and Jackett; download_policy is deliberately preserved.
         if not _is_admin_chat(chat_id):
             await query.edit_message_text("Только администратор может управлять всеми подписками.")
             return
@@ -8957,13 +9022,12 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if not sub:
             await query.edit_message_text("Подписка не найдена.")
             return
-        current = sub.get("notify_mode") or "per_episode"
-        new_mode = "season_complete" if current == "per_episode" else "per_episode"
-        sub["notify_mode"] = new_mode
+        current, new_policy = _toggle_subscription_notify_policy(sub)
         state_store.save_topic_subscriptions(subs)
         logger.info(
-            "Subscription mode toggled: key=%s %s → %s by chat=%s",
-            topic_id, current, new_mode, chat_id,
+            "Subscription notify policy toggled: key=%s %s → %s by chat=%s "
+            "download_policy=%s",
+            topic_id, current, new_policy, chat_id, sub.get("download_policy"),
         )
 
         text, keyboard = _build_admin_subscriptions_view()
@@ -9055,6 +9119,8 @@ async def _check_jackett_sub_via_rutracker_direct(
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)
             task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            if not task_id:
+                raise _missing_task_id_error("для torrent-файла подписки Rutracker")
             if chat_id and task_id:
                 _remember_task_owner(task_id, chat_id)
                 _remember_task_meta(
@@ -9490,7 +9556,7 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
     task_id = str(pending.get("task_id") or "")
     is_complete = bool(pending.get("complete"))
 
-    if is_complete:
+    if is_complete and task_id:
         text = (
             f"🔔 {short}: сезон завершён!\n"
             f"Эпизодов: {last_end} → {new_end} из {new_total} ✅\n"
@@ -9498,6 +9564,31 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
             "Подписка снята автоматически."
         )
         return text, _download_list_keyboard()
+
+    if is_complete:
+        text = (
+            f"🔔 {short}: сезон завершён!\n"
+            f"Эпизодов: {last_end} → {new_end} из {new_total} ✅\n"
+            "Авто-загрузка отключена для этой подписки.\n"
+            "Подписка снята автоматически."
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🔍 Открыть тему",
+            url=_rutracker_topic_url(topic_id),
+        )]])
+        return text, keyboard
+
+    if not task_id:
+        text = (
+            f"🔔 {short}: новая серия!\n"
+            f"Эпизодов: {last_end} → {new_end} из {new_total}\n"
+            "Авто-загрузка отключена для этой подписки."
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 Открыть тему", url=_rutracker_topic_url(topic_id)),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
+        ]])
+        return text, keyboard
 
     text = (
         f"🔔 {short}: новая серия!\n"
@@ -9597,7 +9688,9 @@ async def _check_subscriptions(app: Application) -> None:
                     torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
                     temp_path.write_bytes(torrent_bytes)
                     task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
-                    if chat_id:
+                    if not task_id:
+                        raise _missing_task_id_error("для torrent-файла подписки Rutracker")
+                    if chat_id and task_id:
                         _remember_task_owner(task_id, chat_id)
                         _remember_task_meta(
                             task_id,
