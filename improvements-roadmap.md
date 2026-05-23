@@ -256,9 +256,17 @@ rating_key, который можно потом передать в `plex_clien
 
 ## Текущий next-action
 
-Сделано: 1.1 ✅ · R.1 ✅ · 1.2 ✅ · 1.3a ✅ · 1.3b ✅ · R.2 ✅
+Сделано: 1.1 ✅ · R.1 ✅ · 1.2 ✅ · 1.3a ✅ · 1.3b ✅ · R.2 ✅ · Search Quality + UI ✅
 
-**Paket 1 полностью закрыт + R.2 (видимая ценность).**
+**Paket 1 полностью закрыт + R.2 + Search Quality & Progressive UI.**
+
+**Свежее (сегодня, 2026-05-23):**
+- ✅ Multi-tracker failure detection — не предлагаем did-you-mean когда Jackett
+  упал, но selection покрывал non-rutracker трекеры
+- ✅ KP-verify original query + GPT suggestions — фильтрует галлюцинации
+- ✅ Description recognition в GPT prompt («фильм где Гослинг ездит» → Драйв)
+- ✅ Progressive UI с MP4-анимацией для search и voice (новый модуль
+  `progressive_status.py`)
 
 **Следующее по приоритету:**
 - 2.1 — Search provider contract abstraction (готовит под Freedomist)

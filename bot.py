@@ -130,6 +130,11 @@ from storage import (
     STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info,
     get_unified_disk_info,
 )
+from progressive_status import (
+    ProgressiveStatus,
+    SEARCH_ANIMATION_PATH, VOICE_ANIMATION_PATH,
+    search_stages, voice_stages,
+)
 from voice_transcription import (
     check_api_key as voice_check_api_key,
     estimate_cost_usd as voice_estimate_cost_usd,
@@ -6193,7 +6198,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         filter_parts.append("оригинальная дорожка")
     if subs_required:
         filter_parts.append("субтитры")
-    loading_text = f"🔍 Ищу «{base_query}»…"
+    loading_text = f"🔎 Ищем «{base_query}»…"
     if filter_parts:
         loading_text += f"\n⚙️ {' · '.join(filter_parts)}"
 
@@ -6202,8 +6207,59 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         context.user_data["srch_ui_msg_id"] = loading_msg.message_id
         context.user_data["srch_ui_chat_id"] = loading_msg.chat_id
 
+    # R.2-followup: progressive UI — schedule stage text edits at t+10s / t+25s
+    # plus an animated MP4 sent as a sibling message. By the time the user
+    # waits through a slow Jackett response (30-40s common), they've seen
+    # the bot is still working. Cancelled & cleaned up when search completes.
+    progressive: ProgressiveStatus | None = None
+    if loading_msg is not None:
+        progressive = ProgressiveStatus(
+            bot=loading_msg.get_bot() if hasattr(loading_msg, "get_bot") else context.bot,
+            chat_id=loading_msg.chat_id,
+            initial_text=loading_text,  # already shown above; helper won't re-send
+            stages=search_stages(),
+            gif_path=SEARCH_ANIMATION_PATH,
+        )
+        # Override: we already sent the text via send_fn above, so attach the
+        # existing message handle and only schedule the gif + stage updates.
+        progressive.text_msg = loading_msg
+        try:
+            if progressive.gif_path.exists():
+                with open(progressive.gif_path, "rb") as fh:
+                    progressive.gif_msg = await context.bot.send_animation(
+                        chat_id=loading_msg.chat_id, animation=fh,
+                    )
+        except Exception:
+            logger.debug("Search progressive: gif send failed", exc_info=True)
+            progressive.gif_msg = None
+        if progressive.stages:
+            try:
+                progressive._task = asyncio.create_task(progressive._run_stages())
+            except RuntimeError:
+                progressive._task = None
+
     # After the first send we always edit-in-place regardless of origin.
-    edit_fn = loading_msg.edit_text if loading_msg is not None else send_fn
+    _raw_edit_fn = loading_msg.edit_text if loading_msg is not None else send_fn
+
+    async def _finalize_progressive() -> None:
+        """Cancel progressive updates + delete gif before showing final UI.
+
+        Idempotent — safe to call multiple times.
+        """
+        if progressive is not None:
+            try:
+                await progressive.stop()
+            except Exception:
+                logger.debug("Search progressive: stop failed", exc_info=True)
+
+    async def edit_fn(*args, **kwargs):
+        """Wrapper around the original edit/send function that finalises
+        progressive UI first. Every exit path in _run_search goes through
+        edit_fn (it's how we render the final state), so attaching cleanup
+        here covers all branches without per-branch duplication.
+        """
+        await _finalize_progressive()
+        return await _raw_edit_fn(*args, **kwargs)
 
     # --- Search: Jackett first (preferred), Rutracker direct as fallback ON ERROR only ---
     #
@@ -11334,7 +11390,38 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ConversationHandler.END
 
-    status = await update.message.reply_text("🎙 Распознаю…")
+    status = await update.message.reply_text("🎧 Прослушиваем…")
+
+    # Progressive UI: animated mp4 (spy operators) + stage text update at
+    # t+10s so a slow Whisper response doesn't feel like the bot froze.
+    voice_progressive: ProgressiveStatus | None = ProgressiveStatus(
+        bot=context.bot,
+        chat_id=status.chat_id,
+        initial_text="🎧 Прослушиваем…",
+        stages=voice_stages(),
+        gif_path=VOICE_ANIMATION_PATH,
+    )
+    voice_progressive.text_msg = status  # message already sent above
+    try:
+        if voice_progressive.gif_path.exists():
+            with open(voice_progressive.gif_path, "rb") as fh:
+                voice_progressive.gif_msg = await context.bot.send_animation(
+                    chat_id=status.chat_id, animation=fh,
+                )
+    except Exception:
+        logger.debug("Voice progressive: gif send failed", exc_info=True)
+        voice_progressive.gif_msg = None
+    if voice_progressive.stages:
+        try:
+            voice_progressive._task = asyncio.create_task(voice_progressive._run_stages())
+        except RuntimeError:
+            voice_progressive._task = None
+
+    async def _finalize_voice_progressive() -> None:
+        try:
+            await voice_progressive.stop()
+        except Exception:
+            logger.debug("Voice progressive: stop failed", exc_info=True)
 
     # Download voice file to a temporary path. Telegram returns OGG/Opus.
     temp_path: Path | None = None
@@ -11345,6 +11432,7 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         await tg_file.download_to_drive(custom_path=str(temp_path))
     except Exception:
         logger.warning("Failed to download voice file id=%s", voice.file_id, exc_info=True)
+        await _finalize_voice_progressive()
         await _safe_edit_message(
             status,
             "🎙 Не удалось скачать голосовое. Попробуйте ещё раз или напишите текстом.",
@@ -11364,6 +11452,7 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
                 temp_path.unlink()
         except OSError:
             pass
+        await _finalize_voice_progressive()
 
     if not transcription:
         # Record the failure for /admin diagnostics — operators want to know
