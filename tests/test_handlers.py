@@ -2430,6 +2430,84 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         # Fell through to magnet.
         mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:cafebabe")
 
+    async def test_magnet_without_task_id_shows_download_list_without_tracking(self):
+        """Magnet can be accepted by DS before a task id appears.
+
+        That is not a normal tracked success: no owner/meta/tracker injection with
+        an empty id, and the user gets the download-list button instead of a task
+        card button.
+        """
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Public Movie 1080p",
+            "url": "https://example.org/t/1",
+            "torrent_url": None,
+            "magnet_url": "magnet:?xt=urn:btih:deadbeef&dn=Public+Movie",
+            "tracker_name": "public",
+            "source": "jackett",
+            "topic_id": "",
+            "size": "3 GB",
+            "seeders": 10,
+            "quality": "1080p",
+            "year": 2024,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Public Movie"})
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        mock_ds.create_magnet.return_value = ""
+        add_trackers = MagicMock()
+        remember_owner = MagicMock()
+        remember_meta = MagicMock()
+
+        with (
+            patch.object(bot, "jackett_client", MagicMock()),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_wait_for_magnet_task_id", AsyncMock(return_value="")),
+            patch.object(bot, "_add_public_trackers_to_download_task", add_trackers),
+            patch.object(bot, "_remember_task_owner", remember_owner),
+            patch.object(bot, "_remember_task_meta", remember_meta),
+            patch.object(bot, "_start_task_card_refresh"),
+            patch.object(bot, "_mark_tracker_processed_if_final"),
+        ):
+            await bot._download_and_add(
+                update.callback_query,
+                context,
+                0,
+                subscribe=False,
+                _skip_plex_check=True,
+            )
+
+        add_trackers.assert_not_called()
+        remember_owner.assert_not_called()
+        remember_meta.assert_not_called()
+        final_call = update.callback_query.edit_message_text.await_args
+        final_text = final_call.args[0]
+        self.assertIn("ID пока не появился", final_text)
+        self.assertIn("трекеры не добавляю", final_text)
+        markup = final_call.kwargs.get("reply_markup")
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertIn("📋 К списку загрузок", labels)
+
+    async def test_wait_for_magnet_task_id_allows_missing_progress_message(self):
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+
+        with patch.object(bot, "ds_client", mock_ds):
+            task_id = await bot._wait_for_magnet_task_id(
+                "magnet:?xt=urn:btih:deadbeef",
+                set(),
+                None,
+                attempts=1,
+                delay_seconds=0,
+            )
+
+        self.assertEqual(task_id, "")
+        mock_ds.list_tasks.assert_called_once()
+
 
 class FormatDownloadErrorTests(unittest.TestCase):
     """_format_download_error: replaces raw long URLs with a compact summary."""

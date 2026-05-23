@@ -575,6 +575,31 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         self.assertIn("стартовала", sent_text)
         self.assertIn("Test Movie", sent_text)
 
+    def test_success_without_task_id_warns_and_does_not_track(self) -> None:
+        entry_id = self._seed_entry()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        remember_owner = MagicMock()
+        remember_meta = MagicMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("", "magnet"))),
+            patch.object(bot, "_remember_task_owner", remember_owner),
+            patch.object(bot, "_remember_task_meta", remember_meta),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+
+        loaded = self._store.load_pending_downloads()
+        self.assertNotIn(entry_id, loaded)
+        mock_app.bot.send_message.assert_awaited_once()
+        sent_text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("ID пока не появился", sent_text)
+        self.assertNotIn("Слежу за прогрессом", sent_text)
+        remember_owner.assert_not_called()
+        remember_meta.assert_not_called()
+
     def test_failure_increments_attempts_and_persists(self) -> None:
         entry_id = self._seed_entry(attempts=1)
         mock_app = MagicMock()

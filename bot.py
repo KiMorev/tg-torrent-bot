@@ -4764,6 +4764,8 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
                 task_id = await asyncio.to_thread(
                     ds_client.create_torrent_file, temp_path, safe_name
                 )
+                if not task_id:
+                    raise _missing_task_id_error("для torrent-файла")
                 return task_id, "torrent-файл"
             except JackettError as e:
                 last_err = e  # fall through to next step
@@ -4780,6 +4782,8 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
                     task_id = await asyncio.to_thread(
                         ds_client.create_torrent_file, temp_path, safe_name
                     )
+                    if not task_id:
+                        raise _missing_task_id_error("для torrent-файла (Rutracker direct)")
                     return task_id, "torrent-файл (Rutracker direct)"
                 except RutrackerError as e:
                     last_err = e
@@ -4879,8 +4883,12 @@ async def _notify_pending_success(
 
     text = (
         f"✅ Отложенная загрузка стартовала: «{title}».\n"
-        f"Метод: {method}. Слежу за прогрессом."
+        f"Метод: {method}."
     )
+    if task_id:
+        text += " Слежу за прогрессом."
+    else:
+        text += f"\n⚠️ {_magnet_without_task_id_note()}"
     if entry.get("subscribe") and subscribe_restored:
         text += "\n🔔 Подписка восстановлена — слежу за новыми сериями."
     elif entry.get("subscribe") and not subscribe_restored:
@@ -4892,10 +4900,11 @@ async def _notify_pending_success(
         await app.bot.send_message(chat_id=int(chat_id), text=text)
     except Exception:
         logger.warning("Failed to notify pending-success for chat_id=%s", chat_id, exc_info=True)
-    _remember_task_owner(task_id, int(chat_id))
-    _remember_task_meta(task_id, _build_task_meta_from_result(
-        _pending_entry_to_search_result(entry), source="pending",
-    ))
+    if task_id:
+        _remember_task_owner(task_id, int(chat_id))
+        _remember_task_meta(task_id, _build_task_meta_from_result(
+            _pending_entry_to_search_result(entry), source="pending",
+        ))
 
 
 async def _notify_pending_dropped(app: Application, entry: dict) -> None:
@@ -5251,6 +5260,20 @@ def _task_added_message(
     return "\n".join(lines)
 
 
+class MissingTaskIdError(DownloadStationError):
+    """Download Station accepted a create request but exposed no task id."""
+
+
+def _missing_task_id_error(method: str) -> MissingTaskIdError:
+    return MissingTaskIdError(
+        f"Download Station принял запрос {method}, но не вернул ID задачи."
+    )
+
+
+def _magnet_without_task_id_note() -> str:
+    return "ID пока не появился. Откройте список загрузок через кнопку ниже."
+
+
 def _is_message_not_modified(error: BadRequest) -> bool:
     return "message is not modified" in str(error).lower()
 
@@ -5480,7 +5503,8 @@ async def _wait_for_magnet_task_id(
         if step:
             await asyncio.sleep(delay_seconds)
 
-        await _safe_edit_message(progress_message, _magnet_wait_text(step, attempts))
+        if progress_message is not None:
+            await _safe_edit_message(progress_message, _magnet_wait_text(step, attempts))
 
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
@@ -8018,10 +8042,14 @@ async def _download_and_add(
             await query.edit_message_text("Не удалось скачать торрент: нет доступного источника.")
             return ConversationHandler.END
 
-        _remember_task_owner(task_id, chat_id)
-        _remember_task_meta(task_id, _build_task_meta_from_result(result, source="search"))
+        if not task_id and download_method != "magnet":
+            raise _missing_task_id_error(f"для {download_method}")
 
-        if temp_path.exists():
+        if task_id:
+            _remember_task_owner(task_id, chat_id)
+            _remember_task_meta(task_id, _build_task_meta_from_result(result, source="search"))
+
+        if task_id and temp_path.exists():
             if _torrent_file_is_private(temp_path):
                 tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
                 _mark_tracker_processed_if_final(task_id, tracker_result)
@@ -8029,11 +8057,13 @@ async def _download_and_add(
                 await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
                 tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
                 _mark_tracker_processed_if_final(task_id, tracker_result)
-        else:
+        elif task_id:
             # magnet path — no torrent file to check
             await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
+        else:
+            tracker_result = TrackerApplyResult(skipped_reason="ID задачи пока не найден, трекеры не добавляю")
 
         if subscribe:
             if source == "jackett":
@@ -8087,13 +8117,15 @@ async def _download_and_add(
         added_msg = _task_added_message(
             download_method, title=title, task_id=task_id, tracker_result=tracker_result
         )
+        if download_method == "magnet" and not task_id:
+            added_msg += f"\n\n{_magnet_without_task_id_note()}"
         suffix = "\n\n🔔 Буду следить за новыми сериями." if subscribe else ""
         success_text = f"{added_msg}{suffix}"
 
         series_query = _extract_series_base_query(title)
         _card_chat_id = _chat_id_from_query(query)
         _card_msg_id = _message_id_from_message(query.message) if query.message else None
-        if series_query:
+        if series_query and task_id:
             context.user_data["srch_series_query"] = series_query
             # Remember the quality of the release the user actually picked so the
             # next-season search can suggest the same filter.
@@ -8110,7 +8142,10 @@ async def _download_and_add(
                 _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
             return SEARCH_RESULTS
 
-        await query.edit_message_text(success_text, reply_markup=_task_reply_markup(task_id))
+        await query.edit_message_text(
+            success_text,
+            reply_markup=_task_reply_markup(task_id) or _download_list_keyboard(),
+        )
         _register_task_card_from_query(query, task_id)
         if task_id and _card_chat_id and _card_msg_id:
             _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
@@ -9083,13 +9118,33 @@ async def _check_jackett_sub_via_rutracker_direct(
 async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id: int | None) -> str:
     """Try to download the subscription update and add it to Download Station.
 
-    Returns the task_id string (may be empty if DS didn't return one immediately).
-    Raises on unrecoverable errors so the caller can fall back to notify-only mode.
+    Returns a non-empty task_id. Raises when DS accepts the request but does not
+    expose a task id, so the caller can fall back to notify-only mode.
     """
     title = candidate.title
     safe_name = _safe_filename(f"{title}.torrent")
     temp_path = _temp_path(safe_name)
     task_id = ""
+
+    async def _create_subscription_magnet_task(magnet_url: str) -> str:
+        try:
+            before_tasks = await asyncio.to_thread(ds_client.list_tasks)
+            known_task_ids = {task["id"] for task in before_tasks if task.get("id")}
+        except DownloadStationError:
+            logger.warning(
+                "Failed to fetch task list before subscription magnet create",
+                exc_info=True,
+            )
+            known_task_ids = set()
+
+        magnet_task_id = await asyncio.to_thread(ds_client.create_magnet, magnet_url)
+        if not magnet_task_id:
+            magnet_task_id = await _wait_for_magnet_task_id(
+                magnet_url, known_task_ids, None
+            )
+        if not magnet_task_id:
+            raise _missing_task_id_error("для magnet-ссылки подписки")
+        return magnet_task_id
 
     try:
         if candidate.torrent_url:
@@ -9099,6 +9154,8 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                 )
                 temp_path.write_bytes(torrent_bytes)
                 task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                if not task_id:
+                    raise _missing_task_id_error("для torrent-файла подписки")
                 if chat_id and task_id:
                     _remember_task_owner(task_id, chat_id)
                     _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
@@ -9111,16 +9168,18 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                 if not magnet:
                     raise
                 logger.info("Subscription torrent redirected to magnet, using it directly")
-                task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                task_id = await _create_subscription_magnet_task(magnet)
                 if chat_id and task_id:
                     _remember_task_owner(task_id, chat_id)
                     _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
                 return task_id
+            except MissingTaskIdError:
+                raise
             except (JackettError, DownloadStationError) as e:
                 logger.warning("Subscription torrent_url download failed (%s), trying magnet", e)
 
         if candidate.magnet_url:
-            task_id = await asyncio.to_thread(ds_client.create_magnet, candidate.magnet_url)
+            task_id = await _create_subscription_magnet_task(candidate.magnet_url)
             if chat_id and task_id:
                 _remember_task_owner(task_id, chat_id)
                 _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
@@ -9207,7 +9266,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                         key, dl_err,
                     )
 
-            download_attempted_and_failed = wants_download and task_id is None
+            download_attempted_and_failed = wants_download and not task_id
 
             # Silent advance: download didn't fail AND user doesn't want a
             # push right now. Advance state (so we don't re-process this
@@ -9238,7 +9297,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 )
 
             # Build notification text — three branches by what happened.
-            if task_id is not None:
+            if task_id:
                 text = (
                     f"🔔 Подписка «{short_q}» обновилась — задача добавлена в DS!\n"
                     f"\n🔎 {candidate.title}"
@@ -10753,13 +10812,18 @@ async def _do_process_magnet(
         task_id = await asyncio.to_thread(ds_client.create_magnet, magnet_uri)
         if not task_id:
             task_id = await _wait_for_magnet_task_id(magnet_uri, known_task_ids, progress_message)
-        _remember_task_owner(task_id, chat_id)
-        dn = _extract_magnet_dn(magnet_uri)
-        if dn:
-            _remember_task_meta(task_id, _build_task_meta_from_title(dn, source="magnet"))
-        await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
-        tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
-        _mark_tracker_processed_if_final(task_id, tracker_result)
+        if task_id:
+            _remember_task_owner(task_id, chat_id)
+            dn = _extract_magnet_dn(magnet_uri)
+            if dn:
+                _remember_task_meta(task_id, _build_task_meta_from_title(dn, source="magnet"))
+            await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
+            tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
+            _mark_tracker_processed_if_final(task_id, tracker_result)
+        else:
+            tracker_result = TrackerApplyResult(
+                skipped_reason="ID задачи пока не найден, трекеры не добавляю"
+            )
     except DownloadStationError as e:
         logger.exception("Failed to create Download Station task")
         await _safe_edit_message(progress_message, f"Не удалось добавить magnet-ссылку: {e}")
@@ -10767,7 +10831,7 @@ async def _do_process_magnet(
 
     msg_text = _task_added_message("magnet-ссылка", task_id=task_id, tracker_result=tracker_result)
     if not task_id:
-        msg_text += "\n\nID пока не появился. Откройте список загрузок через кнопку ниже."
+        msg_text += f"\n\n{_magnet_without_task_id_note()}"
 
     await _safe_edit_message(
         progress_message,
@@ -10803,6 +10867,8 @@ async def _do_process_torrent(
         logger.info("Creating Download Station task from torrent file %s", safe_name)
         await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
         task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        if not task_id:
+            raise _missing_task_id_error("для torrent-файла")
         _remember_task_owner(task_id, chat_id)
         meta_title = _normalize_torrent_filename_for_match(safe_name)
         if meta_title:

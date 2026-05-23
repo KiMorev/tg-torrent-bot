@@ -263,6 +263,75 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
         text = app.bot.send_message.await_args.kwargs.get("text", "")
         self.assertIn("вручную", text.lower())
 
+    def test_empty_task_id_counts_as_failed_download(self):
+        """An empty task_id is not a successful DS auto-download."""
+        from jackett import JackettResult
+        sub_key = "jackett:empty-task"
+        sub = {
+            "type": "jackett",
+            "chat_id": 100,
+            "query": "Some show",
+            "title": "",
+            "tracker": "kinozal",
+            "topic_url": "https://kinozal.tv/topic/77",
+            "notify_mode": "season_complete",
+            "last_check": "2026-05-01 10:00",
+            "seen_titles": [],
+        }
+        self.store.save_topic_subscriptions({sub_key: sub})
+
+        candidate = JackettResult(
+            title="Show S1E1-5 of 10", size="10 GB", seeders=42,
+            torrent_url="http://jk/dl?p=xxx", magnet_url=None,
+            tracker="kinozal", topic_url="https://kinozal.tv/topic/77",
+        )
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        jackett = MagicMock()
+        jackett.search.return_value = [candidate]
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "select_jackett_subscription_candidate", return_value=candidate),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct",
+                         AsyncMock(return_value=False)),
+            patch.object(bot, "_jackett_subscription_auto_download",
+                         AsyncMock(return_value="")),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        app.bot.send_message.assert_awaited_once()
+        text = app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("вручную", text.lower())
+        self.assertNotIn("задача добавлена", text.lower())
+
+    def test_subscription_torrent_empty_task_id_does_not_retry_as_magnet(self):
+        """If DS accepted the .torrent but gave no id, do not create a duplicate magnet."""
+        from jackett import JackettResult
+        candidate = JackettResult(
+            title="Show S1E1-5 of 10", size="10 GB", seeders=42,
+            torrent_url="http://jk/dl?p=xxx",
+            magnet_url="magnet:?xt=urn:btih:deadbeef",
+            tracker="kinozal",
+            topic_url="https://kinozal.tv/topic/77",
+        )
+        jackett = MagicMock()
+        jackett.download_torrent.return_value = b"d8:announce4:test"
+        ds = MagicMock()
+        ds.create_torrent_file.return_value = ""
+        ds.create_magnet = MagicMock()
+
+        with (
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "ds_client", ds),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+            self.assertRaises(bot.MissingTaskIdError),
+        ):
+            asyncio.run(bot._jackett_subscription_auto_download(candidate, chat_id=100))
+
+        ds.create_magnet.assert_not_called()
+
     def test_successful_download_in_season_complete_still_silent_advances(self):
         """Regression guard — happy path of season_complete still silently
         advances when download succeeds and season isn't done yet."""
