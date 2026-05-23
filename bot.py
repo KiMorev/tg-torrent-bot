@@ -6480,10 +6480,9 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             original_kp_match = False  # don't bother checking
         else:
             # === KP-verify original query (Problem B) =====================
-            # User typed «Гангстерленд» — that's a real 2018 film. If KP
-            # finds it, we should NOT confuse the user with did-you-mean
-            # variations — instead say «найден на КП, но в трекерах сейчас
-            # нет, попробуй ещё раз позже». Run in parallel with the GPT
+            # If KP confirms the original query itself, we should NOT confuse
+            # the user with did-you-mean variations — instead say «найден на
+            # КП, но в трекерах сейчас нет». Run in parallel with the GPT
             # did-you-mean call to keep latency at ~1s total.
             kp_task = asyncio.create_task(
                 asyncio.to_thread(
@@ -6500,6 +6499,9 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 logger.warning("KP/did-you-mean parallel fetch failed", exc_info=True)
                 original_kp_match = False
                 suggestions = []
+
+            if not original_kp_match and not suggestions:
+                suggestions = await asyncio.to_thread(_kp_loose_suggestions_sync, base_query)
 
             # If user's original query IS on KP, swap GPT suggestions for a
             # single «искать снова» hint — they didn't mistype.
@@ -10984,6 +10986,7 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
     with just the existing «без качества» / «все трекеры» / «отмена» buttons.
     """
     if not GPT_ENABLED:
+        logger.info("did_you_mean skipped for %r: GPT disabled", search_query)
         return []
     sink: list = []
     try:
@@ -11004,6 +11007,10 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
         error_label=error,
         usage=(sink[0] if sink else None),
     )
+    if error:
+        logger.info("did_you_mean returned no suggestions for %r: %s", search_query, error)
+    elif not suggestions:
+        logger.info("did_you_mean returned no suggestions for %r", search_query)
     return suggestions
 
 
@@ -11125,6 +11132,45 @@ def _kp_match_plausibly_equals_query(
         query, getattr(match, "title_ru", ""), getattr(match, "title_en", ""),
     )
     return False
+
+
+def _kp_suggestion_titles_from_match(query: str, match) -> list[str]:
+    """Return KP titles as did-you-mean candidates for a loose keyword hit."""
+    if match is None or _kp_match_plausibly_equals_query(query, match):
+        return []
+
+    seen = {_kp_verify_norm_title(query)}
+    suggestions: list[str] = []
+    for raw in (getattr(match, "title_ru", ""), getattr(match, "title_en", ""), getattr(match, "title", "")):
+        value = str(raw or "").strip()
+        norm = _kp_verify_norm_title(value)
+        if not value or not norm or norm in seen:
+            continue
+        seen.add(norm)
+        suggestions.append(value)
+    return suggestions[:3]
+
+
+def _kp_loose_suggestions_sync(title: str) -> list[str]:
+    """Use KP keyword search as a fallback source for typo suggestions.
+
+    This is deliberately separate from `_kp_verify_title_sync`: the same loose
+    KP hit must not prove "the user's title exists", but it can still be a
+    useful button when GPT returns no variants.
+    """
+    if kinopoisk_client is None:
+        return []
+    if not (title or "").strip():
+        return []
+    try:
+        match = kinopoisk_client.search_movie(title)
+    except Exception as exc:
+        logger.debug("KP loose suggestion failed for %r: %s", title, exc)
+        return []
+    suggestions = _kp_suggestion_titles_from_match(title, match)
+    if suggestions:
+        logger.info("KP loose suggestions for %r: %s", title, suggestions)
+    return suggestions
 
 
 def _is_rutracker_only_indexer_set(

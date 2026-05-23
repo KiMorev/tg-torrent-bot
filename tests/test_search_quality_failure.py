@@ -158,6 +158,16 @@ class KpVerifyTitleSyncTests(unittest.TestCase):
         with patch.object(bot, "kinopoisk_client", kp):
             self.assertFalse(bot._kp_verify_title_sync("Ганстерленд"))
 
+    def test_loose_kp_hit_becomes_suggestion_titles(self):
+        kp = MagicMock()
+        kp.search_movie.return_value = self._match(
+            title_ru="Земля гангстеров",
+            title_en="Gangster Land",
+        )
+        with patch.object(bot, "kinopoisk_client", kp):
+            suggestions = bot._kp_loose_suggestions_sync("ганстерленд")
+        self.assertEqual(suggestions, ["Земля гангстеров", "Gangster Land"])
+
 
 class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
     """End-to-end-ish checks on _run_search no-results path: which message
@@ -424,6 +434,52 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         labels = [b.text for row in keyboard for b in row]
         self.assertTrue(any("Земля гангстеров" in lbl for lbl in labels))
 
+    async def test_empty_gpt_falls_back_to_loose_kp_suggestion(self):
+        """If GPT returns no variants, a loose KP keyword hit is still useful
+        as a did-you-mean button."""
+        ctx = self._make_context(
+            jackett_selected={"rutracker"},
+            jackett_indexers=[{"id": "rutracker"}],
+        )
+        message = MagicMock()
+        message.message_id = 1
+        message.chat_id = 100
+        message.edit_text = AsyncMock(return_value=message)
+
+        async def send_fn(text, **kw):
+            await message.edit_text(text, **kw)
+            return message
+
+        def _match(title_ru: str, title_en: str = ""):
+            match = MagicMock()
+            match.title_ru = title_ru
+            match.title_en = title_en
+            match.title = title_ru or title_en
+            return match
+
+        kp = MagicMock()
+        kp.search_movie.return_value = _match("Земля гангстеров", "Gangster Land")
+        mock_jackett = MagicMock(
+            search=MagicMock(return_value=[]),
+            get_indexers=MagicMock(return_value=[{"id": "rutracker"}]),
+        )
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "kinopoisk_client", kp),
+            patch.object(bot, "_gpt_get_did_you_mean",
+                         new=AsyncMock(return_value=[])),
+        ):
+            await bot._run_search(send_fn, ctx, "ганстерленд")
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Возможно", text)
+        keyboard = kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in keyboard for b in row]
+        self.assertTrue(any("Земля гангстеров" in lbl for lbl in labels))
+        self.assertTrue(any("Gangster Land" in lbl for lbl in labels))
+
 
 class GptPromptOrderingTests(unittest.TestCase):
     """The prompt updates (D) are encoded as substrings the prompt MUST
@@ -444,17 +500,19 @@ class GptPromptOrderingTests(unittest.TestCase):
     def test_existence_rule_explicit_in_prompt(self):
         src = self._get_prompt()
         self.assertIn("does this film/series actually exist", src)
-        self.assertIn("Kinopoisk", src)
+        self.assertIn("prefer returning that likely title", src)
 
     def test_description_recognition_in_prompt(self):
         src = self._get_prompt()
         self.assertIn("DESCRIPTION", src)
         self.assertIn("Райан Гослинг", src)  # canonical example
 
-    def test_gangsterland_real_film_example(self):
-        """Confirms the prompt teaches GPT not to invent fixes for «Гангстерленд»."""
+    def test_gangsterland_typo_example(self):
+        """The prompt should not train GPT to return [] for this typo family."""
         src = self._get_prompt()
-        self.assertIn("Гангстерленд", src)
+        self.assertIn("ганстерленд", src)
+        self.assertIn("Земля гангстеров", src)
+        self.assertNotIn("Гангстерленд» → []", src)
 
 
 if __name__ == "__main__":
