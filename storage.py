@@ -55,6 +55,51 @@ def get_storage_info(path: str = STORAGE_MOUNT_PATH) -> StorageInfo | None:
     return StorageInfo(total_bytes=total, used_bytes=used, free_bytes=free, used_percent=pct)
 
 
+def _dsm_volume_to_storage_info(volume: dict | None) -> StorageInfo | None:
+    """Convert a `DownloadStationClient.get_volume_info()` result into the
+    StorageInfo shape used by the admin panel. Returns None on missing or
+    malformed input.
+    """
+    if not volume:
+        return None
+    try:
+        total = int(volume.get("total_bytes") or 0)
+        free = int(volume.get("free_bytes") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    used = max(0, total - free)
+    pct = used / total * 100
+    return StorageInfo(total_bytes=total, used_bytes=used, free_bytes=free, used_percent=pct)
+
+
+def get_unified_disk_info(
+    ds_client=None, *, mount_path: str = STORAGE_MOUNT_PATH,
+    use_dsm_cache: bool = True,
+) -> StorageInfo | None:
+    """Single source of disk-usage truth. Tries the bind-mounted `/storage`
+    path first (fast, no network), falls back to the DSM API.
+
+    Returns None when neither source can answer — callers treat as «feature
+    disabled, hide the block / skip the check» and never block on it.
+
+    Why mount-first: shutil.disk_usage is microseconds and doesn't depend on
+    DSM auth/session lifetimes. DSM API is more universally available (works
+    without bind-mount setup) but slower and can fail in transient ways.
+    """
+    info = get_storage_info(mount_path)
+    if info is not None:
+        return info
+    if ds_client is None:
+        return None
+    try:
+        volume = ds_client.get_volume_info(use_cache=use_dsm_cache)
+    except Exception:  # noqa: BLE001 — defensive, never let disk check raise
+        return None
+    return _dsm_volume_to_storage_info(volume)
+
+
 def format_bytes(num: int) -> str:
     """Human-readable size: 1.4 TB, 256 GB, 800 MB, 4.5 KB, 320 B.
 

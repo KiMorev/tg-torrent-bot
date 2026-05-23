@@ -126,7 +126,10 @@ from plex import (
     is_unmatched as _plex_is_unmatched,
     _normalise_resolution as _plex_normalise_resolution,
 )
-from storage import STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info
+from storage import (
+    STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info,
+    get_unified_disk_info,
+)
 from voice_transcription import (
     check_api_key as voice_check_api_key,
     estimate_cost_usd as voice_estimate_cost_usd,
@@ -1142,11 +1145,13 @@ def _format_storage_forecast(info: StorageInfo) -> str | None:
 def _format_admin_storage_section() -> str | None:
     """Build the «📀 Хранилище» admin block, or None when feature disabled.
 
-    Feature is disabled (block hidden) when the `/storage` mount isn't
-    present inside the container. This is the graceful-degrade signal — the
-    admin hasn't bind-mounted the NAS volume yet.
+    Uses the unified disk-info helper: prefers the `/storage` bind-mount
+    (fast, history-friendly for the 7-day forecast), falls back to the DSM
+    API (`SYNO.Core.Storage.Volume.list`). The block hides itself only when
+    BOTH sources fail — most installs will see it light up automatically
+    via DSM API even without configuring the bind-mount.
     """
-    info = get_storage_info(STORAGE_MOUNT_PATH)
+    info = get_unified_disk_info(ds_client)
     if info is None:
         return None
     icon = "⚠️" if info.used_percent >= STORAGE_ALERT_PERCENT else "📀"
@@ -7294,24 +7299,20 @@ def _check_disk_space_for_download() -> tuple[str, str] | None:
     severity: "block" → caller MUST abort download with this message.
               "warn"  → caller logs + can optionally show in UI.
 
-    None means either disk space is fine, OR DSM didn't expose volume
-    info (treat as fine — graceful degrade, don't block on missing API).
+    Uses the unified disk-info helper (mount-first, DSM-fallback). None
+    means either disk space is fine, OR neither source could answer
+    (treat as fine — graceful degrade, never block on missing data).
     """
-    if ds_client is None:
-        return None
     try:
-        info = ds_client.get_volume_info()
+        info = get_unified_disk_info(ds_client)
     except Exception:  # noqa: BLE001 — disk check must never crash download flow
         logger.warning("Disk-space check raised unexpectedly", exc_info=True)
         return None
-    if info is None:
-        return None  # API unavailable — graceful skip
-
-    free = int(info.get("free_bytes") or 0)
-    total = int(info.get("total_bytes") or 0)
-    if total <= 0:
+    if info is None or info.total_bytes <= 0:
         return None
 
+    free = info.free_bytes
+    total = info.total_bytes
     free_pct = 100.0 * free / total
     if free_pct < _DISK_SPACE_BLOCK_PCT:
         msg = (

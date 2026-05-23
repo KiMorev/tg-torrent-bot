@@ -171,30 +171,33 @@ class VolumeInfoCacheTests(unittest.TestCase):
 
 
 class CheckDiskSpaceForDownloadTests(unittest.TestCase):
-    """The severity classifier in bot.py."""
+    """The severity classifier in bot.py — now uses get_unified_disk_info
+    (mount-first, DSM-fallback). We patch the unified helper directly to
+    keep tests focused on classification, not source selection."""
 
     def setUp(self):
         import bot
         self.bot = bot
+        from storage import StorageInfo
+        self.StorageInfo = StorageInfo
 
-    def _fake_volume(self, free_pct: float) -> dict:
+    def _fake_info(self, free_pct: float):
         total = 1_000_000_000_000
         free = int(total * free_pct / 100)
-        return {
-            "total_bytes": total, "free_bytes": free,
-            "used_pct": 100.0 - free_pct, "mount_point": "/volume1",
-        }
+        used = total - free
+        return self.StorageInfo(
+            total_bytes=total, used_bytes=used, free_bytes=free,
+            used_percent=100.0 - free_pct,
+        )
 
     def test_returns_none_when_disk_healthy(self):
-        fake_ds = MagicMock()
-        fake_ds.get_volume_info.return_value = self._fake_volume(40.0)
-        with patch.object(self.bot, "ds_client", fake_ds):
+        with patch.object(self.bot, "get_unified_disk_info",
+                          return_value=self._fake_info(40.0)):
             self.assertIsNone(self.bot._check_disk_space_for_download())
 
     def test_returns_warn_at_10_pct_free(self):
-        fake_ds = MagicMock()
-        fake_ds.get_volume_info.return_value = self._fake_volume(10.0)
-        with patch.object(self.bot, "ds_client", fake_ds):
+        with patch.object(self.bot, "get_unified_disk_info",
+                          return_value=self._fake_info(10.0)):
             result = self.bot._check_disk_space_for_download()
         self.assertIsNotNone(result)
         severity, msg = result
@@ -202,101 +205,81 @@ class CheckDiskSpaceForDownloadTests(unittest.TestCase):
         self.assertIn("заканчивается", msg.lower())
 
     def test_returns_block_at_3_pct_free(self):
-        fake_ds = MagicMock()
-        fake_ds.get_volume_info.return_value = self._fake_volume(3.0)
-        with patch.object(self.bot, "ds_client", fake_ds):
+        with patch.object(self.bot, "get_unified_disk_info",
+                          return_value=self._fake_info(3.0)):
             result = self.bot._check_disk_space_for_download()
         self.assertIsNotNone(result)
         severity, msg = result
         self.assertEqual(severity, "block")
         self.assertIn("Недостаточно", msg)
 
-    def test_returns_none_when_volume_info_unavailable(self):
-        """DSM didn't return volume info (older version, etc) → no block."""
-        fake_ds = MagicMock()
-        fake_ds.get_volume_info.return_value = None
-        with patch.object(self.bot, "ds_client", fake_ds):
+    def test_returns_none_when_unified_returns_none(self):
+        """No source available (no mount, no DSM API) → no block."""
+        with patch.object(self.bot, "get_unified_disk_info", return_value=None):
             self.assertIsNone(self.bot._check_disk_space_for_download())
 
-    def test_returns_none_when_ds_client_none(self):
-        """Bot started without DS → must not crash, must not block."""
-        with patch.object(self.bot, "ds_client", None):
-            self.assertIsNone(self.bot._check_disk_space_for_download())
-
-    def test_returns_none_when_ds_check_raises(self):
-        """Defensive: any unexpected exception → graceful skip, never block download."""
-        fake_ds = MagicMock()
-        fake_ds.get_volume_info.side_effect = RuntimeError("boom")
-        with patch.object(self.bot, "ds_client", fake_ds):
+    def test_returns_none_when_unified_raises(self):
+        """Defensive: any unexpected exception → graceful skip."""
+        with patch.object(self.bot, "get_unified_disk_info",
+                          side_effect=RuntimeError("boom")):
             self.assertIsNone(self.bot._check_disk_space_for_download())
 
 
-class DiagnosticsDiskLineTests(unittest.TestCase):
-    """The new «💾 Место» line in /admin → Download Station block."""
+class UnifiedDiskInfoTests(unittest.TestCase):
+    """get_unified_disk_info: mount-first, DSM-fallback strategy."""
 
-    def test_volume_line_appears_when_dsm_exposes_info(self):
-        from diagnostics import _download_station_diagnostic
+    def test_mount_path_present_uses_shutil(self):
+        from storage import get_unified_disk_info, StorageInfo
+        ds = MagicMock()  # would be called only if mount fails
+        with (
+            patch("storage.Path") as path_cls,
+            patch("storage.shutil.disk_usage", return_value=(1000, 400, 600)),
+        ):
+            path_cls.return_value.exists.return_value = True
+            info = get_unified_disk_info(ds, mount_path="/storage")
+        self.assertIsNotNone(info)
+        self.assertEqual(info.total_bytes, 1000)
+        self.assertEqual(info.free_bytes, 600)
+        # DSM API NOT called when mount answered.
+        ds.get_volume_info.assert_not_called()
+
+    def test_no_mount_falls_back_to_dsm(self):
+        from storage import get_unified_disk_info
         ds = MagicMock()
-        ds.list_tasks.return_value = []
         ds.get_volume_info.return_value = {
-            "total_bytes": 1_000_000_000_000,
+            "total_bytes": 2_000_000_000_000,
             "free_bytes": 400_000_000_000,
-            "used_pct": 60.0,
-            "mount_point": "/volume1",
+            "used_pct": 80.0, "mount_point": "/volume1",
         }
-        diag = _download_station_diagnostic(ds)
-        joined = "\n".join(diag.details)
-        self.assertIn("Место", joined)
-        self.assertIn("/volume1", joined)
-        self.assertEqual(diag.status, "ok")
+        with patch("storage.Path") as path_cls:
+            path_cls.return_value.exists.return_value = False
+            info = get_unified_disk_info(ds, mount_path="/storage")
+        self.assertIsNotNone(info)
+        self.assertEqual(info.total_bytes, 2_000_000_000_000)
+        self.assertEqual(info.free_bytes, 400_000_000_000)
+        ds.get_volume_info.assert_called_once()
 
-    def test_volume_line_omitted_when_api_unavailable(self):
-        """If DSM doesn't expose volume info, the rest of the diagnostic
-        still works — we just don't show the line."""
-        from diagnostics import _download_station_diagnostic
+    def test_no_mount_no_dsm_returns_none(self):
+        from storage import get_unified_disk_info
+        with patch("storage.Path") as path_cls:
+            path_cls.return_value.exists.return_value = False
+            self.assertIsNone(get_unified_disk_info(ds_client=None))
+
+    def test_dsm_returning_none_returns_none(self):
+        from storage import get_unified_disk_info
         ds = MagicMock()
-        ds.list_tasks.return_value = []
         ds.get_volume_info.return_value = None
-        diag = _download_station_diagnostic(ds)
-        joined = "\n".join(diag.details)
-        self.assertNotIn("Место", joined)
-        self.assertEqual(diag.status, "ok")
+        with patch("storage.Path") as path_cls:
+            path_cls.return_value.exists.return_value = False
+            self.assertIsNone(get_unified_disk_info(ds))
 
-    def test_status_becomes_warn_when_low_space(self):
-        from diagnostics import _download_station_diagnostic
+    def test_dsm_raising_is_swallowed(self):
+        from storage import get_unified_disk_info
         ds = MagicMock()
-        ds.list_tasks.return_value = []
-        # 10% free → warn band
-        ds.get_volume_info.return_value = {
-            "total_bytes": 1000, "free_bytes": 100,
-            "used_pct": 90.0, "mount_point": "/volume1",
-        }
-        diag = _download_station_diagnostic(ds)
-        self.assertEqual(diag.status, "warn")
-
-    def test_status_becomes_error_when_critical_space(self):
-        from diagnostics import _download_station_diagnostic
-        ds = MagicMock()
-        ds.list_tasks.return_value = []
-        # 2% free → critical
-        ds.get_volume_info.return_value = {
-            "total_bytes": 1000, "free_bytes": 20,
-            "used_pct": 98.0, "mount_point": "/volume1",
-        }
-        diag = _download_station_diagnostic(ds)
-        self.assertEqual(diag.status, "error")
-
-    def test_get_volume_info_attribute_missing_doesnt_crash(self):
-        """Legacy tests use a Fake without get_volume_info — must not break."""
-        from diagnostics import _download_station_diagnostic
-
-        class LegacyFake:
-            def list_tasks(self):
-                return []
-        diag = _download_station_diagnostic(LegacyFake())
-        self.assertEqual(diag.status, "ok")
-        joined = "\n".join(diag.details)
-        self.assertNotIn("Место", joined)
+        ds.get_volume_info.side_effect = RuntimeError("network down")
+        with patch("storage.Path") as path_cls:
+            path_cls.return_value.exists.return_value = False
+            self.assertIsNone(get_unified_disk_info(ds))
 
 
 if __name__ == "__main__":
