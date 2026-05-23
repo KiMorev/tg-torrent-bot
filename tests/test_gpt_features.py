@@ -512,5 +512,205 @@ class GptValidateKpMatchTests(unittest.TestCase):
             self.assertTrue(self.bot._gpt_validate_kp_match("Дюна 2024", self.match))
 
 
+class GptUsageSinkTests(unittest.TestCase):
+    """Plumbing real {input_tokens, output_tokens, model} from chat_completion
+    up through the feature wrappers to the usage tracker — replaces the prior
+    hardcoded estimates in _gpt_record_usage calls."""
+
+    def _fake_chat_ok(self, *, text='{"pick":1,"confidence":0.9,"reason":"ok"}',
+                     in_tok=123, out_tok=45, model="gpt-4o-mini"):
+        return ({
+            "text": text,
+            "input_tokens": in_tok, "output_tokens": out_tok, "model": model,
+        }, None)
+
+    def test_parse_torrent_title_records_real_usage_into_sink(self):
+        fake = ({
+            "text": '{"quality":"2160p","source":"BDRemux","hdr":null,'
+                    '"audio":null,"langs":["RUS"],"release_group":null,'
+                    '"edition":null}',
+            "input_tokens": 187, "output_tokens": 42, "model": "gpt-4o-mini-2024-07-18",
+        }, None)
+        sink: list = []
+        with patch.object(gpt_features, "chat_completion", return_value=fake):
+            meta, err = gpt_features.parse_torrent_title(
+                title="Dune.2024.2160p.BDRemux.RUS", api_key="sk-test",
+                usage_sink=sink,
+            )
+        self.assertIsNone(err)
+        self.assertEqual(meta["quality"], "2160p")
+        self.assertEqual(len(sink), 1)
+        self.assertEqual(sink[0]["input_tokens"], 187)
+        self.assertEqual(sink[0]["output_tokens"], 42)
+        self.assertEqual(sink[0]["model"], "gpt-4o-mini-2024-07-18")
+
+    def test_kp_confidence_check_records_usage_even_when_low_confidence(self):
+        """Tokens are spent before we know the confidence is too low — must
+        still be recorded so /admin shows the real cost."""
+        sink: list = []
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_ok(
+                text='{"pick":1,"confidence":0.3,"reason":"meh"}',
+                in_tok=210, out_tok=18,
+            ),
+        ):
+            idx, _conf, err = gpt_features.kp_confidence_check(
+                query="X", candidates=[{"title_ru": "Y"}], api_key="sk-test",
+                usage_sink=sink,
+            )
+        self.assertIsNone(idx)
+        self.assertIsNone(err)
+        self.assertEqual(len(sink), 1)
+        self.assertEqual(sink[0]["input_tokens"], 210)
+
+    def test_usage_sink_empty_on_network_error(self):
+        """No API call succeeded → no usage to record. Sink stays empty."""
+        sink: list = []
+        with patch.object(
+            gpt_features, "chat_completion", return_value=(None, "timeout"),
+        ):
+            meta, err = gpt_features.parse_torrent_title(
+                title="X", api_key="sk-test", usage_sink=sink,
+            )
+        self.assertIsNone(meta)
+        self.assertEqual(err, "timeout")
+        self.assertEqual(sink, [])
+
+    def test_usage_sink_records_even_on_local_parse_failure(self):
+        """API returned 200 + tokens, but JSON didn't parse — tokens were
+        still spent, so /admin must count them."""
+        fake = ({
+            "text": "not-json-content",
+            "input_tokens": 99, "output_tokens": 7, "model": "gpt-4o-mini",
+        }, None)
+        sink: list = []
+        with patch.object(gpt_features, "chat_completion", return_value=fake):
+            meta, err = gpt_features.parse_torrent_title(
+                title="X", api_key="sk-test", usage_sink=sink,
+            )
+        self.assertIsNone(meta)
+        self.assertEqual(err, "parse")
+        # Real tokens must still be plumbed up so /admin shows true cost.
+        self.assertEqual(len(sink), 1)
+        self.assertEqual(sink[0]["input_tokens"], 99)
+        self.assertEqual(sink[0]["output_tokens"], 7)
+
+    def test_did_you_mean_propagates_usage(self):
+        import json as _json
+        fake = ({
+            "text": _json.dumps({"suggestions": ["Дюна"]}),
+            "input_tokens": 55, "output_tokens": 12, "model": "gpt-4o-mini",
+        }, None)
+        sink: list = []
+        with patch.object(gpt_features, "chat_completion", return_value=fake):
+            sugs, err = gpt_features.did_you_mean(
+                query="Дюра", api_key="sk-test", usage_sink=sink,
+            )
+        self.assertIsNone(err)
+        self.assertEqual(sugs, ["Дюна"])
+        self.assertEqual(sink[0]["input_tokens"], 55)
+
+
+class EstimateCostUnknownModelTests(unittest.TestCase):
+    def test_returns_none_for_unknown_model(self):
+        self.assertIsNone(
+            gpt_client.estimate_chat_cost_usd(100, 50, model="claude-3-haiku")
+        )
+
+    def test_prefix_match_for_dated_variant(self):
+        # "gpt-4o-mini-2024-07-18" should resolve via prefix → use mini pricing,
+        # not the more-expensive gpt-4o rate.
+        cost = gpt_client.estimate_chat_cost_usd(
+            1_000_000, 0, model="gpt-4o-mini-2024-07-18",
+        )
+        self.assertIsNotNone(cost)
+        self.assertAlmostEqual(cost, 0.150, places=5)
+
+    def test_longest_prefix_wins(self):
+        # "gpt-4o-2024-08-06" must NOT match "gpt-4o-mini" — it's plain gpt-4o.
+        cost = gpt_client.estimate_chat_cost_usd(
+            1_000_000, 0, model="gpt-4o-2024-08-06",
+        )
+        self.assertAlmostEqual(cost, 2.500, places=5)
+
+
+class GptRecordUsageRealVsEstimateTests(unittest.TestCase):
+    """_gpt_record_usage must (a) prefer real usage when supplied,
+    (b) handle unknown models by counting tokens but flagging cost-unknown."""
+
+    def setUp(self):
+        import bot
+        self.bot = bot
+
+    def _isolated_usage_io(self):
+        """Return a (load, save) pair backed by a single shared dict so
+        we can observe writes within a single test."""
+        store: dict = {"data": {}}
+        def load():
+            import copy
+            return copy.deepcopy(store["data"])
+        def save(payload):
+            import copy
+            store["data"] = copy.deepcopy(payload)
+        return store, load, save
+
+    def test_real_usage_overrides_fallback_estimate(self):
+        store, load, save = self._isolated_usage_io()
+        with (
+            patch.object(self.bot.state_store, "load_gpt_usage", side_effect=load),
+            patch.object(self.bot.state_store, "save_gpt_usage", side_effect=save),
+        ):
+            self.bot._gpt_record_usage(
+                feature="quality_parse",
+                input_tokens=200, output_tokens=80,  # fallback
+                error_label=None,
+                usage={"input_tokens": 17, "output_tokens": 3, "model": "gpt-4o-mini"},
+            )
+        bucket = store["data"]["features"]["quality_parse"]
+        # Real values stored, not fallback.
+        self.assertEqual(bucket["input_tokens"], 17)
+        self.assertEqual(bucket["output_tokens"], 3)
+        self.assertEqual(bucket["real_usage_calls"], 1)
+        self.assertEqual(bucket["estimate_calls"], 0)
+
+    def test_fallback_used_when_no_usage_supplied(self):
+        store, load, save = self._isolated_usage_io()
+        with (
+            patch.object(self.bot.state_store, "load_gpt_usage", side_effect=load),
+            patch.object(self.bot.state_store, "save_gpt_usage", side_effect=save),
+        ):
+            self.bot._gpt_record_usage(
+                feature="quality_parse",
+                input_tokens=200, output_tokens=80,
+                error_label="timeout",
+                usage=None,
+            )
+        bucket = store["data"]["features"]["quality_parse"]
+        self.assertEqual(bucket["input_tokens"], 200)
+        self.assertEqual(bucket["output_tokens"], 80)
+        self.assertEqual(bucket["estimate_calls"], 1)
+        self.assertEqual(bucket["real_usage_calls"], 0)
+
+    def test_unknown_model_records_tokens_but_flags_cost_unknown(self):
+        store, load, save = self._isolated_usage_io()
+        with (
+            patch.object(self.bot.state_store, "load_gpt_usage", side_effect=load),
+            patch.object(self.bot.state_store, "save_gpt_usage", side_effect=save),
+        ):
+            self.bot._gpt_record_usage(
+                feature="kp_confidence",
+                input_tokens=0, output_tokens=0,
+                error_label=None,
+                usage={"input_tokens": 50, "output_tokens": 10, "model": "claude-3-haiku"},
+            )
+        bucket = store["data"]["features"]["kp_confidence"]
+        self.assertEqual(bucket["input_tokens"], 50)
+        self.assertEqual(bucket["output_tokens"], 10)
+        self.assertEqual(bucket["cost_unknown_calls"], 1)
+        self.assertEqual(bucket["estimated_cost_usd"], 0.0)
+        self.assertIn("claude-3-haiku", bucket["unknown_models"])
+
+
 if __name__ == "__main__":
     unittest.main()

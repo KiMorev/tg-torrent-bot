@@ -63,6 +63,11 @@ class DownloadStationClient:
         self.retry_attempts = max(1, retry_attempts)
         self.retry_delay = max(0.0, retry_delay)
         self._lock = threading.RLock()
+        # Volume-info cache: avoid hammering DSM with 5 calls back-to-back when
+        # the user taps a few buttons in quick succession. 60 s is short enough
+        # that a freshly-downloaded 30 GB rip will reflect in the next confirm.
+        self._volume_cache: tuple[float, dict] | None = None
+        self._volume_cache_ttl = 60.0
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -357,6 +362,109 @@ class DownloadStationClient:
         finally:
             if own_sid:
                 self._logout(sid)
+
+    @_synchronized
+    def get_volume_info(self, *, use_cache: bool = True) -> dict | None:
+        """Return free/total bytes for the volume hosting DS_DESTINATION.
+
+        Returns ``{"total_bytes": int, "free_bytes": int, "used_pct": float,
+        "mount_point": str}`` on success, or ``None`` if DSM doesn't support
+        the API / destination doesn't map to a known volume / network failed.
+
+        Graceful — caller treats None as «диск-чек недоступен, не блокируем».
+
+        Cached for ``self._volume_cache_ttl`` seconds. Pass ``use_cache=False``
+        to force a fresh query (e.g. from diagnostics page).
+        """
+        if use_cache and self._volume_cache is not None:
+            ts, cached = self._volume_cache
+            if time.monotonic() - ts < self._volume_cache_ttl:
+                return cached
+
+        try:
+            sid = self._login()
+        except DownloadStationError:
+            logger.warning("Disk-space check: login failed", exc_info=True)
+            return None
+
+        try:
+            try:
+                result = self._request(
+                    "/webapi/entry.cgi",
+                    {
+                        "api": "SYNO.Core.Storage.Volume",
+                        "version": "1",
+                        "method": "list",
+                        "limit": "-1",
+                        "offset": "0",
+                        "_sid": sid,
+                    },
+                )
+            except DownloadStationError as exc:
+                # API not available on this DSM (older version, restricted user).
+                logger.info("Disk-space check: Volume.list unavailable: %s", exc)
+                return None
+
+            volumes = result.get("data", {}).get("volumes") or []
+            if not volumes:
+                logger.info("Disk-space check: no volumes returned by DSM")
+                return None
+
+            # Match the volume whose `volume_path` is a prefix of our destination
+            # path, longest match wins. Destination may be relative ("video")
+            # or absolute ("/volume1/video") — try both.
+            dest = self.destination or ""
+            dest_abs = dest if dest.startswith("/") else f"/{dest}"
+
+            best: dict | None = None
+            best_len = -1
+            for vol in volumes:
+                if not isinstance(vol, dict):
+                    continue
+                vp = str(vol.get("volume_path") or "")
+                if not vp:
+                    continue
+                if dest_abs.startswith(vp.rstrip("/") + "/") or dest_abs == vp:
+                    if len(vp) > best_len:
+                        best = vol
+                        best_len = len(vp)
+
+            # Fallback: if our destination doesn't match by prefix (relative
+            # path with unknown volume), pick the largest single volume — most
+            # Synologies have just one, so this is usually correct.
+            if best is None and len(volumes) == 1:
+                best = volumes[0] if isinstance(volumes[0], dict) else None
+
+            if best is None:
+                logger.info(
+                    "Disk-space check: destination %r doesn't match any volume "
+                    "(volumes=%s)",
+                    dest, [v.get("volume_path") for v in volumes if isinstance(v, dict)],
+                )
+                return None
+
+            try:
+                total = int(best.get("size", {}).get("total") or 0)
+                free = int(best.get("size", {}).get("free_inode") or
+                           best.get("size", {}).get("free") or 0)
+            except (TypeError, ValueError, AttributeError):
+                logger.warning("Disk-space check: unparseable size in %r", best)
+                return None
+
+            if total <= 0:
+                return None
+
+            used_pct = max(0.0, min(100.0, 100.0 * (total - free) / total))
+            info = {
+                "total_bytes": total,
+                "free_bytes": max(0, free),
+                "used_pct": round(used_pct, 1),
+                "mount_point": str(best.get("volume_path") or ""),
+            }
+            self._volume_cache = (time.monotonic(), info)
+            return info
+        finally:
+            self._logout(sid)
 
     @_synchronized
     def list_tasks(self) -> list[dict]:

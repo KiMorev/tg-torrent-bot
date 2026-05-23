@@ -20,6 +20,20 @@ from gpt_client import chat_completion
 logger = logging.getLogger("tg_torrent_drop")
 
 
+def _record_usage(sink: list | None, result: dict | None) -> None:
+    """Append real {input_tokens, output_tokens, model} from a chat_completion
+    success into the caller-supplied sink. No-op if sink is None or result
+    is None (network/auth error → no tokens spent).
+    """
+    if sink is None or result is None:
+        return
+    sink.append({
+        "input_tokens": int(result.get("input_tokens") or 0),
+        "output_tokens": int(result.get("output_tokens") or 0),
+        "model": str(result.get("model") or ""),
+    })
+
+
 # Confidence threshold below which kp_confidence_check rejects a match.
 # Tuned conservatively: 0.7 means GPT must be reasonably sure. Lower → more
 # false-positive matches; higher → more cards left without KP enrichment.
@@ -32,6 +46,7 @@ def kp_confidence_check(
     candidates: list[dict],
     api_key: str,
     model: str = "gpt-4o-mini",
+    usage_sink: list | None = None,
 ) -> tuple[int | None, float, str | None]:
     """Ask GPT to pick the best Kinopoisk match for a torrent title.
 
@@ -82,6 +97,7 @@ def kp_confidence_check(
         temperature=0.0,
         response_format={"type": "json_object"},
     )
+    _record_usage(usage_sink, result)
     if error or not result:
         return (None, 0.0, error)
 
@@ -113,6 +129,7 @@ def parse_torrent_title(
     title: str,
     api_key: str,
     model: str = "gpt-4o-mini",
+    usage_sink: list | None = None,
 ) -> tuple[dict | None, str | None]:
     """Parse a raw torrent title into structured metadata for clean UI badges.
 
@@ -187,6 +204,7 @@ def parse_torrent_title(
         temperature=0.0,
         response_format={"type": "json_object"},
     )
+    _record_usage(usage_sink, result)
     if error or not result:
         return (None, error)
 
@@ -223,6 +241,7 @@ def explain_movie_card(
     synopsis: str = "",
     api_key: str,
     model: str = "gpt-4o-mini",
+    usage_sink: list | None = None,
 ) -> tuple[str | None, str | None]:
     """Generate a 1-sentence Russian «why this film» explanation for /new.
 
@@ -288,6 +307,7 @@ def explain_movie_card(
         temperature=0.5,  # small creativity for varied phrasing
         response_format={"type": "json_object"},
     )
+    _record_usage(usage_sink, result)
     if error or not result:
         return (None, error)
 
@@ -317,6 +337,7 @@ def did_you_mean(
     api_key: str,
     model: str = "gpt-4o-mini",
     max_suggestions: int = 3,
+    usage_sink: list | None = None,
 ) -> tuple[list[str], str | None]:
     """Generate alternative search queries when the original returned 0 results.
 
@@ -375,6 +396,7 @@ def did_you_mean(
         temperature=0.3,  # slight creativity for spelling variations
         response_format={"type": "json_object"},
     )
+    _record_usage(usage_sink, result)
     if error or not result:
         return ([], error)
 

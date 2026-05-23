@@ -4571,10 +4571,72 @@ async def _notify_pending_success(
     if not chat_id:
         return
     title = entry.get("title") or "загрузка"
+
+    # If the original action was «⬇️📺 Серии» / «⬇️🎯 Сезон» (subscribe=True),
+    # recreate the subscription now that the download actually succeeded.
+    # Without this, queueing a series after a download failure would silently
+    # downgrade to a one-shot — the user's original intent is lost.
+    subscribe_restored = False
+    if entry.get("subscribe"):
+        notify_mode = str(entry.get("notify_mode") or "per_episode")
+        source = str(entry.get("source") or "")
+        try:
+            if source == "jackett":
+                sub_key = f"jackett:{uuid.uuid4().hex[:8]}"
+                subs = state_store.load_topic_subscriptions()
+                now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                subs[sub_key] = build_jackett_subscription(
+                    chat_id=int(chat_id),
+                    query=entry.get("title") or "",
+                    result=_pending_entry_to_search_result(entry),
+                    seen_results=[],  # no historical seen-list — sub will
+                                      # catch updates from this point forward
+                    added_at=now_text,
+                    notify_mode=notify_mode,
+                )
+                state_store.save_topic_subscriptions(subs)
+                subscribe_restored = True
+                logger.info(
+                    "Pending-success: restored Jackett subscription key=%s notify_mode=%s",
+                    sub_key, notify_mode,
+                )
+            else:
+                # Rutracker subscription needs an episode-info-bearing title.
+                topic_id = _extract_rutracker_topic_id(entry.get("topic_url") or "")
+                episode_info = _parse_episode_info(title)
+                if topic_id and episode_info:
+                    subs = state_store.load_topic_subscriptions()
+                    subs[topic_id] = {
+                        "chat_id": int(chat_id),
+                        "title": title,
+                        "last_episode_end": episode_info[0],
+                        "total_episodes": episode_info[1],
+                        "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
+                        "notify_mode": notify_mode,
+                    }
+                    state_store.save_topic_subscriptions(subs)
+                    subscribe_restored = True
+                    logger.info(
+                        "Pending-success: restored Rutracker subscription topic=%s notify_mode=%s",
+                        topic_id, notify_mode,
+                    )
+        except Exception:  # noqa: BLE001 — subscription restore is best-effort
+            logger.warning(
+                "Pending-success: failed to restore subscription for %s",
+                title, exc_info=True,
+            )
+
     text = (
         f"✅ Отложенная загрузка стартовала: «{title}».\n"
         f"Метод: {method}. Слежу за прогрессом."
     )
+    if entry.get("subscribe") and subscribe_restored:
+        text += "\n🔔 Подписка восстановлена — слежу за новыми сериями."
+    elif entry.get("subscribe") and not subscribe_restored:
+        text += (
+            "\n⚠️ Подписка не была восстановлена автоматически — "
+            "добавьте её вручную через поиск."
+        )
     try:
         await app.bot.send_message(chat_id=int(chat_id), text=text)
     except Exception:
@@ -6563,7 +6625,14 @@ async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except (ValueError, IndexError):
         await query.edit_message_text("Запрос потерян. Начните поиск заново.")
         return ConversationHandler.END
-    return await _download_and_add(query, context, index, subscribe=False)
+    # Restore subscribe-intent saved by the original _download_and_add call —
+    # without this, retrying «⬇️📺 Серии» / «⬇️🎯 Сезон» after a failure would
+    # silently become a plain one-shot download.
+    return await _download_and_add(
+        query, context, index,
+        subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
+        notify_mode=str(context.user_data.get("srch_last_notify_mode") or "per_episode"),
+    )
 
 
 async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -6596,7 +6665,10 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     pending = _load_pending_downloads()
     entry_id = uuid.uuid4().hex[:12]
     pending[entry_id] = _pending_download_entry_from_result(
-        result, chat_id=chat_id, subscribe=False, error=last_error,
+        result, chat_id=chat_id,
+        subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
+        notify_mode=str(context.user_data.get("srch_last_notify_mode") or "per_episode"),
+        error=last_error,
     )
     _save_pending_downloads(pending)
     logger.info(
@@ -7138,7 +7210,8 @@ def _save_pending_downloads(entries: dict[str, dict]) -> None:
 
 
 def _pending_download_entry_from_result(
-    result: dict, *, chat_id: int | None, subscribe: bool, error: str,
+    result: dict, *, chat_id: int | None, subscribe: bool,
+    notify_mode: str = "per_episode", error: str,
 ) -> dict:
     """Build a pending-queue entry from a search result + last error message."""
     return {
@@ -7151,6 +7224,11 @@ def _pending_download_entry_from_result(
         "tracker": str(result.get("tracker_name") or result.get("category") or ""),
         "source": str(result.get("source") or ""),
         "subscribe": bool(subscribe),
+        # Preserve notify_mode so the background pending-retry loop can
+        # restore per_episode vs season_complete semantics when it
+        # eventually succeeds — otherwise queueing «⬇️🎯 Сезон» would
+        # silently downgrade to per-episode notifications.
+        "notify_mode": str(notify_mode or "per_episode"),
         "attempts": 0,
         "last_attempt_at": None,
         "last_error": (error or "")[:200],
@@ -7202,6 +7280,55 @@ def _format_download_error(exc: Exception) -> str:
     return f"❌ Ошибка: {msg[:200]}"
 
 
+# Disk-space guard thresholds. <5% free → BLOCK download (DSM would likely
+# fail anyway, but better to fail-fast with a clear message). <15% free →
+# warn in logs and surface in /admin diagnostics, but don't block (user
+# may consciously want this last 30 GB rip).
+_DISK_SPACE_BLOCK_PCT = 5.0
+_DISK_SPACE_WARN_PCT = 15.0
+
+
+def _check_disk_space_for_download() -> tuple[str, str] | None:
+    """Return (severity, message) if disk-space concern, else None.
+
+    severity: "block" → caller MUST abort download with this message.
+              "warn"  → caller logs + can optionally show in UI.
+
+    None means either disk space is fine, OR DSM didn't expose volume
+    info (treat as fine — graceful degrade, don't block on missing API).
+    """
+    if ds_client is None:
+        return None
+    try:
+        info = ds_client.get_volume_info()
+    except Exception:  # noqa: BLE001 — disk check must never crash download flow
+        logger.warning("Disk-space check raised unexpectedly", exc_info=True)
+        return None
+    if info is None:
+        return None  # API unavailable — graceful skip
+
+    free = int(info.get("free_bytes") or 0)
+    total = int(info.get("total_bytes") or 0)
+    if total <= 0:
+        return None
+
+    free_pct = 100.0 * free / total
+    if free_pct < _DISK_SPACE_BLOCK_PCT:
+        msg = (
+            f"🚨 Недостаточно места на NAS\n\n"
+            f"Свободно: <b>{_format_size(free)}</b> из {_format_size(total)} "
+            f"(<b>{free_pct:.1f}%</b>).\n"
+            f"Порог блокировки: {_DISK_SPACE_BLOCK_PCT:.0f}%.\n\n"
+            f"Освободите место и попробуйте снова."
+        )
+        return ("block", msg)
+    if free_pct < _DISK_SPACE_WARN_PCT:
+        return ("warn",
+                f"⚠️ На NAS осталось {_format_size(free)} ({free_pct:.1f}%) — "
+                f"download продолжается, но место заканчивается.")
+    return None
+
+
 async def _download_and_add(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -7224,6 +7351,11 @@ async def _download_and_add(
 
     result = results[index]
     context.user_data["srch_picked"] = index
+    # Stash subscribe/notify_mode intent so retry/queue handlers can
+    # restore them after a download failure — otherwise tapping retry
+    # silently downgrades «⬇️📺 Серии» to a plain one-shot download.
+    context.user_data["srch_last_subscribe"] = subscribe
+    context.user_data["srch_last_notify_mode"] = notify_mode
     topic_id = result.get("topic_id", "")
     source = result.get("source", "rutracker")
 
@@ -7257,6 +7389,11 @@ async def _download_and_add(
                     "type": "search",
                     "index": index,
                     "subscribe": subscribe,
+                    # Preserve notify_mode so plex_confirm_download doesn't
+                    # silently downgrade season_complete → per_episode. The
+                    # movie branch (above) already does this; the series
+                    # branch used to drop it.
+                    "notify_mode": notify_mode,
                 }
                 await query.edit_message_text(
                     _plex_series_confirm_text(series_check, display_title, req_quality),
@@ -7264,6 +7401,25 @@ async def _download_and_add(
                     parse_mode="HTML",
                 )
                 return SEARCH_PLEX_CONFIRM
+
+    # Disk-space guard — runs after Plex check (Plex confirm has its own
+    # path that re-enters this function with _skip_plex_check=True, so the
+    # check still fires before any actual DS task creation).
+    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+    if disk_check is not None:
+        severity, msg = disk_check
+        if severity == "block":
+            logger.warning("Download blocked: disk space critical (%s)", msg)
+            await query.edit_message_text(
+                msg,
+                reply_markup=_search_error_keyboard(),
+                parse_mode="HTML",
+            )
+            return ConversationHandler.END
+        # severity == "warn" — keep going, but surface to the user later
+        # in the success message. Stash for renderer to pick up.
+        context.user_data["srch_disk_warn"] = msg
+        logger.info("Disk-space warning before download: %s", msg)
 
     await query.edit_message_text("⏳ Скачиваю torrent-файл…")
 
@@ -8062,19 +8218,43 @@ async def _check_jackett_sub_via_rutracker_direct(
             pass
 
     is_complete = new_end >= new_total
+    notify_mode = sub.get("notify_mode") or "per_episode"
     short_q = str(sub.get("query") or sub.get("title") or key)
     short_q = short_q[:40] + "…" if len(short_q) > 40 else short_q
     progress = f"\nСерии: {last_end} → {new_end} из {new_total}"
 
-    # Update stored state
-    sub["last_episode_end"] = new_end
-    sub["total_episodes"] = new_total
-    sub["title"] = new_title
-    # Remove subscription only when the season is done AND the torrent was
-    # successfully handed off to Download Station.  If the download failed,
-    # keep the subscription so the next check can retry.
-    if is_complete and task_id:
-        subs.pop(key, None)
+    # If the torrent download failed, DO NOT advance last_episode_end —
+    # otherwise the next check sees new_end <= last_end and never retries.
+    # Keep state at last_end so the same update is re-attempted next loop.
+    download_failed = not task_id
+    if not download_failed:
+        sub["last_episode_end"] = new_end
+        sub["total_episodes"] = new_total
+        sub["title"] = new_title
+        # Remove subscription only when the season is done AND the torrent
+        # was successfully handed off to Download Station.
+        if is_complete:
+            subs.pop(key, None)
+    else:
+        logger.info(
+            "Jackett/RT sub %s: download failed (task_id empty) — "
+            "keeping state at last_end=%s for retry next check", key, last_end,
+        )
+
+    # notify_mode=season_complete: silent advance when download succeeded
+    # but season not yet complete — Plex gets every episode, user sees
+    # nothing until full season is out. Skip push, keep loop going.
+    if (
+        notify_mode == "season_complete"
+        and not download_failed
+        and not is_complete
+    ):
+        logger.info(
+            "Jackett/RT sub silent advance (season_complete): key=%s "
+            "episodes=%s→%s/%s task=%s",
+            key, last_end, new_end, new_total, task_id,
+        )
+        return True
 
     # Build notification
     if task_id and is_complete:
@@ -8240,10 +8420,15 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     key, dl_err,
                 )
 
-            # Season-complete mode: silently advance subscription state and skip
-            # the push until the season is fully out. Download has already happened
-            # above so Plex sees every episode regardless.
-            if notify_mode == "season_complete" and not is_complete:
+            # Season-complete mode: silently advance subscription state and
+            # skip the push until the season is fully out. ONLY if the
+            # download actually succeeded — otherwise the silent advance
+            # would mark this update as «handled» and the failed download
+            # would never be retried (next check sees same title in
+            # seen_titles and selects no candidate). When task_id is None,
+            # fall through to the notify-with-error branch so the user can
+            # at least download manually.
+            if notify_mode == "season_complete" and not is_complete and task_id is not None:
                 checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
                 if sub.get("version") == JACKETT_SUBSCRIPTION_SCHEMA:
                     apply_jackett_subscription_match(sub, candidate, checked_at)
@@ -8260,6 +8445,12 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     key, candidate.title,
                 )
                 continue
+            if notify_mode == "season_complete" and not is_complete and task_id is None:
+                logger.info(
+                    "Jackett subscription %s: season_complete + download failed — "
+                    "falling back to notify-with-manual-link (will retry next check)",
+                    key,
+                )
 
             # Build notification text depending on whether auto-download succeeded.
             if task_id is not None:
@@ -9981,29 +10172,38 @@ async def _enrich_top_results_with_metadata(
     if not misses:
         return
 
-    # Step 2: parallel GPT-parse the misses.
-    tasks = [
-        asyncio.to_thread(
-            gpt_features_parse_torrent_title,
-            title=r["title"], api_key=OPENAI_API_KEY, model=GPT_MODEL,
+    # Step 2: parallel GPT-parse the misses. Each call carries its own
+    # usage_sink so we can plumb the real API-reported token counts back
+    # to the per-feature usage tracker (vs hardcoded estimates).
+    miss_sinks: list[list] = [[] for _ in misses]
+
+    def _parse_with_sink(title: str, sink: list):
+        return gpt_features_parse_torrent_title(
+            title=title, api_key=OPENAI_API_KEY, model=GPT_MODEL,
+            usage_sink=sink,
         )
-        for (_h, r) in misses
+
+    tasks = [
+        asyncio.to_thread(_parse_with_sink, r["title"], sink)
+        for (_h, r), sink in zip(misses, miss_sinks)
     ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Step 3: attach parsed_meta + update cache + record usage.
     cache_dirty = False
-    for (h, r), outcome in zip(misses, outcomes):
+    for (h, r), outcome, sink in zip(misses, outcomes, miss_sinks):
         if isinstance(outcome, Exception):
             logger.warning(
                 "parse_torrent_title raised for %r: %s", r.get("title", "")[:60], outcome,
             )
             continue
         meta, err = outcome
+        usage = sink[0] if sink else None
         _gpt_record_usage(
             feature="quality_parse",
-            input_tokens=200, output_tokens=80,
+            input_tokens=200, output_tokens=80,  # fallback only — usage wins
             error_label=err,
+            usage=usage,
         )
         if meta:
             r["parsed_meta"] = meta
@@ -10033,22 +10233,24 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
     """
     if not GPT_ENABLED:
         return []
+    sink: list = []
     try:
         suggestions, error = await asyncio.to_thread(
             gpt_did_you_mean,
             query=search_query,
             api_key=OPENAI_API_KEY,
             model=GPT_MODEL,
+            usage_sink=sink,
         )
     except Exception:
         logger.warning("did_you_mean call failed", exc_info=True)
         return []
-    # Same conservative token estimate as kp_confidence — refine later if needed.
     _gpt_record_usage(
         feature="did_you_mean",
         input_tokens=100,
-        output_tokens=120,
+        output_tokens=120,  # fallback only — real usage from sink wins
         error_label=error,
+        usage=(sink[0] if sink else None),
     )
     return suggestions
 
@@ -10111,6 +10313,7 @@ async def _enrich_top10_with_explanations(cache: dict) -> None:
         # Step 2: GPT explanation (cached forever).
         explanation = cache_entry.get("explanation")
         if not explanation:
+            explain_sink: list = []
             text, error = await asyncio.to_thread(
                 gpt_features_explain_movie_card,
                 title=str(card.get("title") or ""),
@@ -10120,15 +10323,15 @@ async def _enrich_top10_with_explanations(cache: dict) -> None:
                 synopsis=synopsis or "",
                 api_key=OPENAI_API_KEY,
                 model=GPT_MODEL,
+                usage_sink=explain_sink,
             )
-            # Rough token estimate for the usage tracker — refine later if
-            # /admin numbers look off vs OpenAI dashboard.
             approx_in = 200 + (len(synopsis or "") // 4)
             _gpt_record_usage(
                 feature="explain_card",
                 input_tokens=approx_in,
-                output_tokens=60,
+                output_tokens=60,  # fallback only
                 error_label=error,
+                usage=(explain_sink[0] if explain_sink else None),
             )
             if text:
                 explanation = text
@@ -10171,20 +10374,20 @@ def _gpt_validate_kp_match(query: str, match) -> bool:
         "genres": match.genres or [],
     }]
 
+    kp_sink: list = []
     pick, confidence, error = gpt_kp_confidence_check(
         query=query,
         candidates=candidates,
         api_key=OPENAI_API_KEY,
         model=GPT_MODEL,
+        usage_sink=kp_sink,
     )
-    # Approximate token usage: prompt ~150 + 1 candidate row, response ~50.
-    # We don't get exact counts from gpt_features (it discards them), so
-    # estimate conservatively — refine later if /admin numbers look off.
     _gpt_record_usage(
         feature="kp_confidence",
         input_tokens=200,
-        output_tokens=50,
+        output_tokens=50,  # fallback only — sink carries real counts
         error_label=error,
+        usage=(kp_sink[0] if kp_sink else None),
     )
 
     if error:
@@ -10197,49 +10400,82 @@ def _gpt_validate_kp_match(query: str, match) -> bool:
 def _gpt_record_usage(
     *,
     feature: str,  # "kp_confidence" | "did_you_mean" | "explain_card" | "quality_parse" | "plex_unmatched"
-    input_tokens: int,
-    output_tokens: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
     error_label: str | None,
+    usage: dict | None = None,
 ) -> None:
     """Track GPT call into the monthly per-feature usage bucket.
 
-    Cheap (one JSON load/save) so it's safe to call synchronously from
-    each GPT feature wrapper. Counters reset on calendar month rollover;
-    last_error persists across rollover so the operator still sees the
-    last problem after a month boundary.
+    Prefer the real ``usage`` dict (``{input_tokens, output_tokens, model}``)
+    plumbed up from ``gpt_features._record_usage`` — that's the API-reported
+    counts. The ``input_tokens``/``output_tokens`` positional args are kept
+    only as fallback estimates for code paths that don't propagate usage yet
+    (or for purely-local-failure calls where no API was hit).
+
+    If the model is unknown to ``MODEL_PRICING``, tokens are still recorded
+    but cost is left untouched and a ``cost_unknown_calls`` counter is bumped
+    so /admin can flag «cost unknown for model X».
+
+    Counters reset on calendar month rollover; ``last_error`` persists across
+    rollover so the operator still sees the last problem after the boundary.
     """
+    # Pick the most accurate numbers we have. Real usage wins; falls back to
+    # caller estimates so a path without a sink still records something.
+    if usage:
+        real_in = int(usage.get("input_tokens") or 0)
+        real_out = int(usage.get("output_tokens") or 0)
+        model = str(usage.get("model") or "gpt-4o-mini")
+        is_real = True
+    else:
+        real_in = max(0, input_tokens)
+        real_out = max(0, output_tokens)
+        model = "gpt-4o-mini"  # default model used everywhere today
+        is_real = False
+
     now = datetime.now(DISPLAY_TIMEZONE)
     current_month = now.strftime("%Y-%m")
-    usage = state_store.load_gpt_usage()
-    if usage.get("month") != current_month:
-        usage = {
+    gpt_usage = state_store.load_gpt_usage()
+    if gpt_usage.get("month") != current_month:
+        gpt_usage = {
             "month": current_month,
             "features": {},
-            "last_error": usage.get("last_error"),
+            "last_error": gpt_usage.get("last_error"),
         }
 
-    features = usage.setdefault("features", {})
+    features = gpt_usage.setdefault("features", {})
     bucket = features.setdefault(feature, {
         "calls": 0,
         "input_tokens": 0,
         "output_tokens": 0,
         "estimated_cost_usd": 0.0,
+        "real_usage_calls": 0,
+        "estimate_calls": 0,
+        "cost_unknown_calls": 0,
     })
     bucket["calls"] = int(bucket.get("calls", 0)) + 1
-    bucket["input_tokens"] = int(bucket.get("input_tokens", 0)) + max(0, input_tokens)
-    bucket["output_tokens"] = int(bucket.get("output_tokens", 0)) + max(0, output_tokens)
-    bucket["estimated_cost_usd"] = float(bucket.get("estimated_cost_usd", 0.0)) + estimate_chat_cost_usd(
-        input_tokens, output_tokens,
-    )
+    bucket["input_tokens"] = int(bucket.get("input_tokens", 0)) + real_in
+    bucket["output_tokens"] = int(bucket.get("output_tokens", 0)) + real_out
+    bucket["real_usage_calls"] = int(bucket.get("real_usage_calls", 0)) + (1 if is_real else 0)
+    bucket["estimate_calls"] = int(bucket.get("estimate_calls", 0)) + (0 if is_real else 1)
+
+    cost = estimate_chat_cost_usd(real_in, real_out, model=model)
+    if cost is None:
+        bucket["cost_unknown_calls"] = int(bucket.get("cost_unknown_calls", 0)) + 1
+        bucket.setdefault("unknown_models", [])
+        if model and model not in bucket["unknown_models"]:
+            bucket["unknown_models"].append(model)
+    else:
+        bucket["estimated_cost_usd"] = float(bucket.get("estimated_cost_usd", 0.0)) + cost
 
     if error_label:
-        usage["last_error"] = {
+        gpt_usage["last_error"] = {
             "ts": now.isoformat(timespec="seconds"),
             "feature": feature,
             "type": error_label,
         }
 
-    state_store.save_gpt_usage(usage)
+    state_store.save_gpt_usage(gpt_usage)
 
 
 async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

@@ -146,6 +146,18 @@ def _jackett_diagnostic(jackett_client) -> ServiceDiagnostic:
     )
 
 
+def _format_bytes_short(value: int) -> str:
+    """Compact bytes formatter for diagnostics ('128.4 ГБ', '2.1 ТБ')."""
+    if value <= 0:
+        return "0 Б"
+    n = float(value)
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} ЭБ"
+
+
 def _download_station_diagnostic(ds_client) -> ServiceDiagnostic:
     try:
         tasks = ds_client.list_tasks()
@@ -164,11 +176,53 @@ def _download_station_diagnostic(ds_client) -> ServiceDiagnostic:
             [_raw_detail(str(exc))],
         )
 
+    details = [f"   Задач: {len(tasks)}"]
+
+    # Volume info — try to surface free disk space. Graceful: if DSM doesn't
+    # expose SYNO.Core.Storage.Volume (older DSM, restricted account), we
+    # silently omit the line rather than failing the whole diagnostic.
+    try:
+        volume = ds_client.get_volume_info(use_cache=False)
+    except Exception:  # noqa: BLE001
+        volume = None
+    if volume is not None:
+        total = int(volume.get("total_bytes") or 0)
+        free = int(volume.get("free_bytes") or 0)
+        used_pct = float(volume.get("used_pct") or 0.0)
+        mount = str(volume.get("mount_point") or "")
+        free_pct = 100.0 - used_pct
+        status_icon = "✅" if free_pct >= 15 else ("⚠️" if free_pct >= 5 else "🚨")
+        line = (
+            f"   {status_icon} Место: свободно "
+            f"{_format_bytes_short(free)} из {_format_bytes_short(total)} "
+            f"({free_pct:.1f}%)"
+        )
+        if mount:
+            line += f" [{mount}]"
+        details.append(line)
+
+        if free_pct < 5:
+            return ServiceDiagnostic(
+                "Download Station",
+                "error",
+                _summary("error", "🧲", "Download Station",
+                         f"критически мало места ({free_pct:.1f}% свободно)"),
+                details,
+            )
+        if free_pct < 15:
+            return ServiceDiagnostic(
+                "Download Station",
+                "warn",
+                _summary("warn", "🧲", "Download Station",
+                         f"мало места ({free_pct:.1f}% свободно)"),
+                details,
+            )
+
     return ServiceDiagnostic(
         "Download Station",
         "ok",
         _summary("ok", "🧲", "Download Station", "подключен"),
-        [f"   Задач: {len(tasks)}"],
+        details,
     )
 
 
@@ -537,6 +591,10 @@ def _gpt_chat_diagnostic(
     total_cost = 0.0
     total_in_tokens = 0
     total_out_tokens = 0
+    total_real_usage_calls = 0
+    total_estimate_calls = 0
+    total_cost_unknown_calls = 0
+    unknown_models: set[str] = set()
     for f_data in features.values():
         if not isinstance(f_data, dict):
             continue
@@ -544,12 +602,31 @@ def _gpt_chat_diagnostic(
         total_cost += float(f_data.get("estimated_cost_usd") or 0.0)
         total_in_tokens += int(f_data.get("input_tokens") or 0)
         total_out_tokens += int(f_data.get("output_tokens") or 0)
+        total_real_usage_calls += int(f_data.get("real_usage_calls") or 0)
+        total_estimate_calls += int(f_data.get("estimate_calls") or 0)
+        total_cost_unknown_calls += int(f_data.get("cost_unknown_calls") or 0)
+        for m in (f_data.get("unknown_models") or []):
+            if isinstance(m, str) and m:
+                unknown_models.add(m)
 
     details.append(
         f"   За {month}: {total_calls} "
         f"{_plural_ru(total_calls, 'запрос', 'запроса', 'запросов')} · "
         f"~${total_cost:.3f} (in {total_in_tokens}, out {total_out_tokens} ток.)"
     )
+    # Show real-usage vs estimate ratio — operators want to know when /admin
+    # numbers come from API-reported tokens vs hardcoded fallbacks.
+    if total_calls > 0:
+        details.append(
+            f"   Учёт: {total_real_usage_calls} реальных · "
+            f"{total_estimate_calls} оценочных"
+        )
+    if total_cost_unknown_calls > 0:
+        models_str = ", ".join(sorted(unknown_models)) or "?"
+        details.append(
+            f"   ⚠️ Cost unknown для {total_cost_unknown_calls} вызовов "
+            f"(модели: {models_str}) — токены посчитаны, доллары нет"
+        )
 
     # Per-feature breakdown — only show features that actually fired.
     for feature_key, feature_data in sorted(features.items()):
