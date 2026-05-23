@@ -4584,6 +4584,8 @@ async def _notify_pending_success(
     subscribe_restored = False
     if entry.get("subscribe"):
         notify_mode = str(entry.get("notify_mode") or "per_episode")
+        notify_policy = entry.get("notify_policy")
+        download_policy = entry.get("download_policy")
         source = str(entry.get("source") or "")
         try:
             if source == "jackett":
@@ -4594,16 +4596,18 @@ async def _notify_pending_success(
                     chat_id=int(chat_id),
                     query=entry.get("title") or "",
                     result=_pending_entry_to_search_result(entry),
-                    seen_results=[],  # no historical seen-list — sub will
-                                      # catch updates from this point forward
+                    seen_results=[],
                     added_at=now_text,
                     notify_mode=notify_mode,
+                    notify_policy=notify_policy,
+                    download_policy=download_policy,
                 )
                 state_store.save_topic_subscriptions(subs)
                 subscribe_restored = True
                 logger.info(
-                    "Pending-success: restored Jackett subscription key=%s notify_mode=%s",
-                    sub_key, notify_mode,
+                    "Pending-success: restored Jackett subscription key=%s policy=%s/%s",
+                    sub_key, subs[sub_key].get("notify_policy"),
+                    subs[sub_key].get("download_policy"),
                 )
             else:
                 # Rutracker subscription needs an episode-info-bearing title.
@@ -4611,7 +4615,7 @@ async def _notify_pending_success(
                 episode_info = _parse_episode_info(title)
                 if topic_id and episode_info:
                     subs = state_store.load_topic_subscriptions()
-                    subs[topic_id] = {
+                    new_sub = {
                         "chat_id": int(chat_id),
                         "title": title,
                         "last_episode_end": episode_info[0],
@@ -4619,11 +4623,19 @@ async def _notify_pending_success(
                         "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
                         "notify_mode": notify_mode,
                     }
+                    if notify_policy:
+                        new_sub["notify_policy"] = notify_policy
+                    if download_policy:
+                        new_sub["download_policy"] = download_policy
+                    from subscription_policy import migrate_subscription_in_place
+                    migrate_subscription_in_place(new_sub)
+                    subs[topic_id] = new_sub
                     state_store.save_topic_subscriptions(subs)
                     subscribe_restored = True
                     logger.info(
-                        "Pending-success: restored Rutracker subscription topic=%s notify_mode=%s",
-                        topic_id, notify_mode,
+                        "Pending-success: restored Rutracker subscription topic=%s policy=%s/%s",
+                        topic_id, new_sub.get("notify_policy"),
+                        new_sub.get("download_policy"),
                     )
         except Exception:  # noqa: BLE001 — subscription restore is best-effort
             logger.warning(
@@ -6637,6 +6649,8 @@ async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         query, context, index,
         subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
         notify_mode=str(context.user_data.get("srch_last_notify_mode") or "per_episode"),
+        notify_policy=context.user_data.get("srch_last_notify_policy"),
+        download_policy=context.user_data.get("srch_last_download_policy"),
     )
 
 
@@ -6673,6 +6687,8 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         result, chat_id=chat_id,
         subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
         notify_mode=str(context.user_data.get("srch_last_notify_mode") or "per_episode"),
+        notify_policy=context.user_data.get("srch_last_notify_policy"),
+        download_policy=context.user_data.get("srch_last_download_policy"),
         error=last_error,
     )
     _save_pending_downloads(pending)
@@ -7216,10 +7232,13 @@ def _save_pending_downloads(entries: dict[str, dict]) -> None:
 
 def _pending_download_entry_from_result(
     result: dict, *, chat_id: int | None, subscribe: bool,
-    notify_mode: str = "per_episode", error: str,
+    notify_mode: str = "per_episode",
+    notify_policy: str | None = None,
+    download_policy: str | None = None,
+    error: str,
 ) -> dict:
     """Build a pending-queue entry from a search result + last error message."""
-    return {
+    entry = {
         "chat_id": chat_id,
         "added_at": datetime.now(DISPLAY_TIMEZONE).isoformat(),
         "title": str(result.get("title") or ""),
@@ -7229,15 +7248,19 @@ def _pending_download_entry_from_result(
         "tracker": str(result.get("tracker_name") or result.get("category") or ""),
         "source": str(result.get("source") or ""),
         "subscribe": bool(subscribe),
-        # Preserve notify_mode so the background pending-retry loop can
-        # restore per_episode vs season_complete semantics when it
-        # eventually succeeds — otherwise queueing «⬇️🎯 Сезон» would
-        # silently downgrade to per-episode notifications.
+        # Preserve subscription policy so the background pending-retry loop
+        # can restore the exact user intent when it eventually succeeds —
+        # otherwise queueing a season-only subscription would downgrade.
         "notify_mode": str(notify_mode or "per_episode"),
         "attempts": 0,
         "last_attempt_at": None,
         "last_error": (error or "")[:200],
     }
+    if notify_policy:
+        entry["notify_policy"] = notify_policy
+    if download_policy:
+        entry["download_policy"] = download_policy
+    return entry
 
 
 def _pending_entry_to_search_result(entry: dict) -> dict:
@@ -7337,6 +7360,8 @@ async def _download_and_add(
     *,
     subscribe: bool = False,
     notify_mode: str = "per_episode",
+    notify_policy: str | None = None,
+    download_policy: str | None = None,
     _skip_plex_check: bool = False,
 ) -> int:
     """Shared implementation for direct-download and direct-subscribe from the results list.
@@ -7352,11 +7377,13 @@ async def _download_and_add(
 
     result = results[index]
     context.user_data["srch_picked"] = index
-    # Stash subscribe/notify_mode intent so retry/queue handlers can
-    # restore them after a download failure — otherwise tapping retry
+    # Stash subscribe / notify_mode / policy intent so retry/queue handlers
+    # can restore them after a download failure. Without this, tapping retry
     # silently downgrades «⬇️📺 Серии» to a plain one-shot download.
     context.user_data["srch_last_subscribe"] = subscribe
     context.user_data["srch_last_notify_mode"] = notify_mode
+    context.user_data["srch_last_notify_policy"] = notify_policy
+    context.user_data["srch_last_download_policy"] = download_policy
     topic_id = result.get("topic_id", "")
     source = result.get("source", "rutracker")
 
@@ -7373,6 +7400,10 @@ async def _download_and_add(
                 "index": index,
                 "subscribe": subscribe,
                 "notify_mode": notify_mode,
+                # 1.3: carry the new policy fields so plex_confirm_download
+                # restores them intact across the Plex-confirm round-trip.
+                "notify_policy": notify_policy,
+                "download_policy": download_policy,
             }
             await query.edit_message_text(
                 _plex_confirm_text(plex_check, display_title, req_quality),
@@ -7390,11 +7421,12 @@ async def _download_and_add(
                     "type": "search",
                     "index": index,
                     "subscribe": subscribe,
-                    # Preserve notify_mode so plex_confirm_download doesn't
-                    # silently downgrade season_complete → per_episode. The
-                    # movie branch (above) already does this; the series
-                    # branch used to drop it.
+                    # Preserve notify_mode + 1.3 policy fields so
+                    # plex_confirm_download doesn't silently downgrade
+                    # season_complete → per_episode.
                     "notify_mode": notify_mode,
+                    "notify_policy": notify_policy,
+                    "download_policy": download_policy,
                 }
                 await query.edit_message_text(
                     _plex_series_confirm_text(series_check, display_title, req_quality),
@@ -7583,6 +7615,8 @@ async def _download_and_add(
                     seen_results=context.user_data.get("srch_results", []),
                     added_at=now_text,
                     notify_mode=notify_mode,
+                    notify_policy=notify_policy,
+                    download_policy=download_policy,
                 )
                 state_store.save_topic_subscriptions(subs)
                 logger.info(
@@ -7594,7 +7628,7 @@ async def _download_and_add(
                 episode_info = _parse_episode_info(title)
                 if episode_info and chat_id:
                     subs = state_store.load_topic_subscriptions()
-                    subs[topic_id] = {
+                    new_sub = {
                         "chat_id": chat_id,
                         "title": title,
                         "last_episode_end": episode_info[0],
@@ -7602,6 +7636,15 @@ async def _download_and_add(
                         "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
                         "notify_mode": notify_mode,
                     }
+                    if notify_policy:
+                        new_sub["notify_policy"] = notify_policy
+                    if download_policy:
+                        new_sub["download_policy"] = download_policy
+                    # Normalise — guarantees both new fields present even
+                    # if caller passed only legacy notify_mode.
+                    from subscription_policy import migrate_subscription_in_place
+                    migrate_subscription_in_place(new_sub)
+                    subs[topic_id] = new_sub
                     state_store.save_topic_subscriptions(subs)
                     logger.info(
                         "Subscription added: topic=%s chat=%s episodes=%s/%s notify_mode=%s",
@@ -7731,6 +7774,8 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
             query, context, pending["index"],
             subscribe=pending.get("subscribe", False),
             notify_mode=pending.get("notify_mode", "per_episode"),
+            notify_policy=pending.get("notify_policy"),
+            download_policy=pending.get("download_policy"),
             _skip_plex_check=True,
         )
 
@@ -8195,69 +8240,75 @@ async def _check_jackett_sub_via_rutracker_direct(
     if new_end <= last_end:
         return True  # no progress
 
-    # New episodes detected — download torrent directly from Rutracker.
-    safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
-    temp_path = _temp_path(safe_name)
-    task_id = ""
-    try:
-        torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
-        temp_path.write_bytes(torrent_bytes)
-        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
-        if chat_id and task_id:
-            _remember_task_owner(task_id, chat_id)
-            _remember_task_meta(
-                task_id,
-                _build_task_meta_from_title(new_title or "", source="jackett_sub"),
-            )
-    except (RutrackerError, DownloadStationError) as e:
-        logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
-    finally:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-
     is_complete = new_end >= new_total
-    notify_mode = sub.get("notify_mode") or "per_episode"
     short_q = str(sub.get("query") or sub.get("title") or key)
     short_q = short_q[:40] + "…" if len(short_q) > 40 else short_q
     progress = f"\nСерии: {last_end} → {new_end} из {new_total}"
 
-    # If the torrent download failed, DO NOT advance last_episode_end —
-    # otherwise the next check sees new_end <= last_end and never retries.
-    # Keep state at last_end so the same update is re-attempted next loop.
-    download_failed = not task_id
-    if not download_failed:
+    # 1.3 policy split: ask the helpers whether to download and whether to push.
+    from subscription_policy import should_download, should_notify
+    wants_download = should_download(sub, is_complete=is_complete)
+    wants_notify = should_notify(sub, is_complete=is_complete)
+
+    # Conditional download — when download_policy=only_when_complete the
+    # very point is to skip downloads on intermediate episodes.
+    task_id = ""
+    if wants_download:
+        safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
+        temp_path = _temp_path(safe_name)
+        try:
+            torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
+            temp_path.write_bytes(torrent_bytes)
+            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            if chat_id and task_id:
+                _remember_task_owner(task_id, chat_id)
+                _remember_task_meta(
+                    task_id,
+                    _build_task_meta_from_title(new_title or "", source="jackett_sub"),
+                )
+        except (RutrackerError, DownloadStationError) as e:
+            logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+    # State advance rules:
+    # - If we ATTEMPTED a download and it FAILED, keep state frozen so the
+    #   next check retries the same update (Bug A from 1.2).
+    # - If we SKIPPED the download intentionally (only_when_complete on a
+    #   partial episode), advance state — the user explicitly asked us not
+    #   to download yet, so re-attempting next check would also skip.
+    download_attempted_and_failed = wants_download and not task_id
+    if not download_attempted_and_failed:
         sub["last_episode_end"] = new_end
         sub["total_episodes"] = new_total
         sub["title"] = new_title
-        # Remove subscription only when the season is done AND the torrent
-        # was successfully handed off to Download Station.
-        if is_complete:
+        # Remove subscription only when the season is done AND we actually
+        # downloaded it (or we explicitly didn't want to — but then there's
+        # nothing else to do anyway).
+        if is_complete and (task_id or not wants_download):
             subs.pop(key, None)
     else:
         logger.info(
-            "Jackett/RT sub %s: download failed (task_id empty) — "
-            "keeping state at last_end=%s for retry next check", key, last_end,
+            "Jackett/RT sub %s: download failed — keeping state at last_end=%s for retry",
+            key, last_end,
         )
 
-    # notify_mode=season_complete: silent advance when download succeeded
-    # but season not yet complete — Plex gets every episode, user sees
-    # nothing until full season is out. Skip push, keep loop going.
-    if (
-        notify_mode == "season_complete"
-        and not download_failed
-        and not is_complete
-    ):
+    # Silent advance: download succeeded (or was skipped by policy) AND
+    # the user doesn't want a push right now → just log + return.
+    if not wants_notify and not download_attempted_and_failed:
         logger.info(
-            "Jackett/RT sub silent advance (season_complete): key=%s "
-            "episodes=%s→%s/%s task=%s",
-            key, last_end, new_end, new_total, task_id,
+            "Jackett/RT sub silent advance: key=%s ep=%s→%s/%s task=%s "
+            "policy=%s/%s complete=%s",
+            key, last_end, new_end, new_total, task_id or "-",
+            sub.get("notify_policy"), sub.get("download_policy"), is_complete,
         )
         return True
 
-    # Build notification
+    # Build notification — four branches by (download outcome, completion).
     if task_id and is_complete:
         text = (
             f"🔔 Подписка «{short_q}» — сезон завершён! ✅\n"
@@ -8276,7 +8327,21 @@ async def _check_jackett_sub_via_rutracker_direct(
             InlineKeyboardButton("🔄 Статус задачи", callback_data=_task_callback("info", task_id)),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
+    elif not wants_download:
+        # Notify-only mode (download_policy=notify_only) — we intentionally
+        # didn't download. Tell the user what's available with a download
+        # button so they can pull it manually if they want.
+        text = (
+            f"🔔 Подписка «{short_q}» обновилась.\n"
+            f"\n🔎 {new_title}{progress}\n\n"
+            "Авто-загрузка отключена для этой подписки."
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 Посмотреть и скачать", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}"),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+        ]])
     else:
+        # We tried to download and failed — explicit error path.
         text = (
             f"🔔 Подписка «{short_q}» обновилась, но скачать не удалось.\n"
             f"\n🔎 {new_title}{progress}\n\n"
@@ -8404,32 +8469,35 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             short_q = search_query[:40] + "…" if len(search_query) > 40 else search_query
             episode_info = _parse_episode_info(candidate.title)
             progress = f"\nСерии: {episode_info[0]} из {episode_info[1]}" if episode_info else ""
-            notify_mode = sub.get("notify_mode") or "per_episode"
             is_complete = bool(episode_info and episode_info[0] >= episode_info[1] > 0)
 
-            # Try to auto-download the update (same as Rutracker subscription behaviour).
-            task_id: str | None = None
-            try:
-                task_id = await _jackett_subscription_auto_download(candidate, chat_id)
-                logger.info(
-                    "Subscription auto-download: key=%s task_id=%s title=%s",
-                    key, task_id, candidate.title,
-                )
-            except Exception as dl_err:
-                logger.warning(
-                    "Subscription auto-download failed for %s: %s — sending notify-only",
-                    key, dl_err,
-                )
+            # 1.3 policy split: helpers decide whether to download / notify.
+            from subscription_policy import should_download, should_notify
+            wants_download = should_download(sub, is_complete=is_complete)
+            wants_notify = should_notify(sub, is_complete=is_complete)
 
-            # Season-complete mode: silently advance subscription state and
-            # skip the push until the season is fully out. ONLY if the
-            # download actually succeeded — otherwise the silent advance
-            # would mark this update as «handled» and the failed download
-            # would never be retried (next check sees same title in
-            # seen_titles and selects no candidate). When task_id is None,
-            # fall through to the notify-with-error branch so the user can
-            # at least download manually.
-            if notify_mode == "season_complete" and not is_complete and task_id is not None:
+            # Conditional auto-download — only when policy permits AND there's
+            # something to try. download_policy=only_when_complete waits.
+            task_id: str | None = None
+            if wants_download:
+                try:
+                    task_id = await _jackett_subscription_auto_download(candidate, chat_id)
+                    logger.info(
+                        "Subscription auto-download: key=%s task_id=%s title=%s",
+                        key, task_id, candidate.title,
+                    )
+                except Exception as dl_err:
+                    logger.warning(
+                        "Subscription auto-download failed for %s: %s — sending notify-only",
+                        key, dl_err,
+                    )
+
+            download_attempted_and_failed = wants_download and task_id is None
+
+            # Silent advance: download didn't fail AND user doesn't want a
+            # push right now. Advance state (so we don't re-process this
+            # same candidate next loop) and return.
+            if not wants_notify and not download_attempted_and_failed:
                 checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
                 if sub.get("version") == JACKETT_SUBSCRIPTION_SCHEMA:
                     apply_jackett_subscription_match(sub, candidate, checked_at)
@@ -8442,18 +8510,19 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     sub["last_check"] = checked_at
                 changed = True
                 logger.info(
-                    "Jackett subscription silent advance (season_complete): key=%s title=%s",
+                    "Jackett subscription silent advance: key=%s title=%s "
+                    "policy=%s/%s complete=%s",
                     key, candidate.title,
+                    sub.get("notify_policy"), sub.get("download_policy"), is_complete,
                 )
                 continue
-            if notify_mode == "season_complete" and not is_complete and task_id is None:
+            if download_attempted_and_failed:
                 logger.info(
-                    "Jackett subscription %s: season_complete + download failed — "
-                    "falling back to notify-with-manual-link (will retry next check)",
-                    key,
+                    "Jackett subscription %s: auto-download failed — falling back "
+                    "to notify-with-manual-link (will retry next check)", key,
                 )
 
-            # Build notification text depending on whether auto-download succeeded.
+            # Build notification text — three branches by what happened.
             if task_id is not None:
                 text = (
                     f"🔔 Подписка «{short_q}» обновилась — задача добавлена в DS!\n"
@@ -8471,7 +8540,27 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                         callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
                     ),
                 ]])
+            elif not wants_download:
+                # Notify-only mode — we intentionally didn't download.
+                text = (
+                    f"🔔 Найдено обновление подписки «{short_q}»:\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}"
+                    "\n\nАвто-загрузка отключена для этой подписки."
+                )
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔍 Посмотреть и скачать",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
+                    ),
+                    InlineKeyboardButton(
+                        "🔕 Отписаться",
+                        callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+                    ),
+                ]])
             else:
+                # Tried to download and failed — explicit error path.
                 text = (
                     f"🔔 Найдено обновление подписки «{short_q}»:\n"
                     f"\n🔎 {candidate.title}"
@@ -8675,39 +8764,47 @@ async def _check_subscriptions(app: Application) -> None:
 
             chat_id = sub.get("chat_id")
             is_complete = new_end >= new_total
-            notify_mode = sub.get("notify_mode") or "per_episode"
 
-            safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
-            temp_path = _temp_path(safe_name)
+            # 1.3 policy split.
+            from subscription_policy import should_download, should_notify
+            wants_download = should_download(sub, is_complete=is_complete)
+            wants_notify = should_notify(sub, is_complete=is_complete)
+
             task_id = ""
-            try:
-                torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
-                temp_path.write_bytes(torrent_bytes)
-                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
-                if chat_id:
-                    _remember_task_owner(task_id, chat_id)
-                    _remember_task_meta(
-                        task_id,
-                        _build_task_meta_from_title(new_title or "", source="rutracker_sub"),
-                    )
-            except (RutrackerError, DownloadStationError) as e:
-                logger.warning("Failed to update subscription %s: %s", topic_id, e)
-                continue
-            finally:
+            if wants_download:
+                safe_name = _safe_filename(f"rutracker_{topic_id}.torrent")
+                temp_path = _temp_path(safe_name)
                 try:
-                    if temp_path.exists():
-                        temp_path.unlink()
-                except OSError:
-                    pass
+                    torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
+                    temp_path.write_bytes(torrent_bytes)
+                    task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                    if chat_id:
+                        _remember_task_owner(task_id, chat_id)
+                        _remember_task_meta(
+                            task_id,
+                            _build_task_meta_from_title(new_title or "", source="rutracker_sub"),
+                        )
+                except (RutrackerError, DownloadStationError) as e:
+                    logger.warning("Failed to update subscription %s: %s", topic_id, e)
+                    # Bug A (1.2) — don't advance state when download fails,
+                    # so next check retries the same update.
+                    continue
+                finally:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except OSError:
+                        pass
 
-            # Season-complete mode: file is already downloaded above, but the
-            # push is suppressed until the whole season is out. Advance
-            # last_episode_end silently so the next check compares correctly.
-            if notify_mode == "season_complete" and not is_complete:
+            # Silent advance: download didn't fail (succeeded or was skipped
+            # intentionally) AND no push wanted yet.
+            if not wants_notify:
                 sub["last_episode_end"] = new_end
                 logger.info(
-                    "Subscription silent advance (season_complete): topic=%s episodes=%s→%s/%s",
+                    "Subscription silent advance: topic=%s episodes=%s→%s/%s "
+                    "policy=%s/%s complete=%s",
                     topic_id, last_end, new_end, new_total,
+                    sub.get("notify_policy"), sub.get("download_policy"), is_complete,
                 )
                 changed = True
                 continue

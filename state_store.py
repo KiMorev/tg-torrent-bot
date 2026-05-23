@@ -383,13 +383,31 @@ class JsonStateStore:
                     self.save_task_meta(meta)
 
     def load_topic_subscriptions(self) -> dict[str, dict]:
-        """topic_id → {chat_id, title, last_episode_end, total_episodes, added_at}."""
+        """topic_id → {chat_id, title, last_episode_end, total_episodes, added_at, ...}.
+
+        Subscriptions are migrated in-flight: legacy ``notify_mode`` field is
+        translated into the modern ``notify_policy`` + ``download_policy`` pair
+        (see ``subscription_policy.migrate_subscription_in_place``). Migration
+        is idempotent — repeated loads cost nothing extra.
+
+        We do NOT persist the migrated form here; ``save_topic_subscriptions``
+        is called when the loop modifies a subscription, and the persisted
+        payload then carries the new fields. That avoids touching the JSON
+        for read-only loads.
+        """
         if not self.topic_subscriptions_file:
             return {}
         payload = self.load_json_file(self.topic_subscriptions_file, {})
         if not isinstance(payload, dict):
             return {}
-        return {str(k): v for k, v in payload.items() if isinstance(v, dict)}
+        result: dict[str, dict] = {}
+        for k, v in payload.items():
+            if isinstance(v, dict):
+                # Local import to avoid hard module dependency at startup.
+                from subscription_policy import migrate_subscription_in_place
+                migrate_subscription_in_place(v)
+                result[str(k)] = v
+        return result
 
     def save_topic_subscriptions(self, subs: dict[str, dict]) -> None:
         if not self.topic_subscriptions_file:

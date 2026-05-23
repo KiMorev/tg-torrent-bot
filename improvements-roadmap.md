@@ -54,16 +54,39 @@ Unknown-model fallback с counter. 11 новых тестов. README обнов
 
 12 новых тестов в `tests/test_subscription_p0_bugs.py`.
 
-### ⏳ 1.3 notify_policy + download_policy split
-**Статус:** ПОСЛЕ 1.2. Один коммит с миграцией.
+### ✅ 1.3a notify_policy + download_policy split (storage + plumbing)
+**Статус:** ГОТОВО. UI ещё не открыт (см. 1.3b).
 
-Заменить единое `notify_mode` на два ортогональных поля:
-- `notify_policy`: `each_update` | `final_only` | `silent`
-- `download_policy`: `auto_each_update` | `only_when_complete` | `notify_only` | `ask`
+Сделано:
+- Новый модуль `subscription_policy.py` — source of truth для всех решений
+  по подписке + миграция legacy `notify_mode` → `(notify_policy, download_policy)`
+- Helpers `should_notify(sub, is_complete)` и `should_download(sub, is_complete)`
+  с lazy-fallback на legacy notify_mode (устойчивы к не-мигрированным subs)
+- `state_store.load_topic_subscriptions()` мигрирует in-flight (идемпотентно)
+- `build_jackett_subscription()` принимает `notify_policy`/`download_policy`
+  и всегда эмитит мигрированную форму
+- 3 background loop'а (`_check_subscriptions`, `_check_jackett_subscriptions`,
+  `_check_jackett_sub_via_rutracker_direct`) переписаны под helpers вместо
+  inline-if'ов по `notify_mode`
+- Уведомления получили 3-ю ветку «авто-загрузка отключена для этой подписки»
+  (для `download_policy=notify_only`)
+- Plex pending + retry/queue + `_notify_pending_success` пробрасывают
+  новые поля через всю цепочку (как 1.2 для notify_mode)
+- Открыт новый режим `download_policy=only_when_complete` — реальный
+  «жди полный сезон перед загрузкой»
+- 21 новый тест в `test_subscription_policy.py`
 
-Миграция: `per_episode → (each_update, auto_each_update)`,
-`season_complete → (final_only, auto_each_update)`. Поведение сохраняется,
-открывается новый режим `only_when_complete` (реальное «жди полный сезон»).
+### ⏳ 1.3b UI (presets + advanced) — NEXT
+- 4 пресет-кнопки + ⚙️ Advanced → двухшаговое меню
+- Hint-line над клавиатурой про "push" / "качать"
+- Финальная клавиатура:
+  ```
+  📺 Каждую серию + push
+  🎯 Каждую серию, push в конце
+  📦 Скачать после финала сезона
+  🔕 Без скачивания, только push
+  ⚙️ Настроить вручную
+  ```
 
 ---
 
@@ -207,10 +230,11 @@ curl-уровень прототип на 2-3 запросах для оценк
 
 ## Текущий next-action
 
-Сделано: 1.1 ✅ · R.1 ✅ · 1.2 (5 из 5 фиксов; RMW race отложен как 1.2.E) ✅
+Сделано: 1.1 ✅ · R.1 ✅ · 1.2 ✅ · 1.3a ✅
 
-**Следующее по приоритету:** **1.3 notify_policy + download_policy split** —
-финализирует Paket 1.
+**Следующее по приоритету:** **1.3b UI** — открыть новые режимы (особенно
+`only_when_complete`) пользователю через клавиатуру при создании подписки.
+Бэкенд полностью готов, нужны только handlers + клавиатура.
 
 После него:
 - 1.2.E (RMW race protection — нужен отдельный осторожный коммит)
