@@ -11134,13 +11134,127 @@ def _kp_match_plausibly_equals_query(
     return False
 
 
+_EN_TO_RU_TITLE_WORDS = {
+    "gangster": "гангстер",
+    "land": "ленд",
+}
+
+_EN_TO_RU_DIGRAPHS = {
+    "sch": "ш",
+    "sh": "ш",
+    "ch": "ч",
+    "ph": "ф",
+    "th": "т",
+    "ck": "к",
+    "ng": "нг",
+}
+
+_EN_TO_RU_CHARS = {
+    "a": "а",
+    "b": "б",
+    "c": "к",
+    "d": "д",
+    "e": "е",
+    "f": "ф",
+    "g": "г",
+    "h": "х",
+    "i": "и",
+    "j": "дж",
+    "k": "к",
+    "l": "л",
+    "m": "м",
+    "n": "н",
+    "o": "о",
+    "p": "п",
+    "q": "к",
+    "r": "р",
+    "s": "с",
+    "t": "т",
+    "u": "у",
+    "v": "в",
+    "w": "в",
+    "x": "кс",
+    "y": "и",
+    "z": "з",
+}
+
+
+def _capitalize_title_guess(title: str) -> str:
+    title = re.sub(r"\s+", " ", title).strip()
+    return title[:1].upper() + title[1:] if title else title
+
+
+def _english_word_to_cyrillic_guess(word: str) -> str:
+    lower = word.lower()
+    if lower in _EN_TO_RU_TITLE_WORDS:
+        return _EN_TO_RU_TITLE_WORDS[lower]
+
+    out = []
+    i = 0
+    while i < len(lower):
+        matched = False
+        for src, dst in sorted(_EN_TO_RU_DIGRAPHS.items(), key=lambda item: len(item[0]), reverse=True):
+            if lower.startswith(src, i):
+                out.append(dst)
+                i += len(src)
+                matched = True
+                break
+        if matched:
+            continue
+        out.append(_EN_TO_RU_CHARS.get(lower[i], lower[i]))
+        i += 1
+    return "".join(out)
+
+
+def _english_title_to_cyrillic_guesses(title: str) -> list[str]:
+    words = re.findall(r"[A-Za-z]+|\d+", title)
+    if not words or not any(re.search(r"[A-Za-z]", word) for word in words):
+        return []
+
+    cyr_words = [
+        _english_word_to_cyrillic_guess(word) if re.search(r"[A-Za-z]", word) else word
+        for word in words
+    ]
+    variants = ["".join(cyr_words)]
+    return [_capitalize_title_guess(value) for value in variants if value.strip()]
+
+
+def _kp_query_shaped_suggestions(query: str, match) -> list[str]:
+    """Guess a direct typo-fix button from KP original titles.
+
+    KP often returns canonical titles that are good aliases but not the most
+    ergonomic correction. For a query like "ганстерленд" and KP title_en
+    "Gangster Land", the best first button is "Гангстерленд".
+    """
+    query_compact = _kp_verify_norm_title(query).replace(" ", "")
+    if not query_compact:
+        return []
+
+    suggestions: list[str] = []
+    for raw in (getattr(match, "title_en", ""), getattr(match, "title", "")):
+        for guess in _english_title_to_cyrillic_guesses(str(raw or "")):
+            guess_norm = _kp_verify_norm_title(guess)
+            guess_compact = guess_norm.replace(" ", "")
+            if not guess_compact or guess_compact == query_compact:
+                continue
+            if SequenceMatcher(None, query_compact, guess_compact).ratio() >= 0.82:
+                suggestions.append(guess)
+    return suggestions
+
+
 def _kp_suggestion_titles_from_match(query: str, match) -> list[str]:
-    """Return KP titles as did-you-mean candidates for a loose keyword hit."""
+    """Return direct typo-fix + KP titles as candidates for a loose hit."""
     if match is None or _kp_match_plausibly_equals_query(query, match):
         return []
 
     seen = {_kp_verify_norm_title(query)}
     suggestions: list[str] = []
+    for value in _kp_query_shaped_suggestions(query, match):
+        norm = _kp_verify_norm_title(value)
+        if norm and norm not in seen:
+            seen.add(norm)
+            suggestions.append(value)
+
     for raw in (getattr(match, "title_ru", ""), getattr(match, "title_en", ""), getattr(match, "title", "")):
         value = str(raw or "").strip()
         norm = _kp_verify_norm_title(value)

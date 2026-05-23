@@ -166,7 +166,7 @@ class KpVerifyTitleSyncTests(unittest.TestCase):
         )
         with patch.object(bot, "kinopoisk_client", kp):
             suggestions = bot._kp_loose_suggestions_sync("ганстерленд")
-        self.assertEqual(suggestions, ["Земля гангстеров", "Gangster Land"])
+        self.assertEqual(suggestions, ["Гангстерленд", "Земля гангстеров", "Gangster Land"])
 
 
 class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
@@ -477,6 +477,7 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Возможно", text)
         keyboard = kwargs["reply_markup"].inline_keyboard
         labels = [b.text for row in keyboard for b in row]
+        self.assertTrue(any("Гангстерленд" in lbl for lbl in labels))
         self.assertTrue(any("Земля гангстеров" in lbl for lbl in labels))
         self.assertTrue(any("Gangster Land" in lbl for lbl in labels))
 
@@ -496,6 +497,7 @@ class GptPromptOrderingTests(unittest.TestCase):
         src = self._get_prompt()
         self.assertIn("MOST LIKELY", src)
         self.assertIn("index 0", src)
+        self.assertIn("direct typo", src.lower())
 
     def test_existence_rule_explicit_in_prompt(self):
         src = self._get_prompt()
@@ -511,6 +513,7 @@ class GptPromptOrderingTests(unittest.TestCase):
         """The prompt should not train GPT to return [] for this typo family."""
         src = self._get_prompt()
         self.assertIn("ганстерленд", src)
+        self.assertIn("Гангстерленд", src)
         self.assertIn("Земля гангстеров", src)
         self.assertNotIn("Гангстерленд» → []", src)
 
