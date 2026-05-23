@@ -2549,6 +2549,60 @@ class SearchJackettDoHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class SearchClusterPickerBackTests(unittest.IsolatedAsyncioTestCase):
+    """Cluster-filtered results should let the user return to the chooser."""
+
+    def _context_with_picker_state(self):
+        full = [
+            {"title": "Драйв 2011 1080p", "seeders": 10, "size": "5 GB"},
+            {"title": "Ледяной драйв 2021 1080p", "seeders": 7, "size": "4 GB"},
+        ]
+        picker_clusters = [
+            {"title": "Драйв", "year": 2011, "count": 1, "indices": [0]},
+            {"title": "Ледяной драйв", "year": 2021, "count": 1, "indices": [1]},
+        ]
+        return _make_context(user_data={
+            "srch_results_full": list(full),
+            "srch_clusters": list(picker_clusters),
+            "srch_picker_clusters": list(picker_clusters),
+            "srch_search_query": "Драйв 1080p",
+            "srch_source": "jackett",
+            "srch_banner": "🎬 Показаны раздачи в 1080p.",
+        })
+
+    async def test_pick_cluster_keeps_back_to_variants_button(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:cluster:0")
+        context = self._context_with_picker_state()
+
+        with patch.object(bot, "_enrich_top_results_with_metadata", AsyncMock()):
+            result = await bot.search_pick_cluster(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        self.assertTrue(context.user_data.get("srch_cluster_picker_return"))
+        self.assertIn("srch_results_full", context.user_data)
+
+        kwargs = update.callback_query.edit_message_text.await_args.kwargs
+        labels = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+        self.assertIn("⬅️ К вариантам", labels)
+
+    async def test_cluster_back_rerenders_original_picker(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:cluster_back")
+        context = self._context_with_picker_state()
+        context.user_data["srch_cluster_picker_return"] = True
+
+        result = await bot.search_cluster_back(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("найдено несколько вариантов", text)
+        self.assertIn("качество: 1080p", text)
+
+        kwargs = update.callback_query.edit_message_text.await_args.kwargs
+        buttons = {b.text: b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row}
+        self.assertEqual(buttons["🎬 Драйв (2011) · 1 разд."], "srch:cluster:0")
+        self.assertEqual(buttons["📋 Показать все 2 раздач"], "srch:cluster:all")
+
+
 # ---------------------------------------------------------------------------
 # Plex pre-download check helpers
 # ---------------------------------------------------------------------------

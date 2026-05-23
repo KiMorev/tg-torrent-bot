@@ -627,6 +627,7 @@ def _search_results_keyboard(
     show_retry_jackett: bool = False,     # source=rutracker → "↩️ Повторить через Jackett"
     show_direct_rutracker: bool = False,  # source=jackett  → "🔗 Rutracker напрямую"
     show_back_to_discovery: bool = False,
+    show_back_to_cluster_picker: bool = False,
     # Legacy aliases kept for backwards-compat during transition
     show_jackett_expand: bool = False,
     show_jackett_direct: bool = False,
@@ -680,6 +681,14 @@ def _search_results_keyboard(
                 InlineKeyboardButton("▶", callback_data=f"{SEARCH_CALLBACK_PREFIX}:res_page:{page + 1}")
             )
         rows.append(nav_row)
+
+    if show_back_to_cluster_picker:
+        rows.append([
+            InlineKeyboardButton(
+                "⬅️ К вариантам",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:cluster_back",
+            )
+        ])
 
     if show_switch_trackers or show_jackett_expand or show_jackett_direct:
         rows.append([

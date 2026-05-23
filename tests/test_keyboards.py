@@ -336,6 +336,11 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         self.assertIn("↩️ Повторить через Jackett", buttons)
         self.assertEqual(buttons["↩️ Повторить через Jackett"], "srch:switch_trackers")
 
+    def test_back_to_cluster_picker_button_shown_when_requested(self) -> None:
+        keyboard = _search_results_keyboard([], show_back_to_cluster_picker=True)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["⬅️ К вариантам"], "srch:cluster_back")
+
     def test_retry_jackett_and_switch_trackers_are_mutually_exclusive(self) -> None:
         labels_switch = [b.text for row in _search_results_keyboard([], show_switch_trackers=True).inline_keyboard for b in row]
         labels_retry = [b.text for row in _search_results_keyboard([], show_retry_jackett=True).inline_keyboard for b in row]

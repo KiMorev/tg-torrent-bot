@@ -6235,6 +6235,16 @@ def _clusters_for_query_picker(clusters: list[dict], query: str) -> list[dict]:
     return [c for c in clusters if c["count"] >= 2]
 
 
+def _cluster_picker_text(search_query: str, banner: str = "") -> str:
+    text = (
+        f"По запросу {_format_search_query_label(search_query)} найдено несколько вариантов.\n"
+        "Выберите один или покажите все раздачи."
+    )
+    if banner:
+        return f"{banner}\n{text}"
+    return text
+
+
 def _should_show_cluster_picker(
     clusters: list[dict],
     *,
@@ -6292,6 +6302,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     context.user_data.pop("srch_results_full", None)
     context.user_data.pop("srch_clusters", None)
     context.user_data.pop("srch_picker_clusters", None)
+    context.user_data.pop("srch_cluster_picker_return", None)
     # Check for in-flight didmean prefetch BEFORE Strategy-2 splitting — we
     # need base_query to compare. If the prefetched query matches the current
     # base, we'll use its raw Jackett results below; otherwise we cancel it
@@ -6808,14 +6819,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 b for b in (banner, *filter_banner_parts, quality_banner) if b
             )
             context.user_data["srch_banner"] = picker_banner
-            picker_text = (
-                f"По запросу {_format_search_query_label(search_query)} найдено несколько вариантов.\n"
-                "Выберите один или покажите все раздачи."
-            )
-            if picker_banner:
-                picker_text = f"{picker_banner}\n{picker_text}"
             await edit_fn(
-                picker_text,
+                _cluster_picker_text(search_query, picker_banner),
                 reply_markup=_cluster_picker_keyboard(
                     picker_clusters,
                     total_count=len(results_data),
@@ -6905,6 +6910,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             show_switch_trackers=bool(jackett_client and source == "jackett"),
             show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
+            show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -6940,6 +6946,7 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
             show_switch_trackers=bool(jackett_client and source == "jackett"),
             show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
+            show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -7008,8 +7015,8 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
         results_data = [r for i, r in enumerate(full) if i in indices]
 
     # Standard post-cluster render: sort by score, mark top as recommended,
-    # delegate to the existing results keyboard. Picker state is cleaned out
-    # so subsequent _run_search calls start fresh.
+    # delegate to the existing results keyboard. Picker state stays in user_data
+    # so «⬅️ К вариантам» can restore the original chooser.
     if results_data:
         results_data.sort(key=_score_result, reverse=True)
         results_data[0]["recommended"] = True
@@ -7031,10 +7038,8 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
         context, _chat_id_from_query(query) if "query" in locals() else None,
         results_data,
     )
-    # Picker state consumed — don't leave it lying around to confuse the next search.
-    context.user_data.pop("srch_results_full", None)
-    context.user_data.pop("srch_clusters", None)
-    context.user_data.pop("srch_picker_clusters", None)
+    # Keep picker state so the user can back out if they chose the wrong film.
+    context.user_data["srch_cluster_picker_return"] = True
 
     await query.edit_message_text(
         _build_results_text(results_data, search_query, 0, banner=banner),
@@ -7043,9 +7048,39 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
             show_switch_trackers=bool(jackett_client and source == "jackett"),
             show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
+            show_back_to_cluster_picker=True,
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    return SEARCH_RESULTS
+
+
+async def search_cluster_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Return from filtered cluster results to the original cluster picker."""
+    query = update.callback_query
+    await query.answer()
+
+    full = context.user_data.get("srch_results_full") or []
+    picker_clusters = context.user_data.get("srch_picker_clusters") or []
+    search_query = context.user_data.get("srch_search_query", "")
+    banner = context.user_data.get("srch_banner", "")
+
+    if not full or not picker_clusters or not search_query:
+        await query.edit_message_text(
+            "Варианты потеряны — начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
+        context.user_data.pop("srch_cluster_picker_return", None)
+        return SEARCH_RESULTS
+
+    await query.edit_message_text(
+        _cluster_picker_text(search_query, banner),
+        reply_markup=_cluster_picker_keyboard(
+            picker_clusters,
+            total_count=len(full),
+        ),
+        parse_mode="HTML",
     )
     return SEARCH_RESULTS
 
@@ -8387,6 +8422,7 @@ async def search_subscribe_back_to_results(
         show_retry_jackett=context.user_data.get("srch_show_retry_jackett", False),
         show_direct_rutracker=context.user_data.get("srch_show_direct_rutracker", False),
         show_back_to_discovery=context.user_data.get("srch_show_back_to_discovery", False),
+        show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
     )
     try:
         await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
@@ -8568,6 +8604,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
         "srch_results_full", "srch_clusters", "srch_picker_clusters",
+        "srch_cluster_picker_return",
     ):
         context.user_data.pop(key, None)
     # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
@@ -8626,6 +8663,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
         "srch_results_full", "srch_clusters", "srch_picker_clusters",
+        "srch_cluster_picker_return",
     ):
         context.user_data.pop(key, None)
     # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
@@ -12094,6 +12132,7 @@ def main() -> None:
                     CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
                     CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
                     CallbackQueryHandler(search_didmean, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:didmean:"),
+                    CallbackQueryHandler(search_cluster_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cluster_back$"),
                     CallbackQueryHandler(search_pick_cluster, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cluster:"),
                     CallbackQueryHandler(search_retry_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry_dl:\d+$"),
                     CallbackQueryHandler(search_queue_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:queue_dl:\d+$"),
