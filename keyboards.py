@@ -339,14 +339,33 @@ def _task_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def _plex_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Keyboard for the Plex pre-download duplicate warning dialog."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⬇️ Скачать", callback_data="plex:confirm"),
+def _plex_confirm_keyboard(*, show_upgrade: bool = False) -> InlineKeyboardMarkup:
+    """Keyboard for the Plex pre-download duplicate warning dialog.
+
+    When ``show_upgrade=True`` (R.2: only set for ``action=offer_upgrade``),
+    an explicit replacement button is added above the duplicate-download
+    one. Mapping:
+      • «🔼 Заменить версией получше» → plex:upgrade — pending entry
+        carries the old season's rating_key for future removal.
+      • «⬇️ Скачать всё равно» → plex:confirm — keeps both copies.
+      • «✖️ Отмена» → plex:cancel.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if show_upgrade:
+        rows.append([
+            InlineKeyboardButton("🔼 Заменить версией получше",
+                                 callback_data="plex:upgrade"),
+        ])
+        rows.append([
+            InlineKeyboardButton("⬇️ Скачать дубликатом", callback_data="plex:confirm"),
             InlineKeyboardButton("✖️ Отмена", callback_data="plex:cancel"),
-        ]
-    ])
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton("⬇️ Скачать всё равно", callback_data="plex:confirm"),
+            InlineKeyboardButton("✖️ Отмена", callback_data="plex:cancel"),
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _final_notification_keyboard(

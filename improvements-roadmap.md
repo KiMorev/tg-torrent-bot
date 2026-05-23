@@ -3,7 +3,7 @@
 Живой документ. Источник правды для приоритизации работы между сессиями.
 Обновлять при завершении пунктов (✅) или появлении новых из эксплуатации.
 
-**Последнее обновление:** 2026-05-23 (Paket 1 closed: 1.1, 1.2, 1.3a+b)
+**Последнее обновление:** 2026-05-23 (Paket 1 closed + R.2)
 
 ---
 
@@ -144,13 +144,36 @@ curl-уровень прототип на 2-3 запросах для оценк
   silent skip (никогда не блокирует download из-за check-failure)
 - 20 новых тестов, README обновлён
 
-### ⏳ R.2 Plex pre-existence по сезонам
-**Риск без:** 🟡 дубликаты сезонов лежат и занимают место.
-**Сложность:** 4-6 часов.
+### ✅ R.2 Plex pre-existence по сезонам
+**Статус:** ГОТОВО (R.2.1 + R.2.2). R.2.3 (авто-удаление старого после upgrade)
+отложено — нужен фидбек на production.
 
-При поиске сериала + S0X: распарсить какие сезоны уже в Plex.
-- `✅ S01-S04 уже в Plex` если ищется S05 → ок, ничего особенного
-- `⚠️ У вас уже есть S03` если ищется именно S03 → confirm «добавить дубликат?»
+Сделано:
+- `PlexClient.get_show_seasons_lite(focus)` — selective resolution fetching:
+  cold-path для N-сезонного шоу теперь **2 HTTP-запроса** (1 список + 1 для
+  фокусного сезона) вместо N+1
+- `_plex_ensure_show_seasons_lite()` — smart-кэш с top-up: повторные обращения
+  к тому же сезону → 0 запросов; обращение к другому сезону → 1 top-up запрос
+- `_plex_prewarm_show_seasons()` + `_maybe_prewarm_plex_for_results()` —
+  fire-and-forget pre-warm после рендера результатов поиска. К моменту тапа
+  «🔔 N» → preset picker → confirm — кэш Plex уже готов
+- `_plex_other_seasons_context()` + `_format_other_seasons_context()` —
+  рендер контекста «✅ В Plex уже есть: S1 (8 эп.), S2 (10 эп., 1080), S3 (12 эп.)»
+- Расширен `_plex_series_confirm_text` — context-блок над warning'ом
+- Upgrade button «🔼 Заменить версией получше» в `_plex_confirm_keyboard(show_upgrade=True)`
+  для action=offer_upgrade
+- Handler `plex_upgrade_download` + callback `plex:upgrade` — повторяет
+  поведение `plex_confirm_download` плюс лог `old_rating_key` (заготовка
+  под R.2.3 auto-cleanup)
+- `plex_pending` теперь сохраняет `plex_old_season_key` + `plex_action`
+- 26 новых тестов в `test_plex_series_context.py`
+
+### ⏳ R.2.3 Auto-cleanup old season after successful Plex re-index
+**Статус:** Отложено до production-фидбека. Деструктивный action — хочется
+посмотреть как «🔼 Заменить» используется в реальности прежде чем включать
+автоудаление. Подготовлено: `plex_pending["plex_old_season_key"]` несёт
+rating_key, который можно потом передать в `plex_client.delete_season()`
+после успешного `_plex_poll_after_finish`.
 
 ### ⏳ R.3 Health endpoint + weekly backup
 **Риск без:** 🟡 один partial-write JSON и subscriptions потерялись.
@@ -233,15 +256,15 @@ curl-уровень прототип на 2-3 запросах для оценк
 
 ## Текущий next-action
 
-Сделано: 1.1 ✅ · R.1 ✅ · 1.2 ✅ · 1.3a ✅ · 1.3b ✅
+Сделано: 1.1 ✅ · R.1 ✅ · 1.2 ✅ · 1.3a ✅ · 1.3b ✅ · R.2 ✅
 
-**Paket 1 полностью закрыт.**
+**Paket 1 полностью закрыт + R.2 (видимая ценность).**
 
 **Следующее по приоритету:**
-- 1.2.E — RMW race protection в фоновых loop'ах (если будет реальное проявление)
-- R.2 — Plex pre-existence по сезонам (видимая ценность для юзера)
 - 2.1 — Search provider contract abstraction (готовит под Freedomist)
 - R.3 — Health endpoint + weekly backup (операционная гигиена)
+- 1.2.E — RMW race protection в фоновых loop'ах (если будет реальное проявление)
+- R.2.3 — auto-cleanup при upgrade (после production-фидбека)
 
 После него:
 - 1.2.E (RMW race protection — нужен отдельный осторожный коммит)

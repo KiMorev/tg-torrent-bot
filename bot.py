@@ -2952,9 +2952,9 @@ def _plex_show_find(series_query: str, year: int = 0) -> "PlexShow | None":
 async def _plex_ensure_show_seasons(show: "PlexShow") -> dict[int, "PlexSeason"]:
     """Lazily populate ``show.seasons`` via :meth:`PlexClient.get_show_seasons`.
 
-    First call hits the network (two HTTP requests per show: seasons +
-    episode files). Subsequent calls reuse the cached dict on the show
-    instance. Returns an empty dict on any failure.
+    First call hits the network (one request per season + season list).
+    Subsequent calls reuse the cached dict on the show instance. Returns
+    an empty dict on any failure.
     """
     if show.seasons:
         return show.seasons
@@ -2968,6 +2968,171 @@ async def _plex_ensure_show_seasons(show: "PlexShow") -> dict[int, "PlexSeason"]
     if seasons:
         show.seasons = seasons
     return seasons
+
+
+async def _plex_ensure_show_seasons_lite(
+    show: "PlexShow", *, focus_season: int | None,
+) -> dict[int, "PlexSeason"]:
+    """R.2 optimisation #1: lazy season-fetch that only reads episode files
+    for the season the user is actively checking. Other seasons return with
+    ``resolution=""`` and empty ``file_paths`` — fine for showing context
+    («✅ В Plex уже есть: S1 (8 эп.), S3 (12 эп.)») without paying for
+    N episode-children requests.
+
+    On a 5-season show this collapses the cold-path from 6 HTTP requests
+    (1 list + 5 per-season) to 2 (1 list + 1 for the focused season).
+
+    The cache merges: if a previous call already cached the full set, we
+    return it as-is. If a previous lite call cached only one season's
+    resolution, a follow-up call for a different focus_season triggers
+    another fetch and merges into the cached dict. Worst-case repeats are
+    rare because most subscribe flows ask for one season per session.
+    """
+    # Already fully cached (resolution known for the focus, or full snapshot).
+    # Check cache BEFORE the plex_client guard so callers with pre-populated
+    # PlexShow.seasons (notably unit tests) don't accidentally short-circuit
+    # to an empty dict.
+    if show.seasons:
+        if focus_season is None or focus_season not in show.seasons:
+            return show.seasons
+        cached_season = show.seasons[focus_season]
+        if cached_season.resolution:
+            return show.seasons
+        # Cached but missing resolution for the requested season → top up
+        # by fetching just this one season's episode files. Cheap: 1 request.
+        if plex_client is None:
+            return show.seasons
+        try:
+            top_up = await asyncio.to_thread(
+                plex_client.get_show_seasons_lite,
+                show.rating_key,
+                fetch_resolution_for=[focus_season],
+            )
+        except Exception as exc:
+            logger.debug("Plex seasons-lite top-up failed for %r: %s",
+                         show.title, exc)
+            return show.seasons
+        refreshed = top_up.get(focus_season)
+        if refreshed and refreshed.resolution:
+            show.seasons[focus_season] = refreshed
+        return show.seasons
+
+    # Cold cache — first fetch for this show.
+    if plex_client is None:
+        return {}
+    fetch_for = [focus_season] if focus_season else []
+    try:
+        seasons = await asyncio.to_thread(
+            plex_client.get_show_seasons_lite,
+            show.rating_key,
+            fetch_resolution_for=fetch_for,
+        )
+    except Exception as exc:
+        logger.debug("Plex seasons-lite fetch failed for %r: %s", show.title, exc)
+        return {}
+    if seasons:
+        show.seasons = seasons
+    return seasons
+
+
+# Background task store for Plex season pre-warm (optimisation #3). Mapping
+# chat_id → asyncio.Task so we can cancel stale ones if the user navigates
+# away. Same pattern as _didmean_prefetch tasks.
+_plex_prewarm_tasks: dict[int, "asyncio.Task[None]"] = {}
+
+
+def _cancel_plex_prewarm(chat_id: int) -> None:
+    """Cancel any in-flight Plex season pre-warm for this chat. Idempotent."""
+    task = _plex_prewarm_tasks.pop(chat_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _plex_prewarm_show_seasons(
+    chat_id: int, series_query: str, season_num: int | None,
+) -> None:
+    """Pre-warm the season cache for the show the user is likely about to
+    subscribe to. Fires after results render so by the time they tap «🔔 N»
+    → preset picker → confirm, the Plex pre-check is instant.
+
+    Cheap: at most 2 HTTP requests to Plex (1 + focus season). No-op when
+    Plex is disabled, the show isn't in cache, or the seasons are already
+    fetched. Exceptions are swallowed — this is best-effort UX polish, not
+    correctness path.
+    """
+    if not PLEX_ENABLED or plex_client is None:
+        return
+    if not series_query or not season_num:
+        return
+    try:
+        show = _plex_show_find(series_query)
+        if show is None:
+            return
+        # Already cached with the resolution we need → nothing to do.
+        if show.seasons and (
+            season_num not in show.seasons
+            or show.seasons[season_num].resolution
+        ):
+            return
+        await _plex_ensure_show_seasons_lite(show, focus_season=season_num)
+        logger.debug(
+            "Plex pre-warm done: chat=%s show=%r season=%s seasons_cached=%d",
+            chat_id, show.title, season_num, len(show.seasons),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.debug("Plex pre-warm failed for %r S%s: %s", series_query, season_num, exc)
+
+
+def _schedule_plex_prewarm(
+    context: "ContextTypes.DEFAULT_TYPE",
+    chat_id: int | None,
+    series_query: str,
+    season_num: int | None,
+) -> None:
+    """Fire-and-forget pre-warm scheduler. Stashes the task so navigation
+    can cancel it. Safe to call multiple times — older task gets cancelled."""
+    if chat_id is None or not season_num:
+        return
+    _cancel_plex_prewarm(chat_id)
+    try:
+        task = asyncio.create_task(
+            _plex_prewarm_show_seasons(chat_id, series_query, season_num)
+        )
+    except RuntimeError:
+        # No running loop (rare: called from sync context in tests) — skip.
+        return
+    _plex_prewarm_tasks[chat_id] = task
+
+
+def _maybe_prewarm_plex_for_results(
+    context: "ContextTypes.DEFAULT_TYPE",
+    chat_id: int | None,
+    results_data: list[dict],
+) -> None:
+    """If the rendered results contain a partial-season match, pre-warm Plex's
+    season cache for that show. R.2 optimisation #3 — by the time the user
+    taps «🔔 N» → preset picker → confirm, the Plex pre-check is instant.
+
+    We only pre-warm for the FIRST partial result the user is most likely
+    to interact with. Multi-result pre-warming is over-engineering: most
+    cold-paths take ~200ms and pre-warm runs in parallel with the user
+    reading the results, so a single show is enough for the UX win.
+    """
+    if not PLEX_ENABLED or chat_id is None:
+        return
+    for r in results_data:
+        if not r.get("partial"):
+            continue
+        title = str(r.get("title") or r.get("movie_title") or "")
+        if not title:
+            continue
+        series_query = _extract_series_base_query(title) or ""
+        season_num = _extract_season_from_query(title)
+        if series_query and season_num:
+            _schedule_plex_prewarm(context, chat_id, series_query, season_num)
+        return  # only the first partial result
 
 
 def _get_plex_unmatched_lists() -> tuple[list[PlexMovie], list[PlexShow]]:
@@ -3442,6 +3607,9 @@ async def _plex_pre_check_series(
       • series_query/season_num are missing or invalid
       • requested_quality is unknown (can't compare → no warning)
       • The show isn't in Plex, or the show is there but this season isn't
+
+    R.2: uses the lite-variant season fetcher so cold-path issues only
+    1+1 = 2 Plex requests instead of 1+N.
     """
     if not PLEX_ENABLED or not _plex_shows_library:
         return None
@@ -3452,11 +3620,29 @@ async def _plex_pre_check_series(
     show = _plex_show_find(series_query)
     if show is None:
         return None
-    seasons = await _plex_ensure_show_seasons(show)
+    seasons = await _plex_ensure_show_seasons_lite(show, focus_season=season_num)
     season = seasons.get(season_num)
     if season is None:
         return None
     return _plex_check_before_download_season(show, season, requested_quality)
+
+
+def _plex_other_seasons_context(
+    show: "PlexShow", focus_season: int,
+) -> list["PlexSeason"]:
+    """Return sorted list of seasons OTHER than the focus one, for context.
+
+    Used by the R.2 confirm dialog to show «✅ В Plex уже есть: S1, S3, S4»
+    alongside the warning/upgrade message about the focus season. The
+    seasons come from the in-memory cache populated by the lite fetcher —
+    resolution is not guaranteed (we deliberately didn't fetch it for
+    these), so callers should treat empty ``resolution`` as «unknown»,
+    not «SD».
+    """
+    return sorted(
+        (s for n, s in show.seasons.items() if n != focus_season),
+        key=lambda s: s.season_number,
+    )
 
 
 def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
@@ -3736,12 +3922,46 @@ def _plex_confirm_text(check: "PlexCheckResult", display_title: str, requested_q
     )
 
 
+def _format_other_seasons_context(other_seasons: list["PlexSeason"]) -> str:
+    """Render the «✅ В Plex уже есть: S1 (8 эп.), S3 (12 эп.)» line for the
+    confirm dialog. R.2 context block — gives the user the surrounding
+    state of the show so they don't have to switch apps to remember what's
+    already in their library.
+
+    Returns "" when no other seasons exist (don't add an empty section).
+    Resolution is included only when known (lite-fetcher skipped fetching
+    episodes for these seasons, so resolution may be empty).
+    """
+    if not other_seasons:
+        return ""
+    parts = [_format_single_season_context(s) for s in other_seasons]
+    return "✅ В Plex уже есть: " + ", ".join(parts)
+
+
+def _format_single_season_context(season: "PlexSeason") -> str:
+    """One-season context fragment used in the «уже есть» line."""
+    n = season.season_number
+    ep = f"{season.episode_count} эп." if season.episode_count else ""
+    res = season.resolution.upper() if season.resolution else ""
+    if ep and res:
+        return f"S{n} ({ep}, {res})"
+    if ep:
+        return f"S{n} ({ep})"
+    if res:
+        return f"S{n} ({res})"
+    return f"S{n}"
+
+
 def _plex_series_confirm_text(
     check: "PlexSeriesCheckResult",
     display_title: str,
     requested_quality: str,
 ) -> str:
-    """Format the pre-download Plex warning for a TV season (HTML)."""
+    """Format the pre-download Plex warning for a TV season (HTML).
+
+    R.2: adds an «другие сезоны в Plex» context block above the warning
+    so the user sees the surrounding library state in one screen.
+    """
     plex_res = check.season.resolution
     plex_res_display = plex_res.upper() if plex_res else "неизвестное качество"
     show_title_esc = html_module.escape(check.show.title or "")
@@ -3756,17 +3976,25 @@ def _plex_series_confirm_text(
 
     if check.action == "warn_same":
         verb = f"уже есть в Plex ({plex_res_display})"
+        prompt = "Скачать всё равно?"
     elif check.action == "warn_better":
         req_display = requested_quality.upper() if requested_quality else "неизвестное качество"
         verb = f"уже есть в Plex в лучшем качестве ({plex_res_display} &gt; {req_display})"
+        prompt = "Скачать всё равно?"
     else:  # offer_upgrade
         req_display = requested_quality.upper() if requested_quality else "неизвестное качество"
         verb = f"есть в Plex в худшем качестве ({plex_res_display}), запрошено {req_display}"
+        prompt = "Заменить версией получше или скачать дубликатом?"
+
+    # R.2 context block — other seasons of the same show already in Plex.
+    other_seasons = _plex_other_seasons_context(check.show, season_num)
+    context_line = _format_other_seasons_context(other_seasons)
+    context_block = f"\n{html_module.escape(context_line)}" if context_line else ""
 
     return (
-        f"⚠️ <b>{head}</b> {verb}.\n"
+        f"⚠️ <b>{head}</b> {verb}.{context_block}\n"
         f"<i>Из раздачи: {title_esc}</i>\n"
-        "Скачать всё равно?"
+        f"{prompt}"
     )
 
 
@@ -5586,6 +5814,12 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     banner = "🔗 Прямой поиск Rutracker"
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
+    # R.2 pre-warm: kick off background Plex season fetch for the first
+    # partial-season result so the eventual confirm dialog is instant.
+    _maybe_prewarm_plex_for_results(
+        context, _chat_id_from_query(query) if "query" in locals() else None,
+        results_data,
+    )
     context.user_data["srch_banner"] = banner
     context.user_data["srch_source"] = "rutracker"
     await query.edit_message_text(
@@ -6405,6 +6639,12 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
+    # R.2 pre-warm: kick off background Plex season fetch for the first
+    # partial-season result so the eventual confirm dialog is instant.
+    _maybe_prewarm_plex_for_results(
+        context, _chat_id_from_query(query) if "query" in locals() else None,
+        results_data,
+    )
     context.user_data["srch_banner"] = combined_banner
     context.user_data["srch_source"] = source
 
@@ -6534,6 +6774,12 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
+    # R.2 pre-warm: kick off background Plex season fetch for the first
+    # partial-season result so the eventual confirm dialog is instant.
+    _maybe_prewarm_plex_for_results(
+        context, _chat_id_from_query(query) if "query" in locals() else None,
+        results_data,
+    )
     # Picker state consumed — don't leave it lying around to confuse the next search.
     context.user_data.pop("srch_results_full", None)
     context.user_data.pop("srch_clusters", None)
@@ -7427,10 +7673,17 @@ async def _download_and_add(
                     "notify_mode": notify_mode,
                     "notify_policy": notify_policy,
                     "download_policy": download_policy,
+                    # R.2: stash the existing season's rating_key so the
+                    # «🔼 Заменить» button can mark it for future removal
+                    # after Plex indexes the new download.
+                    "plex_old_season_key": series_check.season.rating_key,
+                    "plex_action": series_check.action,
                 }
                 await query.edit_message_text(
                     _plex_series_confirm_text(series_check, display_title, req_quality),
-                    reply_markup=_plex_confirm_keyboard(),
+                    reply_markup=_plex_confirm_keyboard(
+                        show_upgrade=(series_check.action == "offer_upgrade")
+                    ),
                     parse_mode="HTML",
                 )
                 return SEARCH_PLEX_CONFIRM
@@ -8019,6 +8272,46 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     # magnet / torrent — handled via global plex_confirm_standalone below
+    await query.edit_message_text("Неизвестный тип ожидания.")
+    return ConversationHandler.END
+
+
+async def plex_upgrade_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User picked «🔼 Заменить версией получше» — R.2 quality upgrade.
+
+    Same code path as ``plex_confirm_download`` (download proceeds despite
+    the existing Plex entry), but we additionally log the old season's
+    rating_key for future cleanup. Auto-deletion of the old version is
+    intentionally NOT included in v1 — that's a destructive action and
+    we want operator/user feedback first. The rating_key plumbing here
+    sets the groundwork for a follow-up commit (R.2.3 in roadmap).
+    """
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.pop("plex_pending", None)
+    if not pending:
+        await query.edit_message_text("Данные потеряны — начните загрузку заново.")
+        return ConversationHandler.END
+
+    old_key = pending.get("plex_old_season_key")
+    if old_key:
+        logger.info(
+            "Plex upgrade requested: old_season_rating_key=%s — auto-deletion "
+            "not yet implemented (R.2.3 roadmap item), keeping both versions",
+            old_key,
+        )
+
+    if pending["type"] == "search":
+        return await _download_and_add(
+            query, context, pending["index"],
+            subscribe=pending.get("subscribe", False),
+            notify_mode=pending.get("notify_mode", "per_episode"),
+            notify_policy=pending.get("notify_policy"),
+            download_policy=pending.get("download_policy"),
+            _skip_plex_check=True,
+        )
+
     await query.edit_message_text("Неизвестный тип ожидания.")
     return ConversationHandler.END
 
@@ -11356,6 +11649,7 @@ def main() -> None:
                 ],
                 SEARCH_PLEX_CONFIRM: [
                     CallbackQueryHandler(plex_confirm_download, pattern=r"^plex:confirm$"),
+                    CallbackQueryHandler(plex_upgrade_download, pattern=r"^plex:upgrade$"),
                     CallbackQueryHandler(plex_cancel_download, pattern=r"^plex:cancel$"),
                 ],
                 ConversationHandler.TIMEOUT: [

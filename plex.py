@@ -317,6 +317,34 @@ class PlexClient:
 
         Episode listing is one HTTP call per season (Plex doesn't support
         nested expansion). Specials (season_number == 0) are skipped.
+
+        Equivalent to ``get_show_seasons_lite(key, fetch_resolution_for=None)``
+        with ``None`` meaning «fetch for every season». Kept for callers that
+        need the full picture (polling, post-download lookup).
+        """
+        return self.get_show_seasons_lite(show_rating_key, fetch_resolution_for=None)
+
+    def get_show_seasons_lite(
+        self,
+        show_rating_key: str,
+        *,
+        fetch_resolution_for: list[int] | None,
+    ) -> dict[int, PlexSeason]:
+        """Like :meth:`get_show_seasons` but with selective resolution fetching.
+
+        ``fetch_resolution_for``:
+          • ``None`` (default in legacy callers) — fetch episode files +
+            resolution for EVERY season. Equivalent to the original method.
+          • ``[]`` — skip every per-season fetch. Returns seasons with empty
+            ``file_paths`` and ``resolution=""``. One HTTP call total.
+          • ``[2, 5]`` — only fetch episode files for the listed seasons.
+            Other seasons carry just rating_key + episode_count.
+
+        Used by R.2 pre-check: when showing «other seasons» as context, we
+        only need (season_num, episode_count) which is already in the
+        list-of-seasons response. Resolution is only needed for the season
+        the user is actually checking → fetch one episode-children call
+        instead of N.
         """
         if not show_rating_key:
             return {}
@@ -335,7 +363,14 @@ class PlexClient:
                 continue
             season_key = directory.get("ratingKey", "")
             episode_count = int(directory.get("leafCount") or 0)
-            file_paths, resolution = self._fetch_season_episode_files(season_key)
+            should_fetch = (
+                fetch_resolution_for is None
+                or season_num in fetch_resolution_for
+            )
+            if should_fetch:
+                file_paths, resolution = self._fetch_season_episode_files(season_key)
+            else:
+                file_paths, resolution = [], ""
             seasons[season_num] = PlexSeason(
                 rating_key=season_key,
                 season_number=season_num,
