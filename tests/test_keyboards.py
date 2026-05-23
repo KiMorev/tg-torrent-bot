@@ -342,20 +342,20 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         self.assertNotIn("↩️ Повторить через Jackett", labels_switch)
         self.assertNotIn("🔄 Сменить трекеры", labels_retry)
 
-    def test_partial_result_offers_two_subscribe_modes(self) -> None:
-        """A partial result must offer both «📺 Серии» (per_episode) and
-        «🎯 Сезон» (season_complete) so the user picks notify mode at subscribe time."""
+    def test_partial_result_offers_subscribe_picker(self) -> None:
+        """A partial result must offer a «🔔 N» button that opens the
+        1.3b policy picker. The two old buttons («📺 Серии» / «🎯 Сезон»)
+        are now replaced by a single picker entry — the policy choice lives
+        on a dedicated screen, not crammed into the results keyboard."""
         results = [{"title": "Series S01", "partial": True}]
         keyboard = _search_results_keyboard(results)
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
-        # Per-episode button
-        per_episode_label = next((t for t in buttons if t.startswith("⬇️📺 Серии")), None)
-        self.assertIsNotNone(per_episode_label, "per-episode subscribe button must exist")
-        self.assertTrue(buttons[per_episode_label].startswith("srch:sub:"))
-        # Season-complete button
-        season_label = next((t for t in buttons if t.startswith("⬇️🎯 Сезон")), None)
-        self.assertIsNotNone(season_label, "season-complete subscribe button must exist")
-        self.assertTrue(buttons[season_label].startswith("srch:sub_season:"))
+        pick_label = next((t for t in buttons if t.startswith("🔔 ")), None)
+        self.assertIsNotNone(pick_label, "subscribe picker button must exist")
+        self.assertTrue(buttons[pick_label].startswith("srch:sub_pick:"))
+        # The legacy direct buttons must NOT be present any more.
+        legacy = [t for t in buttons if t.startswith(("⬇️📺", "⬇️🎯"))]
+        self.assertEqual(legacy, [], "legacy direct-subscribe buttons must be removed")
 
     def test_neither_button_shown_by_default(self) -> None:
         keyboard = _search_results_keyboard([])

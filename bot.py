@@ -521,7 +521,7 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
             "• ▶️ Открытие готового контента в Plex одной кнопкой"
         )
     bullets.append(
-        "• 🔔 Подписка на сериал — уведомление каждой серии или одно когда сезон выйдет целиком"
+        "• 🔔 Подписка на сериал — выбор когда уведомлять (каждая серия / финал / молча) и когда скачивать (каждую / после финала / только сообщать)"
     )
     return "\n".join(bullets) if joined else bullets
 
@@ -7723,8 +7723,68 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
     return await _download_and_add(query, context, index, subscribe=False)
 
 
-async def search_direct_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Нажатие «⬇️📺 Серии» в списке результатов: подписка с per-episode push."""
+# ─── 1.3b subscription policy picker ───────────────────────────────────────
+#
+# Subscribing now goes through a dedicated picker so the user can express
+# both axes (notify + download) without cluttering the results list:
+#   srch:sub_pick:N           → opens the preset picker for result N
+#   srch:sub_preset:N:CODE    → user picked one of 4 presets, subscribe now
+#   srch:sub_advanced:N       → user wants the 2-step menu (notify → download)
+#   srch:sub_set_notify:N:V   → step 1 of advanced (notify_policy selected)
+#   srch:sub_set_download:N:V → step 2 of advanced (download_policy selected,
+#                               subscribe immediately)
+#   srch:sub_back_results:0   → back to results from the picker (rerender)
+#
+# Preset code → (notify_policy, download_policy) mapping. The "📦 after-finale"
+# preset is the unique new capability 1.3 unlocks — previously impossible.
+from subscription_policy import (
+    NOTIFY_EACH_UPDATE, NOTIFY_FINAL_ONLY, NOTIFY_SILENT,
+    DOWNLOAD_AUTO_EACH_UPDATE, DOWNLOAD_ONLY_WHEN_COMPLETE,
+    DOWNLOAD_NOTIFY_ONLY,
+)
+
+_SUB_PRESETS = {
+    "each":   (NOTIFY_EACH_UPDATE, DOWNLOAD_AUTO_EACH_UPDATE),
+    "final":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_AUTO_EACH_UPDATE),
+    "after":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_ONLY_WHEN_COMPLETE),
+    "notify": (NOTIFY_EACH_UPDATE, DOWNLOAD_NOTIFY_ONLY),
+}
+
+
+def _subscribe_picker_text(result: dict) -> str:
+    """Hint-line block above the preset keyboard — explains «push» / «качать»
+    so first-time users don't need to guess."""
+    title = str(result.get("title") or "")[:120]
+    return (
+        f"🎬 {title}\n\n"
+        "Режим подписки:\n"
+        "• «push» — уведомление в Telegram\n"
+        "• «качать» — авто-загрузка в Plex"
+    )
+
+
+def _subscribe_picker_keyboard(index: int) -> InlineKeyboardMarkup:
+    """Style D preset picker + advanced + back. One button per row so the
+    long-form labels render fully on mobile."""
+    prefix = SEARCH_CALLBACK_PREFIX
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📺 Каждую серию + push",
+                              callback_data=f"{prefix}:sub_preset:{index}:each")],
+        [InlineKeyboardButton("🎯 Каждую серию, push в конце",
+                              callback_data=f"{prefix}:sub_preset:{index}:final")],
+        [InlineKeyboardButton("📦 Скачать после финала сезона",
+                              callback_data=f"{prefix}:sub_preset:{index}:after")],
+        [InlineKeyboardButton("🔕 Без скачивания, только push",
+                              callback_data=f"{prefix}:sub_preset:{index}:notify")],
+        [InlineKeyboardButton("⚙️ Настроить вручную",
+                              callback_data=f"{prefix}:sub_advanced:{index}")],
+        [InlineKeyboardButton("⬅️ К результатам",
+                              callback_data=f"{prefix}:sub_back_results:0")],
+    ])
+
+
+async def search_subscribe_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User tapped «🔔 N» — show the preset picker for that result."""
     query = update.callback_query
     await query.answer()
     try:
@@ -7732,31 +7792,210 @@ async def search_direct_subscribe(update: Update, context: ContextTypes.DEFAULT_
     except (ValueError, IndexError):
         await query.edit_message_text("Ошибка при разборе запроса.")
         return ConversationHandler.END
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    # Stash so the advanced flow can find this result without parsing index again.
+    context.user_data["srch_sub_index"] = index
+    await query.edit_message_text(
+        _subscribe_picker_text(results[index]),
+        reply_markup=_subscribe_picker_keyboard(index),
+        parse_mode="HTML",
+    )
+    return SEARCH_RESULTS
+
+
+async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User picked one of the 4 presets — subscribe immediately with the
+    matching (notify_policy, download_policy) pair."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        _prefix, _action, idx_str, code = query.data.rsplit(":", 3)
+        index = int(idx_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+
+    pair = _SUB_PRESETS.get(code)
+    if pair is None:
+        await query.edit_message_text("Неизвестный пресет подписки.")
+        return ConversationHandler.END
+    notify_policy, download_policy = pair
+    # notify_mode stays in the legacy bucket for back-compat with code paths
+    # that still read it; new policy fields drive behaviour.
+    legacy_notify_mode = (
+        "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
+    )
     return await _download_and_add(
-        query, context, index, subscribe=True, notify_mode="per_episode",
+        query, context, index,
+        subscribe=True,
+        notify_mode=legacy_notify_mode,
+        notify_policy=notify_policy,
+        download_policy=download_policy,
     )
 
 
-async def search_direct_subscribe_season_complete(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+# ─── Advanced (2-step) menu ──────────────────────────────────────────────
+
+def _advanced_notify_text(result: dict) -> str:
+    title = str(result.get("title") or "")[:120]
+    return (
+        f"🎬 {title}\n\n"
+        "<b>Шаг 1/2.</b> Когда отправлять уведомления в Telegram?"
+    )
+
+
+def _advanced_notify_keyboard(index: int) -> InlineKeyboardMarkup:
+    prefix = SEARCH_CALLBACK_PREFIX
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔔 О каждой новой серии",
+                              callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_EACH_UPDATE}")],
+        [InlineKeyboardButton("🎯 Только когда сезон закроется",
+                              callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_FINAL_ONLY}")],
+        [InlineKeyboardButton("🔇 Не уведомлять",
+                              callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_SILENT}")],
+        [InlineKeyboardButton("⬅️ Назад к пресетам",
+                              callback_data=f"{prefix}:sub_pick:{index}")],
+    ])
+
+
+def _advanced_download_text(result: dict, notify_policy: str) -> str:
+    title = str(result.get("title") or "")[:120]
+    notify_label = {
+        NOTIFY_EACH_UPDATE: "🔔 О каждой новой серии",
+        NOTIFY_FINAL_ONLY:  "🎯 Только когда сезон закроется",
+        NOTIFY_SILENT:      "🔇 Не уведомлять",
+    }.get(notify_policy, notify_policy)
+    return (
+        f"🎬 {title}\n\n"
+        f"Уведомления: <b>{notify_label}</b>\n\n"
+        "<b>Шаг 2/2.</b> Когда скачивать?"
+    )
+
+
+def _advanced_download_keyboard(index: int) -> InlineKeyboardMarkup:
+    prefix = SEARCH_CALLBACK_PREFIX
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬇️ Каждую серию по мере выхода",
+                              callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_AUTO_EACH_UPDATE}")],
+        [InlineKeyboardButton("📦 Одним торрентом, когда сезон закроется",
+                              callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_ONLY_WHEN_COMPLETE}")],
+        [InlineKeyboardButton("⏸ Не скачивать (только уведомления)",
+                              callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_NOTIFY_ONLY}")],
+        [InlineKeyboardButton("⬅️ Назад",
+                              callback_data=f"{prefix}:sub_advanced:{index}")],
+    ])
+
+
+async def search_subscribe_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User tapped «⚙️ Настроить вручную» — enter step 1 of advanced menu."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    context.user_data["srch_sub_index"] = index
+    await query.edit_message_text(
+        _advanced_notify_text(results[index]),
+        reply_markup=_advanced_notify_keyboard(index),
+        parse_mode="HTML",
+    )
+    return SEARCH_RESULTS
+
+
+async def search_subscribe_set_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 1 selection → save notify_policy, show step 2 (download policy)."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        _prefix, _action, idx_str, notify_policy = query.data.rsplit(":", 3)
+        index = int(idx_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    # Stash the step-1 choice so step 2 can combine them on commit.
+    context.user_data["srch_sub_notify_policy"] = notify_policy
+    await query.edit_message_text(
+        _advanced_download_text(results[index], notify_policy),
+        reply_markup=_advanced_download_keyboard(index),
+        parse_mode="HTML",
+    )
+    return SEARCH_RESULTS
+
+
+async def search_subscribe_set_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 2 selection → final commit: subscribe with the chosen pair."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        _prefix, _action, idx_str, download_policy = query.data.rsplit(":", 3)
+        index = int(idx_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+
+    notify_policy = str(
+        context.user_data.pop("srch_sub_notify_policy", None) or NOTIFY_EACH_UPDATE
+    )
+    legacy_notify_mode = (
+        "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
+    )
+    return await _download_and_add(
+        query, context, index,
+        subscribe=True,
+        notify_mode=legacy_notify_mode,
+        notify_policy=notify_policy,
+        download_policy=download_policy,
+    )
+
+
+async def search_subscribe_back_to_results(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-    """Нажатие «⬇️🎯 Сезон» в списке результатов: подписка с тихим режимом.
-
-    Бот скачивает каждую новую серию (Plex получает файлы как обычно), но
-    push'и пользователю придут только когда сезон закроется (`new_end >=
-    total_episodes`). Полезно для тех кто марафонит — один push на сезон
-    вместо одного на каждую серию.
-    """
+    """«⬅️ К результатам» — re-render the results keyboard from cached data."""
     query = update.callback_query
     await query.answer()
-    try:
-        index = int(query.data.split(":")[-1])
-    except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+    results = context.user_data.get("srch_results", [])
+    if not results:
+        await query.edit_message_text("Результаты потеряны — начните поиск заново.")
         return ConversationHandler.END
-    return await _download_and_add(
-        query, context, index, subscribe=True, notify_mode="season_complete",
+
+    page = int(context.user_data.get("srch_results_page", 0))
+    search_query = str(
+        context.user_data.get("srch_search_query") or context.user_data.get("srch_query") or ""
     )
+    text = _build_results_text(results, search_query, page)
+    kb = _search_results_keyboard(
+        results, page=page,
+        show_switch_trackers=context.user_data.get("srch_show_switch_trackers", False),
+        show_retry_jackett=context.user_data.get("srch_show_retry_jackett", False),
+        show_direct_rutracker=context.user_data.get("srch_show_direct_rutracker", False),
+        show_back_to_discovery=context.user_data.get("srch_show_back_to_discovery", False),
+    )
+    try:
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        # Fallback if message can't be edited (e.g. media message) — just acknowledge.
+        logger.debug("Could not re-render results after back-to-results", exc_info=True)
+    return SEARCH_RESULTS
 
 
 async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8937,7 +9176,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     extras.append("• Прислать .torrent-файл или magnet-ссылку — добавлю в Download Station")
     if search_enabled:
         extras.append(
-            "• Подписаться на новые серии сериала из карточки результата — две кнопки «📺 Серии» (каждая серия) или «🎯 Сезон» (один push когда сезон выйдет целиком)"
+            "• Подписаться на новые серии сериала из карточки результата — кнопка «🔔 N» открывает выбор: уведомлять о каждой серии или о финале сезона; скачивать каждую серию, ждать полный сезон, или вообще не скачивать (только сообщать)"
         )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
@@ -11065,8 +11304,13 @@ def main() -> None:
                 ],
                 SEARCH_RESULTS: [
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
-                    CallbackQueryHandler(search_direct_subscribe, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub:\d+$"),
-                    CallbackQueryHandler(search_direct_subscribe_season_complete, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_season:\d+$"),
+                    # 1.3b subscription policy picker callbacks
+                    CallbackQueryHandler(search_subscribe_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_pick:\d+$"),
+                    CallbackQueryHandler(search_subscribe_preset, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_preset:\d+:[a-z]+$"),
+                    CallbackQueryHandler(search_subscribe_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_advanced:\d+$"),
+                    CallbackQueryHandler(search_subscribe_set_notify, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_set_notify:\d+:[a-z_]+$"),
+                    CallbackQueryHandler(search_subscribe_set_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_set_download:\d+:[a-z_]+$"),
+                    CallbackQueryHandler(search_subscribe_back_to_results, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_back_results:0$"),
                     CallbackQueryHandler(search_results_page, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:res_page:"),
                     CallbackQueryHandler(search_series_entry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:series_base$"),
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),

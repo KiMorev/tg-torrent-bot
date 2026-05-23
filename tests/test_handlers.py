@@ -333,8 +333,9 @@ class HelpCommandTests(unittest.TestCase):
         text = update.message.reply_text.call_args.args[0]
         self.assertNotIn("🎙", text)
 
-    def test_help_mentions_both_subscription_modes(self):
-        """Confirms the «📺 Серии / 🎯 Сезон» wording survived later edits."""
+    def test_help_mentions_subscription_picker(self):
+        """1.3b: help text describes the 🔔 picker with both axes (notify + download).
+        Replaces the prior «📺 Серии / 🎯 Сезон» wording — those buttons are gone."""
         update = _make_message_update(chat_id=100)
         context = _make_context()
         with (
@@ -350,8 +351,11 @@ class HelpCommandTests(unittest.TestCase):
         ):
             asyncio.run(help_command(update, context))
         text = update.message.reply_text.call_args.args[0]
-        self.assertIn("📺", text)  # per-episode mode
-        self.assertIn("🎯", text)  # season-complete mode
+        self.assertIn("🔔", text)  # picker button is mentioned
+        self.assertIn("финал", text.lower())  # final-only option exists in help
+        # The two-axis nature must be visible (mention both «уведом…» and «скачив…»).
+        self.assertIn("уведомлять", text.lower())
+        self.assertIn("скачивать", text.lower())
 
 
 class StartCommandTests(unittest.TestCase):
