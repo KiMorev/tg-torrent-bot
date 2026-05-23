@@ -6400,15 +6400,76 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     if not results_data:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
-        # Did-you-mean: pass the BASE query (no quality suffix). GPT shouldn't
-        # be guessing variations of «Дюра 1080p» — it should be fixing «Дюра»
-        # back to «Дюна».
-        suggestions = await _gpt_get_did_you_mean(base_query)
+
+        # === Failure-vs-empty distinction (Problem A) =====================
+        # If Jackett errored AND user's selected indexers covered trackers
+        # BEYOND rutracker, the RT-direct fallback we just ran only saw one
+        # source — the 0-result outcome doesn't mean «not anywhere», it
+        # means «we lost coverage of the trackers Jackett would have hit».
+        # Skip did-you-mean entirely (misleading) — show retry.
+        is_rt_only = _is_rutracker_only_indexer_set(
+            context.user_data.get("srch_jackett_selected"),
+            context.user_data.get("srch_jackett_indexers"),
+        )
+        multi_tracker_coverage_lost = jackett_errored and not is_rt_only
+        if multi_tracker_coverage_lost:
+            logger.info(
+                "Search: skipping did-you-mean for %r — Jackett errored and "
+                "selection covered non-rutracker indexers (coverage lost, not "
+                "definitive 0)", search_query,
+            )
+            suggestions: list[str] = []
+            original_kp_match = False  # don't bother checking
+        else:
+            # === KP-verify original query (Problem B) =====================
+            # User typed «Гангстерленд» — that's a real 2018 film. If KP
+            # finds it, we should NOT confuse the user with did-you-mean
+            # variations — instead say «найден на КП, но в трекерах сейчас
+            # нет, попробуй ещё раз позже». Run in parallel with the GPT
+            # did-you-mean call to keep latency at ~1s total.
+            kp_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _kp_verify_title_sync, base_query,
+                    default_on_unknown=False,  # don't suppress did-you-mean on KP outage
+                )
+            )
+            suggestions_task = asyncio.create_task(_gpt_get_did_you_mean(base_query))
+            try:
+                original_kp_match, suggestions = await asyncio.gather(
+                    kp_task, suggestions_task,
+                )
+            except Exception:
+                logger.warning("KP/did-you-mean parallel fetch failed", exc_info=True)
+                original_kp_match = False
+                suggestions = []
+
+            # === KP-verify GPT suggestions (Problem C) ====================
+            # Drop hallucinated titles. KP doesn't lie about existence; GPT
+            # occasionally does. Permissive on KP errors — better to keep
+            # a maybe-valid suggestion than drop a real one due to flaky KP.
+            if suggestions:
+                verified = await _kp_verify_titles(list(suggestions))
+                kept = [s for s in suggestions if verified.get(s, True)]
+                dropped = [s for s in suggestions if not verified.get(s, True)]
+                if dropped:
+                    logger.info(
+                        "Search: did-you-mean dropped %d non-existent titles "
+                        "for %r: %s (kept %d)",
+                        len(dropped), search_query, dropped, len(kept),
+                    )
+                suggestions = kept
+            # If user's original query IS on KP, swap GPT suggestions for a
+            # single «искать снова» hint — they didn't mistype.
+            if original_kp_match:
+                logger.info(
+                    "Search: original query %r found on KP — suppressing "
+                    "did-you-mean (no typo)", base_query,
+                )
+                suggestions = []
+
         # Prefetch (Proposal #2): fire a background Jackett search for the
-        # TOP-1 suggestion while the user reads the buttons. If they tap it,
-        # _run_search will pick up the result instantly. Top-1 only — saves
-        # Jackett load vs prefetching all 3 (most users tap the first or
-        # nothing at all).
+        # TOP-1 suggestion while the user reads the buttons. Top-1 only —
+        # the GPT prompt guarantees array index 0 is the most likely.
         if suggestions and jackett_client is not None:
             _cancel_didmean_prefetch(context)  # belt-and-suspenders
             top_suggestion = suggestions[0]
@@ -6428,7 +6489,25 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         no_results_text = f"По запросу «{search_query}» ничего не найдено."
         if banner:
             no_results_text = f"{no_results_text}\n{banner}"
-        if suggestions:
+        if multi_tracker_coverage_lost:
+            # New branch (A): Jackett errored + we lost non-rutracker coverage.
+            # Don't suggest variants — push the user toward a retry instead.
+            no_results_text = (
+                f"{no_results_text}\n\n"
+                "⚠️ Поисковики ответили не полностью — это похоже на временный сбой.\n"
+                "Попробуйте повторить поиск через минуту."
+            )
+        elif original_kp_match:
+            # New branch (B): user's query is a real title on KP, just not on
+            # trackers right now. Don't shove «возможно вы имели в виду» at
+            # them — they typed correctly.
+            no_results_text = (
+                f"{no_results_text}\n\n"
+                "🎬 Этот фильм/сериал найден на Кинопоиске, но в трекерах "
+                "сейчас не доступен. Попробуйте позже или поищите по "
+                "оригинальному названию."
+            )
+        elif suggestions:
             no_results_text = (
                 f"{no_results_text}\n\n"
                 "🤖 Возможно вы имели в виду — попробуйте вариант ниже "
@@ -10883,6 +10962,120 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
         usage=(sink[0] if sink else None),
     )
     return suggestions
+
+
+# ─── KP verification for did-you-mean (Problems B + C) ─────────────────────
+#
+# Two failure modes the bare GPT did-you-mean exhibits:
+#   B) User's original query is a REAL title that just wasn't on trackers
+#      this minute (Jackett timeout, etc). GPT doesn't know it's real, tries
+#      to «fix» it into a similar-sounding film and confuses the user.
+#   C) GPT hallucinates titles that don't exist anywhere — sound plausible,
+#      look like a typo fix, but are fictional.
+# KP API knows what's real. We verify both the user's query AND each GPT
+# suggestion against KP before showing the buttons.
+
+# In-process cache: KP verification of a normalized title is immutable for
+# our purposes (films don't un-exist). Saves ~1s per repeat lookup.
+_kp_exists_cache: dict[str, bool] = {}
+_KP_EXISTS_CACHE_MAX = 500  # rough upper bound; LRU eviction below
+
+
+def _kp_exists_cache_get(norm_title: str) -> bool | None:
+    return _kp_exists_cache.get(norm_title)
+
+
+def _kp_exists_cache_put(norm_title: str, exists: bool) -> None:
+    if len(_kp_exists_cache) >= _KP_EXISTS_CACHE_MAX:
+        # Drop oldest 100 entries (insertion-order dict). Rare enough to be ok.
+        for old in list(_kp_exists_cache.keys())[:100]:
+            _kp_exists_cache.pop(old, None)
+    _kp_exists_cache[norm_title] = exists
+
+
+def _kp_verify_title_sync(title: str, *, default_on_unknown: bool = True) -> bool:
+    """Synchronous KP existence check used inside ``asyncio.to_thread``.
+
+    ``default_on_unknown`` controls what we return when KP can't give a
+    definite answer (client is None, network fails, KP API errors out):
+      • True  — for suggestion verification: «don't drop on flaky infra»
+      • False — for original-query verification: «don't suppress did-you-mean
+        on flaky infra» (otherwise a single KP outage would silently strip
+        all suggestions even when the original is a typo)
+
+    Returns:
+      • True/False from KP when the check succeeded
+      • default_on_unknown when KP is unreachable / not configured
+    """
+    if kinopoisk_client is None:
+        return default_on_unknown
+    norm = (title or "").strip().lower()
+    if not norm:
+        return False
+    cached = _kp_exists_cache_get(norm)
+    if cached is not None:
+        return cached
+    try:
+        match = kinopoisk_client.search_movie(title)
+    except Exception as exc:
+        logger.debug("KP verify error for %r: %s — falling back to %s",
+                     title, exc, default_on_unknown)
+        return default_on_unknown
+    exists = match is not None
+    _kp_exists_cache_put(norm, exists)
+    logger.debug("KP verify %r → %s", title, exists)
+    return exists
+
+
+async def _kp_verify_titles(titles: list[str]) -> dict[str, bool]:
+    """Parallel KP verification of multiple titles. Returns a dict
+    ``{title → bool}`` where True means «KP found it (or check failed —
+    keep it)» and False means «KP confirms it doesn't exist».
+
+    Uses ``asyncio.gather(to_thread(...))`` so all checks run in parallel
+    rather than serially. With ~1s per KP call this collapses a 4-title
+    check from 4s to ~1s.
+    """
+    if not titles:
+        return {}
+    coros = [asyncio.to_thread(_kp_verify_title_sync, t) for t in titles]
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    out: dict[str, bool] = {}
+    for title, res in zip(titles, results):
+        if isinstance(res, Exception):
+            logger.debug("KP verify task raised for %r: %s", title, res)
+            out[title] = True  # permissive
+        else:
+            out[title] = bool(res)
+    return out
+
+
+def _is_rutracker_only_indexer_set(
+    selected: set[str] | None, indexers: list[dict] | None,
+) -> bool:
+    """Return True if the user's Jackett indexer selection is rutracker-only.
+
+    R.2-fail context: when Jackett times out we fall back to a direct
+    Rutracker search. If the user's selection was ONLY rutracker, the
+    fallback covers the same source → an empty result from RT-direct
+    is a reliable «not found» signal → did-you-mean is appropriate.
+
+    But if the selection included OTHER trackers (kinozal/nnmclub/etc),
+    the Jackett failure means we lost that coverage; the RT-direct fallback
+    only sees one tracker. An empty result here ISN'T conclusive — could be
+    everywhere else. In that case did-you-mean would be misleading; show
+    «retry» instead.
+    """
+    if not selected:
+        return True  # treat empty as «default = rutracker-only»
+    indexers = indexers or []
+    rutracker_ids = {
+        str(i.get("id", "")).lower() for i in indexers
+        if "rutracker" in str(i.get("id", "")).lower()
+    }
+    selected_lower = {str(s).lower() for s in selected}
+    non_rt = selected_lower - rutracker_ids
+    return not non_rt
 
 
 async def _enrich_top10_with_explanations(cache: dict) -> None:
