@@ -98,6 +98,7 @@ from keyboards import (
     SEARCH_PAGE_SIZE,
     SUB_CALLBACK_PREFIX,
     _task_callback,
+    _task_error_keyboard,
     _task_keyboard,
     _task_reply_markup,
     _tasks_keyboard,
@@ -5244,9 +5245,15 @@ def _task_added_message(
     title: str = "",
     task_id: str = "",
     tracker_result: TrackerApplyResult | None = None,
+    accepted_without_task_id: bool = False,
 ) -> str:
+    intro = (
+        "Magnet-ссылка отправлена в Download Station."
+        if accepted_without_task_id
+        else "Задача добавлена в Download Station."
+    )
     lines = [
-        "Задача добавлена в Download Station.",
+        intro,
         f"Тип: {task_type}",
     ]
 
@@ -5650,7 +5657,10 @@ def _build_results_text(results_data: list[dict], search_query: str, page: int, 
         lines.append(banner)
     lines.append(f"Результаты по {_format_search_query_label(search_query, escape_html=True)}:")
     start = page * SEARCH_PAGE_SIZE
-    for index, r in enumerate(results_data[start : start + SEARCH_PAGE_SIZE], start=start):
+    visible_results = results_data[start : start + SEARCH_PAGE_SIZE]
+    if any(r.get("partial") for r in visible_results):
+        lines.append("⬇️ N — скачать; 🔔 N — подписка на серии.")
+    for index, r in enumerate(visible_results, start=start):
         icon = "⭐" if r.get("recommended") else "🔎"
         ep_note = f"  ⚠️ {r['ep_str']}" if r.get("partial") and r.get("ep_str") else ""
         title_escaped = html_module.escape(r["title"])
@@ -6170,15 +6180,43 @@ def _normalize_search_cluster_title(title: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+_SEARCH_CLUSTER_SERIES_MARKERS = (
+    "сериал",
+    "сериалы",
+    "телесериал",
+    "мультсериал",
+    "мультсериалы",
+    "tv",
+    "series",
+)
+
+
+def _search_cluster_kind(result: dict) -> str:
+    """Return ``series`` or ``movie`` for the compact cluster picker badge."""
+    title = str(result.get("movie_title") or result.get("title") or "")
+    if _plex_is_series(title) or _extract_series_base_query(title):
+        return "series"
+
+    category_text = " ".join(
+        str(result.get(key) or "")
+        for key in ("category", "tracker_name")
+    ).lower()
+    if any(marker in category_text for marker in _SEARCH_CLUSTER_SERIES_MARKERS):
+        return "series"
+
+    return "movie"
+
+
 def _build_search_clusters(results_data: list[dict]) -> list[dict]:
     """Group search results by (normalized_title, year) — used for the
-    «Какую Дюну?» picker when one query returns multiple distinct films.
+    «Какую Дюну?» picker when one query returns multiple distinct titles.
 
     Returns a list of cluster dicts, each:
         {
           "key": "<title>|<year>",         # for callback_data
           "title": "Дюна",                 # display title (best from cluster)
           "year": 2024,                    # or None if unparseable
+          "kind": "movie",                 # "movie" or "series"
           "count": 12,                     # number of releases
           "indices": [0, 3, 7, ...],       # positions in results_data
         }
@@ -6191,15 +6229,19 @@ def _build_search_clusters(results_data: list[dict]) -> list[dict]:
         title = r.get("title") or ""
         normalized = _normalize_search_cluster_title(title)
         year = _search_cluster_year(title)
+        kind = _search_cluster_kind(r)
         key = (normalized.lower(), year)
         if key not in clusters:
             clusters[key] = {
                 "key": f"{normalized}|{year if year else '?'}",
                 "title": normalized or title,
                 "year": year,
+                "kind": kind,
                 "count": 0,
                 "indices": [],
             }
+        elif kind == "series":
+            clusters[key]["kind"] = "series"
         clusters[key]["count"] += 1
         clusters[key]["indices"].append(idx)
     # Sort: newer films first, then by release count
@@ -8115,7 +8157,11 @@ async def _download_and_add(
                     )
 
         added_msg = _task_added_message(
-            download_method, title=title, task_id=task_id, tracker_result=tracker_result
+            download_method,
+            title=title,
+            task_id=task_id,
+            tracker_result=tracker_result,
+            accepted_without_task_id=(download_method == "magnet" and not task_id),
         )
         if download_method == "magnet" and not task_id:
             added_msg += f"\n\n{_magnet_without_task_id_note()}"
@@ -8220,14 +8266,13 @@ _SUB_PRESETS = {
 
 
 def _subscribe_picker_text(result: dict) -> str:
-    """Hint-line block above the preset keyboard — explains «push» / «качать»
-    so first-time users don't need to guess."""
+    """Hint-line block above the preset keyboard — explains download/notify axes."""
     title = str(result.get("title") or "")[:120]
     return (
         f"🎬 {title}\n\n"
         "Режим подписки:\n"
-        "• «push» — уведомление в Telegram\n"
-        "• «качать» — авто-загрузка в Plex"
+        "• ⬇️ — добавлять новые серии в Download Station\n"
+        "• 🔔 — присылать push в Telegram"
     )
 
 
@@ -8236,13 +8281,13 @@ def _subscribe_picker_keyboard(index: int) -> InlineKeyboardMarkup:
     long-form labels render fully on mobile."""
     prefix = SEARCH_CALLBACK_PREFIX
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📺 Каждую серию + push",
+        [InlineKeyboardButton("⬇️+🔔 Каждую серию",
                               callback_data=f"{prefix}:sub_preset:{index}:each")],
-        [InlineKeyboardButton("🎯 Каждую серию, push в конце",
+        [InlineKeyboardButton("⬇️ каждую · 🔔 финал",
                               callback_data=f"{prefix}:sub_preset:{index}:final")],
-        [InlineKeyboardButton("📦 Скачать после финала сезона",
+        [InlineKeyboardButton("📦 Скачать сезон целиком",
                               callback_data=f"{prefix}:sub_preset:{index}:after")],
-        [InlineKeyboardButton("🔕 Без скачивания, только push",
+        [InlineKeyboardButton("🔔 Только сообщать",
                               callback_data=f"{prefix}:sub_preset:{index}:notify")],
         [InlineKeyboardButton("⚙️ Настроить вручную",
                               callback_data=f"{prefix}:sub_advanced:{index}")],
@@ -10482,11 +10527,15 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         _, action, task_id = query.data.split(":", 2)
     except ValueError:
-        await query.edit_message_text("Не удалось разобрать действие.")
+        await query.edit_message_text(
+            "Не удалось разобрать действие.",
+            reply_markup=_task_error_keyboard(),
+        )
         return
 
     chat_id = _chat_id_from_query(query)
     message_id = query.message.message_id if query.message else None
+    retry_callback = query.data or None
     # Cancel any running auto-refresh for this card before handling the action
     if chat_id and message_id:
         _cancel_task_card_refresh(chat_id, message_id)
@@ -10499,7 +10548,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось получить задачи: {e}")
+            await query.edit_message_text(
+                f"Не удалось получить задачи: {e}",
+                reply_markup=_task_error_keyboard(retry_callback=retry_callback),
+            )
             return
 
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
@@ -10514,7 +10566,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось получить задачи: {e}")
+            await query.edit_message_text(
+                f"Не удалось получить задачи: {e}",
+                reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=scope),
+            )
             return
 
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
@@ -10528,7 +10583,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "delete_ask":
         if not _can_access_task_id(chat_id, task_id):
-            await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
+            await query.edit_message_text(
+                "Эта задача не относится к вашим загрузкам.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
             return
 
         _forget_task_card_message(chat_id, message_id, task_id)
@@ -10545,7 +10603,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось получить задачи: {e}")
+            await query.edit_message_text(
+                f"Не удалось получить задачи: {e}",
+                reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=scope),
+            )
             return
 
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
@@ -10580,13 +10641,19 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await asyncio.to_thread(ds_client.delete_tasks, finished_ids)
             _forget_task_state(finished_ids)
         except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось удалить завершенные задачи: {e}")
+            await query.edit_message_text(
+                f"Не удалось удалить завершенные задачи: {e}",
+                reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=scope),
+            )
             return
 
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError:
-            await query.edit_message_text(f"Удалено завершенных задач: {len(finished_ids)}.")
+            await query.edit_message_text(
+                f"Удалено завершенных задач: {len(finished_ids)}.",
+                reply_markup=_task_error_keyboard(list_scope=scope),
+            )
             return
 
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
@@ -10605,19 +10672,28 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "trackers":
         if not _can_access_task_id(chat_id, task_id):
-            await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
+            await query.edit_message_text(
+                "Эта задача не относится к вашим загрузкам.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
             return
 
         await _safe_edit_callback(query, "➕ Добавляю public-трекеры…")
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось получить задачу: {e}")
+            await query.edit_message_text(
+                f"Не удалось получить задачу: {e}",
+                reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=_default_list_scope(chat_id)),
+            )
             return
 
         task = _find_task(tasks, task_id)
         if not task:
-            await query.edit_message_text(f"Задача не найдена.\nID: {task_id}")
+            await query.edit_message_text(
+                f"Задача не найдена.\nID: {task_id}",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
             return
         if (task.get("type") or "").lower() != "bt":
             await query.edit_message_text(
@@ -10679,7 +10755,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action in {"resume", "pause", "delete"}:
         if not _can_access_task_id(chat_id, task_id):
-            await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
+            await query.edit_message_text(
+                "Эта задача не относится к вашим загрузкам.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
             return
 
         action_progress = {
@@ -10708,6 +10787,8 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                             "📋 К списку загрузок",
                             callback_data=_task_callback("list", scope),
                         )
+                    ], [
+                        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
                     ]]),
                 )
                 if del_chat_id and del_msg_id:
@@ -10716,13 +10797,22 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     )
                 return
         except DownloadStationError as e:
-            await query.edit_message_text(f"Не удалось выполнить действие: {e}")
+            await query.edit_message_text(
+                f"Не удалось выполнить действие: {e}",
+                reply_markup=_task_error_keyboard(
+                    retry_callback=retry_callback,
+                    list_scope=_default_list_scope(chat_id),
+                ),
+            )
             return
 
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError:
-            await query.edit_message_text(f"{notice}\nID: {task_id}")
+            await query.edit_message_text(
+                f"{notice}\nID: {task_id}",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
             return
 
         task = _find_task(tasks, task_id)
@@ -10733,23 +10823,38 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             _register_task_card_from_query(query, task_id)
         else:
-            await query.edit_message_text(f"{notice}\nID: {task_id}")
+            await query.edit_message_text(
+                f"{notice}\nID: {task_id}",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
         return
 
     if not _can_access_task_id(chat_id, task_id):
-        await query.edit_message_text("Эта задача не относится к вашим загрузкам.")
+        await query.edit_message_text(
+            "Эта задача не относится к вашим загрузкам.",
+            reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
         return
 
     await _safe_edit_callback(query, "🔎 Получаю задачу…")
     try:
         tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
-        await query.edit_message_text(f"Не удалось получить задачу: {e}")
+        await query.edit_message_text(
+            f"Не удалось получить задачу: {e}",
+            reply_markup=_task_error_keyboard(
+                retry_callback=retry_callback,
+                list_scope=_default_list_scope(chat_id),
+            ),
+        )
         return
 
     task = _find_task(tasks, task_id)
     if not task:
-        await query.edit_message_text(f"Задача не найдена.\nID: {task_id}")
+        await query.edit_message_text(
+            f"Задача не найдена.\nID: {task_id}",
+            reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
         return
 
     status = (task.get("status") or "").lower()
@@ -10829,7 +10934,12 @@ async def _do_process_magnet(
         await _safe_edit_message(progress_message, f"Не удалось добавить magnet-ссылку: {e}")
         return
 
-    msg_text = _task_added_message("magnet-ссылка", task_id=task_id, tracker_result=tracker_result)
+    msg_text = _task_added_message(
+        "magnet-ссылка",
+        task_id=task_id,
+        tracker_result=tracker_result,
+        accepted_without_task_id=not task_id,
+    )
     if not task_id:
         msg_text += f"\n\n{_magnet_without_task_id_note()}"
 

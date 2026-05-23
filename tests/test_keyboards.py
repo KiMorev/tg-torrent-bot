@@ -7,9 +7,13 @@ from keyboards import (
     _admin_kp_force_refresh_keyboard,
     _admin_movie_status_keyboard,
     _admin_panel_keyboard,
+    _cluster_picker_keyboard,
+    _download_list_keyboard,
     _final_notification_keyboard,
     _jackett_select_keyboard,
+    _new_task_keyboard,
     _search_advanced_keyboard,
+    _search_after_add_keyboard,
     _download_error_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
@@ -17,6 +21,7 @@ from keyboards import (
     _search_results_keyboard,
     _season_back_to_picker_keyboard,
     _season_select_keyboard,
+    _task_error_keyboard,
     _task_keyboard,
     _tasks_keyboard,
     tracker_selection_label,
@@ -341,6 +346,15 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
         self.assertEqual(buttons["⬅️ К вариантам"], "srch:cluster_back")
 
+    def test_cluster_picker_distinguishes_movies_and_series(self) -> None:
+        keyboard = _cluster_picker_keyboard([
+            {"title": "Драйв", "year": 2011, "count": 1, "kind": "movie"},
+            {"title": "Клиника", "year": 2001, "count": 3, "kind": "series"},
+        ], total_count=4)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🎬 Драйв (2011) · 1 разд."], "srch:cluster:0")
+        self.assertEqual(buttons["📺 Клиника (2001) · 3 разд."], "srch:cluster:1")
+
     def test_retry_jackett_and_switch_trackers_are_mutually_exclusive(self) -> None:
         labels_switch = [b.text for row in _search_results_keyboard([], show_switch_trackers=True).inline_keyboard for b in row]
         labels_retry = [b.text for row in _search_results_keyboard([], show_retry_jackett=True).inline_keyboard for b in row]
@@ -582,7 +596,7 @@ class NoResultsKeyboardTests(unittest.TestCase):
 
 
 class TasksKeyboardCloseTests(unittest.TestCase):
-    """_tasks_keyboard and _task_keyboard always end with a Close button."""
+    """Task-flow keyboards always offer a clear close path."""
 
     def _labels(self, keyboard) -> list[str]:
         return [b.text for row in keyboard.inline_keyboard for b in row]
@@ -618,6 +632,27 @@ class TasksKeyboardCloseTests(unittest.TestCase):
         self.assertIn("✖️ Закрыть", labels)
         self.assertIn("🔄 Обновить", labels)
         self.assertIn("🙋 Мои загрузки", labels)
+
+    def test_new_task_keyboard_has_close_button(self) -> None:
+        buttons = self._buttons(_new_task_keyboard("task_123"))
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_download_list_keyboard_has_close_button(self) -> None:
+        buttons = self._buttons(_download_list_keyboard())
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_search_after_add_keyboard_has_close_button(self) -> None:
+        buttons = self._buttons(_search_after_add_keyboard("task_123"))
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_task_error_keyboard_has_retry_list_and_close(self) -> None:
+        buttons = self._buttons(_task_error_keyboard(
+            retry_callback="task:info:task_123",
+            list_scope="mine",
+        ))
+        self.assertEqual(buttons["🔄 Попробовать снова"], "task:info:task_123")
+        self.assertEqual(buttons["📋 К списку загрузок"], "task:list:mine")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
 
 class UsersKeyboardTests(unittest.TestCase):

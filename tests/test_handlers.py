@@ -2681,6 +2681,22 @@ class SearchClusterPickerBackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buttons["📋 Показать все 2 раздач"], "srch:cluster:all")
 
 
+class SearchClusterKindTests(unittest.TestCase):
+    """Cluster picker badges should distinguish films from series."""
+
+    def test_build_search_clusters_marks_series_from_title_or_category(self):
+        clusters = bot._build_search_clusters([
+            {"title": "Драйв 2011 1080p", "category": "Фильмы"},
+            {"title": "Клиника / Scrubs / Сезон 3 1080p", "category": ""},
+            {"title": "Фарго 2014 1080p", "category": "Зарубежные сериалы"},
+        ])
+
+        by_title = {cluster["title"]: cluster for cluster in clusters}
+        self.assertEqual(by_title["Драйв"]["kind"], "movie")
+        self.assertEqual(by_title["Клиника"]["kind"], "series")
+        self.assertEqual(by_title["Фарго"]["kind"], "series")
+
+
 # ---------------------------------------------------------------------------
 # Plex pre-download check helpers
 # ---------------------------------------------------------------------------
@@ -4367,6 +4383,76 @@ class SearchNoResultsFallbackTests(unittest.TestCase):
         with patch.object(bot, "jackett_client", None):
             _, can_exp = bot._no_results_flags(context, "X")
         self.assertFalse(can_exp)
+
+
+class SearchResultsTextTests(unittest.TestCase):
+    def test_partial_results_explain_download_and_subscribe_buttons(self):
+        text = bot._build_results_text(
+            [{
+                "title": "Клиника / Scrubs / Сезон: 1 / Серии: 1-8 из 10",
+                "size": "10 GB",
+                "seeders": 12,
+                "partial": True,
+                "ep_str": "1-8 из 10",
+            }],
+            "Клиника 1080p",
+            0,
+        )
+
+        self.assertIn("⬇️ N — скачать; 🔔 N — подписка на серии.", text)
+
+    def test_plain_results_do_not_explain_subscribe_button(self):
+        text = bot._build_results_text(
+            [{"title": "Драйв", "size": "8 GB", "seeders": 7}],
+            "Драйв 1080p",
+            0,
+        )
+
+        self.assertNotIn("🔔 N", text)
+
+
+class TaskAddedMessageTests(unittest.TestCase):
+    def test_magnet_without_task_id_uses_honest_intro(self):
+        text = bot._task_added_message(
+            "magnet-ссылка",
+            accepted_without_task_id=True,
+        )
+
+        self.assertTrue(text.startswith("Magnet-ссылка отправлена в Download Station."))
+        self.assertNotIn("Задача добавлена", text)
+
+    def test_regular_task_keeps_added_intro(self):
+        text = bot._task_added_message("torrent-файл", task_id="task_123")
+
+        self.assertTrue(text.startswith("Задача добавлена в Download Station."))
+        self.assertIn("ID: task_123", text)
+
+
+class TaskCallbackErrorKeyboardTests(unittest.TestCase):
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {button.text: button.callback_data for row in keyboard.inline_keyboard for button in row}
+
+    def test_get_task_error_offers_retry_list_and_close(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:info:task_123")
+        context = _make_context()
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.side_effect = bot.DownloadStationError("DS down")
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_can_access_task_id", return_value=True),
+            patch.object(bot, "ds_client", fake_ds),
+        ):
+            asyncio.run(bot.task_callback(update, context))
+
+        call = update.callback_query.edit_message_text.await_args
+        self.assertIn("Не удалось получить задачу", call.args[0])
+        buttons = self._buttons(call.kwargs["reply_markup"])
+        self.assertEqual(buttons["🔄 Попробовать снова"], "task:info:task_123")
+        self.assertEqual(buttons["📋 К списку загрузок"], "task:list:mine")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
 
 class SearchCancelCallbackTests(unittest.TestCase):

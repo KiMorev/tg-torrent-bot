@@ -87,8 +87,31 @@ def _access_approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 def _download_list_keyboard(scope: str = TASK_LIST_SCOPE_DEFAULT) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", scope))]]
+        [
+            [InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", scope))],
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        ]
     )
+
+
+def _task_error_keyboard(
+    *,
+    retry_callback: str | None = None,
+    list_scope: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Keyboard for task-flow error screens so they never become dead ends."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if retry_callback:
+        rows.append([InlineKeyboardButton("🔄 Попробовать снова", callback_data=retry_callback)])
+    if list_scope:
+        rows.append([
+            InlineKeyboardButton(
+                "📋 К списку загрузок",
+                callback_data=_task_callback("list", list_scope),
+            )
+        ])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
 
 
 def _admin_panel_keyboard(
@@ -396,6 +419,7 @@ def _new_task_keyboard(task_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))],
             [InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))],
+            [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
         ]
     )
 
@@ -482,16 +506,17 @@ def _no_results_keyboard(
 
 
 def _cluster_picker_keyboard(clusters: list[dict], *, total_count: int | None = None) -> InlineKeyboardMarkup:
-    """Keyboard for the «which film?» picker shown when one search query
+    """Keyboard for the «which title?» picker shown when one search query
     returned releases spanning multiple distinct (title, year) tuples.
 
-    Each cluster gets one row with the film identity + release count.
+    Each cluster gets one row with content type, identity + release count.
     Final rows: «📋 Показать все» (skip filter) and «❌ Отмена».
     """
     rows: list[list[InlineKeyboardButton]] = []
     for idx, cluster in enumerate(clusters):
         year_str = f" ({cluster['year']})" if cluster.get("year") else ""
-        label = f"🎬 {cluster['title']}{year_str} · {cluster['count']} разд."
+        icon = "📺" if cluster.get("kind") == "series" else "🎬"
+        label = f"{icon} {cluster['title']}{year_str} · {cluster['count']} разд."
         # Trim label if too long (Telegram limit ~64 chars)
         if len(label) > 60:
             label = label[:57] + "…"
@@ -735,6 +760,7 @@ def _search_after_add_keyboard(task_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id)),
             InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
         ],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
     ])
 
 

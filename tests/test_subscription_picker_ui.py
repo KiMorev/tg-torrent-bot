@@ -59,15 +59,15 @@ class SearchSubscribePickTests(unittest.TestCase):
         call = update.callback_query.edit_message_text.await_args
         text = call.args[0]
         kb = call.kwargs.get("reply_markup")
-        # Hint-line above buttons explains «push» / «качать».
+        # Hint-line above buttons explains what download and notification mean.
+        self.assertIn("Download Station", text)
         self.assertIn("push", text)
-        self.assertIn("качать", text)
         # All 5 buttons present (4 presets + advanced + back = 6 actually).
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertTrue(any("📺" in l for l in labels))  # each
-        self.assertTrue(any("🎯" in l for l in labels))  # final
-        self.assertTrue(any("📦" in l for l in labels))  # after-finale (NEW)
-        self.assertTrue(any("🔕" in l for l in labels))  # notify-only
+        self.assertIn("⬇️+🔔 Каждую серию", labels)
+        self.assertIn("⬇️ каждую · 🔔 финал", labels)
+        self.assertIn("📦 Скачать сезон целиком", labels)
+        self.assertIn("🔔 Только сообщать", labels)
         self.assertTrue(any("⚙️" in l for l in labels))  # advanced
         self.assertTrue(any("К результатам" in l for l in labels))  # back
 
