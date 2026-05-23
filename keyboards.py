@@ -481,7 +481,7 @@ def _no_results_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def _cluster_picker_keyboard(clusters: list[dict]) -> InlineKeyboardMarkup:
+def _cluster_picker_keyboard(clusters: list[dict], *, total_count: int | None = None) -> InlineKeyboardMarkup:
     """Keyboard for the «which film?» picker shown when one search query
     returned releases spanning multiple distinct (title, year) tuples.
 
@@ -499,7 +499,7 @@ def _cluster_picker_keyboard(clusters: list[dict]) -> InlineKeyboardMarkup:
             label,
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:cluster:{idx}",
         )])
-    total = sum(c["count"] for c in clusters)
+    total = total_count if total_count is not None else sum(c["count"] for c in clusters)
     rows.append([InlineKeyboardButton(
         f"📋 Показать все {total} раздач",
         callback_data=f"{SEARCH_CALLBACK_PREFIX}:cluster:all",

@@ -742,6 +742,22 @@ class EnrichTopResultsWithMetadataTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("parsed_meta", r)
 
 
+class SearchQueryLabelTests(unittest.TestCase):
+    """User-facing query labels must keep filters outside title quotes."""
+
+    def test_quality_rendered_outside_title_quotes(self):
+        self.assertEqual(
+            bot._format_search_query_label("Драйв 1080p"),
+            "«Драйв» (качество: 1080p)",
+        )
+
+    def test_audio_and_sub_filters_rendered_as_filters(self):
+        self.assertEqual(
+            bot._format_search_query_label("Драйв 1080p Original Sub"),
+            "«Драйв» (качество: 1080p, оригинальная дорожка, субтитры)",
+        )
+
+
 class BuildSearchClustersTests(unittest.TestCase):
     """Proposal #1 cluster detection — groups results by (normalized_title, year)."""
 
@@ -798,6 +814,47 @@ class BuildSearchClustersTests(unittest.TestCase):
         )
         clusters = bot._build_search_clusters(results)
         self.assertFalse(bot._should_show_cluster_picker(clusters))
+
+    def test_picker_prefers_exact_title_over_token_noise(self):
+        """Query «Драйв» should not hide exact «Драйв» behind newer token matches."""
+        results = [
+            {"title": "Ледяной драйв 2021 1080p"},
+            {"title": "Ледяной драйв 2021 720p"},
+            {"title": "Акудама Драйв 2020 1080p"},
+            {"title": "Акудама Драйв 2020 720p"},
+            {"title": "Драйв 2011 1080p"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        picker = bot._clusters_for_query_picker(clusters, "Драйв")
+        self.assertEqual([c["title"] for c in picker], ["Драйв"])
+        self.assertTrue(
+            bot._should_show_cluster_picker(
+                picker,
+                total_clusters=len(clusters),
+                filtered_for_query=True,
+            )
+        )
+
+    def test_picker_shows_multiple_exact_title_years_even_with_single_release(self):
+        results = [
+            {"title": "Драйв 2011 1080p"},
+            {"title": "Драйв 1997 720p"},
+            {"title": "Ледяной драйв 2021 1080p"},
+            {"title": "Ледяной драйв 2021 720p"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        picker = bot._clusters_for_query_picker(clusters, "Драйв")
+        self.assertEqual(
+            [(c["title"], c["year"]) for c in picker],
+            [("Драйв", 2011), ("Драйв", 1997)],
+        )
+        self.assertTrue(
+            bot._should_show_cluster_picker(
+                picker,
+                total_clusters=len(clusters),
+                filtered_for_query=True,
+            )
+        )
 
 
 class DidmeanPrefetchCleanupTests(unittest.TestCase):

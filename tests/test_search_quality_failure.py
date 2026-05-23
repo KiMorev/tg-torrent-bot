@@ -337,7 +337,7 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
 
         args, kwargs = message.edit_text.call_args
         text = args[0] if args else kwargs.get("text", "")
-        self.assertIn("По запросу «ганстерленд» ничего не найдено.", text)
+        self.assertIn("По запросу «ганстерленд» (качество: 1080p) ничего не найдено.", text)
         self.assertNotIn("«ганстерленд 1080p»", text)
 
         keyboard = kwargs["reply_markup"].inline_keyboard

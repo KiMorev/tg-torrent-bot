@@ -2505,6 +2505,50 @@ class SearchRetryDlHandlerTests(unittest.IsolatedAsyncioTestCase):
         update.callback_query.edit_message_text.assert_called_once()
 
 
+class SearchRetryHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """search_retry should re-run the unified search with the saved query."""
+
+    async def test_retry_invokes_run_search_with_correct_argument_order(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:retry")
+        context = _make_context(user_data={"srch_search_query": "Драйв 1080p"})
+
+        with patch.object(bot, "_run_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as run_mock:
+            result = await bot.search_retry(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        run_mock.assert_awaited_once_with(
+            update.callback_query.edit_message_text,
+            context,
+            "Драйв 1080p",
+        )
+
+
+class SearchJackettDoHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """Tracker confirmation should not bypass the shared search pipeline."""
+
+    async def test_results_mode_uses_unified_search_pipeline(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:jk_search")
+        context = _make_context(user_data={
+            "srch_picker_return_to": "results",
+            "srch_jackett_selected": {"rutracker"},
+            "srch_search_query": "Драйв 1080p",
+        })
+
+        with (
+            patch.object(bot, "jackett_client", MagicMock()),
+            patch.object(bot, "_execute_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as exec_mock,
+        ):
+            result = await bot.search_jackett_do(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        update.callback_query.answer.assert_awaited_once()
+        exec_mock.assert_awaited_once_with(
+            update.callback_query,
+            context,
+            "Драйв 1080p",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Plex pre-download check helpers
 # ---------------------------------------------------------------------------

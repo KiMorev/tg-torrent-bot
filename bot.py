@@ -5624,7 +5624,7 @@ def _build_results_text(results_data: list[dict], search_query: str, page: int, 
     lines = []
     if banner:
         lines.append(banner)
-    lines.append(f"Результаты по «{html_module.escape(search_query)}»:")
+    lines.append(f"Результаты по {_format_search_query_label(search_query, escape_html=True)}:")
     start = page * SEARCH_PAGE_SIZE
     for index, r in enumerate(results_data[start : start + SEARCH_PAGE_SIZE], start=start):
         icon = "⭐" if r.get("recommended") else "🔎"
@@ -5769,9 +5769,10 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     if not search_query:
         await query.answer("Запрос потерян. Начните поиск заново.", show_alert=True)
         return ConversationHandler.END
-    await query.edit_message_text(f"🔍 Ищу «{search_query}» напрямую в Rutracker…")
+    base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
+    await query.edit_message_text(f"🔍 Ищу {_format_search_query_label(search_query)} напрямую в Rutracker…")
     try:
-        rt_results = await asyncio.to_thread(rutracker_client.search, search_query)
+        rt_results = await asyncio.to_thread(rutracker_client.search, base_query)
     except RutrackerError as rt_err:
         await query.edit_message_text(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
@@ -5793,14 +5794,35 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             "torrent_url": None,
             "tracker_name": "rutracker",
         })
+    filter_banner_parts: list[str] = []
+    if audio_required:
+        before = len(results_data)
+        results_data = [r for r in results_data if _detect_has_original_audio(r.get("title", ""))]
+        if before != len(results_data):
+            filter_banner_parts.append(f"⚙️ Оставлены {len(results_data)}/{before} с оригинальной дорожкой")
+    if subs_required:
+        before = len(results_data)
+        results_data = [r for r in results_data if _detect_has_subs(r.get("title", ""))]
+        if before != len(results_data):
+            filter_banner_parts.append(f"⚙️ Оставлены {len(results_data)}/{before} с субтитрами")
+    quality_banner = ""
+    if preferred_quality and results_data:
+        buckets = _classify_results_by_quality(results_data)
+        preferred_bucket = buckets.get(preferred_quality) or []
+        if preferred_bucket:
+            results_data = preferred_bucket
+            other_stats = _format_quality_stats(buckets, exclude=preferred_quality)
+            quality_banner = f"🎬 Показаны раздачи в {preferred_quality}."
+            if other_stats:
+                quality_banner += f" Также есть: {other_stats}."
+        else:
+            other_stats = _format_quality_stats(buckets)
+            quality_banner = f"⚠️ В {preferred_quality} ничего не найдено. Показаны все качества: {other_stats}."
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
-        # Strip quality suffix before asking GPT — same reasoning as the main
-        # Strategy-2 path (see _split_query_quality docstring).
-        clean_query, _ = _split_query_quality(search_query)
-        suggestions = await _gpt_get_did_you_mean(clean_query)
+        suggestions = await _gpt_get_did_you_mean(base_query)
         # Direct Rutracker path — Jackett expansion is irrelevant here.
-        text = f"По запросу «{search_query}» ничего не найдено в Rutracker."
+        text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено в Rutracker."
         if suggestions:
             text += (
                 "\n\n🤖 Возможно вы имели в виду — попробуйте вариант ниже "
@@ -5817,7 +5839,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         return SEARCH_RESULTS
     results_data.sort(key=_score_result, reverse=True)
     results_data[0]["recommended"] = True
-    banner = "🔗 Прямой поиск Rutracker"
+    banner = "\n".join(b for b in ("🔗 Прямой поиск Rutracker", *filter_banner_parts, quality_banner) if b)
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
     # R.2 pre-warm: kick off background Plex season fetch for the first
@@ -6007,6 +6029,28 @@ def _split_query_quality(search_query: str) -> tuple[str, str | None]:
     return (base, quality)
 
 
+def _format_search_query_label(search_query: str, *, escape_html: bool = False) -> str:
+    """Render user-facing query text without treating filters as title text.
+
+    Example: ``Драйв 1080p Original`` -> ``«Драйв» (качество: 1080p, оригинальная дорожка)``.
+    """
+    base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
+    shown = base_query or search_query.strip()
+    if escape_html:
+        shown = html_module.escape(shown)
+
+    filters: list[str] = []
+    if preferred_quality:
+        filters.append(f"качество: {preferred_quality}")
+    if audio_required:
+        filters.append("оригинальная дорожка")
+    if subs_required:
+        filters.append("субтитры")
+
+    suffix = f" ({', '.join(filters)})" if filters else ""
+    return f"«{shown}»{suffix}"
+
+
 def _classify_results_by_quality(results: list[dict]) -> dict[str, list[dict]]:
     """Group results by detected quality bucket (Plex-normalised string).
 
@@ -6088,6 +6132,20 @@ async def _didmean_prefetch_jackett(
         return None
 
 
+_SEARCH_CLUSTER_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+
+
+def _search_cluster_year(title: str) -> int | None:
+    matches = _SEARCH_CLUSTER_YEAR_RE.findall(title or "")
+    return int(matches[-1]) if matches else _movie_extract_year(title)
+
+
+def _normalize_search_cluster_title(title: str) -> str:
+    normalized = _normalize_movie_title(title)
+    normalized = _SEARCH_CLUSTER_YEAR_RE.sub(" ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def _build_search_clusters(results_data: list[dict]) -> list[dict]:
     """Group search results by (normalized_title, year) — used for the
     «Какую Дюну?» picker when one query returns multiple distinct films.
@@ -6107,8 +6165,8 @@ def _build_search_clusters(results_data: list[dict]) -> list[dict]:
     clusters: dict[tuple[str, int | None], dict] = {}
     for idx, r in enumerate(results_data):
         title = r.get("title") or ""
-        normalized = _normalize_movie_title(title)
-        year = _movie_extract_year(title)
+        normalized = _normalize_search_cluster_title(title)
+        year = _search_cluster_year(title)
         key = (normalized.lower(), year)
         if key not in clusters:
             clusters[key] = {
@@ -6131,10 +6189,66 @@ def _build_search_clusters(results_data: list[dict]) -> list[dict]:
     )
 
 
-def _should_show_cluster_picker(clusters: list[dict]) -> bool:
+def _cluster_query_relevance(cluster: dict, query: str) -> int:
+    """How directly a cluster title matches the cleaned search query.
+
+    3 = exact title match, 2 = title starts with the query, 1 = query is only
+    a token inside a longer title, 0 = unrelated/noisy.
+    """
+    q_norm = _normalize_search_cluster_title(query or "").lower()
+    title_norm = str(cluster.get("title") or "").strip().lower()
+    if not q_norm or not title_norm:
+        return 0
+    if title_norm == q_norm:
+        return 3
+    if title_norm.startswith(f"{q_norm} "):
+        return 2
+    tokens = set(title_norm.split())
+    if q_norm in tokens:
+        return 1
+    return 0
+
+
+def _clusters_for_query_picker(clusters: list[dict], query: str) -> list[dict]:
+    """Pick and order clusters for the visible picker.
+
+    If the query has direct title matches, show those even when they have only
+    one release and suppress loose token matches like «Ледяной драйв» for a
+    query «Драйв». The full result list remains available via «Показать все».
+    """
+    focused = [
+        (relevance, cluster)
+        for cluster in clusters
+        if (relevance := _cluster_query_relevance(cluster, query)) >= 2
+    ]
+    if focused:
+        focused.sort(
+            key=lambda item: (
+                -item[0],
+                -(item[1].get("year") or 0),
+                -item[1].get("count", 0),
+                item[1].get("title") or "",
+            )
+        )
+        return [cluster for _relevance, cluster in focused]
+
+    return [c for c in clusters if c["count"] >= 2]
+
+
+def _should_show_cluster_picker(
+    clusters: list[dict],
+    *,
+    total_clusters: int | None = None,
+    filtered_for_query: bool = False,
+) -> bool:
     """Show picker only when results genuinely span ≥2 distinct films with
     ≥2 releases each. Otherwise the picker is a useless extra tap (single
     film already, or one cluster dominates and the rest are noise)."""
+    if filtered_for_query and clusters:
+        if len(clusters) >= 2:
+            return True
+        if total_clusters is not None and len(clusters) < total_clusters:
+            return True
     real_clusters = [c for c in clusters if c["count"] >= 2]
     return len(real_clusters) >= 2
 
@@ -6177,6 +6291,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # results_full from the prior search.
     context.user_data.pop("srch_results_full", None)
     context.user_data.pop("srch_clusters", None)
+    context.user_data.pop("srch_picker_clusters", None)
     # Check for in-flight didmean prefetch BEFORE Strategy-2 splitting — we
     # need base_query to compare. If the prefetched query matches the current
     # base, we'll use its raw Jackett results below; otherwise we cancel it
@@ -6187,7 +6302,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # base_query is what actually goes to Jackett/Rutracker; the rest are
     # applied as post-filters on the raw results.
     base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
-    display_query = base_query or search_query
     context.user_data["srch_preferred_quality"] = preferred_quality
 
     # Loading message: show the user a clean «what we're looking for» rather
@@ -6531,7 +6645,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 )
         # Compose text: optional banner (e.g. «both sources down») + framing
         # that emphasises did-you-mean buttons when we have any.
-        no_results_text = f"По запросу «{display_query}» ничего не найдено."
+        no_results_text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено."
         if banner:
             no_results_text = f"{no_results_text}\n{banner}"
         if multi_tracker_coverage_lost:
@@ -6612,7 +6726,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
         text = (
-            f"По запросу «{search_query}» ничего не найдено.\n"
+            f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
             + "\n".join(filter_banner_parts)
             + "\nПопробуйте отключить фильтры аудио/субтитров в настройках."
         )
@@ -6671,11 +6785,21 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     _maybe_season = _extract_season_from_query(search_query)
     if _maybe_season is None:
         clusters = _build_search_clusters(results_data)
-        if _should_show_cluster_picker(clusters):
+        picker_clusters = _clusters_for_query_picker(clusters, base_query)
+        picker_is_focused = any(
+            _cluster_query_relevance(cluster, base_query) >= 2
+            for cluster in picker_clusters
+        )
+        if _should_show_cluster_picker(
+            picker_clusters,
+            total_clusters=len(clusters),
+            filtered_for_query=picker_is_focused,
+        ):
             # Stash full results + clusters for the picker callback. The user
             # may choose a single cluster (filter) or «show all» (use original).
             context.user_data["srch_results_full"] = list(results_data)
             context.user_data["srch_clusters"] = clusters
+            context.user_data["srch_picker_clusters"] = picker_clusters
             context.user_data["srch_source"] = source
             # Banner: combine source-fallback + filter banners (quality/audio/subs).
             # combined_banner isn't computed until after season filter further
@@ -6685,14 +6809,16 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             )
             context.user_data["srch_banner"] = picker_banner
             picker_text = (
-                f"По запросу «{search_query}» найдено разных фильмов: "
-                f"{len([c for c in clusters if c['count'] >= 2])}.\n"
+                f"По запросу {_format_search_query_label(search_query)} найдено несколько вариантов.\n"
                 "Выберите один или покажите все раздачи."
             )
+            if picker_banner:
+                picker_text = f"{picker_banner}\n{picker_text}"
             await edit_fn(
                 picker_text,
                 reply_markup=_cluster_picker_keyboard(
-                    [c for c in clusters if c["count"] >= 2]
+                    picker_clusters,
+                    total_count=len(results_data),
                 ),
                 parse_mode="HTML",
             )
@@ -6711,7 +6837,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             has_quality, jackett_can_expand = _no_results_flags(context, search_query)
             if has_quality:
                 await edit_fn(
-                    f"По запросу «{search_query}» раздач с указанным качеством не найдено.\n"
+                    f"По запросу {_format_search_query_label(search_query)} раздач с указанным качеством не найдено.\n"
                     f"Попробуйте ослабить фильтры:",
                     reply_markup=_no_results_keyboard(
                         has_quality=True,
@@ -6728,7 +6854,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             if available and in_picker_flow:
                 seasons_str = ", ".join(str(n) for n in available)
                 await edit_fn(
-                    f"По запросу «{search_query}» ничего не найдено.\n"
+                    f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
                     f"На трекерах найдены сезоны: {seasons_str}.",
                     reply_markup=_season_back_to_picker_keyboard(),
                 )
@@ -6737,7 +6863,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             # Generic dead-end after season filter wiped everything: offer to
             # broaden trackers (the requested season may exist elsewhere).
             await edit_fn(
-                f"По запросу «{search_query}» ничего не найдено.\n"
+                f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
                 "Попробуйте ослабить фильтры или другой запрос.",
                 reply_markup=_no_results_keyboard(
                     has_quality=False,
@@ -6854,6 +6980,7 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     full = context.user_data.get("srch_results_full") or []
     clusters = context.user_data.get("srch_clusters") or []
+    picker_clusters = context.user_data.get("srch_picker_clusters") or []
     if not full or not clusters:
         await query.edit_message_text(
             "Данные кластера потеряны — начните поиск заново.",
@@ -6870,9 +6997,9 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
         except ValueError:
             await query.edit_message_text("Неверный индекс кластера.")
             return SEARCH_RESULTS
-        # The picker only shows clusters with count >= 2 (see _should_show_cluster_picker),
-        # so re-filter to that subset and index into it — matches keyboard order.
-        visible = [c for c in clusters if c["count"] >= 2]
+        # Use the exact visible cluster list rendered by _run_search. Fallback
+        # to the old >=2 rule for stale sessions created before this state key.
+        visible = picker_clusters or [c for c in clusters if c["count"] >= 2]
         if cluster_idx < 0 or cluster_idx >= len(visible):
             await query.edit_message_text("Кластер не найден.")
             return SEARCH_RESULTS
@@ -6907,6 +7034,7 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Picker state consumed — don't leave it lying around to confuse the next search.
     context.user_data.pop("srch_results_full", None)
     context.user_data.pop("srch_clusters", None)
+    context.user_data.pop("srch_picker_clusters", None)
 
     await query.edit_message_text(
         _build_results_text(results_data, search_query, 0, banner=banner),
@@ -7132,7 +7260,7 @@ async def search_jackett_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
     show_back = return_to in ("options", "advanced")
     await query.edit_message_text(
-        f"Поиск: «{search_query}»\nВыберите трекеры для поиска:",
+        f"Поиск: {_format_search_query_label(search_query)}\nВыберите трекеры для поиска:",
         reply_markup=_jackett_select_keyboard(
             indexers, selected, confirm_label=confirm_label, show_back=show_back
         ),
@@ -7179,7 +7307,7 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         show_back = return_to_err in ("options", "advanced")
         search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
         await query.edit_message_text(
-            f"Поиск: «{search_query}»\nВыберите трекеры для поиска:",
+            f"Поиск: {_format_search_query_label(search_query)}\nВыберите трекеры для поиска:",
             reply_markup=_jackett_select_keyboard(
                 indexers, selected, confirm_label=confirm_label, show_back=show_back
             ),
@@ -7207,123 +7335,16 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return SEARCH_OPTIONS
 
-    # --- "results" mode: run search immediately ---
+    # --- "results" mode: run the unified search path immediately ---
     await query.answer()
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
-
-    try:
-        await query.edit_message_text(f"🔍 Ищу «{search_query}» через Jackett…")
-    except Exception as exc:
-        logger.warning("search_jackett_do: loading edit failed: %s", exc)
-
-    try:
-        j_results_raw = await asyncio.wait_for(
-            asyncio.to_thread(
-                jackett_client.search,
-                search_query,
-                indexers=list(selected),
-                fetch_limit=JACKETT_FETCH_LIMIT,
-            ),
-            timeout=45.0,
+    if not search_query:
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
         )
-    except (JackettError, asyncio.TimeoutError) as e:
-        raw_err = (
-            "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
-            if isinstance(e, asyncio.TimeoutError) else str(e)
-        )
-        if "not well-formed" in raw_err or "разобрать ответ" in raw_err:
-            raw_err += " — возможно, индексер требует авторизации в Jackett"
-        logger.error("Jackett search failed: %s", raw_err)
-        await _safe_answer(query, f"❌ {raw_err}", show_alert=True)
-        existing = context.user_data.get("srch_results", [])
-        banner = context.user_data.get("srch_banner", "")
-        if existing:
-            await query.edit_message_text(
-                _build_results_text(existing, search_query, 0, banner=banner),
-                reply_markup=_search_results_keyboard(
-                    existing, page=0,
-                    show_retry_jackett=True,   # Jackett failed — offer retry, not "direct RT" (already on RT)
-                    show_direct_rutracker=False,
-                ),
-                parse_mode="HTML",
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
-            return SEARCH_RESULTS
-        await query.edit_message_text(_friendly_error("jackett", raw_err), reply_markup=_search_error_keyboard(), parse_mode="HTML")
         return ConversationHandler.END
-
-    if not j_results_raw:
-        await _safe_answer(query, "Jackett не нашёл результатов по выбранным трекерам.", show_alert=True)
-        existing = context.user_data.get("srch_results", [])
-        banner = context.user_data.get("srch_banner", "")
-        if existing:
-            empty_markup = _search_results_keyboard(
-                existing, page=0,
-                show_retry_jackett=True,   # offer retry with different trackers
-                show_direct_rutracker=False,
-            )
-        else:
-            has_quality, jackett_can_expand = _no_results_flags(context, search_query)
-            empty_markup = _no_results_keyboard(
-                has_quality=has_quality,
-                jackett_can_expand=jackett_can_expand,
-            )
-        await query.edit_message_text(
-            _build_results_text(existing, search_query, 0, banner=banner) if existing
-            else f"По запросу «{search_query}» ничего не найдено.",
-            reply_markup=empty_markup,
-            parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
-        return SEARCH_RESULTS
-
-    logger.info("Jackett search returned %d results", len(j_results_raw))
-
-    j_results_data = []
-    for r in j_results_raw:
-        ep = _parse_episode_info(r.title)
-        partial = ep is not None and ep[0] < ep[1]
-        j_results_data.append({
-            "source": "jackett",
-            "topic_id": "",
-            "title": r.title,
-            "url": r.topic_url or "",
-            "category": r.tracker,
-            "size": r.size,
-            "seeders": r.seeders,
-            "partial": partial,
-            "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
-            "magnet_url": r.magnet_url,
-            "torrent_url": r.torrent_url,
-            "tracker_name": r.tracker,
-        })
-
-    merged = sorted(j_results_data, key=_score_result, reverse=True)
-    banner = f"🔍 Jackett: {len(merged)} результатов"
-    if merged:
-        merged[0]["recommended"] = True
-
-    context.user_data["srch_results"] = merged
-    context.user_data["srch_results_page"] = 0
-    context.user_data["srch_source"] = "jackett"
-    context.user_data["srch_banner"] = banner
-
-    try:
-        await query.edit_message_text(
-            _build_results_text(merged, search_query, 0, banner=banner),
-            reply_markup=_search_results_keyboard(
-                merged, page=0,
-                show_switch_trackers=True,
-                show_retry_jackett=False,
-                show_direct_rutracker=bool(rutracker_client),
-            ),
-            parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
-    except Exception as exc:
-        logger.error("Jackett results display failed: %s", exc, exc_info=True)
-        await _safe_answer(query, f"Ошибка отображения: {exc}", show_alert=True)
-    return SEARCH_RESULTS
+    return await _execute_search(query, context, search_query)
 
 
 async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8546,7 +8567,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_picker_return_to", "srch_jackett_mode",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
-        "srch_results_full", "srch_clusters",
+        "srch_results_full", "srch_clusters", "srch_picker_clusters",
     ):
         context.user_data.pop(key, None)
     # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
@@ -8573,7 +8594,7 @@ async def search_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             reply_markup=_search_error_keyboard(),
         )
         return ConversationHandler.END
-    return await _run_search(search_query, query.edit_message_text, context)
+    return await _run_search(query.edit_message_text, context, search_query)
 
 
 async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8604,7 +8625,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_picker_return_to", "srch_jackett_mode",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
-        "srch_results_full", "srch_clusters",
+        "srch_results_full", "srch_clusters", "srch_picker_clusters",
     ):
         context.user_data.pop(key, None)
     # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
