@@ -856,8 +856,62 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
             for button in row
         }
 
-        self.assertEqual(buttons["🎬 1. Невеста!"], "new:show:0")
+        self.assertRegex(buttons["🎬 1. Невеста!"], r"^new:show:0:[0-9a-f]{12}$")
         self.assertEqual(buttons["✖️ Закрыть"], "new:close")
+
+    def test_movie_new_show_recovers_card_when_cache_order_changed(self):
+        old_first = {
+            "key": "2026:old",
+            "title": "Old",
+            "year": 2026,
+            "releases": [{"title": "Old release", "source": "rutracker"}],
+        }
+        target = {
+            "key": "2026:target",
+            "title": "Target",
+            "year": 2026,
+            "releases": [{"title": "Target release", "source": "rutracker"}],
+        }
+        token = bot._movie_discovery_card_token(target)
+        update = _make_callback_update(chat_id=100, callback_data=f"new:show:0:{token}")
+        context = _make_context()
+        cache = {"cards": [old_first, target]}
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=cache),
+            patch.object(bot, "_build_results_text", return_value="results"),
+        ):
+            result = asyncio.run(bot.movie_new_show_releases(update, context))
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        self.assertEqual(context.user_data["srch_results"][0]["title"], "Target release")
+
+    def test_movie_new_show_stale_token_asks_to_refresh(self):
+        card = {
+            "key": "2026:current",
+            "title": "Current",
+            "year": 2026,
+            "releases": [{"title": "Current release", "source": "rutracker"}],
+        }
+        update = _make_callback_update(chat_id=100, callback_data="new:show:0:deadbeefdead")
+        context = _make_context()
+        cache = {"cards": [card]}
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=cache),
+        ):
+            result = asyncio.run(bot.movie_new_show_releases(update, context))
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        self.assertNotIn("srch_results", context.user_data)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Обновите список", text)
 
     def test_movie_discovery_text_lists_unique_tracker_abbreviations(self):
         text = _format_movie_discovery_cache({

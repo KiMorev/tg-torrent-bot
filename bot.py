@@ -1796,6 +1796,37 @@ def _movie_release_to_search_result(release: dict) -> dict:
     }
 
 
+def _movie_discovery_card_token(card: dict) -> str:
+    """Short stable token for a /new card callback.
+
+    Telegram callback_data is limited, so the button carries index + token.
+    The token lets us recover the same card if the cache order changes before
+    the user taps the button.
+    """
+    raw = str(card.get("key") or "")
+    if not raw and card.get("kp_id"):
+        raw = f"kp:{card.get('kp_id')}"
+    if not raw:
+        raw = "|".join(
+            str(card.get(key) or "")
+            for key in ("title", "alt_title", "year")
+        )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _find_movie_discovery_card(cards: list[dict], index: int, token: str = "") -> dict | None:
+    if token:
+        if 0 <= index < len(cards) and _movie_discovery_card_token(cards[index]) == token:
+            return cards[index]
+        for card in cards:
+            if _movie_discovery_card_token(card) == token:
+                return card
+        return None
+    if 0 <= index < len(cards):
+        return cards[index]
+    return None
+
+
 def _movie_discovery_audit_row(search_query: str, source: str, result, release: dict | None, reason: str) -> dict:
     return {
         "query": search_query,
@@ -1823,7 +1854,7 @@ def _movie_discovery_keyboard(cards: list[dict], chat_id: int | None = None) -> 
         title = _short_title({"title": display}, limit=42)
         rows.append([InlineKeyboardButton(
             f"🎬 {index}. {title}",
-            callback_data=f"new:show:{index - 1}",
+            callback_data=f"new:show:{index - 1}:{_movie_discovery_card_token(card)}",
         )])
     is_subscribed = chat_id is not None and _is_movie_subscribed(chat_id)
     sub_label = "🔕 Отписаться от /new" if is_subscribed else "🔔 Подписаться на /new"
@@ -10765,18 +10796,24 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
 
     await query.answer()
     try:
-        index = int((query.data or "").split(":")[-1])
+        parts = (query.data or "").split(":")
+        index = int(parts[2])
+        token = parts[3] if len(parts) > 3 else ""
     except (TypeError, ValueError):
         await query.edit_message_text("Не удалось открыть новинку.")
         return ConversationHandler.END
 
     cache = _load_movie_discovery_cache()
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
-    if index < 0 or index >= len(cards):
-        await query.edit_message_text("Новинка не найдена. Обновите список.")
+    card = _find_movie_discovery_card(cards, index, token)
+    if card is None:
+        chat_id = query.message.chat.id if query.message else None
+        await query.edit_message_text(
+            "Новинка изменилась после обновления кэша. Обновите список и выберите фильм ещё раз.",
+            reply_markup=_movie_discovery_keyboard(cards, chat_id=chat_id),
+        )
         return ConversationHandler.END
 
-    card = cards[index]
     releases = [_movie_release_to_search_result(release) for release in card.get("releases", [])]
     releases = sorted(releases, key=_score_result, reverse=True)
     if not releases:
@@ -12710,7 +12747,7 @@ def main() -> None:
                 search_jackett_check_entry,
                 pattern=rf"^{SUB_CALLBACK_PREFIX}:jackett_view:",
             ),
-            CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+$"),
+            CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+(?::[0-9a-f]{12})?$"),
             # Re-run the last search from an error message (conversation already ended).
             CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
         ],
