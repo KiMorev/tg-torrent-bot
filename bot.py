@@ -4882,6 +4882,14 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
                 if not task_id:
                     raise _missing_task_id_error("для torrent-файла")
                 return task_id, "torrent-файл"
+            except JackettMagnetRedirect as e:
+                magnet = e.magnet_url or magnet_url
+                if magnet:
+                    task_id = await asyncio.to_thread(ds_client.create_magnet, magnet)
+                    if not task_id:
+                        task_id = await _wait_for_magnet_task_id(magnet, set(), None)
+                    return task_id, "magnet"
+                last_err = e
             except JackettError as e:
                 last_err = e  # fall through to next step
 
@@ -8296,6 +8304,20 @@ async def _download_and_add(
                             task_id = await asyncio.to_thread(
                                 ds_client.create_torrent_file, temp_path, safe_name
                             )
+                        except JackettMagnetRedirect as retry_redir:
+                            magnet = retry_redir.magnet_url or result.get("magnet_url", "")
+                            if not magnet:
+                                raise JackettError(
+                                    "Torrent-файл недоступен и magnet-ссылка отсутствует."
+                                ) from retry_redir
+                            task_id = await asyncio.to_thread(
+                                ds_client.create_magnet, magnet
+                            )
+                            if not task_id:
+                                task_id = await _wait_for_magnet_task_id(
+                                    magnet, known_task_ids, query.message
+                                )
+                            download_method = "magnet"
                         except JackettError as retry_err:
                             logger.warning("retry also failed (%s), trying magnet", retry_err)
                             if result.get("magnet_url"):

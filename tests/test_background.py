@@ -635,6 +635,35 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         remember_owner.assert_not_called()
         remember_meta.assert_not_called()
 
+    def test_attempt_pending_download_uses_magnet_from_jackett_redirect(self) -> None:
+        from jackett import JackettMagnetRedirect
+        entry = {
+            "title": "Public Movie 1080p",
+            "topic_url": "https://example.org/topic/1",
+            "torrent_url": "http://jackett/dl/public/?path=old",
+            "magnet_url": None,
+            "tracker": "public",
+            "source": "jackett",
+        }
+        mock_jackett = MagicMock()
+        mock_jackett.download_torrent = MagicMock(
+            side_effect=JackettMagnetRedirect("magnet:?xt=urn:btih:pending")
+        )
+        mock_ds = MagicMock()
+        mock_ds.create_magnet.return_value = "task-pending"
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            task_id, method = asyncio.run(bot._attempt_pending_download(entry))
+
+        self.assertEqual(task_id, "task-pending")
+        self.assertEqual(method, "magnet")
+        mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:pending")
+
     def test_failure_increments_attempts_and_persists(self) -> None:
         entry_id = self._seed_entry(attempts=1)
         mock_app = MagicMock()

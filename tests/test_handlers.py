@@ -2706,6 +2706,54 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         # Fell through to magnet.
         mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:cafebabe")
 
+    async def test_refreshed_jackett_url_magnet_redirect_uses_redirect_magnet(self):
+        from jackett import JackettError, JackettMagnetRedirect
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Public Movie 1080p",
+            "url": "https://example.org/topic/1",
+            "torrent_url": "http://jackett/dl/public/?path=old",
+            "magnet_url": None,
+            "tracker_name": "public",
+            "source": "jackett",
+            "topic_id": "",
+            "size": "3 GB",
+            "seeders": 10,
+            "quality": "1080p",
+            "year": 2024,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Public Movie"})
+
+        mock_jackett = MagicMock()
+        mock_jackett.download_torrent = MagicMock(side_effect=[
+            JackettError("HTTP 404"),
+            JackettMagnetRedirect("magnet:?xt=urn:btih:fresh"),
+        ])
+        mock_jackett._api_key = "k"
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        mock_ds.create_magnet.return_value = "task1"
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_refresh_jackett_torrent_url", AsyncMock(return_value="http://jackett/dl/public/?path=fresh")),
+            patch.object(bot, "_add_public_trackers_to_download_task", return_value=MagicMock(skipped_reason=None)),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_register_task_card_from_query"),
+            patch.object(bot, "_start_task_card_refresh"),
+            patch.object(bot, "_mark_tracker_processed_if_final"),
+            patch.object(bot.asyncio, "sleep", AsyncMock()),
+        ):
+            await bot._download_and_add(update.callback_query, context, 0, subscribe=False, _skip_plex_check=True)
+
+        self.assertEqual(mock_jackett.download_torrent.call_count, 2)
+        mock_ds.create_magnet.assert_called_once_with("magnet:?xt=urn:btih:fresh")
+
     async def test_magnet_without_task_id_shows_download_list_without_tracking(self):
         """Magnet can be accepted by DS before a task id appears.
 
