@@ -653,9 +653,6 @@ def _search_results_keyboard(
     show_direct_rutracker: bool = False,  # source=jackett  → "🔗 Rutracker напрямую"
     show_back_to_discovery: bool = False,
     show_back_to_cluster_picker: bool = False,
-    # Legacy aliases kept for backwards-compat during transition
-    show_jackett_expand: bool = False,
-    show_jackett_direct: bool = False,
 ) -> InlineKeyboardMarkup:
     total = len(results)
     total_pages = max(1, (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
@@ -717,7 +714,7 @@ def _search_results_keyboard(
             )
         ])
 
-    if show_switch_trackers or show_jackett_expand or show_jackett_direct:
+    if show_switch_trackers:
         rows.append([
             InlineKeyboardButton(
                 "🔄 Сменить трекеры",

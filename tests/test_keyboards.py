@@ -393,12 +393,6 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         self.assertNotIn("🔄 Сменить трекеры", labels)
         self.assertNotIn("🔗 Прямой поиск Rutracker", labels)
 
-    def test_legacy_show_jackett_expand_maps_to_switch_trackers(self) -> None:
-        keyboard = _search_results_keyboard([], show_jackett_expand=True)
-        labels = [b.text for row in keyboard.inline_keyboard for b in row]
-        self.assertIn("🔄 Сменить трекеры", labels)
-
-
 class SearchOptionsKeyboardTests(unittest.TestCase):
     def test_no_tracker_button_without_label(self) -> None:
         keyboard = _search_options_keyboard()

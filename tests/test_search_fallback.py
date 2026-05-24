@@ -183,31 +183,35 @@ class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
         self.assertTrue(any("альтернатива" in lbl for lbl in labels))
 
 
-class SplitQueryQualityTests(unittest.TestCase):
+class SplitQuerySettingsTests(unittest.TestCase):
     """Strategy 2: extract base + preferred quality from full search query."""
 
+    def _split_quality(self, query: str) -> tuple[str, str | None]:
+        base, quality, _audio, _subs = bot._split_query_settings(query)
+        return base, quality
+
     def test_extracts_1080p_suffix(self):
-        self.assertEqual(bot._split_query_quality("Дюна 1080p"), ("Дюна", "1080p"))
+        self.assertEqual(self._split_quality("Дюна 1080p"), ("Дюна", "1080p"))
 
     def test_extracts_2160p_suffix(self):
-        self.assertEqual(bot._split_query_quality("Аркейн 2160p"), ("Аркейн", "2160p"))
+        self.assertEqual(self._split_quality("Аркейн 2160p"), ("Аркейн", "2160p"))
 
     def test_normalises_4k_to_2160p(self):
-        self.assertEqual(bot._split_query_quality("Барби 4k"), ("Барби", "2160p"))
+        self.assertEqual(self._split_quality("Барби 4k"), ("Барби", "2160p"))
 
     def test_normalises_uhd_to_2160p(self):
-        self.assertEqual(bot._split_query_quality("Дюна UHD"), ("Дюна", "2160p"))
+        self.assertEqual(self._split_quality("Дюна UHD"), ("Дюна", "2160p"))
 
     def test_no_suffix_means_no_filter(self):
-        self.assertEqual(bot._split_query_quality("Дюна 2024"), ("Дюна 2024", None))
+        self.assertEqual(self._split_quality("Дюна 2024"), ("Дюна 2024", None))
 
     def test_year_not_misread_as_quality(self):
         # Year (4 digits) shouldn't be confused with a quality token.
-        self.assertEqual(bot._split_query_quality("Аркейн 2024"), ("Аркейн 2024", None))
+        self.assertEqual(self._split_quality("Аркейн 2024"), ("Аркейн 2024", None))
 
     def test_multiword_title_preserved(self):
         self.assertEqual(
-            bot._split_query_quality("Дюна часть вторая 1080p"),
+            self._split_quality("Дюна часть вторая 1080p"),
             ("Дюна часть вторая", "1080p"),
         )
 
@@ -474,7 +478,7 @@ class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
         """User searched «Дюра 1080p» → typo → taps «Дюна» suggestion →
         bot must search for «Дюна 1080p», not bare «Дюна»."""
         query = MagicMock()
-        query.data = "srch:didmean:Дюна"
+        query.data = "srch:didmean:0"
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1, chat_id=100))
         update = MagicMock(callback_query=query)
@@ -482,6 +486,7 @@ class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
         context.user_data = {
             "srch_query": "Дюра",
             "srch_search_query": "Дюра 1080p",
+            "srch_didmean_suggestions": ["Дюна"],
             "srch_settings": {"quality": "1080p", "audio": False, "subs": False},
         }
 
@@ -498,7 +503,7 @@ class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
 
     def test_didmean_preserves_audio_and_subs(self):
         query = MagicMock()
-        query.data = "srch:didmean:Аркейн"
+        query.data = "srch:didmean:0"
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1, chat_id=100))
         update = MagicMock(callback_query=query)
@@ -506,6 +511,7 @@ class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
         context.user_data = {
             "srch_query": "Аркаин",
             "srch_search_query": "Аркаин 1080p Original Sub",
+            "srch_didmean_suggestions": ["Аркейн"],
             "srch_settings": {"quality": "1080p", "audio": True, "subs": True},
         }
 

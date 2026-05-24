@@ -6199,13 +6199,6 @@ def _split_query_settings(search_query: str) -> tuple[str, str | None, bool, boo
     return (s or search_query.strip(), preferred_quality, audio_required, subs_required)
 
 
-def _split_query_quality(search_query: str) -> tuple[str, str | None]:
-    """Backwards-compat wrapper around _split_query_settings — returns only
-    (base, quality) for callers that don't care about audio/subs flags."""
-    base, quality, _audio, _subs = _split_query_settings(search_query)
-    return (base, quality)
-
-
 _MEDIA_INTENT_MOVIE_RE = re.compile(
     r"(?<!\w)(фильм|фильма|фильмы|кино|мультфильм|мультик)(?!\w)",
     re.IGNORECASE,
@@ -7383,7 +7376,7 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     # Current callback shape is "srch:didmean:<index>" to stay under
-    # Telegram's 64-byte callback_data limit. Old "<text>" callbacks still work.
+    # Telegram's 64-byte callback_data limit.
     prefix = f"{SEARCH_CALLBACK_PREFIX}:didmean:"
     raw = query.data or ""
     token = raw[len(prefix):].strip() if raw.startswith(prefix) else ""
@@ -7393,9 +7386,6 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         idx = int(token)
         if 0 <= idx < len(stored):
             suggestion = str(stored[idx]).strip()
-    else:
-        # Back-compat for no-results messages rendered before indexed callbacks.
-        suggestion = token
     if not suggestion:
         await query.edit_message_text("Подсказка потеряна. Начните поиск заново.")
         return ConversationHandler.END
@@ -7534,11 +7524,6 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ]]),
     )
     return ConversationHandler.END
-
-
-async def search_expand_jackett(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Kept for backwards-compat; now delegates to search_switch_trackers."""
-    return await search_switch_trackers(update, context)
 
 
 async def search_jackett_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -10998,7 +10983,7 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["srch_banner"] = banner
     await query.edit_message_text(
         _build_results_text(releases, search_query, 0, banner=banner),
-        reply_markup=_search_results_keyboard(releases, page=0, show_jackett_expand=False, show_jackett_direct=False, show_back_to_discovery=True),
+        reply_markup=_search_results_keyboard(releases, page=0, show_back_to_discovery=True),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
@@ -12975,16 +12960,13 @@ def main() -> None:
                     CallbackQueryHandler(search_no_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality$"),
                     CallbackQueryHandler(search_expand_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_all_trackers$"),
                     CallbackQueryHandler(search_no_quality_all_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers$"),
-                    CallbackQueryHandler(search_didmean, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:didmean:"),
+                    CallbackQueryHandler(search_didmean, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:didmean:\d+$"),
                     CallbackQueryHandler(search_cluster_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cluster_back$"),
                     CallbackQueryHandler(search_pick_cluster, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cluster:"),
                     CallbackQueryHandler(search_retry_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry_dl:\d+$"),
                     CallbackQueryHandler(search_queue_dl, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:queue_dl:\d+$"),
                     CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:switch_trackers$"),
                     CallbackQueryHandler(search_direct_rutracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:direct_rt$"),
-                    # Legacy patterns — delegate to new handlers
-                    CallbackQueryHandler(search_expand_jackett, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:expand_jackett$"),
-                    CallbackQueryHandler(search_switch_trackers, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:jackett_direct$"),
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                     CallbackQueryHandler(movie_new_back, pattern=r"^new:back$"),
                     # New text → treat as a fresh query, restarting the flow.
