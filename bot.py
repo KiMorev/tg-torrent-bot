@@ -4637,7 +4637,7 @@ async def _run_task_notifications_once(app: Application) -> None:
         # task_meta and handles both kinds.
         plex_should_poll = (
             PLEX_ENABLED
-            and status == "finished"
+            and status in {"finished", "seeding"}
             and task_id not in _PLEX_POLLING_TASKS
             and not _plex_poll_is_done(task_id, notified)
         )

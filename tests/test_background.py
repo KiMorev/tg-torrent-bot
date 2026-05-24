@@ -185,6 +185,41 @@ class NotificationDeduplicationTests(unittest.TestCase):
         notified = self._store.load_notified_tasks()["tid1"]
         self.assertEqual(notified["failures"], {"999": 2})
 
+    def test_seeding_status_starts_plex_polling_once(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "TestFile", "size": 0}
+        created_coroutines = []
+
+        def fake_create_task(coro):
+            created_coroutines.append(coro)
+            coro.close()
+            return MagicMock()
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"seeding"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_plex_poll_is_done", return_value=False),
+            patch.object(bot, "_get_task_meta", return_value={"kind": "movie", "title": "TestFile"}),
+            patch.object(bot, "_plex_poll_after_finish", AsyncMock()) as poll,
+            patch.object(bot.asyncio, "create_task", side_effect=fake_create_task),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        poll.assert_called_once()
+        self.assertEqual(len(created_coroutines), 1)
+
 
 class NotificationSkipLoggingTests(unittest.TestCase):
     """Regression: every skip branch in _run_task_notifications_once must
