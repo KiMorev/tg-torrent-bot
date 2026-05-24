@@ -31,6 +31,7 @@
 | Фоновые циклы | `bot.py`: `setup_bot_commands`, `_tracker_background_loop`, `_task_maintenance_loop`, `_subscription_check_loop`, `_movie_discovery_loop`, `_plex_cache_loop`; профильная логика в отдельных модулях | `tests/test_background.py`, профильные тесты блока |
 | Конфигурация и `.env` | `config.py`; `app_context.py`; `compose.yaml`; `README.md`; `install.sh`; `scripts/setup_wizard.py` | `tests/test_config.py`, `tests/test_setup_wizard.py` |
 | Установка на Synology | `install.sh`; `scripts/setup_wizard.py`; `compose.yaml`; `README.md` | `tests/test_setup_wizard.py`, `tests/test_config.py` |
+| Тестовое окружение | `tests/conftest.py`; профильные helper-функции в `tests/test_*.py` | полный `python -m pytest tests/ -v` |
 
 ## Точки входа runtime
 
@@ -99,6 +100,7 @@
 | `access_control.py` | Проверка разрешённых/admin chat ids и подпись заявки на доступ. |
 | `progressive_status.py` | Прогрессивные сообщения ожидания для поиска и голосового ввода. |
 | `scripts/setup_wizard.py` | Wizard установки и генерация `.env`. |
+| `tests/conftest.py` | Bootstrap тестового окружения: изолированные `TMP_DIR`/`STATE_DIR` до импорта `bot.py`. |
 
 ## State files
 
