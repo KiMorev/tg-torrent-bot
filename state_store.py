@@ -53,7 +53,13 @@ class JsonStateStore:
         with self.lock:
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except FileNotFoundError:
+                return default
+            except json.JSONDecodeError:
+                logger.warning("Malformed JSON in %s; using default", path, exc_info=True)
+                return default
+            except OSError:
+                logger.warning("Failed to load %s; using default", path, exc_info=True)
                 return default
 
     def save_json_file(self, path: Path, payload: Any, label: str) -> None:
@@ -65,7 +71,7 @@ class JsonStateStore:
                 text = json.dumps(payload, ensure_ascii=False, indent=2)
                 tmp_path.write_text(text, encoding="utf-8")
                 os.replace(tmp_path, path)
-            except OSError:
+            except (OSError, TypeError, ValueError):
                 if tmp_path is not None:
                     try:
                         tmp_path.unlink(missing_ok=True)

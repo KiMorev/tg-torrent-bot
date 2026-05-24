@@ -169,6 +169,39 @@ class StateStoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.load_approved_chat_ids(), original_content)
 
+    def test_load_json_file_missing_is_silent_default(self) -> None:
+        missing = Path(self._tmp.name) / "missing.json"
+        default = {"fallback": True}
+
+        with self.assertNoLogs("tg_torrent_drop", level="WARNING"):
+            result = self.store.load_json_file(missing, default)
+
+        self.assertEqual(result, default)
+
+    def test_load_json_file_malformed_logs_warning_and_returns_default(self) -> None:
+        broken = Path(self._tmp.name) / "broken.json"
+        broken.write_text("{not valid json", encoding="utf-8")
+        default = {"fallback": True}
+
+        with self.assertLogs("tg_torrent_drop", level="WARNING") as captured:
+            result = self.store.load_json_file(broken, default)
+
+        self.assertEqual(result, default)
+        joined = "\n".join(captured.output)
+        self.assertIn("Malformed JSON", joined)
+        self.assertIn("broken.json", joined)
+
+    def test_save_json_file_serialization_error_preserves_old_file(self) -> None:
+        path = Path(self._tmp.name) / "custom.json"
+        self.store.save_json_file(path, {"ok": True}, "custom state")
+        original_text = path.read_text(encoding="utf-8")
+
+        with self.assertLogs("tg_torrent_drop", level="WARNING") as captured:
+            self.store.save_json_file(path, {"bad": object()}, "custom state")
+
+        self.assertEqual(path.read_text(encoding="utf-8"), original_text)
+        self.assertIn("Failed to save custom state", "\n".join(captured.output))
+
     def test_add_tracker_processed_ids_deduplication(self) -> None:
         self.store.add_tracker_processed_ids({"t1", "t2"})
         self.store.add_tracker_processed_ids({"t2", "t3"})
