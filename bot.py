@@ -11947,7 +11947,8 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     temp_path: Path | None = None
     try:
         tg_file = await context.bot.get_file(voice.file_id)
-        safe_name = _safe_filename(f"voice_{voice.file_id}.ogg")
+        safe_voice_id = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(voice.file_id or "voice"))[:160]
+        safe_name = f"voice_{safe_voice_id}.ogg"
         temp_path = _temp_path(safe_name)
         await tg_file.download_to_drive(custom_path=str(temp_path))
     except Exception:

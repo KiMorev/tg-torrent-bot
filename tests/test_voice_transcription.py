@@ -256,7 +256,7 @@ class VoiceMessageEntryTests(unittest.TestCase):
             patch.object(bot, "VOICE_SEARCH_ENABLED", True),
             patch.object(bot, "OPENAI_API_KEY", "sk-test"),
             patch.object(bot, "VOICE_MAX_SECONDS", 30),
-            patch.object(bot, "transcribe_audio_detailed", return_value=("Дюна часть вторая", None)),
+            patch.object(bot, "transcribe_audio_detailed", return_value=("Дюна часть вторая", None)) as transcribe_mock,
             patch.object(bot, "rutracker_client", MagicMock()),
             patch.object(bot, "_safe_edit_message", new=AsyncMock()) as edit_mock,
             patch.object(bot, "_voice_record_usage"),  # silence usage recording in test
@@ -265,6 +265,9 @@ class VoiceMessageEntryTests(unittest.TestCase):
 
         # The transcribed text was placed into the search query slot.
         self.assertEqual(context.user_data.get("srch_query"), "Дюна часть вторая")
+        audio_path = transcribe_mock.call_args.args[0]
+        self.assertTrue(audio_path.name.endswith(".ogg"))
+        self.assertNotIn(".torrent", audio_path.name)
         # The user-visible status message shows what was heard.
         last_call_text = edit_mock.call_args.args[1]
         self.assertIn("Услышал", last_call_text)
