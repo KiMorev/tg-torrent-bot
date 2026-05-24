@@ -1516,6 +1516,59 @@ class SubscriberNotificationTests(unittest.TestCase):
 
         self.assertEqual(mock_app.bot.send_message.await_count, 1)
 
+    def test_failed_subscriber_remains_until_retry_success(self) -> None:
+        from telegram.error import TimedOut
+
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "Movie", "size": 0}
+        attempts: list[int] = []
+        subscriber_failed = False
+
+        async def send_message(*, chat_id, **kwargs):
+            nonlocal subscriber_failed
+            attempts.append(chat_id)
+            if chat_id == 888 and not subscriber_failed:
+                subscriber_failed = True
+                raise TimedOut("read timed out")
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=send_message)
+        mock_app.bot.delete_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        self._store.save_notified_tasks({
+            "tid1": {
+                "status": "",
+                "sent": [],
+                "failures": {},
+                "subscribers": ["888"],
+                "plex_done": True,
+            },
+        })
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+            after_first = self._store.load_notified_tasks()["tid1"]
+            self.assertEqual(after_first["sent"], ["999"])
+            self.assertEqual(after_first["subscribers"], ["888"])
+            self.assertTrue(after_first["plex_done"])
+
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertEqual(attempts, [888, 999, 888])
+        after_retry = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(after_retry["sent"], ["888", "999"])
+        self.assertNotIn("subscribers", after_retry)
+        self.assertTrue(after_retry["plex_done"])
+
     def test_subscribers_not_notified_for_non_final_status(self) -> None:
         task = {"id": "tid1", "status": "downloading", "type": "bt", "title": "Movie", "size": 0}
         mock_app = MagicMock()

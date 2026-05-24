@@ -4440,8 +4440,9 @@ def _make_notification_delivery_state(
     notification_key: str,
     sent: set[str],
     failures: dict[str, int],
+    raw_state: object | None = None,
 ) -> dict:
-    return {
+    entry = {
         "status": notification_key,
         "sent": sorted(sent),
         "failures": {
@@ -4450,6 +4451,18 @@ def _make_notification_delivery_state(
             if count > 0
         },
     }
+    if isinstance(raw_state, dict):
+        subscribers = {
+            str(chat_id)
+            for chat_id in raw_state.get("subscribers", [])
+            if chat_id
+        }
+        subscribers -= sent
+        if subscribers:
+            entry["subscribers"] = sorted(subscribers)
+        if raw_state.get("plex_done"):
+            entry["plex_done"] = True
+    return entry
 
 
 _RU_MONTHS = {
@@ -4812,6 +4825,7 @@ async def _run_task_notifications_once(app: Application) -> None:
                 notification_key,
                 sent_recipients,
                 failed_recipients,
+                notified.get(task_id),
             )
             # Persist after each task so a crash mid-cycle loses at most one
             # task's worth of state (instead of the whole cycle, which would
