@@ -3,7 +3,7 @@
 Living checklist for series-related search, subscription, and notification work.
 Update this file when a task is completed or reprioritized.
 
-Last updated: 2026-05-23 - P0 closed
+Last updated: 2026-05-24 - preserved search render context after subscription picker
 
 ## P0 - Required Fixes
 
@@ -14,7 +14,7 @@ Last updated: 2026-05-23 - P0 closed
 
 ## P1 - Important Next
 
-- [ ] Preserve search render context when returning from the subscription picker to results.
+- [x] Preserve search render context when returning from the subscription picker to results.
 - [ ] Escape series/subscription titles in HTML-formatted Telegram messages.
 - [ ] Always offer manual season selection in "other season" flow, even when Kinopoisk is unavailable.
 - [ ] Improve English/no-slash series title cleanup for `Sxx`, `SxxEyy`, quality tags, and release suffixes.

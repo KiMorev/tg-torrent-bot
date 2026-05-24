@@ -8634,17 +8634,36 @@ async def search_subscribe_back_to_results(
     search_query = str(
         context.user_data.get("srch_search_query") or context.user_data.get("srch_query") or ""
     )
-    text = _build_results_text(results, search_query, page)
+    banner = str(context.user_data.get("srch_banner") or "")
+    source = str(context.user_data.get("srch_source") or "")
+    text = _build_results_text(results, search_query, page, banner=banner)
     kb = _search_results_keyboard(
         results, page=page,
-        show_switch_trackers=context.user_data.get("srch_show_switch_trackers", False),
-        show_retry_jackett=context.user_data.get("srch_show_retry_jackett", False),
-        show_direct_rutracker=context.user_data.get("srch_show_direct_rutracker", False),
-        show_back_to_discovery=context.user_data.get("srch_show_back_to_discovery", False),
+        show_switch_trackers=bool(
+            context.user_data.get("srch_show_switch_trackers", False)
+            or (jackett_client and source == "jackett")
+        ),
+        show_retry_jackett=bool(
+            context.user_data.get("srch_show_retry_jackett", False)
+            or (jackett_client and source == "rutracker")
+        ),
+        show_direct_rutracker=bool(
+            context.user_data.get("srch_show_direct_rutracker", False)
+            or (rutracker_client and source == "jackett")
+        ),
+        show_back_to_discovery=bool(
+            context.user_data.get("srch_show_back_to_discovery", False)
+            or source == "movie_discovery"
+        ),
         show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
     )
     try:
-        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+        await query.edit_message_text(
+            text,
+            reply_markup=kb,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
     except Exception:
         # Fallback if message can't be edited (e.g. media message) — just acknowledge.
         logger.debug("Could not re-render results after back-to-results", exc_info=True)
@@ -10522,12 +10541,15 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     search_query = f"{card.get('title', '')} {card.get('year', '')}".strip()
+    banner = "🎬 Раздачи по выбранной новинке"
     context.user_data["srch_results"] = releases
+    context.user_data["srch_results_page"] = 0
     context.user_data["srch_search_query"] = search_query
     context.user_data["srch_query"] = search_query
     context.user_data["srch_source"] = "movie_discovery"
+    context.user_data["srch_banner"] = banner
     await query.edit_message_text(
-        _build_results_text(releases, search_query, 0, banner="🎬 Раздачи по выбранной новинке"),
+        _build_results_text(releases, search_query, 0, banner=banner),
         reply_markup=_search_results_keyboard(releases, page=0, show_jackett_expand=False, show_jackett_direct=False, show_back_to_discovery=True),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),

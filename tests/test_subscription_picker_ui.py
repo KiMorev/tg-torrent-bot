@@ -232,6 +232,61 @@ class SearchSubscribeBackToResultsTests(unittest.TestCase):
         call = update.callback_query.edit_message_text.await_args
         self.assertIsNotNone(call.kwargs.get("reply_markup"))
 
+    def test_preserves_banner_page_and_source_buttons(self):
+        update = MagicMock(callback_query=_make_query("srch:sub_back_results:0"))
+        results = [{"title": f"Test {i}", "partial": True} for i in range(6)]
+        ctx = _make_context(results=results)
+        ctx.user_data.update({
+            "srch_results_page": 1,
+            "srch_search_query": "Test Show 1080p",
+            "srch_banner": "⚙️ Показаны сериалы",
+            "srch_source": "jackett",
+            "srch_cluster_picker_return": True,
+        })
+
+        with (
+            patch.object(bot, "jackett_client", object()),
+            patch.object(bot, "rutracker_client", object()),
+            patch.object(bot, "_build_results_text", return_value="🔎 results") as build_text,
+        ):
+            asyncio.run(bot.search_subscribe_back_to_results(update, ctx))
+
+        build_text.assert_called_once_with(
+            results,
+            "Test Show 1080p",
+            1,
+            banner="⚙️ Показаны сериалы",
+        )
+        call = update.callback_query.edit_message_text.await_args
+        labels = [
+            button.text
+            for row in call.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🔄 Сменить трекеры", labels)
+        self.assertIn("🔗 Rutracker напрямую", labels)
+        self.assertIn("⬅️ К вариантам", labels)
+
+    def test_preserves_movie_discovery_back_button(self):
+        update = MagicMock(callback_query=_make_query("srch:sub_back_results:0"))
+        ctx = _make_context(results=[{"title": "Movie release", "partial": True}])
+        ctx.user_data.update({
+            "srch_search_query": "Movie 2026",
+            "srch_banner": "🎬 Раздачи по выбранной новинке",
+            "srch_source": "movie_discovery",
+        })
+
+        with patch.object(bot, "_build_results_text", return_value="🔎 results"):
+            asyncio.run(bot.search_subscribe_back_to_results(update, ctx))
+
+        call = update.callback_query.edit_message_text.await_args
+        labels = [
+            button.text
+            for row in call.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🎬 ← Новинки", labels)
+
     def test_missing_results_graceful_error(self):
         update = MagicMock(callback_query=_make_query("srch:sub_back_results:0"))
         ctx = _make_context(results=[])
