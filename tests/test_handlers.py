@@ -1102,6 +1102,157 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertTrue(lpo.is_disabled, "link preview must be disabled after refresh")
 
 
+class MovieDiscoveryRefreshSingleFlightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_normal_refreshes_coalesce_into_one_inner_call(self):
+        cache = {"cards": [{"title": "A"}], "updated_at": "2026-05-24 12:00"}
+        saved = {"cache": cache}
+        calls: list[int | None] = []
+
+        async def fake_inner(max_stale_kp_refresh: int | None = bot._KP_MAX_STALE_REFRESH) -> dict:
+            calls.append(max_stale_kp_refresh)
+            await asyncio.sleep(0.01)
+            saved["cache"] = cache
+            return cache
+
+        with (
+            patch.object(bot, "_movie_discovery_refresh_lock", None),
+            patch.object(bot, "_movie_discovery_refresh_current_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_finished_at", 0.0),
+            patch.object(bot, "_refresh_movie_discovery_cache_inner", fake_inner),
+            patch.object(bot, "_load_movie_discovery_cache", side_effect=lambda: saved["cache"]),
+        ):
+            results = await asyncio.gather(*[bot._refresh_movie_discovery_cache() for _ in range(5)])
+
+        self.assertEqual(calls, [bot._KP_MAX_STALE_REFRESH])
+        self.assertTrue(all(result is cache for result in results))
+
+    async def test_force_refresh_does_not_reuse_recent_normal_cache(self):
+        first_cache = {"cards": [{"title": "first"}]}
+        second_cache = {"cards": [{"title": "second"}]}
+        saved = {"cache": first_cache}
+        calls: list[int | None] = []
+
+        async def fake_inner(max_stale_kp_refresh: int | None = bot._KP_MAX_STALE_REFRESH) -> dict:
+            calls.append(max_stale_kp_refresh)
+            cache = first_cache if len(calls) == 1 else second_cache
+            saved["cache"] = cache
+            return cache
+
+        with (
+            patch.object(bot, "_movie_discovery_refresh_lock", None),
+            patch.object(bot, "_movie_discovery_refresh_current_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_finished_at", 0.0),
+            patch.object(bot, "_refresh_movie_discovery_cache_inner", fake_inner),
+            patch.object(bot, "_load_movie_discovery_cache", side_effect=lambda: saved["cache"]),
+        ):
+            first_result = await bot._refresh_movie_discovery_cache()
+            second_result = await bot._refresh_movie_discovery_cache(force_refresh=True)
+
+        self.assertEqual(calls, [bot._KP_MAX_STALE_REFRESH, bot._KP_MAX_STALE_REFRESH])
+        self.assertIs(first_result, first_cache)
+        self.assertIs(second_result, second_cache)
+
+    async def test_full_kp_refresh_is_not_coalesced_by_normal_refresh(self):
+        saved = {"cache": {"cards": []}}
+        calls: list[int | None] = []
+        normal_started = asyncio.Event()
+        normal_release = asyncio.Event()
+
+        async def fake_inner(max_stale_kp_refresh: int | None = bot._KP_MAX_STALE_REFRESH) -> dict:
+            calls.append(max_stale_kp_refresh)
+            if max_stale_kp_refresh is not None:
+                normal_started.set()
+                await normal_release.wait()
+                cache = {"cards": [{"title": "normal"}]}
+            else:
+                cache = {"cards": [{"title": "full"}]}
+            saved["cache"] = cache
+            return cache
+
+        with (
+            patch.object(bot, "_movie_discovery_refresh_lock", None),
+            patch.object(bot, "_movie_discovery_refresh_current_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_finished_at", 0.0),
+            patch.object(bot, "_refresh_movie_discovery_cache_inner", fake_inner),
+            patch.object(bot, "_load_movie_discovery_cache", side_effect=lambda: saved["cache"]),
+        ):
+            normal_task = asyncio.create_task(bot._refresh_movie_discovery_cache())
+            await normal_started.wait()
+            full_task = asyncio.create_task(bot._refresh_movie_discovery_cache(max_stale_kp_refresh=None))
+            await asyncio.sleep(0)
+            normal_release.set()
+            normal_result, full_result = await asyncio.gather(normal_task, full_task)
+
+        self.assertEqual(calls, [bot._KP_MAX_STALE_REFRESH, None])
+        self.assertEqual(normal_result["cards"][0]["title"], "normal")
+        self.assertEqual(full_result["cards"][0]["title"], "full")
+
+    async def test_full_kp_refresh_covers_waiting_normal_refresh(self):
+        full_cache = {"cards": [{"title": "full"}], "updated_at": "2026-05-24 12:00"}
+        saved = {"cache": full_cache}
+        calls: list[int | None] = []
+        full_started = asyncio.Event()
+        full_release = asyncio.Event()
+
+        async def fake_inner(max_stale_kp_refresh: int | None = bot._KP_MAX_STALE_REFRESH) -> dict:
+            calls.append(max_stale_kp_refresh)
+            if max_stale_kp_refresh is None:
+                full_started.set()
+                await full_release.wait()
+            saved["cache"] = full_cache
+            return full_cache
+
+        with (
+            patch.object(bot, "_movie_discovery_refresh_lock", None),
+            patch.object(bot, "_movie_discovery_refresh_current_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_mode", ""),
+            patch.object(bot, "_movie_discovery_refresh_last_finished_at", 0.0),
+            patch.object(bot, "_refresh_movie_discovery_cache_inner", fake_inner),
+            patch.object(bot, "_load_movie_discovery_cache", side_effect=lambda: saved["cache"]),
+        ):
+            full_task = asyncio.create_task(bot._refresh_movie_discovery_cache(max_stale_kp_refresh=None))
+            await full_started.wait()
+            normal_task = asyncio.create_task(bot._refresh_movie_discovery_cache())
+            await asyncio.sleep(0)
+            full_release.set()
+            full_result, normal_result = await asyncio.gather(full_task, normal_task)
+
+        self.assertEqual(calls, [None])
+        self.assertIs(full_result, full_cache)
+        self.assertIs(normal_result, full_cache)
+
+    async def test_refresh_callback_mentions_in_progress_refresh(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:refresh")
+        context = _make_context()
+        fake_cache = {
+            "cards": [{"title": "Тест", "year": 2026, "score": 0.8}],
+            "updated_at": "2026-05-24 12:00",
+        }
+        lock = asyncio.Lock()
+        await lock.acquire()
+        refresh_mock = AsyncMock(return_value=fake_cache)
+
+        try:
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+                patch.object(bot, "_movie_discovery_refresh_lock", lock),
+                patch.object(bot, "_movie_discovery_refresh_current_mode", "normal"),
+                patch.object(bot, "_refresh_movie_discovery_cache", refresh_mock),
+            ):
+                await movie_new_refresh_callback(update, context)
+        finally:
+            lock.release()
+
+        first_text = update.callback_query.edit_message_text.call_args_list[0].args[0]
+        self.assertIn("Новинки уже обновляются", first_text)
+        refresh_mock.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # _enrich_cards_with_plex + _format_movie_discovery_cache (Plex badge)
 # ---------------------------------------------------------------------------

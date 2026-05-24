@@ -296,6 +296,11 @@ GPT_MODEL = settings.gpt_model
 _KP_DAILY_LIMIT = 500
 # Max stale KP entries refreshed per discovery run (mirrors movie_discovery._KP_MAX_STALE_REFRESH_PER_RUN)
 _KP_MAX_STALE_REFRESH = 15
+_MOVIE_DISCOVERY_REFRESH_COALESCE_SECONDS = 30.0
+_movie_discovery_refresh_lock: "asyncio.Lock | None" = None
+_movie_discovery_refresh_current_mode: str = ""
+_movie_discovery_refresh_last_mode: str = ""
+_movie_discovery_refresh_last_finished_at: float = 0.0
 
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
@@ -2078,7 +2083,72 @@ def _supplement_releases_for_failed_queries(
     return supplemented
 
 
-async def _refresh_movie_discovery_cache(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
+async def _refresh_movie_discovery_cache(
+    max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH,
+    *,
+    force_refresh: bool = False,
+) -> dict:
+    global _movie_discovery_refresh_lock, _movie_discovery_refresh_current_mode
+    global _movie_discovery_refresh_last_mode, _movie_discovery_refresh_last_finished_at
+
+    mode = _movie_discovery_refresh_mode(max_stale_kp_refresh)
+    if _movie_discovery_refresh_lock is None:
+        _movie_discovery_refresh_lock = asyncio.Lock()
+
+    async with _movie_discovery_refresh_lock:
+        now_monotonic = time.monotonic()
+        can_reuse = (
+            not force_refresh
+            and _movie_discovery_refresh_last_finished_at
+            and now_monotonic - _movie_discovery_refresh_last_finished_at < _MOVIE_DISCOVERY_REFRESH_COALESCE_SECONDS
+            and _movie_discovery_refresh_covers(_movie_discovery_refresh_last_mode, mode)
+        )
+        if can_reuse:
+            logger.info(
+                "movie_discovery: refresh coalesced requested_mode=%s completed_mode=%s",
+                mode,
+                _movie_discovery_refresh_last_mode,
+            )
+            return _load_movie_discovery_cache()
+
+        _movie_discovery_refresh_current_mode = mode
+        try:
+            cache = await _refresh_movie_discovery_cache_inner(max_stale_kp_refresh=max_stale_kp_refresh)
+        finally:
+            _movie_discovery_refresh_current_mode = ""
+        _movie_discovery_refresh_last_mode = mode
+        _movie_discovery_refresh_last_finished_at = time.monotonic()
+        return cache
+
+
+def _movie_discovery_refresh_mode(max_stale_kp_refresh: int | None) -> str:
+    return "kp_full" if max_stale_kp_refresh is None else "normal"
+
+
+def _movie_discovery_refresh_covers(completed_mode: str, requested_mode: str) -> bool:
+    return completed_mode == requested_mode or (completed_mode == "kp_full" and requested_mode == "normal")
+
+
+def _movie_discovery_refresh_busy_mode() -> str:
+    lock = _movie_discovery_refresh_lock
+    if lock is not None and lock.locked():
+        return _movie_discovery_refresh_current_mode or "normal"
+    return ""
+
+
+def _movie_discovery_refresh_wait_text(mode: str) -> str:
+    if mode == "kp_full":
+        return "🎬 Идёт глубокое обновление новинок. Дождусь его и покажу свежий список."
+    return "🎬 Новинки уже обновляются. Дождусь текущего обновления и покажу свежий список."
+
+
+def _movie_discovery_admin_refresh_wait_note(refresh_kind: str) -> str:
+    if refresh_kind == "full":
+        return "🔄 Идёт другое обновление. Полное обновление KP-кэша запустится сразу после него."
+    return "🔄 Идёт другое обновление. Постепенное обновление KP-кэша запустится сразу после него."
+
+
+async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
 
@@ -10406,13 +10476,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 entry["cached_at"] = stale_ts
         cache["kp_cache"] = kp_cache_dict
         _save_movie_discovery_cache(cache)
-        asyncio.create_task(_refresh_movie_discovery_cache(max_stale_kp_refresh=None))
+        busy_mode = _movie_discovery_refresh_busy_mode()
+        wait_note = f"\n\n{_movie_discovery_admin_refresh_wait_note('full')}" if busy_mode else ""
+        asyncio.create_task(_refresh_movie_discovery_cache(max_stale_kp_refresh=None, force_refresh=True))
         await _safe_edit_callback(
             query,
             "🔄 <b>Запускаю полное обновление KP кэша</b>\n\n"
             f"Все <b>{len(kp_cache_dict)}</b> {_plural(len(kp_cache_dict), 'запись', 'записи', 'записей')} "
             f"помечены устаревшими.\n"
-            "Обновление идёт в фоне — займёт несколько минут.",
+            "Обновление идёт в фоне — займёт несколько минут."
+            + wait_note,
             parse_mode="HTML",
             reply_markup=_admin_kp_cache_cleared_keyboard(),
         )
@@ -10427,7 +10500,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 entry["cached_at"] = stale_ts
         cache["kp_cache"] = kp_cache_dict
         _save_movie_discovery_cache(cache)
-        asyncio.create_task(_refresh_movie_discovery_cache())
+        busy_mode = _movie_discovery_refresh_busy_mode()
+        wait_note = f"\n\n{_movie_discovery_admin_refresh_wait_note('gradual')}" if busy_mode else ""
+        asyncio.create_task(_refresh_movie_discovery_cache(force_refresh=True))
         runs_needed = (len(kp_cache_dict) + _KP_MAX_STALE_REFRESH - 1) // _KP_MAX_STALE_REFRESH if kp_cache_dict else 1
         await _safe_edit_callback(
             query,
@@ -10435,7 +10510,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Все <b>{len(kp_cache_dict)}</b> {_plural(len(kp_cache_dict), 'запись', 'записи', 'записей')} "
             f"помечены устаревшими.\n"
             f"Обновляется по {_KP_MAX_STALE_REFRESH} за прогон — "
-            f"~{runs_needed} {_plural(runs_needed, 'прогон', 'прогона', 'прогонов')} автообновления.",
+            f"~{runs_needed} {_plural(runs_needed, 'прогон', 'прогона', 'прогонов')} автообновления."
+            + wait_note,
             parse_mode="HTML",
             reply_markup=_admin_kp_cache_cleared_keyboard(),
         )
@@ -10618,7 +10694,13 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ",".join(str(c.get("kp_id") or "-") for c in (cache.get("cards") or [])[:10]),
     )
     if not cache.get("cards"):
-        progress = await update.message.reply_text("🎬 Собираю новинки…")
+        busy_mode = _movie_discovery_refresh_busy_mode()
+        progress_text = (
+            _movie_discovery_refresh_wait_text(busy_mode)
+            if busy_mode
+            else "🎬 Собираю новинки…"
+        )
+        progress = await update.message.reply_text(progress_text)
         cache = await _refresh_movie_discovery_cache()
         await _safe_edit_message(
             progress,
@@ -10660,7 +10742,13 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
 
     chat_id = query.message.chat.id if query.message else None
     await query.answer()
-    await _safe_edit_callback(query, "🎬 Обновляю новинки…")
+    busy_mode = _movie_discovery_refresh_busy_mode()
+    progress_text = (
+        _movie_discovery_refresh_wait_text(busy_mode)
+        if busy_mode
+        else "🎬 Обновляю новинки…"
+    )
+    await _safe_edit_callback(query, progress_text)
     logger.info("movie_discovery: /new render path=refresh_callback chat=%s — refreshing now", chat_id)
     cache = await _refresh_movie_discovery_cache()
     logger.info(
