@@ -762,6 +762,37 @@ class AdminPanelTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("не относится", text)
 
+    def test_access_approve_sends_post_approval_welcome(self):
+        update = _make_callback_update(chat_id=300, callback_data="access:approve:200")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            with (
+                patch.dict(bot.ACCESS_PENDING_USERS, {200: "Petr"}, clear=True),
+                patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+                patch.object(bot, "ALLOWED_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "RUTRACKER_ENABLED", True),
+                patch.object(bot, "JACKETT_ENABLED", True),
+                patch.object(bot, "KINOPOISK_ENABLED", True),
+                patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "VOICE_SEARCH_ENABLED", True),
+            ):
+                asyncio.run(access_callback(update, context))
+
+        context.bot.send_message.assert_awaited_once()
+        sent = context.bot.send_message.call_args.kwargs
+        self.assertEqual(sent["chat_id"], 200)
+        text = sent["text"]
+        self.assertIn("Доступ разрешён", text)
+        self.assertIn("название фильма", text)
+        self.assertIn("Кинопоиска", text)
+        self.assertIn("/help", text)
+        self.assertNotIn(".torrent файлом", text)
+        self.assertNotIn("magnet-ссылку сообщением", text)
+
     def test_access_remove_revokes_owned_tasks_and_subscriptions(self):
         update = _make_callback_update(chat_id=300, callback_data="access:remove:200")
         context = _make_context()

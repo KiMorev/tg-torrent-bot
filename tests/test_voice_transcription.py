@@ -174,6 +174,31 @@ class VoiceMessageEntryTests(unittest.TestCase):
         text = update.message.reply_text.call_args.args[0]
         self.assertIn("слишком длинное", text)
 
+    def test_download_failure_records_voice_usage_error(self):
+        update = _make_voice_update(duration=5)
+        context = _make_voice_context()
+        context.bot.get_file.side_effect = RuntimeError("telegram down")
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(
+                load_approved_chat_ids=MagicMock(return_value=set()),
+            )),
+            patch.object(bot, "VOICE_SEARCH_ENABLED", True),
+            patch.object(bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(bot, "VOICE_MAX_SECONDS", 30),
+            patch.object(bot, "_safe_edit_message", new=AsyncMock()) as edit_mock,
+            patch.object(bot, "_voice_record_usage") as usage_mock,
+        ):
+            asyncio.run(bot.voice_message_entry(update, context))
+
+        usage_mock.assert_called_once()
+        self.assertEqual(usage_mock.call_args.kwargs["outcome"], "error")
+        self.assertEqual(usage_mock.call_args.kwargs["error_label"], "download_failed")
+        last_call_text = edit_mock.call_args.args[1]
+        self.assertIn("Не удалось скачать голосовое", last_call_text)
+
     def test_friendly_message_when_transcription_fails(self):
         """When Whisper returns None (network error, empty result, etc.) the
         user sees a clear «попробуйте ещё раз» instead of a silent failure."""

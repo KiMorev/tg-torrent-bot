@@ -501,8 +501,8 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
 
     Each bullet is conditioned on the corresponding configuration flag so a
     minimal install (no Plex, no Movie discovery, no Kinopoisk) doesn't
-    promise capabilities it doesn't have. Reused by the unauthenticated
-    welcome (_reply_access_pending) and the authenticated /start.
+    promise capabilities it doesn't have. Reused by access-pending and
+    post-approval access messages.
     """
     search_enabled = RUTRACKER_ENABLED or JACKETT_ENABLED
     bullets: list[str] = []
@@ -531,6 +531,20 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
         "• 🔔 Подписка на сериал — выбор когда уведомлять (каждая серия / финал / молча) и когда скачивать (каждую / после финала / только сообщать)"
     )
     return "\n".join(bullets) if joined else bullets
+
+
+def _build_access_approved_text() -> str:
+    """Message sent to a user immediately after admin approval."""
+    return (
+        "✅ Доступ разрешён.\n"
+        "\n"
+        "Теперь можно пользоваться ботом:\n"
+        f"{_build_value_props()}\n"
+        "\n"
+        "Напишите название фильма или сериала, отправьте ссылку Кинопоиска, "
+        ".torrent-файл или magnet-ссылку.\n"
+        "Подробно по возможностям — /help."
+    )
 
 
 async def _reply_access_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -10567,10 +10581,7 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             await context.bot.send_message(
                 chat_id=target_chat_id,
-                text=(
-                    "Доступ разрешен.\n"
-                    "Пришлите .torrent файлом или magnet-ссылку сообщением."
-                ),
+                text=_build_access_approved_text(),
             )
         except Exception:
             logger.warning("Failed to notify approved chat_id=%s", target_chat_id, exc_info=True)
@@ -11941,6 +11952,15 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         await tg_file.download_to_drive(custom_path=str(temp_path))
     except Exception:
         logger.warning("Failed to download voice file id=%s", voice.file_id, exc_info=True)
+        try:
+            _voice_record_usage(
+                duration_sec=float(voice.duration or 0),
+                text="",
+                outcome="error",
+                error_label="download_failed",
+            )
+        except Exception:
+            logger.warning("Failed to record voice download failure", exc_info=True)
         await _finalize_voice_progressive()
         await _safe_edit_message(
             status,
@@ -11964,6 +11984,10 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _finalize_voice_progressive()
 
     if not transcription:
+        logger.info(
+            "Voice transcription failed: chat=%s duration=%ss error=%s",
+            _chat_id(update), voice.duration, error_label or "unknown",
+        )
         # Record the failure for /admin diagnostics — operators want to know
         # which type of error happened (quota_exceeded, auth, timeout, …).
         try:
