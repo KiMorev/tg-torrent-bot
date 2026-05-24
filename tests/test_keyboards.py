@@ -588,6 +588,18 @@ class NoResultsKeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["🔍🌐 Без качества + все трекеры"], "srch:no_quality_all_trackers")
         self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
 
+    def test_suggestions_use_short_index_callbacks(self) -> None:
+        long_suggestion = "Long Movie Title " * 8
+        kb = _no_results_keyboard(
+            has_quality=False,
+            jackett_can_expand=False,
+            suggestions=[long_suggestion],
+        )
+        button = kb.inline_keyboard[0][0]
+        self.assertIn(long_suggestion, button.text)
+        self.assertEqual(button.callback_data, "srch:didmean:0")
+        self.assertLessEqual(len(button.callback_data.encode("utf-8")), 64)
+
     def test_cancel_is_always_last_row(self) -> None:
         """Regardless of which fallback rows are present, Cancel is the final row."""
         for has_q, can_exp in [(False, False), (True, False), (False, True), (True, True)]:

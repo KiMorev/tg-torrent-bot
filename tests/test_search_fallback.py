@@ -105,6 +105,13 @@ class JackettEmptyDoesNotFallbackToRutrackerTests(unittest.TestCase):
             any("правильный запрос" in lbl for lbl in labels),
             f"Expected did-you-mean suggestion in keyboard: {labels}",
         )
+        buttons = [b for row in keyboard for b in row]
+        suggestion_button = next(b for b in buttons if "правильный запрос" in b.text)
+        self.assertEqual(suggestion_button.callback_data, "srch:didmean:0")
+        self.assertEqual(
+            context.user_data["srch_didmean_suggestions"],
+            ["правильный запрос", "alt query"],
+        )
 
 
 class JackettErrorFallsBackToRutrackerTests(unittest.TestCase):
@@ -511,6 +518,25 @@ class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
         self.assertIn("1080p", full)
         self.assertIn("Original", full)
         self.assertIn("Sub", full)
+
+    def test_didmean_index_uses_stored_suggestion(self):
+        query = MagicMock()
+        query.data = "srch:didmean:1"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1, chat_id=100))
+        update = MagicMock(callback_query=query)
+        context = MagicMock()
+        context.user_data = {
+            "srch_didmean_suggestions": ["Дюна", "Аркейн"],
+            "srch_settings": {"quality": "1080p", "audio": False, "subs": False},
+        }
+
+        with patch.object(bot, "_execute_search", new=AsyncMock(return_value=0)) as exec_mock:
+            asyncio.run(bot.search_didmean(update, context))
+
+        called_args = exec_mock.call_args.args
+        self.assertEqual(called_args[2], "Аркейн 1080p")
+        self.assertEqual(context.user_data["srch_query"], "Аркейн")
 
 
 class AudioSubsFilterIntegrationTests(unittest.TestCase):

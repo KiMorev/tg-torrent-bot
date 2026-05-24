@@ -477,12 +477,12 @@ def _no_results_keyboard(
     """
     rows: list[list[InlineKeyboardButton]] = []
     # GPT suggestions go FIRST — they're the most likely fix for typos.
-    for suggestion in (suggestions or [])[:3]:
+    for idx, suggestion in enumerate((suggestions or [])[:3]):
         if not suggestion:
             continue
         rows.append([InlineKeyboardButton(
             f"🔍 {suggestion}",
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:didmean:{suggestion}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:didmean:{idx}",
         )])
     if has_quality:
         rows.append([InlineKeyboardButton(

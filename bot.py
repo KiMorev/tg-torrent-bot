@@ -5993,6 +5993,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
+        suggestions = _remember_didmean_suggestions(context, suggestions)
         # Direct Rutracker path — Jackett expansion is irrelevant here.
         text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено в Rutracker."
         if suggestions:
@@ -6311,6 +6312,19 @@ def _cancel_didmean_prefetch(context) -> None:
     if not task.done():
         task.cancel()
         logger.info("movie_discovery: didmean prefetch cancelled (query=%r)", _query)
+
+
+def _remember_didmean_suggestions(context, suggestions: list[str] | None) -> list[str]:
+    cleaned = [
+        str(s).strip()
+        for s in (suggestions or [])
+        if str(s).strip()
+    ][:3]
+    if cleaned:
+        context.user_data["srch_didmean_suggestions"] = cleaned
+    else:
+        context.user_data.pop("srch_didmean_suggestions", None)
+    return cleaned
 
 
 async def _didmean_prefetch_jackett(
@@ -6893,6 +6907,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 )
                 suggestions = []
 
+        suggestions = _remember_didmean_suggestions(context, suggestions)
+
         # Prefetch (Proposal #2): fire a background Jackett search for the
         # TOP-1 suggestion while the user reads the buttons. Top-1 only —
         # the GPT prompt guarantees array index 0 is the most likely.
@@ -6992,6 +7008,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     if not results_data and filter_banner_parts:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
+        suggestions = _remember_didmean_suggestions(context, suggestions)
         text = (
             f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
             + "\n".join(filter_banner_parts)
@@ -7106,6 +7123,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             results_data = filtered
         else:
             has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+            _remember_didmean_suggestions(context, [])
             if has_quality:
                 await edit_fn(
                     f"По запросу {_format_search_query_label(search_query)} раздач с указанным качеством не найдено.\n"
@@ -7364,11 +7382,20 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """
     query = update.callback_query
     await query.answer()
-    # Callback data shape: «srch:didmean:<text>». Strip the prefix; preserve
-    # the text verbatim (it can contain spaces / special chars but no «:»).
+    # Current callback shape is "srch:didmean:<index>" to stay under
+    # Telegram's 64-byte callback_data limit. Old "<text>" callbacks still work.
     prefix = f"{SEARCH_CALLBACK_PREFIX}:didmean:"
     raw = query.data or ""
-    suggestion = raw[len(prefix):].strip() if raw.startswith(prefix) else ""
+    token = raw[len(prefix):].strip() if raw.startswith(prefix) else ""
+    suggestion = ""
+    stored = context.user_data.get("srch_didmean_suggestions") or []
+    if token.isdigit():
+        idx = int(token)
+        if 0 <= idx < len(stored):
+            suggestion = str(stored[idx]).strip()
+    else:
+        # Back-compat for no-results messages rendered before indexed callbacks.
+        suggestion = token
     if not suggestion:
         await query.edit_message_text("Подсказка потеряна. Начните поиск заново.")
         return ConversationHandler.END
