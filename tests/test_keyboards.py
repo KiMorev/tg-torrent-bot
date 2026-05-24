@@ -361,17 +361,13 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         self.assertNotIn("↩️ Повторить через Jackett", labels_switch)
         self.assertNotIn("🔄 Сменить трекеры", labels_retry)
 
-    def test_partial_result_offers_subscribe_picker(self) -> None:
-        """A partial result must offer a «🔔 N» button that opens the
-        1.3b policy picker. The two old buttons («📺 Серии» / «🎯 Сезон»)
-        are now replaced by a single picker entry — the policy choice lives
-        on a dedicated screen, not crammed into the results keyboard."""
+    def test_partial_result_offers_download_and_notify_pickers(self) -> None:
+        """A partial result splits download choices from notification choices."""
         results = [{"title": "Series S01", "partial": True}]
         keyboard = _search_results_keyboard(results)
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
-        pick_label = next((t for t in buttons if t.startswith("🔔 ")), None)
-        self.assertIsNotNone(pick_label, "subscribe picker button must exist")
-        self.assertTrue(buttons[pick_label].startswith("srch:sub_pick:"))
+        self.assertEqual(buttons["⬇️ 1"], "srch:dl_pick:0")
+        self.assertEqual(buttons["🔔 1"], "srch:sub_pick:0")
         # The legacy direct buttons must NOT be present any more.
         legacy = [t for t in buttons if t.startswith(("⬇️📺", "⬇️🎯"))]
         self.assertEqual(legacy, [], "legacy direct-subscribe buttons must be removed")

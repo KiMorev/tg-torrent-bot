@@ -665,20 +665,22 @@ def _search_results_keyboard(
 
     rows = []
 
-    # Single row of numbered download buttons for all visible results.
+    # Partial series need one extra choice before downloading: just this
+    # torrent, this torrent + updates, or wait for the full season.
     dl_row = [
         InlineKeyboardButton(
             f"⬇️ {start + i + 1}",
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:dl:{start + i}",
+            callback_data=(
+                f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{start + i}"
+                if result.get("partial")
+                else f"{SEARCH_CALLBACK_PREFIX}:dl:{start + i}"
+            ),
         )
-        for i in range(len(visible))
+        for i, result in enumerate(visible)
     ]
     rows.append(dl_row)
 
-    # 1.3b: single «🔔 N» button per partial result — opens the preset picker
-    # (Style D in improvements-roadmap.md). Replaces the prior two-button row
-    # so the policy choice gets a dedicated screen rather than fighting for
-    # space in the crowded results keyboard.
+    # Notification-only choices for partial results.
     sub_row = [
         InlineKeyboardButton(
             f"🔔 {start + i + 1}",

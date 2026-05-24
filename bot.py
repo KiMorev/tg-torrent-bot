@@ -528,7 +528,7 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
             "• ▶️ Открытие готового контента в Plex одной кнопкой"
         )
     bullets.append(
-        "• 🔔 Подписка на сериал — выбор когда уведомлять (каждая серия / финал / молча) и когда скачивать (каждую / после финала / только сообщать)"
+        "• Для неполных сериалов: ⬇️ — скачать сейчас/автообновлять/ждать полный сезон, 🔔 — только уведомления"
     )
     return "\n".join(bullets) if joined else bullets
 
@@ -5673,7 +5673,7 @@ def _build_results_text(results_data: list[dict], search_query: str, page: int, 
     start = page * SEARCH_PAGE_SIZE
     visible_results = results_data[start : start + SEARCH_PAGE_SIZE]
     if any(r.get("partial") for r in visible_results):
-        lines.append("⬇️ N — скачать; 🔔 N — подписка на серии.")
+        lines.append("⬇️ N — варианты скачивания; 🔔 N — только уведомления.")
     for index, r in enumerate(visible_results, start=start):
         icon = "⭐" if r.get("recommended") else "🔎"
         ep_note = f"  ⚠️ {r['ep_str']}" if r.get("partial") and r.get("ep_str") else ""
@@ -8312,20 +8312,16 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
     return await _download_and_add(query, context, index, subscribe=False)
 
 
-# ─── 1.3b subscription policy picker ───────────────────────────────────────
+# ─── Partial-series action pickers ─────────────────────────────────────────
 #
-# Subscribing now goes through a dedicated picker so the user can express
-# both axes (notify + download) without cluttering the results list:
-#   srch:sub_pick:N           → opens the preset picker for result N
-#   srch:sub_preset:N:CODE    → user picked one of 4 presets, subscribe now
-#   srch:sub_advanced:N       → user wants the 2-step menu (notify → download)
-#   srch:sub_set_notify:N:V   → step 1 of advanced (notify_policy selected)
-#   srch:sub_set_download:N:V → step 2 of advanced (download_policy selected,
-#                               subscribe immediately)
+# Partial results split the user's intent into two clear branches:
+#   srch:dl_pick:N            → download branch for result N
+#   srch:sub_pick:N           → notification-only branch for result N
+#   srch:sub_preset:N:CODE    → commit one of the branch options
+#   srch:sub_advanced:N       → legacy/manual 2-step menu (notify → download)
+#   srch:sub_set_notify:N:V   → step 1 of manual flow
+#   srch:sub_set_download:N:V → step 2 of manual flow
 #   srch:sub_back_results:0   → back to results from the picker (rerender)
-#
-# Preset code → (notify_policy, download_policy) mapping. The "📦 after-finale"
-# preset is the unique new capability 1.3 unlocks — previously impossible.
 from subscription_policy import (
     NOTIFY_EACH_UPDATE, NOTIFY_FINAL_ONLY, NOTIFY_SILENT,
     VALID_DOWNLOAD_POLICIES, VALID_NOTIFY_POLICIES,
@@ -8335,10 +8331,11 @@ from subscription_policy import (
 )
 
 _SUB_PRESETS = {
-    "each":   (NOTIFY_EACH_UPDATE, DOWNLOAD_AUTO_EACH_UPDATE),
-    "final":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_AUTO_EACH_UPDATE),
-    "after":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_ONLY_WHEN_COMPLETE),
-    "notify": (NOTIFY_EACH_UPDATE, DOWNLOAD_NOTIFY_ONLY),
+    # code → (notify_policy, download_policy, download_current_now)
+    "each":   (NOTIFY_EACH_UPDATE, DOWNLOAD_AUTO_EACH_UPDATE, True),
+    "after":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_ONLY_WHEN_COMPLETE, False),
+    "notify": (NOTIFY_EACH_UPDATE, DOWNLOAD_NOTIFY_ONLY, False),
+    "final":  (NOTIFY_FINAL_ONLY,  DOWNLOAD_NOTIFY_ONLY, False),
 }
 
 
@@ -8348,6 +8345,98 @@ def _legacy_notify_mode_for_policy(notify_policy: str) -> str:
 
 def _subscription_policy_pair_does_nothing(notify_policy: str, download_policy: str) -> bool:
     return notify_policy == NOTIFY_SILENT and download_policy == DOWNLOAD_NOTIFY_ONLY
+
+
+def _subscription_done_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+    ]])
+
+
+async def _create_subscription_only(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
+    *,
+    notify_policy: str,
+    download_policy: str,
+) -> int:
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    result = results[index]
+    title = str(result.get("title") or "")
+    chat_id = _chat_id_from_query(query)
+    if not isinstance(chat_id, int):
+        chat_id = None
+    notify_mode = _legacy_notify_mode_for_policy(notify_policy)
+    source = str(result.get("source") or "rutracker")
+    now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    subs = state_store.load_topic_subscriptions()
+
+    if source == "jackett":
+        sub_key = f"jackett:{uuid.uuid4().hex[:8]}"
+        search_query = str(
+            context.user_data.get("srch_search_query")
+            or context.user_data.get("srch_query")
+            or title
+        )
+        subs[sub_key] = build_jackett_subscription(
+            chat_id=chat_id,
+            query=search_query,
+            result=result,
+            seen_results=context.user_data.get("srch_results", []),
+            added_at=now_text,
+            notify_mode=notify_mode,
+            notify_policy=notify_policy,
+            download_policy=download_policy,
+        )
+        saved_sub = subs[sub_key]
+        saved_key = sub_key
+    else:
+        topic_id = str(result.get("topic_id") or "")
+        if not topic_id:
+            topic_id = _extract_rutracker_topic_id(str(result.get("url") or ""))
+        episode_info = _parse_episode_info(title)
+        if not topic_id or not episode_info or chat_id is None:
+            await query.edit_message_text(
+                "Не удалось создать подписку для этого результата.",
+                reply_markup=_subscription_done_keyboard(),
+            )
+            return ConversationHandler.END
+        saved_sub = {
+            "chat_id": chat_id,
+            "title": title,
+            "last_episode_end": episode_info[0],
+            "total_episodes": episode_info[1],
+            "added_at": now_text,
+            "notify_mode": notify_mode,
+        }
+        saved_sub["notify_policy"] = notify_policy
+        saved_sub["download_policy"] = download_policy
+        from subscription_policy import migrate_subscription_in_place
+        migrate_subscription_in_place(saved_sub)
+        subs[topic_id] = saved_sub
+        saved_key = topic_id
+
+    state_store.save_topic_subscriptions(subs)
+    logger.info(
+        "Subscription added without initial download: key=%s policy=%s/%s",
+        saved_key, notify_policy, download_policy,
+    )
+    title_html = html_module.escape(title[:160] or "раздача")
+    policy_html = html_module.escape(policies_summary_ru(saved_sub))
+    await query.edit_message_text(
+        "✅ Настроил обновления.\n\n"
+        f"🎬 <b>{title_html}</b>\n"
+        f"Режим: {policy_html}\n\n"
+        "Текущую неполную раздачу не скачиваю.",
+        reply_markup=_subscription_done_keyboard(),
+        parse_mode="HTML",
+    )
+    return ConversationHandler.END
 
 
 def _admin_subscription_toggle_label(sub: dict) -> str:
@@ -8384,39 +8473,55 @@ def _toggle_subscription_notify_policy(sub: dict) -> tuple[str, str]:
     return current, new_policy
 
 
-def _subscribe_picker_text(result: dict) -> str:
-    """Hint-line block above the preset keyboard — explains download/notify axes."""
+def _download_picker_text(result: dict) -> str:
     title = html_module.escape(str(result.get("title") or "")[:120])
+    ep_str = html_module.escape(str(result.get("ep_str") or ""))
+    progress = f"\n\nСейчас доступно: <b>{ep_str}</b>" if ep_str else ""
+    return f"🎬 {title}{progress}\n\nЧто скачать?"
+
+
+def _download_picker_keyboard(index: int) -> InlineKeyboardMarkup:
+    prefix = SEARCH_CALLBACK_PREFIX
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬇️ Скачать сейчас",
+                              callback_data=f"{prefix}:dl:{index}")],
+        [InlineKeyboardButton("⬇️ Скачать сейчас + обновлять",
+                              callback_data=f"{prefix}:sub_preset:{index}:each")],
+        [InlineKeyboardButton("📦 Дождаться полного сезона и скачать",
+                              callback_data=f"{prefix}:sub_preset:{index}:after")],
+        [InlineKeyboardButton("⬅️ К результатам",
+                              callback_data=f"{prefix}:sub_back_results:0")],
+        [InlineKeyboardButton("❌ Отмена",
+                              callback_data=f"{prefix}:cancel")],
+    ])
+
+
+def _subscribe_picker_text(result: dict) -> str:
+    title = html_module.escape(str(result.get("title") or "")[:120])
+    ep_str = html_module.escape(str(result.get("ep_str") or ""))
+    progress = f"\n\nСейчас доступно: <b>{ep_str}</b>" if ep_str else ""
     return (
-        f"🎬 {title}\n\n"
-        "Режим подписки:\n"
-        "• ⬇️ — добавлять новые серии в Download Station\n"
-        "• 🔔 — присылать push в Telegram"
+        f"🎬 {title}{progress}\n\n"
+        "Когда присылать уведомление?"
     )
 
 
 def _subscribe_picker_keyboard(index: int) -> InlineKeyboardMarkup:
-    """Style D preset picker + advanced + back. One button per row so the
-    long-form labels render fully on mobile."""
     prefix = SEARCH_CALLBACK_PREFIX
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬇️+🔔 Каждую серию",
-                              callback_data=f"{prefix}:sub_preset:{index}:each")],
-        [InlineKeyboardButton("⬇️ каждую · 🔔 финал",
-                              callback_data=f"{prefix}:sub_preset:{index}:final")],
-        [InlineKeyboardButton("📦 Скачать сезон целиком",
-                              callback_data=f"{prefix}:sub_preset:{index}:after")],
-        [InlineKeyboardButton("🔔 Только сообщать",
+        [InlineKeyboardButton("🔔 Уведомлять о новых сериях",
                               callback_data=f"{prefix}:sub_preset:{index}:notify")],
-        [InlineKeyboardButton("⚙️ Настроить вручную",
-                              callback_data=f"{prefix}:sub_advanced:{index}")],
+        [InlineKeyboardButton("🎯 Сообщить, когда сезон завершится",
+                              callback_data=f"{prefix}:sub_preset:{index}:final")],
         [InlineKeyboardButton("⬅️ К результатам",
                               callback_data=f"{prefix}:sub_back_results:0")],
+        [InlineKeyboardButton("❌ Отмена",
+                              callback_data=f"{prefix}:cancel")],
     ])
 
 
-async def search_subscribe_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User tapped «🔔 N» — show the preset picker for that result."""
+async def search_download_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User tapped «⬇️ N» on a partial result — show download choices."""
     query = update.callback_query
     await query.answer()
     try:
@@ -8430,7 +8535,29 @@ async def search_subscribe_pick(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Результат недоступен.")
         return ConversationHandler.END
 
-    # Stash so the advanced flow can find this result without parsing index again.
+    await query.edit_message_text(
+        _download_picker_text(results[index]),
+        reply_markup=_download_picker_keyboard(index),
+        parse_mode="HTML",
+    )
+    return SEARCH_RESULTS
+
+
+async def search_subscribe_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User tapped «🔔 N» — show notification-only choices."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
     context.user_data["srch_sub_index"] = index
     await query.edit_message_text(
         _subscribe_picker_text(results[index]),
@@ -8441,8 +8568,7 @@ async def search_subscribe_pick(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User picked one of the 4 presets — subscribe immediately with the
-    matching (notify_policy, download_policy) pair."""
+    """Commit one picker option."""
     query = update.callback_query
     await query.answer()
     try:
@@ -8456,12 +8582,14 @@ async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_
     if pair is None:
         await query.edit_message_text("Неизвестный пресет подписки.")
         return ConversationHandler.END
-    notify_policy, download_policy = pair
-    # notify_mode stays in the legacy bucket for back-compat with code paths
-    # that still read it; new policy fields drive behaviour.
-    legacy_notify_mode = (
-        "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
-    )
+    notify_policy, download_policy, download_current_now = pair
+    legacy_notify_mode = _legacy_notify_mode_for_policy(notify_policy)
+    if not download_current_now:
+        return await _create_subscription_only(
+            query, context, index,
+            notify_policy=notify_policy,
+            download_policy=download_policy,
+        )
     return await _download_and_add(
         query, context, index,
         subscribe=True,
@@ -9284,6 +9412,17 @@ async def _check_jackett_sub_via_rutracker_direct(
             InlineKeyboardButton("🔄 Статус задачи", callback_data=_task_callback("info", task_id)),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
+    elif not wants_download and is_complete:
+        text = (
+            f"🔔 Подписка «{short_q}» — сезон завершён! ✅\n"
+            f"{progress}\n"
+            "Авто-загрузка отключена для этой подписки. Подписка снята."
+        )
+        rows = []
+        if topic_url:
+            rows.append([InlineKeyboardButton("🔍 Открыть раздачу", url=topic_url)])
+        rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+        kb = InlineKeyboardMarkup(rows)
     elif not wants_download:
         # Notify-only mode (download_policy=notify_only) — we intentionally
         # didn't download. Tell the user what's available with a download
@@ -9474,6 +9613,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     )
 
             download_attempted_and_failed = wants_download and not task_id
+            final_action_succeeded = is_complete and (bool(task_id) or not wants_download)
 
             # Silent advance: download didn't fail AND user doesn't want a
             # push right now. Advance state (so we don't re-process this
@@ -9489,6 +9629,8 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     ]))
                     sub["seen_titles"] = seen_titles[-100:]
                     sub["last_check"] = checked_at
+                if final_action_succeeded:
+                    subs.pop(key, None)
                 changed = True
                 logger.info(
                     "Jackett subscription silent advance: key=%s title=%s "
@@ -9504,7 +9646,22 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 )
 
             # Build notification text — three branches by what happened.
-            if task_id:
+            if task_id and is_complete:
+                text = (
+                    f"🔔 Подписка «{short_q}» — сезон завершён! ✅\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}\n\n"
+                    "Задача добавлена в DS. Подписка снята."
+                )
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔄 Статус задачи",
+                        callback_data=_task_callback("info", task_id),
+                    ),
+                    InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+                ]])
+            elif task_id:
                 text = (
                     f"🔔 Подписка «{short_q}» обновилась — задача добавлена в DS!\n"
                     f"\n🔎 {candidate.title}"
@@ -9521,6 +9678,20 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                         callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
                     ),
                 ]])
+            elif not wants_download and is_complete:
+                text = (
+                    f"🔔 Подписка «{short_q}» — сезон завершён! ✅\n"
+                    f"\n🔎 {candidate.title}"
+                    f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
+                    f"{progress}\n\n"
+                    "Авто-загрузка отключена для этой подписки. Подписка снята."
+                )
+                rows = []
+                topic_url = str(getattr(candidate, "topic_url", "") or "")
+                if topic_url:
+                    rows.append([InlineKeyboardButton("🔍 Открыть раздачу", url=topic_url)])
+                rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+                kb = InlineKeyboardMarkup(rows)
             elif not wants_download:
                 # Notify-only mode — we intentionally didn't download.
                 text = (
@@ -9579,6 +9750,8 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     ]))
                     sub["seen_titles"] = seen_titles[-100:]
                     sub["last_check"] = checked_at
+                if final_action_succeeded:
+                    subs.pop(key, None)
                 changed = True
                 logger.info("Jackett subscription update: key=%s title=%s", key, candidate.title)
 
@@ -9945,7 +10118,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     extras.append("• Прислать .torrent-файл или magnet-ссылку — добавлю в Download Station")
     if search_enabled:
         extras.append(
-            "• Подписаться на новые серии сериала из карточки результата — кнопка «🔔 N» открывает выбор: уведомлять о каждой серии или о финале сезона; скачивать каждую серию, ждать полный сезон, или вообще не скачивать (только сообщать)"
+            "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
         )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
@@ -12497,8 +12670,9 @@ def main() -> None:
                     MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_RESULTS: [
+                    CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
-                    # 1.3b subscription policy picker callbacks
+                    # Partial-series download/notification picker callbacks
                     CallbackQueryHandler(search_subscribe_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_pick:\d+$"),
                     CallbackQueryHandler(search_subscribe_preset, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_preset:\d+:[a-z]+$"),
                     CallbackQueryHandler(search_subscribe_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_advanced:\d+$"),

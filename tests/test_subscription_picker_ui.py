@@ -1,13 +1,4 @@
-"""Tests for the 1.3b subscription policy picker UI in bot.py.
-
-The picker replaces the old «⬇️📺 Серии» / «⬇️🎯 Сезон» pair with a single
-«🔔 N» button → preset picker (Style D) → optional advanced 2-step menu.
-This test file covers:
-  - search_subscribe_pick renders the preset keyboard with all 5 options
-  - Each preset translates to the correct (notify_policy, download_policy) pair
-  - The advanced flow stashes step-1 choice and applies it at commit time
-  - Edge cases: stale index, missing user_data
-"""
+"""Tests for partial-series download/notification pickers in bot.py."""
 from __future__ import annotations
 
 import asyncio
@@ -47,36 +38,58 @@ def _make_context(*, results: list[dict] | None = None) -> MagicMock:
     return ctx
 
 
-class SearchSubscribePickTests(unittest.TestCase):
-    """search_subscribe_pick — first tap «🔔 N» opens the preset picker."""
+class SearchDownloadPickTests(unittest.TestCase):
+    """search_download_pick — first tap «⬇️ N» on a partial result opens download choices."""
 
-    def test_renders_preset_picker_with_all_options(self):
-        update = MagicMock(callback_query=_make_query("srch:sub_pick:0"))
+    def test_renders_download_choices(self):
+        update = MagicMock(callback_query=_make_query("srch:dl_pick:0"))
         ctx = _make_context()
-        asyncio.run(bot.search_subscribe_pick(update, ctx))
+        asyncio.run(bot.search_download_pick(update, ctx))
 
         update.callback_query.edit_message_text.assert_awaited_once()
         call = update.callback_query.edit_message_text.await_args
         text = call.args[0]
         kb = call.kwargs.get("reply_markup")
-        # Hint-line above buttons explains what download and notification mean.
-        self.assertIn("Download Station", text)
-        self.assertIn("push", text)
-        # All 5 buttons present (4 presets + advanced + back = 6 actually).
+        self.assertIn("Что скачать", text)
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertIn("⬇️+🔔 Каждую серию", labels)
-        self.assertIn("⬇️ каждую · 🔔 финал", labels)
-        self.assertIn("📦 Скачать сезон целиком", labels)
-        self.assertIn("🔔 Только сообщать", labels)
-        self.assertTrue(any("⚙️" in l for l in labels))  # advanced
-        self.assertTrue(any("К результатам" in l for l in labels))  # back
+        self.assertIn("⬇️ Скачать сейчас", labels)
+        self.assertIn("⬇️ Скачать сейчас + обновлять", labels)
+        self.assertIn("📦 Дождаться полного сезона и скачать", labels)
+        self.assertTrue(any("К результатам" in l for l in labels))
 
     def test_stale_index_returns_error_message(self):
-        update = MagicMock(callback_query=_make_query("srch:sub_pick:5"))
+        update = MagicMock(callback_query=_make_query("srch:dl_pick:5"))
         ctx = _make_context(results=[{"title": "X", "partial": True}])
-        asyncio.run(bot.search_subscribe_pick(update, ctx))
+        asyncio.run(bot.search_download_pick(update, ctx))
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Результат недоступен", text)
+
+    def test_escapes_title_in_html_message(self):
+        update = MagicMock(callback_query=_make_query("srch:dl_pick:0"))
+        ctx = _make_context(results=[{
+            "title": "Show <Finale> & S02E01",
+            "partial": True,
+        }])
+        asyncio.run(bot.search_download_pick(update, ctx))
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Show &lt;Finale&gt; &amp; S02E01", text)
+        self.assertNotIn("Show <Finale> & S02E01", text)
+
+
+class SearchSubscribePickTests(unittest.TestCase):
+    """search_subscribe_pick — first tap «🔔 N» opens notification-only choices."""
+
+    def test_renders_notification_choices(self):
+        update = MagicMock(callback_query=_make_query("srch:sub_pick:0"))
+        ctx = _make_context()
+        asyncio.run(bot.search_subscribe_pick(update, ctx))
+
+        kb = update.callback_query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertIn("🔔 Уведомлять о новых сериях", labels)
+        self.assertIn("🎯 Сообщить, когда сезон завершится", labels)
+        self.assertTrue(any("К результатам" in l for l in labels))
 
     def test_escapes_title_in_html_message(self):
         update = MagicMock(callback_query=_make_query("srch:sub_pick:0"))
@@ -92,7 +105,7 @@ class SearchSubscribePickTests(unittest.TestCase):
 
 
 class SearchSubscribePresetTests(unittest.TestCase):
-    """search_subscribe_preset — direct subscribe with the chosen policy pair."""
+    """search_subscribe_preset — commit one of the branch options."""
 
     def _drive_preset(self, code: str):
         update = MagicMock(callback_query=_make_query(f"srch:sub_preset:0:{code}"))
@@ -108,27 +121,43 @@ class SearchSubscribePresetTests(unittest.TestCase):
             asyncio.run(bot.search_subscribe_preset(update, ctx))
         return captured
 
-    def test_each_preset_maps_to_each_update_auto(self):
+    def test_each_preset_downloads_now_and_subscribes_to_updates(self):
         c = self._drive_preset("each")
         self.assertTrue(c["kwargs"]["subscribe"])
         self.assertEqual(c["kwargs"]["notify_policy"], NOTIFY_EACH_UPDATE)
         self.assertEqual(c["kwargs"]["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
 
-    def test_final_preset_maps_to_final_only_auto(self):
-        c = self._drive_preset("final")
-        self.assertEqual(c["kwargs"]["notify_policy"], NOTIFY_FINAL_ONLY)
-        self.assertEqual(c["kwargs"]["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-        self.assertEqual(c["kwargs"]["notify_mode"], "season_complete")
+    def _drive_subscribe_only(self, code: str):
+        update = MagicMock(callback_query=_make_query(f"srch:sub_preset:0:{code}"))
+        ctx = _make_context()
+        captured = {}
 
-    def test_after_finale_preset_uses_only_when_complete(self):
-        """The new 1.3 capability — wait for season then download as a batch."""
-        c = self._drive_preset("after")
+        async def fake_create(query, context, index, **kw):
+            captured["index"] = index
+            captured["kwargs"] = kw
+            return 0
+
+        with (
+            patch.object(bot, "_download_and_add", AsyncMock()) as dl,
+            patch.object(bot, "_create_subscription_only", side_effect=fake_create),
+        ):
+            asyncio.run(bot.search_subscribe_preset(update, ctx))
+        dl.assert_not_awaited()
+        return captured
+
+    def test_after_finale_preset_waits_for_complete_season_without_current_download(self):
+        c = self._drive_subscribe_only("after")
         self.assertEqual(c["kwargs"]["notify_policy"], NOTIFY_FINAL_ONLY)
         self.assertEqual(c["kwargs"]["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
 
-    def test_notify_only_preset_skips_download(self):
-        c = self._drive_preset("notify")
+    def test_notify_preset_is_notify_only_each_update(self):
+        c = self._drive_subscribe_only("notify")
         self.assertEqual(c["kwargs"]["notify_policy"], NOTIFY_EACH_UPDATE)
+        self.assertEqual(c["kwargs"]["download_policy"], DOWNLOAD_NOTIFY_ONLY)
+
+    def test_final_preset_is_notify_only_final(self):
+        c = self._drive_subscribe_only("final")
+        self.assertEqual(c["kwargs"]["notify_policy"], NOTIFY_FINAL_ONLY)
         self.assertEqual(c["kwargs"]["download_policy"], DOWNLOAD_NOTIFY_ONLY)
 
     def test_unknown_preset_returns_error(self):
@@ -139,6 +168,46 @@ class SearchSubscribePresetTests(unittest.TestCase):
         dl.assert_not_awaited()
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Неизвестный", text)
+
+    def test_subscribe_only_creates_jackett_subscription_without_downloading(self):
+        update = MagicMock(callback_query=_make_query("srch:sub_preset:0:after"))
+        update.callback_query.message.chat.id = 100
+        ctx = _make_context(results=[{
+            "source": "jackett",
+            "title": "Show S1E1-8 of 10",
+            "url": "https://tracker.local/topic/1",
+            "tracker_name": "kinozal",
+            "partial": True,
+        }])
+        ctx.user_data["srch_search_query"] = "Show 1080p"
+        saved = {}
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {}
+        fake_store.save_topic_subscriptions.side_effect = lambda subs: saved.update(subs)
+
+        with (
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "_download_and_add", AsyncMock()) as dl,
+        ):
+            asyncio.run(bot.search_subscribe_preset(update, ctx))
+
+        dl.assert_not_awaited()
+        self.assertEqual(len(saved), 1)
+        sub = next(iter(saved.values()))
+        self.assertEqual(sub["type"], "jackett")
+        self.assertEqual(sub["query"], "Show 1080p")
+        self.assertEqual(sub["last_episode_end"], 8)
+        self.assertEqual(sub["total_episodes"], 10)
+        self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
+        self.assertEqual(sub["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Текущую неполную раздачу не скачиваю", text)
+        labels = [
+            b.text
+            for row in update.callback_query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("✖️ Закрыть", labels)
 
 
 class SearchSubscribeAdvancedFlowTests(unittest.TestCase):

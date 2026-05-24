@@ -333,9 +333,8 @@ class HelpCommandTests(unittest.TestCase):
         text = update.message.reply_text.call_args.args[0]
         self.assertNotIn("🎙", text)
 
-    def test_help_mentions_subscription_picker(self):
-        """1.3b: help text describes the 🔔 picker with both axes (notify + download).
-        Replaces the prior «📺 Серии / 🎯 Сезон» wording — those buttons are gone."""
+    def test_help_mentions_partial_series_download_and_notify_actions(self):
+        """Help text describes separate download and notification actions."""
         update = _make_message_update(chat_id=100)
         context = _make_context()
         with (
@@ -351,11 +350,11 @@ class HelpCommandTests(unittest.TestCase):
         ):
             asyncio.run(help_command(update, context))
         text = update.message.reply_text.call_args.args[0]
-        self.assertIn("🔔", text)  # picker button is mentioned
+        self.assertIn("⬇️", text)
+        self.assertIn("🔔", text)
         self.assertIn("финал", text.lower())  # final-only option exists in help
-        # The two-axis nature must be visible (mention both «уведом…» and «скачив…»).
-        self.assertIn("уведомлять", text.lower())
-        self.assertIn("скачивать", text.lower())
+        self.assertIn("уведомлен", text.lower())
+        self.assertIn("скачиван", text.lower())
 
 
 class StartCommandTests(unittest.TestCase):
@@ -4516,7 +4515,7 @@ class SearchNoResultsFallbackTests(unittest.TestCase):
 
 
 class SearchResultsTextTests(unittest.TestCase):
-    def test_partial_results_explain_download_and_subscribe_buttons(self):
+    def test_partial_results_explain_download_and_notification_buttons(self):
         text = bot._build_results_text(
             [{
                 "title": "Клиника / Scrubs / Сезон: 1 / Серии: 1-8 из 10",
@@ -4529,7 +4528,7 @@ class SearchResultsTextTests(unittest.TestCase):
             0,
         )
 
-        self.assertIn("⬇️ N — скачать; 🔔 N — подписка на серии.", text)
+        self.assertIn("⬇️ N — варианты скачивания; 🔔 N — только уведомления.", text)
 
     def test_plain_results_do_not_explain_subscribe_button(self):
         text = bot._build_results_text(

@@ -3,7 +3,7 @@
 Living checklist for series-related search, subscription, and notification work.
 Update this file when a task is completed or reprioritized.
 
-Last updated: 2026-05-24 - recognized ordinal Russian season markers like `1-й сезон`
+Last updated: 2026-05-24 - split partial-series download and notification actions
 
 ## P0 - Required Fixes
 
@@ -18,8 +18,9 @@ Last updated: 2026-05-24 - recognized ordinal Russian season markers like `1-й 
 - [x] Escape series/subscription titles in HTML-formatted Telegram messages.
 - [x] Always offer manual season selection in "other season" flow, even when Kinopoisk is unavailable.
 - [x] Recognize Russian ordinal season markers like `1-й сезон` in series detection.
+- [x] Split partial-series actions into download choices and notification-only choices.
+- [x] Remove normal Jackett subscriptions consistently when a season completes.
 - [ ] Improve English/no-slash series title cleanup for `Sxx`, `SxxEyy`, quality tags, and release suffixes.
-- [ ] Remove normal Jackett subscriptions consistently when a season completes.
 - [ ] Keep silent subscription state complete: title, total episodes, completion/removal state.
 
 ## P2 - UX And Reliability

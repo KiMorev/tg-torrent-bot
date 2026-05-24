@@ -384,6 +384,101 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
         # No push to user — silent advance.
         app.bot.send_message.assert_not_awaited()
 
+    def test_complete_normal_jackett_subscription_is_removed_after_download(self):
+        """Normal Jackett-search path must remove the subscription on season completion."""
+        from jackett import JackettResult
+        sub_key = "jackett:complete"
+        sub = {
+            "type": "jackett",
+            "chat_id": 100,
+            "query": "Show",
+            "title": "Show S1E1-9 of 10",
+            "tracker": "kinozal",
+            "topic_url": "https://kinozal.tv/topic/77",
+            "notify_policy": "each_update",
+            "download_policy": "auto_each_update",
+            "last_episode_end": 9,
+            "total_episodes": 10,
+            "last_check": "2026-05-01 10:00",
+            "seen_titles": [],
+        }
+        self.store.save_topic_subscriptions({sub_key: sub})
+
+        candidate = JackettResult(
+            title="Show S1E1-10 of 10", size="10 GB", seeders=10,
+            torrent_url="http://jk/x", magnet_url=None,
+            tracker="kinozal", topic_url="https://kinozal.tv/topic/77",
+        )
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        jackett = MagicMock()
+        jackett.search.return_value = [candidate]
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "select_jackett_subscription_candidate", return_value=candidate),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct",
+                         AsyncMock(return_value=False)),
+            patch.object(bot, "_jackett_subscription_auto_download",
+                         AsyncMock(return_value="task-final")),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        self.assertNotIn(sub_key, self.store.load_topic_subscriptions())
+        text = app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("сезон заверш", text.lower())
+        self.assertIn("Подписка снята", text)
+
+    def test_complete_normal_jackett_notify_only_subscription_is_removed(self):
+        """Final notification-only Jackett updates should not keep a dead subscription."""
+        from jackett import JackettResult
+        from subscription_policy import DOWNLOAD_NOTIFY_ONLY, NOTIFY_FINAL_ONLY
+
+        sub_key = "jackett:notify-final"
+        sub = {
+            "type": "jackett",
+            "chat_id": 100,
+            "query": "Show",
+            "title": "Show S1E1-9 of 10",
+            "tracker": "kinozal",
+            "topic_url": "https://kinozal.tv/topic/77",
+            "notify_policy": NOTIFY_FINAL_ONLY,
+            "download_policy": DOWNLOAD_NOTIFY_ONLY,
+            "last_episode_end": 9,
+            "total_episodes": 10,
+            "last_check": "2026-05-01 10:00",
+            "seen_titles": [],
+        }
+        self.store.save_topic_subscriptions({sub_key: sub})
+
+        candidate = JackettResult(
+            title="Show S1E1-10 of 10", size="10 GB", seeders=10,
+            torrent_url="http://jk/x", magnet_url=None,
+            tracker="kinozal", topic_url="https://kinozal.tv/topic/77",
+        )
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        jackett = MagicMock()
+        jackett.search.return_value = [candidate]
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "select_jackett_subscription_candidate", return_value=candidate),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct",
+                         AsyncMock(return_value=False)),
+            patch.object(bot, "_jackett_subscription_auto_download",
+                         AsyncMock()) as dl,
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        dl.assert_not_awaited()
+        self.assertNotIn(sub_key, self.store.load_topic_subscriptions())
+        text = app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertIn("Авто-загрузка отключена", text)
+        self.assertIn("Подписка снята", text)
+
 
 class PendingDownloadSubscribePreserveTests(unittest.TestCase):
     """Bug F: queueing a failed «⬇️📺 Серии» / «⬇️🎯 Сезон» must restore the
