@@ -93,6 +93,7 @@ from keyboards import (
     _search_options_keyboard,
     _search_results_keyboard,
     tracker_selection_label,
+    _season_input_keyboard,
     _season_select_keyboard,
     _season_back_to_picker_keyboard,
     SEARCH_PAGE_SIZE,
@@ -7757,10 +7758,53 @@ async def search_season_input_ask(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     base = context.user_data.get("srch_base_title", "")
+    if query.message:
+        context.user_data["srch_season_input_msg_id"] = query.message.message_id
+        context.user_data["srch_season_input_chat_id"] = query.message.chat.id
     await query.edit_message_text(
-        f"Введите номер сезона для «{base}»:" if base else "Введите номер сезона:"
+        f"Введите номер сезона для «{base}»:" if base else "Введите номер сезона:",
+        reply_markup=_season_input_keyboard(),
     )
     return SEARCH_SEASON_SELECT
+
+
+async def _delete_season_input_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+    message_id: int | None,
+) -> None:
+    if not chat_id or not message_id:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _edit_or_send_season_input_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    chat_id = context.user_data.get("srch_season_input_chat_id")
+    message_id = context.user_data.get("srch_season_input_msg_id")
+    if chat_id and message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=_season_input_keyboard(),
+            )
+            return
+        except Exception:
+            pass
+
+    if update.message:
+        prompt = await update.message.reply_text(text, reply_markup=_season_input_keyboard())
+        if prompt:
+            context.user_data["srch_season_input_msg_id"] = prompt.message_id
+            context.user_data["srch_season_input_chat_id"] = prompt.chat_id
 
 
 async def search_season_got_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -7772,16 +7816,35 @@ async def search_season_got_input(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("Запрос потерян. Начните поиск заново.")
         return ConversationHandler.END
 
-    if not text.isdigit():
-        await update.message.reply_text(
-            f"Пожалуйста, введите номер сезона цифрой для «{base}»:"
+    if not text.isdigit() or int(text) <= 0:
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        message_id = update.message.message_id if update.message else None
+        await _delete_season_input_message(context, chat_id, message_id)
+        await _edit_or_send_season_input_prompt(
+            update,
+            context,
+            f"Введите положительный номер сезона цифрой для «{base}\":",
         )
         return SEARCH_SEASON_SELECT
 
     season_num = int(text)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    message_id = update.message.message_id if update.message else None
+    await _delete_season_input_message(context, chat_id, message_id)
+    prompt_chat_id = context.user_data.pop("srch_season_input_chat_id", None)
+    prompt_msg_id = context.user_data.pop("srch_season_input_msg_id", None)
+    await _delete_season_input_message(context, prompt_chat_id, prompt_msg_id)
+
     quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
     search_query = _normalize_season_in_query(f"{base} Сезон {season_num}{quality_suffix}")
-    return await _run_search(update.message.reply_text, context, search_query)
+
+    if chat_id is None:
+        return await _run_search(update.message.reply_text, context, search_query)
+
+    async def send_to_chat(*args, **kwargs):
+        return await context.bot.send_message(*args, chat_id=chat_id, **kwargs)
+
+    return await _run_search(send_to_chat, context, search_query)
 
 
 def _pending_downloads_enabled() -> bool:
@@ -8966,7 +9029,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
-        "srch_plex_seasons",
+        "srch_plex_seasons", "srch_season_input_msg_id", "srch_season_input_chat_id",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
@@ -9025,7 +9088,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
-        "srch_plex_seasons",
+        "srch_plex_seasons", "srch_season_input_msg_id", "srch_season_input_chat_id",
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",

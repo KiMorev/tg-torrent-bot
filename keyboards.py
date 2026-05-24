@@ -779,6 +779,17 @@ def _season_back_to_picker_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _season_input_keyboard() -> InlineKeyboardMarkup:
+    """Shown while waiting for a manually typed season number."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "⬅️ К выбору сезона",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:season_back_to_picker",
+        )],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
 def _season_select_keyboard(
     total_seasons: int | None,
     plex_seasons: set[int] | None = None,

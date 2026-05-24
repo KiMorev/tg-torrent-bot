@@ -3,7 +3,7 @@
 Living checklist for series-related search, subscription, and notification work.
 Update this file when a task is completed or reprioritized.
 
-Last updated: 2026-05-24 - complete silent subscription state updates
+Last updated: 2026-05-24 - improve manual season input controls
 
 ## P0 - Required Fixes
 
@@ -26,8 +26,8 @@ Last updated: 2026-05-24 - complete silent subscription state updates
 ## P2 - UX And Reliability
 
 - [ ] Broaden episode parser for single-episode formats like `S02E08`, `Серия 8 из 10`, and `E08/10`.
-- [ ] Add back/cancel buttons to manual season input.
-- [ ] Avoid chat clutter after manual season input by editing or deleting the prompt.
+- [x] Add back/cancel buttons to manual season input.
+- [x] Avoid chat clutter after manual season input by editing or deleting the prompt.
 - [ ] Show available seasons when a selected season/quality has zero results.
 - [ ] Allow subscribing from complete season releases where that makes product sense.
 - [ ] Use a series-aware grouping key for search clusters.

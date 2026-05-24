@@ -148,6 +148,7 @@ def _make_context(user_data: dict | None = None):
     ctx.user_data = user_data if user_data is not None else {}
     ctx.bot = MagicMock()
     ctx.bot.send_message = AsyncMock()
+    ctx.bot.edit_message_text = AsyncMock()
     ctx.bot.delete_message = AsyncMock()
     return ctx
 
@@ -4062,6 +4063,74 @@ class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
         update.callback_query.edit_message_text.assert_awaited_once()
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("Запрос потерян", text)
+
+
+class SearchSeasonManualInputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_input_prompt_has_back_cancel_and_tracks_message(self):
+        from bot import search_season_input_ask, SEARCH_SEASON_SELECT
+
+        update = _make_callback_update(callback_data="srch:season_input")
+        context = _make_context(user_data={"srch_base_title": "Клиника"})
+
+        result = await search_season_input_ask(update, context)
+
+        self.assertEqual(result, SEARCH_SEASON_SELECT)
+        self.assertEqual(context.user_data["srch_season_input_msg_id"], 42)
+        self.assertEqual(context.user_data["srch_season_input_chat_id"], 100)
+        edit = update.callback_query.edit_message_text
+        edit.assert_awaited_once()
+        self.assertIn("Клиника", edit.call_args.args[0])
+        buttons = {
+            button.text: button.callback_data
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["⬅️ К выбору сезона"], "srch:season_back_to_picker")
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
+    async def test_invalid_manual_input_edits_prompt_without_new_message(self):
+        from bot import search_season_got_input, SEARCH_SEASON_SELECT
+
+        update = _make_message_update()
+        update.message.text = "0"
+        context = _make_context(user_data={
+            "srch_base_title": "Клиника",
+            "srch_season_input_msg_id": 77,
+            "srch_season_input_chat_id": 100,
+        })
+
+        result = await search_season_got_input(update, context)
+
+        self.assertEqual(result, SEARCH_SEASON_SELECT)
+        context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
+        context.bot.edit_message_text.assert_awaited_once()
+        kwargs = context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 100)
+        self.assertEqual(kwargs["message_id"], 77)
+        self.assertIn("положительный номер сезона", kwargs["text"])
+        update.message.reply_text.assert_not_awaited()
+
+    async def test_valid_manual_input_deletes_prompt_and_runs_search(self):
+        from bot import search_season_got_input, SEARCH_RESULTS
+
+        update = _make_message_update()
+        update.message.text = "7"
+        context = _make_context(user_data={
+            "srch_base_title": "Клиника",
+            "srch_picked_quality": "1080",
+            "srch_season_input_msg_id": 77,
+            "srch_season_input_chat_id": 100,
+        })
+
+        with patch.object(bot, "_run_search", AsyncMock(return_value=SEARCH_RESULTS)) as run_search:
+            result = await search_season_got_input(update, context)
+
+        self.assertEqual(result, SEARCH_RESULTS)
+        context.bot.delete_message.assert_any_await(chat_id=100, message_id=42)
+        context.bot.delete_message.assert_any_await(chat_id=100, message_id=77)
+        self.assertNotIn("srch_season_input_msg_id", context.user_data)
+        self.assertNotIn("srch_season_input_chat_id", context.user_data)
+        self.assertEqual(run_search.await_args.args[2], "Клиника Сезон: 7 1080p")
 
 
 class SearchSeasonBackToPickerHandlerTests(unittest.IsolatedAsyncioTestCase):
