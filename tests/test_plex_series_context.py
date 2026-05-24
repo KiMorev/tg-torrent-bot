@@ -298,7 +298,7 @@ class PlexConfirmKeyboardUpgradeTests(unittest.TestCase):
         kb = _plex_confirm_keyboard()
         labels = [b.text for row in kb.inline_keyboard for b in row]
         self.assertIn("⬇️ Скачать всё равно", labels)
-        self.assertIn("✖️ Отмена", labels)
+        self.assertIn("❌ Отмена", labels)
         self.assertNotIn("🔼 Заменить версией получше", labels)
 
     def test_show_upgrade_adds_replacement_button(self):
@@ -309,7 +309,7 @@ class PlexConfirmKeyboardUpgradeTests(unittest.TestCase):
         self.assertIn("🔼 Заменить версией получше", labels)
         self.assertIn("plex:upgrade", callbacks)
         # Standard buttons still there.
-        self.assertIn("✖️ Отмена", labels)
+        self.assertIn("❌ Отмена", labels)
 
 
 # ─── plex_upgrade_download handler ─────────────────────────────────────

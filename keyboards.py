@@ -371,7 +371,7 @@ def _plex_confirm_keyboard(*, show_upgrade: bool = False) -> InlineKeyboardMarku
       • «🔼 Заменить версией получше» → plex:upgrade — pending entry
         carries the old season's rating_key for future removal.
       • «⬇️ Скачать всё равно» → plex:confirm — keeps both copies.
-      • «✖️ Отмена» → plex:cancel.
+      • «❌ Отмена» → plex:cancel.
     """
     rows: list[list[InlineKeyboardButton]] = []
     if show_upgrade:
@@ -381,12 +381,12 @@ def _plex_confirm_keyboard(*, show_upgrade: bool = False) -> InlineKeyboardMarku
         ])
         rows.append([
             InlineKeyboardButton("⬇️ Скачать дубликатом", callback_data="plex:confirm"),
-            InlineKeyboardButton("✖️ Отмена", callback_data="plex:cancel"),
+            InlineKeyboardButton("❌ Отмена", callback_data="plex:cancel"),
         ])
     else:
         rows.append([
             InlineKeyboardButton("⬇️ Скачать всё равно", callback_data="plex:confirm"),
-            InlineKeyboardButton("✖️ Отмена", callback_data="plex:cancel"),
+            InlineKeyboardButton("❌ Отмена", callback_data="plex:cancel"),
         ])
     return InlineKeyboardMarkup(rows)
 
@@ -408,7 +408,7 @@ def _final_notification_keyboard(
     rows = []
     if show_plex:
         rows.append([InlineKeyboardButton("▶️ Открыть Plex", url=plex_url)])
-    rows.append([InlineKeyboardButton("🧹 Удалить из списка", callback_data=_task_callback("delete_ask", task_id))])
+    rows.append([InlineKeyboardButton("🗑️ Удалить задачу", callback_data=_task_callback("delete_ask", task_id))])
     rows.append([InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))])
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
@@ -760,7 +760,7 @@ def _search_after_add_keyboard(task_id: str) -> InlineKeyboardMarkup:
         )],
         [
             InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id)),
-            InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
+            InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id)),
         ],
         [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
     ])

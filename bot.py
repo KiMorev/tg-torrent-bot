@@ -8860,6 +8860,8 @@ def _advanced_notify_keyboard(index: int) -> InlineKeyboardMarkup:
                               callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_SILENT}")],
         [InlineKeyboardButton("⬅️ Назад к пресетам",
                               callback_data=f"{prefix}:sub_pick:{index}")],
+        [InlineKeyboardButton("❌ Отмена",
+                              callback_data=f"{prefix}:cancel")],
     ])
 
 
@@ -8892,6 +8894,8 @@ def _advanced_download_keyboard(index: int, notify_policy: str = NOTIFY_EACH_UPD
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад",
                                       callback_data=f"{prefix}:sub_advanced:{index}")])
+    rows.append([InlineKeyboardButton("❌ Отмена",
+                                      callback_data=f"{prefix}:cancel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -9641,7 +9645,7 @@ async def _check_jackett_sub_via_rutracker_direct(
             "Торрент обновлён в Download Station. Подписка снята."
         )
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
+            InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id)),
         ]])
     elif task_id:
         text = (
@@ -9649,7 +9653,7 @@ async def _check_jackett_sub_via_rutracker_direct(
             f"\n🔎 {new_title}{progress}"
         )
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔄 Статус задачи", callback_data=_task_callback("info", task_id)),
+            InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", task_id)),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
     elif not wants_download and is_complete:
@@ -9896,7 +9900,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 )
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
-                        "🔄 Статус задачи",
+                        "📋 Открыть задачу",
                         callback_data=_task_callback("info", task_id),
                     ),
                     InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
@@ -9910,7 +9914,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 )
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
-                        "🔄 Статус задачи",
+                        "📋 Открыть задачу",
                         callback_data=_task_callback("info", task_id),
                     ),
                     InlineKeyboardButton(
@@ -10105,7 +10109,7 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
         "Торрент обновлён в Download Station."
     )
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📋 К загрузкам", callback_data=_task_callback("list", task_id)),
+        InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id)),
         InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
     ]])
     return text, keyboard

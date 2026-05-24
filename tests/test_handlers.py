@@ -4669,6 +4669,23 @@ class PlexDeepLinkHelperTests(unittest.TestCase):
             )
 
 
+class SubscriptionAdvancedKeyboardTests(unittest.TestCase):
+    def _buttons(self, keyboard) -> dict[str, str]:
+        return {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+    def test_notify_step_has_cancel(self):
+        buttons = self._buttons(bot._advanced_notify_keyboard(3))
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
+    def test_download_step_has_cancel(self):
+        buttons = self._buttons(bot._advanced_download_keyboard(3))
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
+
 # ---------------------------------------------------------------------------
 # status command tests
 # ---------------------------------------------------------------------------

@@ -75,6 +75,15 @@ class KeyboardTests(unittest.TestCase):
         last_row_label = keyboard.inline_keyboard[-1][0].text
         self.assertEqual(last_row_label, "✖️ Закрыть")
 
+    def test_final_notification_delete_button_names_task_action(self) -> None:
+        keyboard = _final_notification_keyboard("tid1", show_plex=True)
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🗑️ Удалить задачу"], "task:delete_ask:tid1")
+
     def test_admin_panel_keyboard_links_core_sections(self) -> None:
         keyboard = _admin_panel_keyboard()
 
