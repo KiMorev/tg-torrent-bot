@@ -39,7 +39,7 @@ Telegram-помощник для домашнего киносервера на 
 ### 📺 Интеграция с Plex (опционально)
 
 - **Pre-download check**: предупреждение если фильм/сериал уже в Plex и качество сравнимо — экономит трафик и место. Кнопка «⬇️ Скачать всё равно» для случая «хочу 4K вместо 1080».
-- **Polling после завершения**: бот мониторит Plex до 10 минут после загрузки. Когда фильм проиндексировался — приходит сообщение `✅ … добавлен в Plex` с кнопкой **«▶️ Смотреть в Plex»** ([Plex Universal Link](https://support.plex.tv/articles/218168898-universal-links/) — iOS/Android Plex app перехватывает, на десктопе открывается Plex Web).
+- **Polling после завершения**: бот мониторит Plex до 10 минут после загрузки. Когда фильм проиндексировался — приходит сообщение `✅ … добавлен в Plex` с кнопкой **«▶️ Смотреть в Plex»**. На десктопе ссылка открывает точную карточку в Plex Web; на iOS через `PLEX_DEEPLINK_BASE_URL` можно открыть нативное приложение Plex, но без гарантированного перехода к конкретному фильму/сезону.
 - **Радар «без матча» в Plex**: список файлов в библиотеке без metadata + опциональные push-уведомления когда появляется новый несматченный файл.
 
 ### 🔔 Подписки и автоматизация
@@ -751,9 +751,9 @@ PLEX_MOVIE_SECTION=           # опционально; если пусто — 
 
    **Куда ведёт кнопка «Смотреть в Plex».** Поведение зависит от env-переменной `PLEX_DEEPLINK_BASE_URL`:
 
-   - **Не задано (по умолчанию)** — кнопка ведёт на `https://app.plex.tv/desktop/#!/server/{machineId}/details?key=...`. Plex Web показывает контент с вашего сервера. **На iOS это открывается в Safari**, не в нативном приложении: Plex не публикует [Universal Links](https://support.plex.tv/articles/218168898-universal-links/) для `app.plex.tv` (проверил их AASA — для пути `/desktop` ничего не зарегистрировано). Telegram при этом не принимает `plex://` в inline-кнопках с мая 2026 (`HTTP 400: unsupported url protocol`), поэтому прямо открыть приложение из кнопки невозможно — нужен redirect.
+   - **Не задано (по умолчанию)** — кнопка ведёт на `https://app.plex.tv/desktop/#!/server/{machineId}/details?key=...`. Plex Web показывает контент с вашего сервера. **На iOS это открывается в Safari**, не в нативном приложении: `app.plex.tv` не отдаёт рабочий AASA для Universal Links, а `watch.plex.tv` содержит Universal Links только для публичных путей вроде `/movie/*` и `/show/*`, не для личного `server/.../details?key=...`. Telegram при этом не принимает `plex://` в inline-кнопках (`HTTP 400: unsupported url protocol`), поэтому прямо открыть приложение из кнопки невозможно — нужен redirect.
 
-   - **`PLEX_DEEPLINK_BASE_URL=https://your-host/plex.html`** — бот формирует кнопку с URL `https://your-host/plex.html?key=/library/metadata/{ratingKey}&server={machineId}`. По этому адресу вы хостите крошечную HTML-страничку, которая JS-ом делает `location.href = "plex://..."`. Safari/Chrome принимают `plex://` через `location.href` (это разрешено) → iOS/Android запускают **нативное Plex-приложение**.
+   - **`PLEX_DEEPLINK_BASE_URL=https://your-host/plex.html`** — бот формирует кнопку с URL `https://your-host/plex.html?key=/library/metadata/{ratingKey}&server={machineId}`. По этому адресу вы хостите крошечную HTML-страничку: на десктопе она открывает точную карточку в Plex Web, а на iOS/Android делает `location.href = "plex://"` и запускает **нативное Plex-приложение**. Переход к конкретному фильму/сезону внутри Plex iOS не считается надёжным: рабочие варианты `plex://preplay?...` были недокументированными, а в текущем приложении могут игнорироваться или вести нестабильно.
 
      Минимальный `plex.html`:
      ```html
@@ -761,12 +761,15 @@ PLEX_MOVIE_SECTION=           # опционально; если пусто — 
      <html><body>
      <script>
        const p = new URLSearchParams(location.search);
-       const key = p.get('key'), server = p.get('server');
+       const key = p.get('key') || '';
+       const server = p.get('server') || '';
+       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+       let webTarget = 'https://app.plex.tv/desktop';
        if (key && server) {
-         location.href = `plex://preplay/?metadataKey=${encodeURIComponent(key)}&metadataType=1&server=${server}`;
-       } else {
-         location.href = 'plex://';
+         webTarget = 'https://app.plex.tv/desktop/#!/server/' + server +
+                     '/details?key=' + encodeURIComponent(key);
        }
+       location.href = isMobile ? 'plex://' : webTarget;
      </script>
      <p>Открываю Plex…</p>
      </body></html>
@@ -913,8 +916,8 @@ python -m pytest tests/ -v
 - дублирующие загрузки: перехват `torrent_duplicate`, авто-удаление дубля, контекстное уведомление; подписка `sub_notify` и доставка финального уведомления подписчикам
 - подписка на новинки `/new`: хранилище подписок (`_get/_is/_set_movie_subscription`), кнопка subscribe/unsubscribe в клавиатуре. Per-user семантика с **двумя независимыми сигналами**: хелперы `_card_identifiers` (kp:N + movie_key fallback для устойчивости к KP-flip), legacy-aware `_entry_is_notified`/`_entry_is_shown_in_new`, `_is_card_notified`/`_is_card_shown_in_new`, `_mark_user_notified`/`_mark_user_shown_in_new` через `movie_seen_by_user`. Логика `_run_movie_discovery_notifications` пушит фильмы для которых не выставлен ни один из сигналов и обновляет только `notified_at`. Тихие часы: вне окна push пропускается, сигналы не обновляются → diff натурально доедет следующим in-window рефрешем. Плашка «🆕» в `/new` рендерится per-user: `_format_movie_discovery_cache(cache, chat_id=...)` использует `_is_card_shown_in_new` (push сам по себе плашку не гасит). Открытие `/new` (команда / refresh callback / open callback из push) автоматически вызывает `_mark_user_shown_in_new` для top-10. Legacy single-timestamp entries auto-upgrade при первой записи.
 - правила доступа, политики уведомлений, отображение задач и torrent/magnet-утилиты
-- интеграция с Plex: нормализация разрешения, сравнение качества, разбор XML, все методы `PlexClient` для фильмов и сериалов (`get_all_movies`/`find_movie`/`get_all_shows`/`get_show_seasons`), классификация ошибок (`PlexAuthError`/`PlexTimeoutError`/`PlexConnectionError`/`PlexParseError`); логика pre-download check для фильмов (3 точки входа) + аналогичный pre-check для сезонов сериалов (`_plex_pre_check_series` через TV-секцию); обогащение карточек `/new` значком ✅; polling после завершения скачивания (`_plex_poll_after_finish` с разветвлением по `meta.kind`: фильм → `_plex_library_find` + substring fallback, сериал → `_plex_show_find` + season match; deep link с `metadataType=1` для фильма и `=3` для сезона; persist маркера `plex_done`); single-flight `_refresh_plex_library` с coalesce-окном; TV-кэш с lazy-loading сезонов (`_plex_ensure_show_seasons`); диагностика Plex в `/admin` с распознаванием типа ошибки и счётчиком сериалов; очистка `plex_pending` при таймауте ConversationHandler и при новом text-сообщении
+- интеграция с Plex: нормализация разрешения, сравнение качества, разбор XML, все методы `PlexClient` для фильмов и сериалов (`get_all_movies`/`find_movie`/`get_all_shows`/`get_show_seasons`), классификация ошибок (`PlexAuthError`/`PlexTimeoutError`/`PlexConnectionError`/`PlexParseError`); логика pre-download check для фильмов (3 точки входа) + аналогичный pre-check для сезонов сериалов (`_plex_pre_check_series` через TV-секцию); обогащение карточек `/new` значком ✅; polling после завершения скачивания (`_plex_poll_after_finish` с разветвлением по `meta.kind`: фильм → `_plex_library_find` + substring fallback, сериал → `_plex_show_find` + season match; deep link на найденный `rating_key` через Plex Web или custom redirect; persist маркера `plex_done`); single-flight `_refresh_plex_library` с coalesce-окном; TV-кэш с lazy-loading сезонов (`_plex_ensure_show_seasons`); диагностика Plex в `/admin` с распознаванием типа ошибки и счётчиком сериалов; очистка `plex_pending` при таймауте ConversationHandler и при новом text-сообщении
 - хранилище контекста задач (`task_meta.json`): `_build_task_meta_from_result` / `_build_task_meta_from_title` для извлечения канонических метаданных при добавлении задачи; `state_store.remember_task_meta` со skip-если-не-изменилось; cleanup в `prune_stale_task_state` и `forget_task_state`
-- сериалы в Plex: иконки `✅` в пикере сезонов (`_season_select_keyboard(plex_seasons=...)`), helper `_get_plex_seasons_for_series` (lazy fetch с кэшированием в `srch_plex_seasons`); `_plex_series_confirm_text` (3 ветки: warn_same/warn_better/offer_upgrade); deep links на сезон через `metadataType=3`
+- сериалы в Plex: иконки `✅` в пикере сезонов (`_season_select_keyboard(plex_seasons=...)`), helper `_get_plex_seasons_for_series` (lazy fetch с кэшированием в `srch_plex_seasons`); `_plex_series_confirm_text` (3 ветки: warn_same/warn_better/offer_upgrade); deep links на найденный `rating_key` сезона через Plex Web или custom redirect
 - радар несматченных в Plex: `is_unmatched()` на основе `guid.startswith("local://")`, парсинг `guid` в `_parse_video`/`_parse_show`; runtime-toggle через `_is_plex_unmatched_notify_enabled`/`_set_...`; персистентный snapshot `_load_plex_unmatched_seen`/`_save_...`; diff-логика `_check_plex_unmatched_against_seen` (initial vs new); формат авто-сообщений `_format_unmatched_push` и pull-формат `_format_unmatched_list`; callback'ы `admin:plex_unmatched` и `admin:plex_unmatched_toggle`; условный блок «Не сматчено» в диагностике с `_plural_ru`
 - сериальный multi-season флоу: `_quality_to_query_suffix` и `_seasons_available_in_results` хелперы; перенос качества из выбранной раздачи в поиск следующих сезонов; кнопка «⬅️ Назад» в пикере (handler `search_season_back`) с восстановлением сообщения «добавлено»; обработка 0-результатов сезона со списком доступных и кнопкой возврата (handler `search_season_back_to_picker`); cleanup `srch_series_query`/`srch_picked_quality`/`srch_series_success_*` ключей при таймауте, отмене и новых входных точках
