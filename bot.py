@@ -7581,38 +7581,37 @@ async def search_series_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["srch_base_title"] = series_query
     context.user_data["srch_query"] = series_query
 
-    # If KinoPoisk is available, look up the season count and offer a selector.
+    total_seasons: int | None = None
+
+    # If KinoPoisk is available, look up the season count before offering a selector.
     if kinopoisk_client:
         await query.edit_message_text(f"🔍 Ищу информацию о «{series_query}»…")
         try:
-            total_seasons: int | None = await asyncio.wait_for(
+            total_seasons = await asyncio.wait_for(
                 asyncio.to_thread(kinopoisk_client.search_series_seasons, series_query),
                 timeout=8,
             )
         except Exception:
             total_seasons = None
 
-        context.user_data["srch_total_seasons"] = total_seasons
+    context.user_data["srch_total_seasons"] = total_seasons
 
-        if total_seasons == 1:
-            # Single season — skip the selector and search directly.
-            return await _execute_search(query, context, series_query)
+    if total_seasons == 1:
+        # Single season — skip the selector and search directly.
+        return await _execute_search(query, context, series_query)
 
-        plex_seasons = await _get_plex_seasons_for_series(series_query)
-        context.user_data["srch_plex_seasons"] = plex_seasons
+    plex_seasons = await _get_plex_seasons_for_series(series_query)
+    context.user_data["srch_plex_seasons"] = plex_seasons
 
-        season_count_label = f" ({total_seasons} сез.)" if total_seasons else ""
-        quality_hint = _series_quality_hint(context.user_data.get("srch_picked_quality", ""))
-        plex_line = _series_plex_seasons_line(plex_seasons, total_seasons)
-        await query.edit_message_text(
-            f"📺 Сериал: «{series_query}»{season_count_label}\n"
-            f"{plex_line}{quality_hint}Выберите сезон:",
-            reply_markup=_season_select_keyboard(total_seasons, plex_seasons=plex_seasons),
-        )
-        return SEARCH_SEASON_SELECT
-
-    # No KinoPoisk — go straight to search.
-    return await _execute_search(query, context, series_query)
+    season_count_label = f" ({total_seasons} сез.)" if total_seasons else ""
+    quality_hint = _series_quality_hint(context.user_data.get("srch_picked_quality", ""))
+    plex_line = _series_plex_seasons_line(plex_seasons, total_seasons)
+    await query.edit_message_text(
+        f"📺 Сериал: «{series_query}»{season_count_label}\n"
+        f"{plex_line}{quality_hint}Выберите сезон:",
+        reply_markup=_season_select_keyboard(total_seasons, plex_seasons=plex_seasons),
+    )
+    return SEARCH_SEASON_SELECT
 
 
 def _series_quality_hint(picked_quality: str) -> str:

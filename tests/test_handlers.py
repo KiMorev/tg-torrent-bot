@@ -3966,6 +3966,43 @@ class GetPlexSeasonsForSeriesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await _get_plex_seasons_for_series("X"), {1, 2})
 
 
+class SearchSeriesEntryHandlerTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for the 'Другой сезон' entry point."""
+
+    async def test_without_kinopoisk_still_offers_manual_season_picker(self):
+        from bot import search_series_entry, SEARCH_SEASON_SELECT
+        update = _make_callback_update(callback_data="srch:series_base")
+        context = _make_context(user_data={
+            "srch_series_query": "Клиника",
+            "srch_picked_quality": "1080",
+        })
+
+        with (
+            patch.object(bot, "kinopoisk_client", None),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())),
+            patch.object(bot, "_execute_search", AsyncMock()) as exec_mock,
+        ):
+            result = await search_series_entry(update, context)
+
+        self.assertEqual(result, SEARCH_SEASON_SELECT)
+        exec_mock.assert_not_awaited()
+        edit = update.callback_query.edit_message_text
+        edit.assert_awaited_once()
+        text = edit.call_args.args[0]
+        self.assertIn("«Клиника»", text)
+        self.assertIn("1080p", text)
+        keyboard = edit.call_args.kwargs["reply_markup"]
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["✏️ Свой номер"], "srch:season_input")
+        self.assertEqual(buttons["🔎 Без сезона"], "srch:season_skip")
+        self.assertEqual(context.user_data["srch_total_seasons"], None)
+        self.assertEqual(context.user_data["srch_base_title"], "Клиника")
+
+
 class SearchSeasonBackHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tests for search_season_back — the '⬅️ Назад' button in the season picker."""
 

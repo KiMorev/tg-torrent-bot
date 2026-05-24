@@ -3,7 +3,7 @@
 Living checklist for series-related search, subscription, and notification work.
 Update this file when a task is completed or reprioritized.
 
-Last updated: 2026-05-24 - escaped subscription picker titles in HTML messages
+Last updated: 2026-05-24 - kept manual season picker available without Kinopoisk
 
 ## P0 - Required Fixes
 
@@ -16,7 +16,7 @@ Last updated: 2026-05-24 - escaped subscription picker titles in HTML messages
 
 - [x] Preserve search render context when returning from the subscription picker to results.
 - [x] Escape series/subscription titles in HTML-formatted Telegram messages.
-- [ ] Always offer manual season selection in "other season" flow, even when Kinopoisk is unavailable.
+- [x] Always offer manual season selection in "other season" flow, even when Kinopoisk is unavailable.
 - [ ] Improve English/no-slash series title cleanup for `Sxx`, `SxxEyy`, quality tags, and release suffixes.
 - [ ] Remove normal Jackett subscriptions consistently when a season completes.
 - [ ] Keep silent subscription state complete: title, total episodes, completion/removal state.
