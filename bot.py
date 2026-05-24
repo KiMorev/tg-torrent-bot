@@ -6077,6 +6077,44 @@ def _split_query_quality(search_query: str) -> tuple[str, str | None]:
     return (base, quality)
 
 
+_MEDIA_INTENT_MOVIE_RE = re.compile(
+    r"(?<!\w)(фильм|фильма|фильмы|кино|мультфильм|мультик)(?!\w)",
+    re.IGNORECASE,
+)
+_MEDIA_INTENT_SERIES_RE = re.compile(
+    r"(?<!\w)(сериал|сериала|сериалы|сериалов|мультсериал|сезон|сезоны|серия|серии)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _detect_media_intent(search_query: str) -> str | None:
+    """Return an explicit media intent from user wording, if unambiguous."""
+    has_movie = bool(_MEDIA_INTENT_MOVIE_RE.search(search_query or ""))
+    has_series = bool(_MEDIA_INTENT_SERIES_RE.search(search_query or ""))
+    if has_movie == has_series:
+        return None
+    return "movie" if has_movie else "series"
+
+
+def _apply_media_intent_filter(
+    results_data: list[dict],
+    media_intent: str | None,
+) -> tuple[list[dict], str]:
+    if media_intent not in {"movie", "series"}:
+        return results_data, ""
+
+    preferred = [r for r in results_data if _search_cluster_kind(r) == media_intent]
+    if not preferred or len(preferred) == len(results_data):
+        return results_data, ""
+
+    hidden = len(results_data) - len(preferred)
+    label = "фильмы" if media_intent == "movie" else "сериалы"
+    return (
+        preferred,
+        f"⚙️ Показаны {label}: {len(preferred)}/{len(results_data)} (скрыто {hidden})",
+    )
+
+
 def _format_search_query_label(search_query: str, *, escape_html: bool = False) -> str:
     """Render user-facing query text without treating filters as title text.
 
@@ -6840,6 +6878,16 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             ),
         )
         return SEARCH_RESULTS
+
+    media_intent = _detect_media_intent(base_query)
+    before_media_intent = len(results_data)
+    results_data, media_intent_banner = _apply_media_intent_filter(results_data, media_intent)
+    if media_intent_banner:
+        filter_banner_parts.append(media_intent_banner)
+        logger.info(
+            "Search: media intent %s kept %d/%d for %r",
+            media_intent, len(results_data), before_media_intent, base_query,
+        )
 
     # Classify all results by detected quality (1080p / 2160p / 720p / other).
     # If the user asked for a specific quality:

@@ -552,6 +552,85 @@ class AudioSubsFilterIntegrationTests(unittest.TestCase):
         self.assertNotIn("WEB-DL", text)
 
 
+class MediaIntentFilterIntegrationTests(unittest.TestCase):
+    """Explicit «фильм» / «сериал» wording should narrow mixed tracker output."""
+
+    def _make_jackett_result(self, title: str):
+        r = MagicMock()
+        r.title = title
+        r.topic_url = "https://example.com/x"
+        r.tracker = "rt"
+        r.size = "5 GB"
+        r.seeders = 10
+        r.magnet_url = ""
+        r.torrent_url = ""
+        return r
+
+    def test_movie_intent_drops_series_when_movies_exist(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            self._make_jackett_result("Drive 2011 1080p WEB-DL"),
+            self._make_jackett_result("Drive S01E01 1080p WEB-DL"),
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "фильм где водитель машина"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Drive 2011", text)
+        self.assertNotIn("S01E01", text)
+        self.assertIn("Показаны фильмы", text)
+
+    def test_series_intent_drops_movies_when_series_exist(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            self._make_jackett_result("Halo 2022 1080p WEB-DL"),
+            self._make_jackett_result("Halo S01E01 1080p WEB-DL"),
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "сериал про кольцо"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("S01E01", text)
+        self.assertNotIn("Halo 2022", text)
+        self.assertIn("Показаны сериалы", text)
+
+    def test_media_intent_does_not_empty_results(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            self._make_jackett_result("Drive S01E01 1080p WEB-DL"),
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "фильм где водитель машина"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("S01E01", text)
+        self.assertNotIn("Показаны фильмы", text)
+
+
 class SupplementReleasesForFailedQueriesTests(unittest.TestCase):
     """Pinned behaviour for the «year disappears from /new when its
     query timed out / errored» bug. See _supplement_releases_for_failed_queries."""
