@@ -161,85 +161,60 @@ sequenceDiagram
 
 ## Быстрый старт на Synology
 
-Цель установки PlexLoader — привести новичка от пустой Synology до работающего Telegram-бота без ручной сборки `.env`, копирования файлов и догадок про Docker. Идеальный путь: пользователь запускает одну команду, отвечает только на понятные вопросы и в конце получает сообщение от бота в Telegram.
+MVP-установщик уже есть. Он настраивает базовое ядро: Telegram-бот + Synology Download Station. Rutracker, Jackett, Plex, `/new` и OpenAI пока подключаются после установки через `.env`; следующие итерации мастера будут добавлять их по одному.
 
-Автоматический установщик пока не входит в репозиторий. Ниже сначала зафиксирован целевой маршрут установки, затем текущий ручной способ, который уже работает.
+### Что понадобится
 
-### Целевой установщик
+- Synology с установленным `Container Manager` / Docker.
+- SSH-доступ к NAS пользователем, который может запускать Docker.
+- Новый Telegram-бот из [@BotFather](https://t.me/BotFather): понадобится только `BOT_TOKEN`.
+- DSM-пользователь для PlexLoader, например `tg_bot_ds`, с доступом к Download Station и папке загрузки.
 
-Установщик должен делать сам всё, что можно определить или проверить автоматически:
+### Установка одной командой
 
-- проверить наличие Docker / Container Manager и выбрать `docker compose` или старый `docker-compose`;
-- проверить архитектуру NAS, доступ в интернет, права на Docker и папку установки;
-- создать рабочую папку, скачать `compose.yaml`, подготовить volume для состояния;
-- собрать `.env` через пошаговый мастер, не заставляя пользователя редактировать файл руками;
-- объяснять каждый внешний секрет: где открыть сервис, что нажать, какое значение скопировать;
-- запускать контейнер, проверять логи, Telegram Bot API и Download Station;
-- завершаться только после понятного успеха: бот отвечает в Telegram, `/status` видит Download Station, `/admin` открывает диагностику.
+Подключитесь к NAS по SSH и выполните:
 
-Пользователь должен вводить только то, что нельзя безопасно узнать автоматически:
-
-- `BOT_TOKEN` из BotFather;
-- логин, пароль и адрес Synology Download Station;
-- учётные данные Rutracker, если нужен прямой поиск;
-- URL и API key Jackett, если нужен поиск через Jackett;
-- ключи Кинопоиска и OpenAI, если нужны `/new`, голосовой поиск и GPT-подсказки;
-- подтверждение входа в Plex через официальный Plex auth flow.
-
-Fallback-и установщика:
-
-| Шаг | Основной путь | Запасной путь |
-|---|---|---|
-| Скачивание установщика | `curl` | `wget`; если нет обоих — показать ручную команду установки пакета |
-| Docker Compose | `docker compose` | `docker-compose`; если Docker не установлен — инструкция для Synology Package Center / Container Manager |
-| Папка установки | создать автоматически | показать точные `sudo mkdir` / `sudo chown`, если не хватает прав |
-| `.env` | мастер генерирует сам | сохранить `.env.partial` и предложить `resume`, если установка прервалась |
-| Telegram `chat_id` | пользователь пишет `/start`, установщик читает `getUpdates` | ручной ввод `ADMIN_CHAT_IDS`, если Telegram не отдал update |
-| Download Station | проверить указанный DSM URL | попробовать LAN URL / `host.docker.internal`; при self-signed SSL предложить `DS_VERIFY_SSL=false` |
-| Plex | Plex auth flow без пароля | ручной `X-Plex-Token`, если автоматическая авторизация недоступна |
-| Опциональные сервисы | настроить сразу | пропустить и запустить рабочий минимум: Telegram + Download Station |
-
-Принцип: если проблема блокирует запуск ядра, установщик останавливается с конкретным действием для пользователя. Если ломается опциональная интеграция, бот всё равно запускается в урезанном режиме и явно пишет, что именно не включено.
-
-### Текущий ручной способ
-
-#### 1. Подготовить Telegram-бота
-
-1. Создайте бота через [@BotFather](https://t.me/BotFather).
-2. Сохраните `BOT_TOKEN`.
-3. Напишите будущему боту `/id` после запуска, чтобы узнать свой `chat_id`. Если бот ещё не запущен, можно временно использовать любой сервис получения Telegram ID.
-
-#### 2. Подготовить Download Station
-
-Создайте отдельного пользователя Synology, например `tg_bot_ds`, и выдайте ему:
-
-- доступ к DSM;
-- доступ к Download Station;
-- чтение и запись в папку назначения;
-- папку назначения по умолчанию в Download Station.
-
-Для домашнего DSM с самоподписанным сертификатом обычно удобнее:
-
-```env
-DS_VERIFY_SSL=false
+```bash
+curl -fsSL https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh
 ```
 
-Если DSM доступен через публичный домен с нормальным сертификатом, лучше поставить `DS_VERIFY_SSL=true`.
+Если `curl` не установлен, можно так:
 
-#### 3. Развернуть контейнер
-
-На NAS создайте папку:
-
-```text
-/volume1/docker/tg_torrent_drop
+```bash
+wget -qO- https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh
 ```
 
-Положите туда:
+Установщик:
 
-- [`compose.yaml`](compose.yaml)
-- [`.env.example`](.env.example), переименованный в `.env`
+- проверит Docker и `docker compose` / `docker-compose`;
+- создаст папку `/volume1/docker/plexloader`;
+- скачает [`compose.yaml`](compose.yaml) и мастер [`scripts/setup_wizard.py`](scripts/setup_wizard.py);
+- отключит необязательный `/storage` mount, если на NAS нет `/volume1/video`;
+- проведёт по настройке Telegram и Download Station;
+- создаст `.env`;
+- запустит контейнер;
+- проверит, что `tg_torrent_drop` реально поднялся, а при ошибке покажет последние логи.
 
-Минимальный `.env`:
+### Что спросит мастер
+
+1. `BOT_TOKEN`: откройте [@BotFather](https://t.me/BotFather), создайте бота командой `/newbot` и скопируйте token.
+2. Telegram `chat_id`: мастер попросит написать `/start` вашему боту и сам попробует прочитать `chat_id` через Telegram `getUpdates`. Ручной ввод нужен только если Telegram не отдаст update.
+3. DSM URL: по умолчанию `https://host.docker.internal:5001`. Это адрес DSM из контейнера; установщик умеет проверить его с NAS через локальный fallback.
+4. DSM account / password: пользователь Synology с доступом к Download Station.
+5. Папка назначения Download Station: обычно `video` или другая папка, настроенная в Download Station.
+
+Если DSM использует самоподписанный сертификат, мастер сам попробует fallback `DS_VERIFY_SSL=false`. Если Download Station не проходит проверку, установщик покажет причину и предложит ввести данные заново.
+
+### Ручной fallback
+
+Если автоматическая установка не подходит, можно развернуть вручную:
+
+1. Создайте папку `/volume1/docker/plexloader`.
+2. Скачайте туда [`compose.yaml`](compose.yaml).
+3. Создайте `.env` по примеру [`.env.example`](.env.example).
+4. В Synology Container Manager создайте проект из этой папки и запустите его.
+
+Минимальный `.env` для ручного запуска:
 
 ```env
 BOT_TOKEN=123456:replace_me
@@ -247,23 +222,14 @@ ALLOWED_CHAT_IDS=123456789
 ADMIN_CHAT_IDS=123456789
 STATE_DIR=/data
 
-DS_URL=https://192.168.1.103:5001
+DS_URL=https://host.docker.internal:5001
 DS_ACCOUNT=tg_bot_ds
 DS_PASSWORD=replace_me
 DS_DESTINATION=video
 DS_VERIFY_SSL=false
 ```
 
-В Synology Container Manager:
-
-1. Откройте `Проекты`.
-2. Создайте проект из папки `/volume1/docker/tg_torrent_drop`.
-3. Нажмите `Собрать`.
-4. Нажмите `Запустить`.
-
-Контейнер использует готовый образ `ghcr.io/kimorev/tg-torrent-bot:latest`. Python-файлы на NAS копировать не нужно.
-
-#### 4. Проверить запуск
+### Проверить запуск
 
 В Telegram:
 
@@ -572,6 +538,8 @@ python -m pytest tests/ -v
 
 | Файл | Назначение |
 |---|---|
+| [`install.sh`](install.sh) | Bootstrap-установщик для Synology: скачивает файлы, запускает мастер, поднимает контейнер. |
+| [`scripts/setup_wizard.py`](scripts/setup_wizard.py) | Интерактивный мастер генерации `.env` для базового ядра Telegram + Download Station. |
 | [`bot.py`](bot.py) | Telegram-обработчики и фоновые циклы. |
 | [`config.py`](config.py) | Разбор `.env`. |
 | [`app_context.py`](app_context.py) | Создание клиентов и общего контекста. |
@@ -593,6 +561,7 @@ python -m pytest tests/ -v
 | [`gpt_client.py`](gpt_client.py), [`gpt_features.py`](gpt_features.py) | GPT-улучшения поиска и `/new`. |
 | [`diagnostics.py`](diagnostics.py) | Диагностика для `/admin`. |
 | [`tests/`](tests) | Pytest-набор. |
+| [`tests/test_setup_wizard.py`](tests/test_setup_wizard.py) | Проверки генерации `.env`, Telegram `chat_id` parsing и Synology URL fallback установщика. |
 
 ## Ограничения
 
