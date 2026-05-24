@@ -5593,7 +5593,9 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     context.user_data["srch_query"] = info.search_base
+    context.user_data["srch_from_kp_link"] = True
     context.user_data["srch_kp_info"] = {
+        "kp_id": info.kp_id,
         "title_ru": info.title_ru,
         "title_en": info.title_en,
         "year": info.year,
@@ -6687,21 +6689,31 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             # the user with did-you-mean variations — instead say «найден на
             # КП, но в трекерах сейчас нет». Run in parallel with the GPT
             # did-you-mean call to keep latency at ~1s total.
-            kp_task = asyncio.create_task(
-                asyncio.to_thread(
-                    _kp_verify_title_sync, base_query,
-                    default_on_unknown=False,  # don't suppress did-you-mean on KP outage
-                )
+            kp_info = context.user_data.get("srch_kp_info")
+            from_kp_link = bool(
+                context.user_data.get("srch_from_kp_link")
+                and isinstance(kp_info, dict)
+                and kp_info.get("kp_id")
             )
-            suggestions_task = asyncio.create_task(_gpt_get_did_you_mean(base_query))
-            try:
-                original_kp_match, suggestions = await asyncio.gather(
-                    kp_task, suggestions_task,
+            if from_kp_link:
+                original_kp_match = True
+                suggestions = await _gpt_get_did_you_mean(base_query)
+            else:
+                kp_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _kp_verify_title_sync, base_query,
+                        default_on_unknown=False,  # don't suppress did-you-mean on KP outage
+                    )
                 )
-            except Exception:
-                logger.warning("KP/did-you-mean parallel fetch failed", exc_info=True)
-                original_kp_match = False
-                suggestions = []
+                suggestions_task = asyncio.create_task(_gpt_get_did_you_mean(base_query))
+                try:
+                    original_kp_match, suggestions = await asyncio.gather(
+                        kp_task, suggestions_task,
+                    )
+                except Exception:
+                    logger.warning("KP/did-you-mean parallel fetch failed", exc_info=True)
+                    original_kp_match = False
+                    suggestions = []
 
             if not original_kp_match and not suggestions:
                 suggestions = await asyncio.to_thread(_kp_loose_suggestions_sync, base_query)

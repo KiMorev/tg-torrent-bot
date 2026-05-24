@@ -383,6 +383,45 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         labels = [b.text for row in keyboard for b in row]
         self.assertFalse(any("Wrong Suggestion" in lbl for lbl in labels))
 
+    async def test_kp_link_context_skips_keyword_verify(self):
+        """A KP URL already proves the title exists; no-results must not spend
+        an extra keyword search to verify the same title again."""
+        ctx = self._make_context(
+            jackett_selected={"rutracker"},
+            jackett_indexers=[{"id": "rutracker"}],
+        )
+        ctx.user_data["srch_from_kp_link"] = True
+        ctx.user_data["srch_kp_info"] = {"kp_id": 12345, "title_ru": "Драйв"}
+        message = MagicMock()
+        message.message_id = 1
+        message.chat_id = 100
+        message.edit_text = AsyncMock(return_value=message)
+
+        async def send_fn(text, **kw):
+            await message.edit_text(text, **kw)
+            return message
+
+        mock_jackett = MagicMock(
+            search=MagicMock(return_value=[]),
+            get_indexers=MagicMock(return_value=[{"id": "rutracker"}]),
+        )
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "_gpt_get_did_you_mean",
+                         new=AsyncMock(return_value=["Wrong Suggestion"])),
+            patch.object(bot, "_kp_verify_title_sync", return_value=False) as verify_mock,
+        ):
+            await bot._run_search(send_fn, ctx, "Драйв 1080p")
+
+        verify_mock.assert_not_called()
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Кинопоиске", text)
+        keyboard = kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in keyboard for b in row]
+        self.assertFalse(any("Wrong Suggestion" in lbl for lbl in labels))
+
     async def test_loose_kp_suggestion_does_not_suppress_did_you_mean(self):
         """KP keyword search can return the site's 'maybe you meant' result.
         That is not proof that the original typo is a real title."""
