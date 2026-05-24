@@ -78,6 +78,18 @@ class SearchSubscribePickTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Результат недоступен", text)
 
+    def test_escapes_title_in_html_message(self):
+        update = MagicMock(callback_query=_make_query("srch:sub_pick:0"))
+        ctx = _make_context(results=[{
+            "title": "Show <Finale> & S02E01",
+            "partial": True,
+        }])
+        asyncio.run(bot.search_subscribe_pick(update, ctx))
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Show &lt;Finale&gt; &amp; S02E01", text)
+        self.assertNotIn("Show <Finale> & S02E01", text)
+
 
 class SearchSubscribePresetTests(unittest.TestCase):
     """search_subscribe_preset — direct subscribe with the chosen policy pair."""
@@ -147,6 +159,18 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
         self.assertTrue(any("сезон закроется" in l for l in labels))
         self.assertTrue(any("Не уведомлять" in l for l in labels))
 
+    def test_step1_escapes_title_in_html_message(self):
+        update = MagicMock(callback_query=_make_query("srch:sub_advanced:0"))
+        ctx = _make_context(results=[{
+            "title": "Show <Finale> & S02E01",
+            "partial": True,
+        }])
+        asyncio.run(bot.search_subscribe_advanced(update, ctx))
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Show &lt;Finale&gt; &amp; S02E01", text)
+        self.assertNotIn("Show <Finale> & S02E01", text)
+
     def test_step1_to_step2_carries_notify_choice(self):
         """After picking notify_policy in step 1, step 2 must show the
         downstream choice and remember the upstream pick via user_data."""
@@ -166,6 +190,20 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
         labels = [b.text for row in kb.inline_keyboard for b in row]
         # Step 2 must offer the only_when_complete option.
         self.assertTrue(any("Одним торрентом" in l for l in labels))
+
+    def test_step2_escapes_title_in_html_message(self):
+        update = MagicMock(callback_query=_make_query(
+            f"srch:sub_set_notify:0:{NOTIFY_FINAL_ONLY}"
+        ))
+        ctx = _make_context(results=[{
+            "title": "Show <Finale> & S02E01",
+            "partial": True,
+        }])
+        asyncio.run(bot.search_subscribe_set_notify(update, ctx))
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Show &lt;Finale&gt; &amp; S02E01", text)
+        self.assertNotIn("Show <Finale> & S02E01", text)
 
     def test_silent_notify_hides_notify_only_download_choice(self):
         update = MagicMock(callback_query=_make_query(

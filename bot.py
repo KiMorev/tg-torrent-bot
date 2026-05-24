@@ -8383,7 +8383,7 @@ def _toggle_subscription_notify_policy(sub: dict) -> tuple[str, str]:
 
 def _subscribe_picker_text(result: dict) -> str:
     """Hint-line block above the preset keyboard — explains download/notify axes."""
-    title = str(result.get("title") or "")[:120]
+    title = html_module.escape(str(result.get("title") or "")[:120])
     return (
         f"🎬 {title}\n\n"
         "Режим подписки:\n"
@@ -8471,7 +8471,7 @@ async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_
 # ─── Advanced (2-step) menu ──────────────────────────────────────────────
 
 def _advanced_notify_text(result: dict) -> str:
-    title = str(result.get("title") or "")[:120]
+    title = html_module.escape(str(result.get("title") or "")[:120])
     return (
         f"🎬 {title}\n\n"
         "<b>Шаг 1/2.</b> Когда отправлять уведомления в Telegram?"
@@ -8493,7 +8493,7 @@ def _advanced_notify_keyboard(index: int) -> InlineKeyboardMarkup:
 
 
 def _advanced_download_text(result: dict, notify_policy: str) -> str:
-    title = str(result.get("title") or "")[:120]
+    title = html_module.escape(str(result.get("title") or "")[:120])
     notify_label = {
         NOTIFY_EACH_UPDATE: "🔔 О каждой новой серии",
         NOTIFY_FINAL_ONLY:  "🎯 Только когда сезон закроется",
