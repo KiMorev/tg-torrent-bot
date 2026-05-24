@@ -4958,9 +4958,9 @@ async def _notify_pending_success(
     # downgrade to a one-shot — the user's original intent is lost.
     subscribe_restored = False
     if entry.get("subscribe"):
-        notify_mode = str(entry.get("notify_mode") or "per_episode")
-        notify_policy = entry.get("notify_policy")
-        download_policy = entry.get("download_policy")
+        notify_policy, download_policy = _coerce_subscription_policies(
+            entry.get("notify_policy"), entry.get("download_policy")
+        )
         source = str(entry.get("source") or "")
         try:
             if source == "jackett":
@@ -4973,7 +4973,6 @@ async def _notify_pending_success(
                     result=_pending_entry_to_search_result(entry),
                     seen_results=[],
                     added_at=now_text,
-                    notify_mode=notify_mode,
                     notify_policy=notify_policy,
                     download_policy=download_policy,
                 )
@@ -4996,14 +4995,9 @@ async def _notify_pending_success(
                         "last_episode_end": episode_info[0],
                         "total_episodes": episode_info[1],
                         "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
-                        "notify_mode": notify_mode,
+                        "notify_policy": notify_policy,
+                        "download_policy": download_policy,
                     }
-                    if notify_policy:
-                        new_sub["notify_policy"] = notify_policy
-                    if download_policy:
-                        new_sub["download_policy"] = download_policy
-                    from subscription_policy import migrate_subscription_in_place
-                    migrate_subscription_in_place(new_sub)
                     subs[topic_id] = new_sub
                     state_store.save_topic_subscriptions(subs)
                     subscribe_restored = True
@@ -7464,7 +7458,6 @@ async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return await _download_and_add(
         query, context, index,
         subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
-        notify_mode=str(context.user_data.get("srch_last_notify_mode") or "per_episode"),
         notify_policy=context.user_data.get("srch_last_notify_policy"),
         download_policy=context.user_data.get("srch_last_download_policy"),
     )
@@ -7502,7 +7495,6 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     pending[entry_id] = _pending_download_entry_from_result(
         result, chat_id=chat_id,
         subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
-        notify_mode=str(context.user_data.get("srch_last_notify_mode") or "per_episode"),
         notify_policy=context.user_data.get("srch_last_notify_policy"),
         download_policy=context.user_data.get("srch_last_download_policy"),
         error=last_error,
@@ -7997,7 +7989,6 @@ def _save_pending_downloads(entries: dict[str, dict]) -> None:
 
 def _pending_download_entry_from_result(
     result: dict, *, chat_id: int | None, subscribe: bool,
-    notify_mode: str = "per_episode",
     notify_policy: str | None = None,
     download_policy: str | None = None,
     error: str,
@@ -8013,17 +8004,17 @@ def _pending_download_entry_from_result(
         "tracker": str(result.get("tracker_name") or result.get("category") or ""),
         "source": str(result.get("source") or ""),
         "subscribe": bool(subscribe),
-        # Preserve subscription policy so the background pending-retry loop
-        # can restore the exact user intent when it eventually succeeds —
-        # otherwise queueing a season-only subscription would downgrade.
-        "notify_mode": str(notify_mode or "per_episode"),
         "attempts": 0,
         "last_attempt_at": None,
         "last_error": (error or "")[:200],
     }
-    if notify_policy:
+    if subscribe:
+        notify_policy, download_policy = _coerce_subscription_policies(
+            notify_policy, download_policy
+        )
+        # Preserve subscription policy so the background pending-retry loop
+        # can restore the exact user intent when it eventually succeeds.
         entry["notify_policy"] = notify_policy
-    if download_policy:
         entry["download_policy"] = download_policy
     for key in ("topic_id", "movie_title", "year", "quality"):
         value = result.get(key)
@@ -8137,7 +8128,6 @@ async def _download_and_add(
     index: int,
     *,
     subscribe: bool = False,
-    notify_mode: str = "per_episode",
     notify_policy: str | None = None,
     download_policy: str | None = None,
     _skip_plex_check: bool = False,
@@ -8153,13 +8143,15 @@ async def _download_and_add(
         await query.edit_message_text("Результат недоступен.")
         return ConversationHandler.END
 
+    notify_policy, download_policy = _coerce_subscription_policies(
+        notify_policy, download_policy
+    )
     result = results[index]
     context.user_data["srch_picked"] = index
-    # Stash subscribe / notify_mode / policy intent so retry/queue handlers
+    # Stash subscribe/policy intent so retry/queue handlers
     # can restore them after a download failure. Without this, tapping retry
     # silently downgrades «⬇️📺 Серии» to a plain one-shot download.
     context.user_data["srch_last_subscribe"] = subscribe
-    context.user_data["srch_last_notify_mode"] = notify_mode
     context.user_data["srch_last_notify_policy"] = notify_policy
     context.user_data["srch_last_download_policy"] = download_policy
     topic_id = result.get("topic_id", "")
@@ -8177,9 +8169,6 @@ async def _download_and_add(
                 "type": "search",
                 "index": index,
                 "subscribe": subscribe,
-                "notify_mode": notify_mode,
-                # 1.3: carry the new policy fields so plex_confirm_download
-                # restores them intact across the Plex-confirm round-trip.
                 "notify_policy": notify_policy,
                 "download_policy": download_policy,
             }
@@ -8199,10 +8188,6 @@ async def _download_and_add(
                     "type": "search",
                     "index": index,
                     "subscribe": subscribe,
-                    # Preserve notify_mode + 1.3 policy fields so
-                    # plex_confirm_download doesn't silently downgrade
-                    # season_complete → per_episode.
-                    "notify_mode": notify_mode,
                     "notify_policy": notify_policy,
                     "download_policy": download_policy,
                     # R.2: stash the existing season's rating_key so the
@@ -8419,14 +8404,13 @@ async def _download_and_add(
                     result=result,
                     seen_results=context.user_data.get("srch_results", []),
                     added_at=now_text,
-                    notify_mode=notify_mode,
                     notify_policy=notify_policy,
                     download_policy=download_policy,
                 )
                 state_store.save_topic_subscriptions(subs)
                 logger.info(
-                    "Jackett subscription added: key=%s query=%s notify_mode=%s",
-                    sub_key, subs[sub_key]["query"], notify_mode,
+                    "Jackett subscription added: key=%s query=%s policy=%s/%s",
+                    sub_key, subs[sub_key]["query"], notify_policy, download_policy,
                 )
             else:
                 # Rutracker topic subscription (existing logic)
@@ -8439,21 +8423,15 @@ async def _download_and_add(
                         "last_episode_end": episode_info[0],
                         "total_episodes": episode_info[1],
                         "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
-                        "notify_mode": notify_mode,
+                        "notify_policy": notify_policy,
+                        "download_policy": download_policy,
                     }
-                    if notify_policy:
-                        new_sub["notify_policy"] = notify_policy
-                    if download_policy:
-                        new_sub["download_policy"] = download_policy
-                    # Normalise — guarantees both new fields present even
-                    # if caller passed only legacy notify_mode.
-                    from subscription_policy import migrate_subscription_in_place
-                    migrate_subscription_in_place(new_sub)
                     subs[topic_id] = new_sub
                     state_store.save_topic_subscriptions(subs)
                     logger.info(
-                        "Subscription added: topic=%s chat=%s episodes=%s/%s notify_mode=%s",
-                        topic_id, chat_id, episode_info[0], episode_info[1], notify_mode,
+                        "Subscription added: topic=%s chat=%s episodes=%s/%s policy=%s/%s",
+                        topic_id, chat_id, episode_info[0], episode_info[1],
+                        notify_policy, download_policy,
                     )
 
         added_msg = _task_added_message(
@@ -8564,8 +8542,17 @@ _SUB_PRESETS = {
 }
 
 
-def _legacy_notify_mode_for_policy(notify_policy: str) -> str:
-    return "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
+def _coerce_subscription_policies(
+    notify_policy: str | None,
+    download_policy: str | None,
+) -> tuple[str, str]:
+    notify = notify_policy if notify_policy in VALID_NOTIFY_POLICIES else NOTIFY_EACH_UPDATE
+    download = (
+        download_policy
+        if download_policy in VALID_DOWNLOAD_POLICIES
+        else DOWNLOAD_AUTO_EACH_UPDATE
+    )
+    return notify, download
 
 
 def _subscription_policy_pair_does_nothing(notify_policy: str, download_policy: str) -> bool:
@@ -8596,7 +8583,9 @@ async def _create_subscription_only(
     chat_id = _chat_id_from_query(query)
     if not isinstance(chat_id, int):
         chat_id = None
-    notify_mode = _legacy_notify_mode_for_policy(notify_policy)
+    notify_policy, download_policy = _coerce_subscription_policies(
+        notify_policy, download_policy
+    )
     source = str(result.get("source") or "rutracker")
     now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
     subs = state_store.load_topic_subscriptions()
@@ -8614,7 +8603,6 @@ async def _create_subscription_only(
             result=result,
             seen_results=context.user_data.get("srch_results", []),
             added_at=now_text,
-            notify_mode=notify_mode,
             notify_policy=notify_policy,
             download_policy=download_policy,
         )
@@ -8637,12 +8625,9 @@ async def _create_subscription_only(
             "last_episode_end": episode_info[0],
             "total_episodes": episode_info[1],
             "added_at": now_text,
-            "notify_mode": notify_mode,
+            "notify_policy": notify_policy,
+            "download_policy": download_policy,
         }
-        saved_sub["notify_policy"] = notify_policy
-        saved_sub["download_policy"] = download_policy
-        from subscription_policy import migrate_subscription_in_place
-        migrate_subscription_in_place(saved_sub)
         subs[topic_id] = saved_sub
         saved_key = topic_id
 
@@ -8667,10 +8652,7 @@ async def _create_subscription_only(
 def _admin_subscription_toggle_label(sub: dict) -> str:
     notify_policy = sub.get("notify_policy")
     if notify_policy not in VALID_NOTIFY_POLICIES:
-        legacy_mode = str(sub.get("notify_mode") or "per_episode")
-        notify_policy = (
-            NOTIFY_FINAL_ONLY if legacy_mode == "season_complete" else NOTIFY_EACH_UPDATE
-        )
+        notify_policy = NOTIFY_EACH_UPDATE
     if notify_policy == NOTIFY_FINAL_ONLY:
         return "🎯→📺"
     if notify_policy == NOTIFY_SILENT:
@@ -8680,9 +8662,6 @@ def _admin_subscription_toggle_label(sub: dict) -> str:
 
 def _toggle_subscription_notify_policy(sub: dict) -> tuple[str, str]:
     """Toggle only the notification axis, preserving the download policy."""
-    from subscription_policy import migrate_subscription_in_place
-
-    migrate_subscription_in_place(sub)
     current = str(sub.get("notify_policy") or NOTIFY_EACH_UPDATE)
     if current == NOTIFY_FINAL_ONLY:
         new_policy = NOTIFY_EACH_UPDATE
@@ -8692,7 +8671,6 @@ def _toggle_subscription_notify_policy(sub: dict) -> tuple[str, str]:
         new_policy = NOTIFY_FINAL_ONLY
 
     sub["notify_policy"] = new_policy
-    sub["notify_mode"] = _legacy_notify_mode_for_policy(new_policy)
     if sub.get("download_policy") not in VALID_DOWNLOAD_POLICIES:
         sub["download_policy"] = DOWNLOAD_AUTO_EACH_UPDATE
     return current, new_policy
@@ -8808,7 +8786,6 @@ async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Неизвестный пресет подписки.")
         return ConversationHandler.END
     notify_policy, download_policy, download_current_now = pair
-    legacy_notify_mode = _legacy_notify_mode_for_policy(notify_policy)
     if not download_current_now:
         return await _create_subscription_only(
             query, context, index,
@@ -8818,7 +8795,6 @@ async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_
     return await _download_and_add(
         query, context, index,
         subscribe=True,
-        notify_mode=legacy_notify_mode,
         notify_policy=notify_policy,
         download_policy=download_policy,
     )
@@ -8967,13 +8943,9 @@ async def search_subscribe_set_download(update: Update, context: ContextTypes.DE
             return SEARCH_RESULTS
         await query.edit_message_text("Такой режим ничего не делает: уведомления выключены и загрузка тоже.")
         return ConversationHandler.END
-    legacy_notify_mode = (
-        "season_complete" if notify_policy == NOTIFY_FINAL_ONLY else "per_episode"
-    )
     return await _download_and_add(
         query, context, index,
         subscribe=True,
-        notify_mode=legacy_notify_mode,
         notify_policy=notify_policy,
         download_policy=download_policy,
     )
@@ -9044,7 +9016,6 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
         return await _download_and_add(
             query, context, pending["index"],
             subscribe=pending.get("subscribe", False),
-            notify_mode=pending.get("notify_mode", "per_episode"),
             notify_policy=pending.get("notify_policy"),
             download_policy=pending.get("download_policy"),
             _skip_plex_check=True,
@@ -9085,7 +9056,6 @@ async def plex_upgrade_download(update: Update, context: ContextTypes.DEFAULT_TY
         return await _download_and_add(
             query, context, pending["index"],
             subscribe=pending.get("subscribe", False),
-            notify_mode=pending.get("notify_mode", "per_episode"),
             notify_policy=pending.get("notify_policy"),
             download_policy=pending.get("download_policy"),
             _skip_plex_check=True,

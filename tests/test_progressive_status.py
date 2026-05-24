@@ -145,8 +145,9 @@ class StageRunnerTests(unittest.IsolatedAsyncioTestCase):
             gif_path=None,
         )
         await p.start()
-        # Let the stages run.
-        await asyncio.sleep(0.05)
+        # Let the background stage runner finish instead of relying on a tiny
+        # scheduler sleep window.
+        await asyncio.wait_for(p._task, timeout=1.0)
         # Both stages edited the text in order.
         calls = text_msg.edit_text.await_args_list
         self.assertEqual(len(calls), 2)

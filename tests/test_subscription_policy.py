@@ -22,89 +22,10 @@ from subscription_policy import (
     NOTIFY_EACH_UPDATE,
     NOTIFY_FINAL_ONLY,
     NOTIFY_SILENT,
-    migrate_subscription_in_place,
-    migrate_subscriptions_in_place,
     policies_summary_ru,
     should_download,
     should_notify,
 )
-
-
-class MigrationTests(unittest.TestCase):
-    """legacy notify_mode → (notify_policy, download_policy) translation."""
-
-    def test_per_episode_maps_to_each_update_auto(self):
-        sub = {"notify_mode": "per_episode"}
-        changed = migrate_subscription_in_place(sub)
-        self.assertTrue(changed)
-        self.assertEqual(sub["notify_policy"], NOTIFY_EACH_UPDATE)
-        self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-
-    def test_season_complete_maps_to_final_only_auto(self):
-        sub = {"notify_mode": "season_complete"}
-        migrate_subscription_in_place(sub)
-        self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
-        self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-
-    def test_missing_notify_mode_falls_back_to_safest_default(self):
-        sub = {}
-        migrate_subscription_in_place(sub)
-        self.assertEqual(sub["notify_policy"], NOTIFY_EACH_UPDATE)
-        self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-
-    def test_unknown_legacy_value_falls_back_to_safest_default(self):
-        sub = {"notify_mode": "weird_unknown_value"}
-        migrate_subscription_in_place(sub)
-        self.assertEqual(sub["notify_policy"], NOTIFY_EACH_UPDATE)
-        self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-
-    def test_migration_is_idempotent(self):
-        sub = {"notify_mode": "per_episode"}
-        changed_first = migrate_subscription_in_place(sub)
-        snapshot = dict(sub)
-        changed_again = migrate_subscription_in_place(sub)
-        self.assertTrue(changed_first)
-        self.assertFalse(changed_again)
-        self.assertEqual(sub, snapshot)
-
-    def test_explicit_policy_fields_are_not_overwritten(self):
-        """Subscriptions created by 1.3+ code already have policy fields —
-        the migrator must not clobber explicit values with legacy-derived ones."""
-        sub = {
-            "notify_mode": "per_episode",
-            "notify_policy": NOTIFY_FINAL_ONLY,
-            "download_policy": DOWNLOAD_ONLY_WHEN_COMPLETE,
-        }
-        migrate_subscription_in_place(sub)
-        self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
-        self.assertEqual(sub["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
-
-    def test_invalid_policy_value_is_overwritten_with_derived(self):
-        """If someone hand-edited JSON with bogus values, the migrator
-        repairs them using legacy notify_mode as the source of truth."""
-        sub = {
-            "notify_mode": "season_complete",
-            "notify_policy": "garbage",
-            "download_policy": None,
-        }
-        migrate_subscription_in_place(sub)
-        self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
-        self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-
-    def test_migrate_subscriptions_in_place_counts_changes(self):
-        subs = {
-            "a": {"notify_mode": "per_episode"},
-            "b": {"notify_mode": "season_complete"},
-            # already migrated — no change
-            "c": {
-                "notify_policy": NOTIFY_SILENT,
-                "download_policy": DOWNLOAD_NOTIFY_ONLY,
-            },
-        }
-        n = migrate_subscriptions_in_place(subs)
-        self.assertEqual(n, 2)
-        # Already-migrated entry untouched.
-        self.assertEqual(subs["c"]["notify_policy"], NOTIFY_SILENT)
 
 
 class ShouldNotifyTests(unittest.TestCase):
@@ -125,17 +46,13 @@ class ShouldNotifyTests(unittest.TestCase):
         self.assertFalse(should_notify(sub, is_complete=False))
         self.assertFalse(should_notify(sub, is_complete=True))
 
-    def test_legacy_per_episode_resolves_to_each_update(self):
-        """Helpers must work on subs that came from old JSON without policy
-        fields populated yet (defensive — state_store migrates on load but
-        tests / external callers may bypass it)."""
-        sub = {"notify_mode": "per_episode"}
+    def test_missing_policy_defaults_to_each_update(self):
+        sub = {}
         self.assertTrue(should_notify(sub, is_complete=False))
 
-    def test_legacy_season_complete_resolves_to_final_only(self):
-        sub = {"notify_mode": "season_complete"}
-        self.assertFalse(should_notify(sub, is_complete=False))
-        self.assertTrue(should_notify(sub, is_complete=True))
+    def test_invalid_policy_defaults_to_each_update(self):
+        sub = {"notify_policy": "garbage"}
+        self.assertTrue(should_notify(sub, is_complete=False))
 
 
 class ShouldDownloadTests(unittest.TestCase):
@@ -184,15 +101,10 @@ class PoliciesSummaryTests(unittest.TestCase):
         self.assertIn("каждой", s)
         self.assertIn("каждую", s)
 
-    def test_respects_legacy_notify_mode(self):
-        s = policies_summary_ru({"notify_mode": "season_complete"})
-        self.assertIn("финал", s.lower())
-
 
 class JackettSubscriptionBuilderTests(unittest.TestCase):
     """build_jackett_subscription should accept the new policy fields and
-    always emit migrated subscriptions regardless of which input style was
-    used."""
+    always emit explicit policy subscriptions."""
 
     def _result(self) -> dict:
         return {
@@ -212,17 +124,15 @@ class JackettSubscriptionBuilderTests(unittest.TestCase):
         self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
         self.assertEqual(sub["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
 
-    def test_legacy_notify_mode_only_still_migrates(self):
+    def test_default_policy_fields_are_written(self):
         from jackett_subscriptions import build_jackett_subscription
         sub = build_jackett_subscription(
             chat_id=100, query="Show", result=self._result(),
             seen_results=[], added_at="2026-05-23 10:00",
-            notify_mode="season_complete",  # legacy input
         )
-        # Migrated fields present in addition to legacy notify_mode.
-        self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
+        self.assertEqual(sub["notify_policy"], NOTIFY_EACH_UPDATE)
         self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
-        self.assertEqual(sub["notify_mode"], "season_complete")
+        self.assertNotIn("notify_mode", sub)
 
 
 if __name__ == "__main__":

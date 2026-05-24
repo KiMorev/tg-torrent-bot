@@ -727,7 +727,6 @@ class AdminPanelTests(unittest.TestCase):
                     "title": "Клиника",
                     "last_episode_end": 1,
                     "total_episodes": 2,
-                    "notify_mode": "per_episode",
                     "notify_policy": NOTIFY_EACH_UPDATE,
                     "download_policy": DOWNLOAD_NOTIFY_ONLY,
                 },
@@ -740,7 +739,6 @@ class AdminPanelTests(unittest.TestCase):
 
             sub = store.load_topic_subscriptions()["123"]
             self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
-            self.assertEqual(sub["notify_mode"], "season_complete")
             # The admin quick-toggle changes only notifications; download
             # preferences must not be silently overwritten.
             self.assertEqual(sub["download_policy"], DOWNLOAD_NOTIFY_ONLY)

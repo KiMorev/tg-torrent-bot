@@ -330,7 +330,6 @@ class PlexUpgradeDownloadHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "type": "search",
                 "index": 0,
                 "subscribe": True,
-                "notify_mode": "season_complete",
                 "notify_policy": "final_only",
                 "download_policy": "only_when_complete",
                 "plex_old_season_key": "season-key-42",

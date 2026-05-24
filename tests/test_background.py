@@ -1197,8 +1197,8 @@ class SubscriptionCheckTests(unittest.TestCase):
         mock_app.bot.send_message.assert_not_awaited()
         remember_owner.assert_not_called()
 
-    def test_season_complete_mode_silent_when_not_finished(self) -> None:
-        """notify_mode=season_complete: bot still downloads the new episodes
+    def test_final_only_policy_silent_when_not_finished(self) -> None:
+        """notify_policy=final_only: bot still downloads the new episodes
         (so Plex gets the files), but suppresses the push and silently
         advances last_episode_end. No notification fires until new_end ≥ total."""
         self._store.save_topic_subscriptions({
@@ -1207,7 +1207,8 @@ class SubscriptionCheckTests(unittest.TestCase):
                 "title": "Series / 3 из 10",
                 "last_episode_end": 3,
                 "total_episodes": 10,
-                "notify_mode": "season_complete",
+                "notify_policy": bot.NOTIFY_FINAL_ONLY,
+                "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
             }
         })
         mock_rt = MagicMock()
@@ -1238,8 +1239,8 @@ class SubscriptionCheckTests(unittest.TestCase):
         # No push sent to user
         mock_app.bot.send_message.assert_not_awaited()
 
-    def test_season_complete_mode_pushes_on_completion(self) -> None:
-        """When new_end ≥ total_episodes the push fires even in season_complete
+    def test_final_only_policy_pushes_on_completion(self) -> None:
+        """When new_end ≥ total_episodes the push fires even in final_only
         mode — the user finally gets one consolidated «сезон готов» notification."""
         self._store.save_topic_subscriptions({
             "123": {
@@ -1247,7 +1248,8 @@ class SubscriptionCheckTests(unittest.TestCase):
                 "title": "Series / 9 из 10",
                 "last_episode_end": 9,
                 "total_episodes": 10,
-                "notify_mode": "season_complete",
+                "notify_policy": bot.NOTIFY_FINAL_ONLY,
+                "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
             }
         })
         mock_rt = MagicMock()
@@ -1270,16 +1272,14 @@ class SubscriptionCheckTests(unittest.TestCase):
 
         mock_app.bot.send_message.assert_awaited()
 
-    def test_legacy_subscription_without_notify_mode_defaults_to_per_episode(self) -> None:
-        """Backwards compat: subscriptions saved before notify_mode existed
-        should keep firing per-episode notifications (no silent regression)."""
+    def test_subscription_without_policy_defaults_to_each_update(self) -> None:
+        """Missing policy fields default to each-update notifications."""
         self._store.save_topic_subscriptions({
             "123": {
                 "chat_id": 999,
                 "title": "Series / 3 из 10",
                 "last_episode_end": 3,
                 "total_episodes": 10,
-                # NOTE: no notify_mode field — legacy data shape
             }
         })
         mock_rt = MagicMock()
@@ -1300,7 +1300,7 @@ class SubscriptionCheckTests(unittest.TestCase):
         ):
             asyncio.run(bot._check_subscriptions(mock_app))
 
-        # Push fired even though new_end (5) < total (10) — that's per_episode behavior.
+        # Push fired even though new_end (5) < total (10) — that's each_update behavior.
         mock_app.bot.send_message.assert_awaited()
 
     def test_complete_rutracker_subscription_removed_only_after_notification_delivered(self) -> None:

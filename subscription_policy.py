@@ -1,21 +1,12 @@
 """Subscription policy helpers — the source of truth for what `notify_policy`
 and `download_policy` mean and how they interact with subscription state.
 
-Background: subscriptions historically had a single `notify_mode` field with
-two values:
-  - `per_episode`     — push on every new episode, auto-download every episode
-  - `season_complete` — silent download every episode, push only when season is full
-
-That conflated two orthogonal axes:
+Subscriptions use two independent fields:
   1. WHEN to push the user (each update / final only / never)
   2. WHEN to trigger the download (each update / only after season closes / never)
 
-1.3 splits these into two independent fields so we can offer combinations the
-old single field couldn't express (most importantly: «wait for season to be
-fully released, then download as a single torrent»).
-
-This module owns the migration map AND the runtime predicates so all three
-subscription loops (`_check_subscriptions`, `_check_jackett_subscriptions`,
+This module owns the runtime predicates so all three subscription loops
+(`_check_subscriptions`, `_check_jackett_subscriptions`,
 `_check_jackett_sub_via_rutracker_direct`) make consistent decisions.
 """
 from __future__ import annotations
@@ -39,81 +30,13 @@ VALID_DOWNLOAD_POLICIES = frozenset({
 })
 
 
-# Map from legacy single-field values to (notify_policy, download_policy) pairs.
-# Selected so existing user behaviour is preserved exactly.
-_LEGACY_NOTIFY_MODE_MAP = {
-    "per_episode":     (NOTIFY_EACH_UPDATE, DOWNLOAD_AUTO_EACH_UPDATE),
-    "season_complete": (NOTIFY_FINAL_ONLY,  DOWNLOAD_AUTO_EACH_UPDATE),
-}
-
-
-def migrate_subscription_in_place(sub: dict) -> bool:
-    """Inject notify_policy/download_policy if missing, derived from legacy
-    notify_mode. Returns True if anything changed (caller may want to persist).
-
-    Idempotent: running twice is a no-op. Safe to call on every load.
-    Tolerates malformed input — unknown values fall back to the safest pair
-    (each_update + auto_each_update = «old default» behaviour).
-    """
-    if not isinstance(sub, dict):
-        return False
-
-    changed = False
-    has_notify = "notify_policy" in sub and sub["notify_policy"] in VALID_NOTIFY_POLICIES
-    has_download = "download_policy" in sub and sub["download_policy"] in VALID_DOWNLOAD_POLICIES
-
-    if has_notify and has_download:
-        return False  # already migrated, nothing to do
-
-    legacy = str(sub.get("notify_mode") or "per_episode").lower()
-    pair = _LEGACY_NOTIFY_MODE_MAP.get(legacy)
-    if pair is None:
-        # Unknown legacy value — fall back to safest pair preserving old default
-        pair = (NOTIFY_EACH_UPDATE, DOWNLOAD_AUTO_EACH_UPDATE)
-
-    if not has_notify:
-        sub["notify_policy"] = pair[0]
-        changed = True
-    if not has_download:
-        sub["download_policy"] = pair[1]
-        changed = True
-    return changed
-
-
-def migrate_subscriptions_in_place(subs: dict) -> int:
-    """Run ``migrate_subscription_in_place`` over every value of ``subs``.
-
-    Returns the count of dicts that actually changed — caller can decide
-    whether to persist (typically: if N > 0).
-    """
-    if not isinstance(subs, dict):
-        return 0
-    n_changed = 0
-    for sub in subs.values():
-        if migrate_subscription_in_place(sub):
-            n_changed += 1
-    return n_changed
-
-
 def _resolved_policies(sub: dict) -> tuple[str, str]:
-    """Read (notify_policy, download_policy) from a sub, lazily migrating from
-    legacy notify_mode if needed. Defensive against subs that came from old
-    JSON, tests, or paths that bypass state_store.load_topic_subscriptions.
-    """
+    """Read (notify_policy, download_policy), defaulting invalid/missing values."""
     notify = sub.get("notify_policy")
     download = sub.get("download_policy")
-    if notify in VALID_NOTIFY_POLICIES and download in VALID_DOWNLOAD_POLICIES:
-        return (str(notify), str(download))
-    # Fall back to deriving from legacy notify_mode — does NOT mutate the
-    # caller's dict (helpers stay read-only). state_store loader is the
-    # authoritative path that persists the migrated form.
-    legacy = str(sub.get("notify_mode") or "per_episode").lower()
-    pair = _LEGACY_NOTIFY_MODE_MAP.get(
-        legacy, (NOTIFY_EACH_UPDATE, DOWNLOAD_AUTO_EACH_UPDATE)
-    )
     return (
-        str(notify) if notify in VALID_NOTIFY_POLICIES else pair[0],
-        str(download) if download in VALID_DOWNLOAD_POLICIES else pair[1],
+        str(notify) if notify in VALID_NOTIFY_POLICIES else NOTIFY_EACH_UPDATE,
+        str(download) if download in VALID_DOWNLOAD_POLICIES else DOWNLOAD_AUTO_EACH_UPDATE,
     )
 
 

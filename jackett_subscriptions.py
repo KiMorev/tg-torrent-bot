@@ -57,28 +57,16 @@ def build_jackett_subscription(
     result: dict,
     seen_results: list[dict],
     added_at: str,
-    notify_mode: str = "per_episode",
-    notify_policy: str | None = None,
-    download_policy: str | None = None,
+    notify_policy: str = "each_update",
+    download_policy: str = "auto_each_update",
 ) -> dict:
     """Build a Jackett subscription dict.
 
-    Policy fields (preferred — pass these in 1.3+ code):
+    Policy fields:
       - ``notify_policy``: ``each_update`` / ``final_only`` / ``silent``
       - ``download_policy``: ``auto_each_update`` / ``only_when_complete`` /
         ``notify_only`` / ``ask``
-
-    Legacy single-field input is kept for backwards-compatibility:
-      - ``notify_mode=per_episode`` → ``(each_update, auto_each_update)``
-      - ``notify_mode=season_complete`` → ``(final_only, auto_each_update)``
-
-    When explicit policy fields are passed, they take precedence over the
-    legacy field. The migration helper is also applied so the resulting
-    dict always carries both new fields regardless of which inputs were
-    used at the call site.
     """
-    from subscription_policy import migrate_subscription_in_place
-
     title = str(result.get("title") or "")
     query = str(query or title)
     episode_info = _parse_episode_info(title)
@@ -96,20 +84,14 @@ def build_jackett_subscription(
         "seen_titles": [r["title"] for r in seen_results if r.get("title")],
         "added_at": added_at,
         "last_check": added_at,
-        "notify_mode": notify_mode,  # preserved for old code paths reading it
+        "notify_policy": notify_policy,
+        "download_policy": download_policy,
     }
-    if notify_policy:
-        sub["notify_policy"] = notify_policy
-    if download_policy:
-        sub["download_policy"] = download_policy
 
     if episode_info:
         sub["last_episode_end"] = episode_info[0]
         sub["total_episodes"] = episode_info[1]
 
-    # Always normalise — guarantees the new fields are present even when the
-    # caller passed only legacy notify_mode.
-    migrate_subscription_in_place(sub)
     return sub
 
 

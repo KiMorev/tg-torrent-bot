@@ -4,13 +4,13 @@ Bugs covered:
   A. Jackett-fast-path (_check_jackett_sub_via_rutracker_direct) advanced
      last_episode_end even when the DS download failed → next check saw
      same state and never retried.
-  B. Same function ignored notify_mode=season_complete → users got
-     intermediate per-episode pushes despite asking for silent mode.
+  B. Same function ignored notify_policy=final_only → users got
+     intermediate per-episode pushes despite asking for final-only mode.
   C. _check_jackett_subscriptions silently advanced state on
-     season_complete even when auto-download failed → failed updates
+     final_only even when auto-download failed → failed updates
      were marked as «seen» and never retried.
-  D. Plex confirm dialog for SERIES dropped notify_mode → confirming
-     a duplicate silently downgraded season_complete → per_episode.
+  D. Plex confirm dialog for SERIES dropped policy fields → confirming
+     a duplicate silently downgraded final_only → each_update.
   F. Retry/queue after a failed download hardcoded subscribe=False —
      restoring a «⬇️📺 Серии» retry just did a plain one-shot download
      with no subscription. Pending-success path now also restores the
@@ -51,7 +51,9 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
 
 
 def _jackett_rt_sub(
-    *, last_end: int = 1, total: int = 10, notify_mode: str = "per_episode",
+    *, last_end: int = 1, total: int = 10,
+    notify_policy: str = bot.NOTIFY_EACH_UPDATE,
+    download_policy: str = bot.DOWNLOAD_AUTO_EACH_UPDATE,
 ) -> dict:
     return {
         "type": "jackett",
@@ -62,7 +64,8 @@ def _jackett_rt_sub(
         "topic_url": "https://rutracker.org/forum/viewtopic.php?t=12345",
         "last_episode_end": last_end,
         "total_episodes": total,
-        "notify_mode": notify_mode,
+        "notify_policy": notify_policy,
+        "download_policy": download_policy,
         "added_at": "2026-05-01 10:00",
     }
 
@@ -158,7 +161,7 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
 
 
 class JackettRtDirectSeasonCompleteTests(unittest.TestCase):
-    """Bug B: notify_mode=season_complete must suppress intermediate pushes."""
+    """Bug B: notify_policy=final_only must suppress intermediate pushes."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -190,16 +193,20 @@ class JackettRtDirectSeasonCompleteTests(unittest.TestCase):
             )
         return subs, app.bot.send_message
 
-    def test_season_complete_suppresses_intermediate_push(self):
-        sub = _jackett_rt_sub(last_end=1, total=10, notify_mode="season_complete")
+    def test_final_only_suppresses_intermediate_push(self):
+        sub = _jackett_rt_sub(
+            last_end=1, total=10, notify_policy=bot.NOTIFY_FINAL_ONLY,
+        )
         subs, send = self._run(sub, new_title="Show S1E1-5 of 10")
         # Episode 5/10 → silent advance, no push.
         send.assert_not_awaited()
         # But state HAS advanced (download succeeded).
         self.assertEqual(subs["jackett:abc"]["last_episode_end"], 5)
 
-    def test_season_complete_pushes_when_season_done(self):
-        sub = _jackett_rt_sub(last_end=8, total=10, notify_mode="season_complete")
+    def test_final_only_pushes_when_season_done(self):
+        sub = _jackett_rt_sub(
+            last_end=8, total=10, notify_policy=bot.NOTIFY_FINAL_ONLY,
+        )
         subs, send = self._run(sub, new_title="Show S1E1-10 of 10")
         # Final episode → push fires.
         send.assert_awaited_once()
@@ -208,16 +215,16 @@ class JackettRtDirectSeasonCompleteTests(unittest.TestCase):
         # Subscription removed on completion.
         self.assertNotIn("jackett:abc", subs)
 
-    def test_per_episode_still_pushes_on_intermediate(self):
-        """Regression guard — per_episode default must keep behaviour."""
-        sub = _jackett_rt_sub(last_end=1, total=10, notify_mode="per_episode")
+    def test_each_update_still_pushes_on_intermediate(self):
+        """Regression guard — each_update default must keep behaviour."""
+        sub = _jackett_rt_sub(last_end=1, total=10)
         _subs, send = self._run(sub, new_title="Show S1E1-5 of 10")
         send.assert_awaited_once()
 
 
 class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
     """Bug C: _check_jackett_subscriptions must NOT silently advance state
-    when auto-download fails in season_complete mode."""
+    when auto-download fails in final_only mode."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -226,7 +233,7 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_failed_download_in_season_complete_falls_back_to_notify(self):
+    def test_failed_download_in_final_only_falls_back_to_notify(self):
         """When auto-download returns None (no task_id), the silent-advance
         branch must NOT fire — instead the user gets a notify-with-error
         message so they can recover manually."""
@@ -241,7 +248,8 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
             "title": "",
             "tracker": "kinozal",
             "topic_url": "https://kinozal.tv/topic/77",
-            "notify_mode": "season_complete",
+            "notify_policy": bot.NOTIFY_FINAL_ONLY,
+            "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
             "last_check": "2026-05-01 10:00",
             "seen_titles": [],
         }
@@ -284,7 +292,8 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
             "title": "",
             "tracker": "kinozal",
             "topic_url": "https://kinozal.tv/topic/77",
-            "notify_mode": "season_complete",
+            "notify_policy": bot.NOTIFY_FINAL_ONLY,
+            "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
             "last_check": "2026-05-01 10:00",
             "seen_titles": [],
         }
@@ -342,8 +351,8 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
 
         ds.create_magnet.assert_not_called()
 
-    def test_successful_download_in_season_complete_still_silent_advances(self):
-        """Regression guard — happy path of season_complete still silently
+    def test_successful_download_in_final_only_still_silent_advances(self):
+        """Regression guard — happy path of final_only still silently
         advances when download succeeds and season isn't done yet."""
         from jackett import JackettResult
         sub_key = "jackett:bug-c-happy"
@@ -354,7 +363,8 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
             "title": "",
             "tracker": "kinozal",
             "topic_url": "https://kinozal.tv/topic/77",
-            "notify_mode": "season_complete",
+            "notify_policy": bot.NOTIFY_FINAL_ONLY,
+            "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
             "last_check": "2026-05-01 10:00",
             "seen_titles": [],
         }
@@ -491,8 +501,11 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _seed_subscribe_entry(self, *, source: str, notify_mode: str,
-                              title: str = "Some Show 2 of 10") -> str:
+    def _seed_subscribe_entry(
+        self, *, source: str,
+        notify_policy: str = bot.NOTIFY_EACH_UPDATE,
+        download_policy: str = bot.DOWNLOAD_AUTO_EACH_UPDATE,
+        title: str = "Some Show 2 of 10") -> str:
         from datetime import datetime
         entry_id = "p1"
         self.store.save_pending_downloads({
@@ -506,7 +519,8 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
                 "tracker": "rutracker",
                 "source": source,
                 "subscribe": True,
-                "notify_mode": notify_mode,
+                "notify_policy": notify_policy,
+                "download_policy": download_policy,
                 "attempts": 0,
                 "last_attempt_at": None,
                 "last_error": "",
@@ -530,27 +544,31 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
         return mock_app
 
     def test_jackett_subscribe_restored_on_pending_success(self):
-        self._seed_subscribe_entry(source="jackett", notify_mode="season_complete")
+        self._seed_subscribe_entry(
+            source="jackett", notify_policy=bot.NOTIFY_FINAL_ONLY,
+        )
         app = self._run_loop_with_success()
-        # Subscription was created with the correct notify_mode.
+        # Subscription was created with the correct policy.
         subs = self.store.load_topic_subscriptions()
         jackett_subs = [s for s in subs.values() if s.get("type") == "jackett"]
         self.assertEqual(len(jackett_subs), 1)
-        self.assertEqual(jackett_subs[0]["notify_mode"], "season_complete")
+        self.assertEqual(jackett_subs[0]["notify_policy"], bot.NOTIFY_FINAL_ONLY)
+        self.assertEqual(jackett_subs[0]["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
         # User notified that subscription was restored.
         text = app.bot.send_message.await_args.kwargs.get("text", "")
         self.assertIn("Подписка восстановлена", text)
 
     def test_rutracker_subscribe_restored_on_pending_success(self):
         self._seed_subscribe_entry(
-            source="rutracker", notify_mode="per_episode",
+            source="rutracker",
             title="Some Show S1E1-2 of 10",
         )
         app = self._run_loop_with_success()
         subs = self.store.load_topic_subscriptions()
         # Rutracker subs are keyed by topic_id (99 here).
         self.assertIn("99", subs)
-        self.assertEqual(subs["99"]["notify_mode"], "per_episode")
+        self.assertEqual(subs["99"]["notify_policy"], bot.NOTIFY_EACH_UPDATE)
+        self.assertEqual(subs["99"]["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
         self.assertEqual(subs["99"]["last_episode_end"], 2)
         self.assertEqual(subs["99"]["total_episodes"], 10)
 
@@ -562,7 +580,7 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
                 "chat_id": 100, "added_at": datetime.now(bot.DISPLAY_TIMEZONE).isoformat(),
                 "title": "One-shot Movie", "topic_url": "", "torrent_url": "http://x",
                 "magnet_url": None, "tracker": "", "source": "jackett",
-                "subscribe": False, "notify_mode": "per_episode",
+                "subscribe": False,
                 "attempts": 0, "last_attempt_at": None, "last_error": "",
             }
         })
@@ -570,14 +588,18 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
         subs = self.store.load_topic_subscriptions()
         self.assertEqual(subs, {})
 
-    def test_pending_entry_carries_notify_mode_from_search(self):
+    def test_pending_entry_carries_policy_from_search(self):
         """Bug F upstream: _pending_download_entry_from_result must preserve
-        notify_mode when building the queue entry."""
+        policy fields when building the queue entry."""
         entry = bot._pending_download_entry_from_result(
             {"title": "X", "torrent_url": "u", "tracker_name": "t", "source": "jackett"},
-            chat_id=100, subscribe=True, notify_mode="season_complete", error="boom",
+            chat_id=100, subscribe=True,
+            notify_policy=bot.NOTIFY_FINAL_ONLY,
+            download_policy=bot.DOWNLOAD_ONLY_WHEN_COMPLETE,
+            error="boom",
         )
-        self.assertEqual(entry["notify_mode"], "season_complete")
+        self.assertEqual(entry["notify_policy"], bot.NOTIFY_FINAL_ONLY)
+        self.assertEqual(entry["download_policy"], bot.DOWNLOAD_ONLY_WHEN_COMPLETE)
         self.assertTrue(entry["subscribe"])
 
     def test_pending_entry_preserves_canonical_meta_for_task_meta(self):
