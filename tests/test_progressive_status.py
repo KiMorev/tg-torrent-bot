@@ -201,7 +201,7 @@ class StageRunnerTests(unittest.IsolatedAsyncioTestCase):
             gif_path=None,
         )
         await p.start()
-        await asyncio.sleep(0.08)
+        await asyncio.wait_for(p._task, timeout=0.2)
         calls = text_msg.edit_text.await_args_list
         self.assertEqual([c.args[0] for c in calls], ["First", "Second", "Third"])
 

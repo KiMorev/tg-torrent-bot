@@ -3516,11 +3516,15 @@ def _recompute_and_resort_cards(cards: list[dict]) -> None:
     cards.sort(key=lambda c: c.get("score") or 0, reverse=True)
 
 
-# Accepts "S01E02", "1x02", "Сезон 3", "Сезон: 3", "Сезон:3", "СЕЗОН 3" — the
-# colon-form is the most common on Rutracker. Case-insensitive matching is
-# applied via re.IGNORECASE; the literal "сезон" is enough since the flag
-# covers Latin/Cyrillic case mixing.
-_SERIES_RE = re.compile(r"s\d+e\d+|\d+x\d+|сезон[:\s]+\d+", re.IGNORECASE)
+# Accepts "S01E02", "1x02", "Сезон 3", "Сезон: 3", "Сезон:3", "СЕЗОН 3",
+# "1-й сезон" — the colon-form is the most common on Rutracker. Case-insensitive
+# matching is applied via re.IGNORECASE; the literal "сезон" is enough since the
+# flag covers Latin/Cyrillic case mixing.
+_SERIES_RE = re.compile(
+    r"s\d+e\d+|\d+x\d+|сезон[:\s]+\d+|"
+    r"\b\d{1,2}\s*(?:[-‑–—]?\s*(?:й|ый|ой))?\s+сезон\b",
+    re.IGNORECASE,
+)
 
 
 def _plex_is_series(title: str) -> bool:

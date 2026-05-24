@@ -3395,9 +3395,10 @@ class SeriesHelpersTests(unittest.TestCase):
             {"title": "Клиника / Scrubs / Сезон: 3 / Серии 1-22 [BDRip]"},
             {"title": "Клиника Сезон 1 1080p WEB-DL"},
             {"title": "Клиника · Сезон:5 (полный)"},
+            {"title": "Драйв / Drive / 2-й сезон [WEB-DL]"},
             {"title": "Клиника Сезон 3 4K"},  # duplicate season 3
         ]
-        self.assertEqual(_seasons_available_in_results(results), [1, 3, 5])
+        self.assertEqual(_seasons_available_in_results(results), [1, 2, 3, 5])
 
     def test_seasons_available_returns_empty_for_no_season_marker(self):
         from formatters import _seasons_available_in_results
@@ -3435,7 +3436,7 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
 
     def test_plex_is_series_handles_all_cyrillic_cases(self):
         from bot import _plex_is_series
-        for variant in ("Сезон: 1", "сезон 1", "СЕЗОН: 1", "сЕзОн:1", "S01E02", "1x05"):
+        for variant in ("Сезон: 1", "сезон 1", "СЕЗОН: 1", "сЕзОн:1", "1-й сезон", "S01E02", "1x05"):
             self.assertTrue(_plex_is_series(f"Show / {variant}"),
                             f"variant {variant!r} not detected")
 
@@ -3445,21 +3446,24 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         self.assertEqual(_extract_season_from_query("Show сезон 7"), 7)
         self.assertEqual(_extract_season_from_query("Show Сезон: 3"), 3)
         self.assertEqual(_extract_season_from_query("Show сЕзОн:9"), 9)
+        self.assertEqual(_extract_season_from_query("Драйв / Drive / 1-й сезон [WEB-DL]"), 1)
         self.assertIsNone(_extract_season_from_query("Just a Movie"))
 
     def test_filter_by_season_handles_all_cyrillic_cases(self):
-        from formatters import _filter_by_season
+        from formatters import _extract_season_from_query, _filter_by_season
         results = [
             {"title": "Show / СЕЗОН: 3 / 1080p"},
             {"title": "Show / сезон: 3 / 720p"},
             {"title": "Show / Сезон: 3 / 4K"},
+            {"title": "Show / 3-й сезон / WEB-DL"},
             {"title": "Show / Сезон: 4 / 1080p"},
+            {"title": "Show / 13-й сезон / WEB-DL"},
         ]
         # All three case-variants of season 3 must match, season 4 must not.
         filtered = _filter_by_season(results, 3)
-        self.assertEqual(len(filtered), 3)
+        self.assertEqual(len(filtered), 4)
         for r in filtered:
-            self.assertIn("Сезон: 3".lower(), r["title"].lower())
+            self.assertEqual(_extract_season_from_query(r["title"]), 3)
 
     def test_parse_episode_info_handles_uppercase_serii(self):
         """СЕРИИ: 1-8 из 10 must be parsed identically to 'Серии: 1-8 из 10'."""
@@ -3473,6 +3477,7 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         from formatters import _extract_series_base_query
         self.assertEqual(_extract_series_base_query("Шоу / СЕЗОН: 3 / blah"), "Шоу")
         self.assertEqual(_extract_series_base_query("Шоу / сезон 1"), "Шоу")
+        self.assertEqual(_extract_series_base_query("Драйв / Drive / 1-й сезон"), "Драйв")
         self.assertIsNone(_extract_series_base_query("Movie 2024 1080p"))
 
     def test_format_sub_title_handles_uppercase_sezon(self):
@@ -3480,6 +3485,10 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         from formatters import _format_sub_title
         result = _format_sub_title("Шоу / Show / СЕЗОН: 5 / Серии: 1-3")
         self.assertIn("Сезон 5", result)
+        self.assertEqual(
+            _format_sub_title("Драйв / Drive / 1-й сезон [WEB-DL]"),
+            "Драйв / Сезон 1",
+        )
 
     def test_jackett_normalize_title_strips_uppercase_sezon_parts(self):
         """jackett_subscriptions._normalize_title must drop 'СЕЗОН' / 'СЕРИИ' parts."""
@@ -3609,6 +3618,19 @@ class BuildTaskMetaTests(unittest.TestCase):
         self.assertEqual(meta["season_num"], 3)
         self.assertEqual(meta["quality"], "1080")
         self.assertEqual(meta["source"], "search")
+
+    def test_series_result_detects_ordinal_russian_season_marker(self):
+        from bot import _build_task_meta_from_result
+        result = {
+            "title": "Драйв / Drive / 1-й сезон [WEB-DL 1080p]",
+            "year": 2020,
+            "quality": "1080p",
+        }
+        meta = _build_task_meta_from_result(result, source="search")
+        self.assertEqual(meta["kind"], "series")
+        self.assertEqual(meta["series_query"], "Драйв")
+        self.assertEqual(meta["season_num"], 1)
+        self.assertEqual(meta["quality"], "1080")
 
     def test_from_title_detects_movie_when_no_season_marker(self):
         from bot import _build_task_meta_from_title
