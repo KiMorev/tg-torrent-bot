@@ -9981,6 +9981,10 @@ async def _check_subscriptions(app: Application) -> None:
             # intentionally) AND no push wanted yet.
             if not wants_notify:
                 sub["last_episode_end"] = new_end
+                sub["total_episodes"] = new_total
+                sub["title"] = new_title
+                if is_complete and (task_id or not wants_download):
+                    subs.pop(topic_id, None)
                 logger.info(
                     "Subscription silent advance: topic=%s episodes=%s→%s/%s "
                     "policy=%s/%s complete=%s",

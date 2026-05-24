@@ -1023,6 +1023,81 @@ class SubscriptionCheckTests(unittest.TestCase):
         mock_rt.download_torrent.assert_not_called()
         mock_ds.create_torrent_file.assert_not_called()
 
+    def test_silent_rutracker_complete_only_updates_progress_without_download(self) -> None:
+        from subscription_policy import DOWNLOAD_ONLY_WHEN_COMPLETE, NOTIFY_SILENT
+
+        new_title = "Series S1E1-5 of 12"
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series S1E1-3 of 10",
+                "last_episode_end": 3,
+                "total_episodes": 10,
+                "notify_policy": NOTIFY_SILENT,
+                "download_policy": DOWNLOAD_ONLY_WHEN_COMPLETE,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = new_title
+        mock_ds = MagicMock()
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(5, 12)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        updated = self._store.load_topic_subscriptions()["123"]
+        self.assertEqual(updated["last_episode_end"], 5)
+        self.assertEqual(updated["total_episodes"], 12)
+        self.assertEqual(updated["title"], new_title)
+        self.assertNotIn("pending_notification", updated)
+        mock_rt.download_torrent.assert_not_called()
+        mock_ds.create_torrent_file.assert_not_called()
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_silent_rutracker_subscription_removed_on_completion(self) -> None:
+        from subscription_policy import DOWNLOAD_AUTO_EACH_UPDATE, NOTIFY_SILENT
+
+        self._store.save_topic_subscriptions({
+            "123": {
+                "chat_id": 999,
+                "title": "Series S1E1-9 of 10",
+                "last_episode_end": 9,
+                "total_episodes": 10,
+                "notify_policy": NOTIFY_SILENT,
+                "download_policy": DOWNLOAD_AUTO_EACH_UPDATE,
+            }
+        })
+        mock_rt = MagicMock()
+        mock_rt.get_topic_title.return_value = "Series S1E1-10 of 10"
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.create_torrent_file.return_value = "dbid_1"
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "_parse_episode_info", return_value=(10, 10)),
+            patch.object(bot, "TMP_DIR", Path(self._tmp.name)),
+        ):
+            asyncio.run(bot._check_subscriptions(mock_app))
+
+        self.assertNotIn("123", self._store.load_topic_subscriptions())
+        mock_rt.download_torrent.assert_called_once_with("123")
+        mock_ds.create_torrent_file.assert_called_once()
+        mock_app.bot.send_message.assert_not_awaited()
+
     def test_rutracker_subscription_empty_task_id_keeps_state_for_retry(self) -> None:
         self._store.save_topic_subscriptions({
             "123": {

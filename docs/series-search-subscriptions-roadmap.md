@@ -3,7 +3,7 @@
 Living checklist for series-related search, subscription, and notification work.
 Update this file when a task is completed or reprioritized.
 
-Last updated: 2026-05-24 - split partial-series download and notification actions
+Last updated: 2026-05-24 - complete silent subscription state updates
 
 ## P0 - Required Fixes
 
@@ -21,7 +21,7 @@ Last updated: 2026-05-24 - split partial-series download and notification action
 - [x] Split partial-series actions into download choices and notification-only choices.
 - [x] Remove normal Jackett subscriptions consistently when a season completes.
 - [ ] Improve English/no-slash series title cleanup for `Sxx`, `SxxEyy`, quality tags, and release suffixes.
-- [ ] Keep silent subscription state complete: title, total episodes, completion/removal state.
+- [x] Keep silent subscription state complete: title, total episodes, completion/removal state.
 
 ## P2 - UX And Reliability
 
