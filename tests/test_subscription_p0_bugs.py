@@ -580,6 +580,34 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
         self.assertEqual(entry["notify_mode"], "season_complete")
         self.assertTrue(entry["subscribe"])
 
+    def test_pending_entry_preserves_canonical_meta_for_task_meta(self):
+        entry = bot._pending_download_entry_from_result(
+            {
+                "title": "Noisy.Release.2026.1080p.WEB-DL",
+                "movie_title": "Canonical Movie",
+                "year": 2026,
+                "quality": "1080p",
+                "topic_id": "12345",
+                "url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+                "torrent_url": "u",
+                "tracker_name": "rutracker",
+                "source": "jackett",
+            },
+            chat_id=100, subscribe=False, error="boom",
+        )
+
+        restored = bot._pending_entry_to_search_result(entry)
+        self.assertEqual(restored["movie_title"], "Canonical Movie")
+        self.assertEqual(restored["year"], 2026)
+        self.assertEqual(restored["quality"], "1080p")
+        self.assertEqual(restored["topic_id"], "12345")
+
+        meta = bot._build_task_meta_from_result(restored, source="pending")
+        self.assertEqual(meta["title"], "Canonical Movie")
+        self.assertEqual(meta["year"], 2026)
+        self.assertEqual(meta["quality"], "1080")
+        self.assertEqual(meta["source"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()

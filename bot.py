@@ -7991,12 +7991,16 @@ def _pending_download_entry_from_result(
         entry["notify_policy"] = notify_policy
     if download_policy:
         entry["download_policy"] = download_policy
+    for key in ("topic_id", "movie_title", "year", "quality"):
+        value = result.get(key)
+        if value not in (None, ""):
+            entry[key] = value
     return entry
 
 
 def _pending_entry_to_search_result(entry: dict) -> dict:
     """Inverse: reconstruct a search-result-shaped dict for _build_task_meta_from_result."""
-    return {
+    result = {
         "title": entry.get("title") or "",
         "url": entry.get("topic_url") or "",
         "torrent_url": entry.get("torrent_url") or "",
@@ -8004,6 +8008,15 @@ def _pending_entry_to_search_result(entry: dict) -> dict:
         "tracker_name": entry.get("tracker") or "",
         "source": entry.get("source") or "",
     }
+    for key in ("topic_id", "movie_title", "year", "quality"):
+        value = entry.get(key)
+        if value not in (None, ""):
+            result[key] = value
+    if not result.get("topic_id"):
+        topic_id = _extract_rutracker_topic_id(str(result.get("url") or ""))
+        if topic_id:
+            result["topic_id"] = topic_id
+    return result
 
 
 def _format_download_error(exc: Exception) -> str:
