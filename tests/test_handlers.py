@@ -461,6 +461,14 @@ class StartCommandTests(unittest.TestCase):
 
 
 class AdminPanelTests(unittest.TestCase):
+    def _assert_access_result_keyboard(self, markup):
+        callbacks = {
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(callbacks, {"admin:home", "admin:close"})
+
     def test_admin_command_shows_summary_panel(self):
         update = _make_message_update(chat_id=300)
         context = _make_context()
@@ -792,6 +800,34 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("/help", text)
         self.assertNotIn(".torrent файлом", text)
         self.assertNotIn("magnet-ссылку сообщением", text)
+        self._assert_access_result_keyboard(
+            update.callback_query.edit_message_text.call_args.kwargs["reply_markup"],
+        )
+
+    def test_access_deny_shows_admin_result_keyboard(self):
+        update = _make_callback_update(chat_id=300, callback_data="access:deny:200")
+        context = _make_context()
+
+        with (
+            patch.dict(bot.ACCESS_PENDING_USERS, {200: "Petr"}, clear=True),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+        ):
+            asyncio.run(access_callback(update, context))
+
+        self._assert_access_result_keyboard(
+            update.callback_query.edit_message_text.call_args.kwargs["reply_markup"],
+        )
+
+    def test_access_malformed_callback_shows_admin_result_keyboard(self):
+        update = _make_callback_update(chat_id=300, callback_data="access:approve:not-a-number")
+        context = _make_context()
+
+        with patch.object(bot, "ADMIN_CHAT_IDS", {300}):
+            asyncio.run(access_callback(update, context))
+
+        self._assert_access_result_keyboard(
+            update.callback_query.edit_message_text.call_args.kwargs["reply_markup"],
+        )
 
     def test_access_remove_revokes_owned_tasks_and_subscriptions(self):
         update = _make_callback_update(chat_id=300, callback_data="access:remove:200")

@@ -11028,6 +11028,13 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
+def _access_result_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
+        InlineKeyboardButton("✖️ Закрыть", callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
+    ]])
+
+
 async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -11052,7 +11059,10 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         target_chat_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text("Не удалось разобрать запрос доступа.")
+        await query.edit_message_text(
+            "Не удалось разобрать запрос доступа.",
+            reply_markup=_access_result_keyboard(),
+        )
         return
 
     if action == "approve":
@@ -11062,7 +11072,10 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         note = "уже был разрешен" if already_allowed else "разрешен"
         label = f" ({name})" if name else ""
-        await query.edit_message_text(f"Доступ {note}.\nchat_id: {target_chat_id}{label}")
+        await query.edit_message_text(
+            f"Доступ {note}.\nchat_id: {target_chat_id}{label}",
+            reply_markup=_access_result_keyboard(),
+        )
         try:
             await context.bot.send_message(
                 chat_id=target_chat_id,
@@ -11074,7 +11087,10 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "deny":
         ACCESS_PENDING_USERS.pop(target_chat_id, None)
-        await query.edit_message_text(f"Запрос доступа отклонен.\nchat_id: {target_chat_id}")
+        await query.edit_message_text(
+            f"Запрос доступа отклонен.\nchat_id: {target_chat_id}",
+            reply_markup=_access_result_keyboard(),
+        )
         return
 
     if action == "remove":
@@ -11086,7 +11102,10 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(text, reply_markup=keyboard)
         return
 
-    await query.edit_message_text("Неизвестное действие с доступом.")
+    await query.edit_message_text(
+        "Неизвестное действие с доступом.",
+        reply_markup=_access_result_keyboard(),
+    )
 
 
 async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
