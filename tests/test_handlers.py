@@ -815,10 +815,275 @@ class AdminPanelTests(unittest.TestCase):
             for button in row
         ]
         callbacks = {button.text: button.callback_data for button in buttons}
+        self.assertEqual(callbacks["⚙️ 1. Настроить"], "sub:settings:123")
         self.assertEqual(callbacks["🔕 1. Отписаться"], "sub:unsub:123")
+        self.assertEqual(callbacks["⚙️ 2. Настроить"], "sub:settings:jackett:abc")
         self.assertEqual(callbacks["🔕 2. Отписаться"], "sub:jackett_unsub:jackett:abc")
         self.assertEqual(callbacks["✖️ Закрыть"], "task:close:")
         self.assertFalse(any("jackett_view" in value for value in callbacks.values()))
+
+    def test_subscription_settings_screen_shows_current_policy(self):
+        from subscription_policy import (
+            DOWNLOAD_ONLY_WHEN_COMPLETE,
+            NOTIFY_FINAL_ONLY,
+        )
+
+        update = _make_callback_update(chat_id=100, callback_data="sub:settings:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Фарго / Fargo / Сезон 5, Серии 1-5 из 8",
+                    "last_episode_end": 5,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_FINAL_ONLY,
+                    "download_policy": DOWNLOAD_ONLY_WHEN_COMPLETE,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("⚙️ <b>Подписка</b>", text)
+        self.assertIn("Уведомления: <b>только когда сезон завершится</b>", text)
+        self.assertIn("Скачивание: <b>когда сезон завершится</b>", text)
+
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🔔 Уведомления"], "sub:settings_notify:123")
+        self.assertEqual(buttons["⬇️ Скачивание"], "sub:settings_download:123")
+        self.assertEqual(buttons["⬅️ К подпискам"], "sub:list")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_subscription_notify_settings_hides_silent_when_download_disabled(self):
+        from subscription_policy import (
+            DOWNLOAD_NOTIFY_ONLY,
+            NOTIFY_EACH_UPDATE,
+        )
+
+        update = _make_callback_update(chat_id=100, callback_data="sub:settings_notify:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Фарго",
+                    "last_episode_end": 5,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_EACH_UPDATE,
+                    "download_policy": DOWNLOAD_NOTIFY_ONLY,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Когда уведомлять", text)
+        self.assertIn("Нужно оставить хотя бы одно действие", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        labels = [button.text for row in keyboard.inline_keyboard for button in row]
+        self.assertIn("✅ 🔔 О каждой новой серии", labels)
+        self.assertIn("🎯 Только когда сезон завершится", labels)
+        self.assertFalse(any("Не уведомлять" in label for label in labels))
+
+    def test_subscription_set_notify_updates_jackett_subscription(self):
+        from subscription_policy import (
+            DOWNLOAD_NOTIFY_ONLY,
+            NOTIFY_EACH_UPDATE,
+            NOTIFY_FINAL_ONLY,
+        )
+
+        update = _make_callback_update(
+            chat_id=100,
+            callback_data=f"sub:set_notify:{NOTIFY_FINAL_ONLY}:jackett:abc",
+        )
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "jackett:abc": {
+                    "type": "jackett",
+                    "chat_id": 100,
+                    "query": "Одни из нас сезон 2",
+                    "last_episode_end": 3,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_EACH_UPDATE,
+                    "download_policy": DOWNLOAD_NOTIFY_ONLY,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+            sub = store.load_topic_subscriptions()["jackett:abc"]
+            self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
+            self.assertEqual(sub["download_policy"], DOWNLOAD_NOTIFY_ONLY)
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("✅ Настройки обновлены", text)
+        self.assertIn("Уведомления: <b>только когда сезон завершится</b>", text)
+
+    def test_subscription_set_download_rejects_do_nothing_pair(self):
+        from subscription_policy import (
+            DOWNLOAD_AUTO_EACH_UPDATE,
+            DOWNLOAD_NOTIFY_ONLY,
+            NOTIFY_SILENT,
+        )
+
+        update = _make_callback_update(
+            chat_id=100,
+            callback_data=f"sub:set_download:{DOWNLOAD_NOTIFY_ONLY}:123",
+        )
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Фарго",
+                    "last_episode_end": 5,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_SILENT,
+                    "download_policy": DOWNLOAD_AUTO_EACH_UPDATE,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+            sub = store.load_topic_subscriptions()["123"]
+            self.assertEqual(sub["notify_policy"], NOTIFY_SILENT)
+            self.assertEqual(sub["download_policy"], DOWNLOAD_AUTO_EACH_UPDATE)
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("ничего не будет делать", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        callbacks = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(callbacks["🔔 Настроить уведомления"], "sub:settings_notify:123")
+        self.assertEqual(callbacks["⬇️ Настроить скачивание"], "sub:settings_download:123")
+
+    def test_subscription_download_settings_hides_notify_only_when_silent(self):
+        from subscription_policy import (
+            DOWNLOAD_AUTO_EACH_UPDATE,
+            NOTIFY_SILENT,
+        )
+
+        update = _make_callback_update(chat_id=100, callback_data="sub:settings_download:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Фарго",
+                    "last_episode_end": 5,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_SILENT,
+                    "download_policy": DOWNLOAD_AUTO_EACH_UPDATE,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Когда скачивать", text)
+        self.assertIn("Нужно оставить хотя бы одно действие", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        labels = [button.text for row in keyboard.inline_keyboard for button in row]
+        self.assertIn("✅ ⬇️ Каждое обновление", labels)
+        self.assertIn("📦 Когда сезон завершится", labels)
+        self.assertFalse(any("Не скачивать" in label for label in labels))
+
+    def test_subscription_list_callback_returns_to_list(self):
+        update = _make_callback_update(chat_id=100, callback_data="sub:list")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Фарго",
+                    "last_episode_end": 5,
+                    "total_episodes": 8,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_is_movie_subscribed", return_value=False),
+                patch.object(bot, "_next_subscription_check_at", None),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("<b>Подписки</b> (1)", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["⚙️ 1. Настроить"], "sub:settings:123")
+
+    def test_non_owner_cannot_open_subscription_settings(self):
+        update = _make_callback_update(chat_id=100, callback_data="sub:settings:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 200,
+                    "title": "Клиника",
+                    "last_episode_end": 1,
+                    "total_episodes": 2,
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100, 200}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("не относится", text)
 
     def test_subs_command_renders_new_subscription_without_download_policy(self):
         update = _make_message_update(chat_id=100)

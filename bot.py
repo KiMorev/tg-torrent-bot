@@ -9393,13 +9393,20 @@ def _subscription_status_text(sub: dict) -> str:
     return "ждём новые серии"
 
 
-async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_allowed(update):
-        await _reply_access_pending(update, context)
-        return
+def _subscription_title(sub_key: str, sub: dict) -> str:
+    if sub.get("type") == "jackett":
+        title = str(sub.get("query") or sub.get("title") or sub_key)
+    else:
+        title = str(sub.get("title") or sub_key)
+    return _format_sub_title(title)
 
+
+def _subscription_icon(sub: dict) -> str:
+    return "🌐" if sub.get("type") == "jackett" else "📺"
+
+
+def _build_subscriptions_view(chat_id: int | None) -> tuple[str, InlineKeyboardMarkup | None]:
     subs = state_store.load_topic_subscriptions()
-    chat_id = update.effective_chat.id if update.effective_chat else None
     is_admin = _is_admin_chat(chat_id)
     my_subs = {
         tid: sub for tid, sub in subs.items()
@@ -9412,8 +9419,7 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     is_movie_sub = _is_movie_subscribed(chat_id) if chat_id else False
     if not my_subs and not jackett_subs_all and not is_movie_sub:
-        await update.message.reply_text("📭 Активных подписок нет.")
-        return
+        return "📭 Активных подписок нет.", None
 
     total_count = len(my_subs) + len(jackett_subs_all) + (1 if is_movie_sub else 0)
     lines = [f"🔔 <b>Подписки</b> ({total_count})"]
@@ -9423,7 +9429,7 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     rows = []
 
     for i, (topic_id, sub) in enumerate(my_subs.items(), 1):
-        title = _format_sub_title(sub.get("title", "") or topic_id)
+        title = _subscription_title(topic_id, sub)
         notify_text, download_text = _subscription_policy_texts(sub)
         lines.append(
             f"\n{i}. 📺 <b>{html_module.escape(title)}</b>\n"
@@ -9435,18 +9441,21 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         rows.append([
             InlineKeyboardButton(
+                f"⚙️ {i}. Настроить",
+                callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{topic_id}",
+            ),
+            InlineKeyboardButton(
                 f"🔕 {i}. Отписаться",
                 callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}",
-            )
+            ),
         ])
 
     offset = len(my_subs)
     for i, (key, sub) in enumerate(jackett_subs_all.items(), offset + 1):
-        title = str(sub.get("query") or sub.get("title") or key)
-        short_title = _format_sub_title(title)
+        title = _subscription_title(key, sub)
         notify_text, download_text = _subscription_policy_texts(sub)
         lines.append(
-            f"\n{i}. 🌐 <b>{html_module.escape(short_title)}</b>\n"
+            f"\n{i}. 🌐 <b>{html_module.escape(title)}</b>\n"
             f"   Источник: {html_module.escape(_subscription_source_text(sub))}\n"
             f"   Прогресс: {_subscription_progress_text(sub)}\n"
             f"   Уведомления: {notify_text}\n"
@@ -9456,9 +9465,13 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         rows.append([
             InlineKeyboardButton(
+                f"⚙️ {i}. Настроить",
+                callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{key}",
+            ),
+            InlineKeyboardButton(
                 f"🔕 {i}. Отписаться",
                 callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
-            )
+            ),
         ])
 
     if is_movie_sub:
@@ -9475,8 +9488,166 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ])
 
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
+
+def _subscription_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ К подпискам", callback_data=f"{SUB_CALLBACK_PREFIX}:list")],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _subscription_settings_keyboard(sub_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔔 Уведомления", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_notify:{sub_key}")],
+        [InlineKeyboardButton("⬇️ Скачивание", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_download:{sub_key}")],
+        [InlineKeyboardButton("⬅️ К подпискам", callback_data=f"{SUB_CALLBACK_PREFIX}:list")],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _subscription_settings_text(sub_key: str, sub: dict, notice: str = "") -> str:
+    title = html_module.escape(_subscription_title(sub_key, sub))
+    notify_text, download_text = _subscription_policy_texts(sub)
+    lines = []
+    if notice:
+        lines.append(notice)
+        lines.append("")
+    lines.extend([
+        "⚙️ <b>Подписка</b>",
+        f"{_subscription_icon(sub)} <b>{title}</b>",
+        "",
+        f"Источник: {html_module.escape(_subscription_source_text(sub))}",
+        f"Прогресс: {_subscription_progress_text(sub)}",
+        "",
+        "Сейчас:",
+        f"Уведомления: <b>{notify_text}</b>",
+        f"Скачивание: <b>{download_text}</b>",
+        "",
+        "Что изменить?",
+    ])
+    return "\n".join(lines)
+
+
+def _subscription_settings_locked_text(sub_key: str, sub: dict) -> str:
+    title = html_module.escape(_subscription_title(sub_key, sub))
+    return (
+        "⚠️ <b>Настройки временно недоступны</b>\n\n"
+        f"{_subscription_icon(sub)} <b>{title}</b>\n\n"
+        "По этой подписке уже найдено обновление, и бот ждёт повторной отправки уведомления. "
+        "После отправки можно будет менять правила снова."
+    )
+
+
+def _subscription_notify_keyboard(sub_key: str, sub: dict) -> InlineKeyboardMarkup:
+    current_notify, current_download = _coerce_subscription_policies(
+        sub.get("notify_policy"), sub.get("download_policy")
+    )
+
+    def _label(policy: str, text: str) -> str:
+        return f"✅ {text}" if policy == current_notify else text
+
+    choices = [
+        (NOTIFY_EACH_UPDATE, "🔔 О каждой новой серии"),
+        (NOTIFY_FINAL_ONLY, "🎯 Только когда сезон завершится"),
+    ]
+    if current_download != DOWNLOAD_NOTIFY_ONLY:
+        choices.append((NOTIFY_SILENT, "🔇 Не уведомлять"))
+
+    rows = [
+        [InlineKeyboardButton(_label(policy, text), callback_data=f"{SUB_CALLBACK_PREFIX}:set_notify:{policy}:{sub_key}")]
+        for policy, text in choices
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{sub_key}")])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _subscription_download_keyboard(sub_key: str, sub: dict) -> InlineKeyboardMarkup:
+    current_notify, current_download = _coerce_subscription_policies(
+        sub.get("notify_policy"), sub.get("download_policy")
+    )
+
+    def _label(policy: str, text: str) -> str:
+        return f"✅ {text}" if policy == current_download else text
+
+    choices = [
+        (DOWNLOAD_AUTO_EACH_UPDATE, "⬇️ Каждое обновление"),
+        (DOWNLOAD_ONLY_WHEN_COMPLETE, "📦 Когда сезон завершится"),
+    ]
+    if current_notify != NOTIFY_SILENT:
+        choices.append((DOWNLOAD_NOTIFY_ONLY, "⏸ Не скачивать автоматически"))
+
+    rows = [
+        [InlineKeyboardButton(_label(policy, text), callback_data=f"{SUB_CALLBACK_PREFIX}:set_download:{policy}:{sub_key}")]
+        for policy, text in choices
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{sub_key}")])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _subscription_policy_choice_text(sub_key: str, sub: dict, axis: str) -> str:
+    title = html_module.escape(_subscription_title(sub_key, sub))
+    notify_text, download_text = _subscription_policy_texts(sub)
+    if axis == "notify":
+        text = (
+            "🔔 <b>Когда уведомлять?</b>\n\n"
+            f"{_subscription_icon(sub)} <b>{title}</b>\n\n"
+            f"Текущее: <b>{notify_text}</b>"
+        )
+        _, download_policy = _coerce_subscription_policies(
+            sub.get("notify_policy"), sub.get("download_policy")
+        )
+        if download_policy == DOWNLOAD_NOTIFY_ONLY:
+            text += "\n\nНужно оставить хотя бы одно действие: уведомления или скачивание."
+        return text
+
+    text = (
+        "⬇️ <b>Когда скачивать?</b>\n\n"
+        f"{_subscription_icon(sub)} <b>{title}</b>\n\n"
+        f"Текущее: <b>{download_text}</b>"
+    )
+    notify_policy, _ = _coerce_subscription_policies(
+        sub.get("notify_policy"), sub.get("download_policy")
+    )
+    if notify_policy == NOTIFY_SILENT:
+        text += "\n\nНужно оставить хотя бы одно действие: уведомления или скачивание."
+    return text
+
+
+def _subscription_noop_policy_text() -> str:
+    return (
+        "Так подписка ничего не будет делать.\n\n"
+        "Выберите хотя бы одно действие: уведомлять или скачивать."
+    )
+
+
+def _subscription_noop_policy_keyboard(sub_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔔 Настроить уведомления", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_notify:{sub_key}")],
+        [InlineKeyboardButton("⬇️ Настроить скачивание", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_download:{sub_key}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{sub_key}")],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _split_subscription_policy_payload(payload: str) -> tuple[str, str]:
+    policy, sep, sub_key = payload.partition(":")
+    if not sep:
+        return policy, ""
+    return policy, sub_key
+
+
+async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await _reply_access_pending(update, context)
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    text, keyboard = _build_subscriptions_view(chat_id)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9501,10 +9672,176 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "🔕 Уведомления о новинках отключены"))
         return
 
+    if action == "list":
+        text, keyboard = _build_subscriptions_view(chat_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        return
+
     if len(parts) < 3:
         return
 
-    if action == "unsub":
+    if action == "settings":
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.get(topic_id)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
+            return
+        if isinstance(sub.get("pending_notification"), dict):
+            await query.edit_message_text(
+                _subscription_settings_locked_text(topic_id, sub),
+                reply_markup=_subscription_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+        await query.edit_message_text(
+            _subscription_settings_text(topic_id, sub),
+            reply_markup=_subscription_settings_keyboard(topic_id),
+            parse_mode="HTML",
+        )
+
+    elif action == "settings_notify":
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.get(topic_id)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
+            return
+        if isinstance(sub.get("pending_notification"), dict):
+            await query.edit_message_text(
+                _subscription_settings_locked_text(topic_id, sub),
+                reply_markup=_subscription_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+        await query.edit_message_text(
+            _subscription_policy_choice_text(topic_id, sub, "notify"),
+            reply_markup=_subscription_notify_keyboard(topic_id, sub),
+            parse_mode="HTML",
+        )
+
+    elif action == "settings_download":
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.get(topic_id)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
+            return
+        if isinstance(sub.get("pending_notification"), dict):
+            await query.edit_message_text(
+                _subscription_settings_locked_text(topic_id, sub),
+                reply_markup=_subscription_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+        await query.edit_message_text(
+            _subscription_policy_choice_text(topic_id, sub, "download"),
+            reply_markup=_subscription_download_keyboard(topic_id, sub),
+            parse_mode="HTML",
+        )
+
+    elif action == "set_notify":
+        notify_policy, sub_key = _split_subscription_policy_payload(topic_id)
+        if notify_policy not in VALID_NOTIFY_POLICIES or not sub_key:
+            await query.edit_message_text("Некорректная настройка подписки.", reply_markup=_subscription_back_keyboard())
+            return
+
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.get(sub_key)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
+            return
+        if isinstance(sub.get("pending_notification"), dict):
+            await query.edit_message_text(
+                _subscription_settings_locked_text(sub_key, sub),
+                reply_markup=_subscription_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+
+        _current_notify, download_policy = _coerce_subscription_policies(
+            sub.get("notify_policy"), sub.get("download_policy")
+        )
+        if notify_policy == NOTIFY_SILENT and download_policy == DOWNLOAD_NOTIFY_ONLY:
+            await query.edit_message_text(
+                _subscription_noop_policy_text(),
+                reply_markup=_subscription_noop_policy_keyboard(sub_key),
+            )
+            return
+
+        sub["notify_policy"] = notify_policy
+        sub["download_policy"] = download_policy
+        state_store.save_topic_subscriptions(subs)
+        logger.info(
+            "Subscription notify policy updated: key=%s notify=%s download=%s by chat=%s",
+            sub_key, notify_policy, download_policy, chat_id,
+        )
+        await query.edit_message_text(
+            _subscription_settings_text(sub_key, sub, notice="✅ Настройки обновлены"),
+            reply_markup=_subscription_settings_keyboard(sub_key),
+            parse_mode="HTML",
+        )
+
+    elif action == "set_download":
+        download_policy, sub_key = _split_subscription_policy_payload(topic_id)
+        allowed_download_updates = {
+            DOWNLOAD_AUTO_EACH_UPDATE,
+            DOWNLOAD_ONLY_WHEN_COMPLETE,
+            DOWNLOAD_NOTIFY_ONLY,
+        }
+        if download_policy not in allowed_download_updates or not sub_key:
+            await query.edit_message_text("Некорректная настройка подписки.", reply_markup=_subscription_back_keyboard())
+            return
+
+        subs = state_store.load_topic_subscriptions()
+        sub = subs.get(sub_key)
+        if sub and not _can_manage_subscription(chat_id, sub):
+            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            return
+        if not sub:
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
+            return
+        if isinstance(sub.get("pending_notification"), dict):
+            await query.edit_message_text(
+                _subscription_settings_locked_text(sub_key, sub),
+                reply_markup=_subscription_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+
+        notify_policy, _current_download = _coerce_subscription_policies(
+            sub.get("notify_policy"), sub.get("download_policy")
+        )
+        if notify_policy == NOTIFY_SILENT and download_policy == DOWNLOAD_NOTIFY_ONLY:
+            await query.edit_message_text(
+                _subscription_noop_policy_text(),
+                reply_markup=_subscription_noop_policy_keyboard(sub_key),
+            )
+            return
+
+        sub["notify_policy"] = notify_policy
+        sub["download_policy"] = download_policy
+        state_store.save_topic_subscriptions(subs)
+        logger.info(
+            "Subscription download policy updated: key=%s notify=%s download=%s by chat=%s",
+            sub_key, notify_policy, download_policy, chat_id,
+        )
+        await query.edit_message_text(
+            _subscription_settings_text(sub_key, sub, notice="✅ Настройки обновлены"),
+            reply_markup=_subscription_settings_keyboard(sub_key),
+            parse_mode="HTML",
+        )
+
+    elif action == "unsub":
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(topic_id)
         if sub and not _can_manage_subscription(chat_id, sub):

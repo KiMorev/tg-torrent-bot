@@ -52,7 +52,7 @@
 | Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> тот же поиск через `_run_search`. |
 | Скачивание из результата | `search_download_pick` или `search_direct_download` -> Plex pre-check -> `_download_and_add` -> Download Station. |
 | Magnet или `.torrent` файлом | `text_message_entry` или `handle_doc` -> `_process_magnet_uri` / `_do_process_torrent` -> Download Station. |
-| Подписка на сериал | `search_subscribe_pick` -> `search_subscribe_preset` или advanced callbacks -> запись в `topic_subscriptions.json`. |
+| Подписка на сериал | `search_subscribe_pick` -> `search_subscribe_preset` или advanced callbacks -> запись в `topic_subscriptions.json`; `/subs` -> `sub:settings:*` меняет `notify_policy`/`download_policy`. |
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
 | `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`. |
 | Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`. |
@@ -67,7 +67,7 @@
 | `task:*` | `keyboards.py` | `task_callback` |
 | `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback` |
 | `access:*` | `keyboards.py` | `access_callback` |
-| `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`, entry point `search_jackett_check_entry` |
+| `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
 | `new:*` | `bot.py`, `keyboards.py` | `movie_new_*` callbacks, часть внутри search conversation |
 | `plex:*` | `keyboards.py` | `plex_confirm_download`, `plex_upgrade_download`, `plex_cancel_download`, standalone callbacks |
 
