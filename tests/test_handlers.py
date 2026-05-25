@@ -14,6 +14,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -69,6 +70,7 @@ from bot import (
     search_cancel,
     search_timeout,
     setup_bot_commands,
+    subs_command,
     sub_callback,
     status,
     text_message_entry,
@@ -746,6 +748,138 @@ class AdminPanelTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("при финале", text)
         self.assertIn("без загрузки", text)
+
+    def test_subs_command_renders_subscription_details(self):
+        from subscription_policy import (
+            DOWNLOAD_NOTIFY_ONLY,
+            DOWNLOAD_ONLY_WHEN_COMPLETE,
+            NOTIFY_EACH_UPDATE,
+            NOTIFY_FINAL_ONLY,
+        )
+
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Фарго / Fargo / Сезон 5, Серии 1-5 из 8",
+                    "last_episode_end": 5,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_FINAL_ONLY,
+                    "download_policy": DOWNLOAD_ONLY_WHEN_COMPLETE,
+                },
+                "jackett:abc": {
+                    "type": "jackett",
+                    "chat_id": 100,
+                    "query": "Одни из нас сезон 2",
+                    "title": "The Last of Us S02E03 of 8",
+                    "tracker": "rutracker",
+                    "last_episode_end": 3,
+                    "total_episodes": 8,
+                    "last_check": "2000-01-01 10:00",
+                    "notify_policy": NOTIFY_EACH_UPDATE,
+                    "download_policy": DOWNLOAD_NOTIFY_ONLY,
+                },
+            })
+            next_check = datetime.now(bot.DISPLAY_TIMEZONE).replace(
+                hour=18, minute=0, second=0, microsecond=0
+            ).timestamp()
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_is_movie_subscribed", return_value=False),
+                patch.object(bot, "_next_subscription_check_at", next_check),
+            ):
+                asyncio.run(subs_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("<b>Подписки</b> (2)", text)
+        self.assertIn("Следующая проверка: сегодня 18:00", text)
+        self.assertIn("Источник: Rutracker", text)
+        self.assertIn("Прогресс: 5 из 8 эп.", text)
+        self.assertIn("Уведомления: только когда сезон завершится", text)
+        self.assertIn("Скачивание: когда сезон завершится", text)
+        self.assertIn("Статус: ждём финал сезона", text)
+        self.assertIn("Источник: Jackett · rutracker", text)
+        self.assertIn("Проверено: 01.01 10:00", text)
+        self.assertIn("Скачивание: не скачивать автоматически", text)
+
+        keyboard = update.message.reply_text.call_args.kwargs["reply_markup"]
+        buttons = [
+            button
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+        callbacks = {button.text: button.callback_data for button in buttons}
+        self.assertEqual(callbacks["🔕 1. Отписаться"], "sub:unsub:123")
+        self.assertEqual(callbacks["🔕 2. Отписаться"], "sub:jackett_unsub:jackett:abc")
+        self.assertEqual(callbacks["✖️ Закрыть"], "task:close:")
+        self.assertFalse(any("jackett_view" in value for value in callbacks.values()))
+
+    def test_subs_command_renders_new_subscription_without_download_policy(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({})
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_is_movie_subscribed", return_value=True),
+                patch.object(bot, "_next_subscription_check_at", None),
+            ):
+                asyncio.run(subs_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("🎬 <b>Новинки /new</b>", text)
+        self.assertIn("Уведомления: включены", text)
+        self.assertIn("присылаю новые фильмы и мультфильмы", text)
+        self.assertNotIn("Скачивание:", text)
+
+        keyboard = update.message.reply_text.call_args.kwargs["reply_markup"]
+        buttons = [
+            button
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+        callbacks = {button.text: button.callback_data for button in buttons}
+        self.assertEqual(callbacks["🔕 Отписаться от /new"], "sub:new_unsub")
+        self.assertEqual(callbacks["✖️ Закрыть"], "task:close:")
+
+    def test_subs_command_marks_unavailable_subscription(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {
+                    "chat_id": 100,
+                    "title": "Клиника / Scrubs / Сезон 2, Серии 1-4 из 9",
+                    "last_episode_end": 4,
+                    "total_episodes": 9,
+                    "unavailable_at": "2026-05-25 11:00",
+                    "unavailable_reason": "тема удалена",
+                },
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_is_movie_subscribed", return_value=False),
+                patch.object(bot, "_next_subscription_check_at", None),
+            ):
+                asyncio.run(subs_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("Прогресс: 4 из 9 эп.", text)
+        self.assertIn("Статус: ⚠️ проверка приостановлена: тема удалена", text)
 
     def test_non_owner_cannot_delete_subscription(self):
         update = _make_callback_update(chat_id=100, callback_data="sub:unsub:123")

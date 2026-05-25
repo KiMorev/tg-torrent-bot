@@ -8529,7 +8529,7 @@ from subscription_policy import (
     NOTIFY_EACH_UPDATE, NOTIFY_FINAL_ONLY, NOTIFY_SILENT,
     VALID_DOWNLOAD_POLICIES, VALID_NOTIFY_POLICIES,
     DOWNLOAD_AUTO_EACH_UPDATE, DOWNLOAD_ONLY_WHEN_COMPLETE,
-    DOWNLOAD_NOTIFY_ONLY,
+    DOWNLOAD_NOTIFY_ONLY, DOWNLOAD_ASK,
     policies_summary_ru,
 )
 
@@ -9293,8 +9293,107 @@ async def search_jackett_check_entry(update: Update, context: ContextTypes.DEFAU
 # --- Subscription management ---
 
 
+def _subscription_policy_texts(sub: dict) -> tuple[str, str]:
+    notify_policy, download_policy = _coerce_subscription_policies(
+        sub.get("notify_policy"), sub.get("download_policy")
+    )
+    notify_label = {
+        NOTIFY_EACH_UPDATE: "о каждой новой серии",
+        NOTIFY_FINAL_ONLY: "только когда сезон завершится",
+        NOTIFY_SILENT: "не уведомлять",
+    }.get(notify_policy, notify_policy)
+    download_label = {
+        DOWNLOAD_AUTO_EACH_UPDATE: "каждое обновление",
+        DOWNLOAD_ONLY_WHEN_COMPLETE: "когда сезон завершится",
+        DOWNLOAD_NOTIFY_ONLY: "не скачивать автоматически",
+        DOWNLOAD_ASK: "спрашивать перед скачиванием",
+    }.get(download_policy, download_policy)
+    return notify_label, download_label
+
+
+def _subscription_episode_pair(sub: dict) -> tuple[int | None, int | None]:
+    def _as_int(value) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return None
+
+    return _as_int(sub.get("last_episode_end")), _as_int(sub.get("total_episodes"))
+
+
+def _subscription_progress_text(sub: dict) -> str:
+    last_episode, total_episodes = _subscription_episode_pair(sub)
+    if last_episode is not None and total_episodes is not None:
+        return f"{last_episode} из {total_episodes} эп."
+    if last_episode is not None:
+        return f"{last_episode} эп., всего неизвестно"
+    return "нет данных"
+
+
+def _format_subscription_dt(dt: datetime) -> str:
+    today = datetime.now(DISPLAY_TIMEZONE).date()
+    if dt.date() == today:
+        return f"сегодня {dt.strftime('%H:%M')}"
+    if dt.date() == today + timedelta(days=1):
+        return f"завтра {dt.strftime('%H:%M')}"
+    return dt.strftime("%d.%m %H:%M")
+
+
+def _format_subscription_datetime(value: object) -> str:
+    if not value:
+        return "—"
+    raw = str(value)
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M").replace(tzinfo=DISPLAY_TIMEZONE)
+    except ValueError:
+        return raw
+
+    return _format_subscription_dt(dt)
+
+
+def _subscription_source_text(sub: dict) -> str:
+    if sub.get("type") != "jackett":
+        return "Rutracker"
+
+    tracker = str(sub.get("tracker") or "").strip()
+    if not tracker:
+        return "Jackett"
+    if tracker.lower() == "jackett":
+        return "Jackett"
+    return f"Jackett · {tracker}"
+
+
+def _subscription_status_text(sub: dict) -> str:
+    if sub.get("unavailable_at"):
+        reason = str(sub.get("unavailable_reason") or "").strip()
+        if reason:
+            return f"⚠️ проверка приостановлена: {reason}"
+        return "⚠️ проверка приостановлена"
+
+    pending = sub.get("pending_notification")
+    if isinstance(pending, dict):
+        if pending.get("complete"):
+            return "финал найден, ждём повторной отправки уведомления"
+        return "обновление найдено, ждём повторной отправки уведомления"
+
+    last_episode, total_episodes = _subscription_episode_pair(sub)
+    if last_episode is None:
+        return "нет данных о прогрессе"
+    if total_episodes is not None and total_episodes > 0 and last_episode >= total_episodes:
+        return "сезон уже выглядит завершённым"
+
+    notify_policy, download_policy = _coerce_subscription_policies(
+        sub.get("notify_policy"), sub.get("download_policy")
+    )
+    if notify_policy == NOTIFY_FINAL_ONLY or download_policy == DOWNLOAD_ONLY_WHEN_COMPLETE:
+        return "ждём финал сезона"
+    return "ждём новые серии"
+
+
 async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    import html as _html
     if not _is_allowed(update):
         await _reply_access_pending(update, context)
         return
@@ -9317,16 +9416,23 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     total_count = len(my_subs) + len(jackett_subs_all) + (1 if is_movie_sub else 0)
-    lines = [f"🔔 Активные подписки ({total_count}):"]
+    lines = [f"🔔 <b>Подписки</b> ({total_count})"]
+    if _next_subscription_check_at is not None:
+        next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
+        lines.append(f"Следующая проверка: {_format_subscription_dt(next_dt)}")
     rows = []
 
     for i, (topic_id, sub) in enumerate(my_subs.items(), 1):
-        short = _format_sub_title(sub.get("title", ""))
-        ep_end = sub.get("last_episode_end", "?")
-        total = sub.get("total_episodes", "?")
-        lines.append(f"\n{i}. {_html.escape(short)}\n   📺 {ep_end} из {total} эп.")
-        if sub.get("unavailable_at"):
-            lines.append("   ⚠️ Тема недоступна, проверка приостановлена.")
+        title = _format_sub_title(sub.get("title", "") or topic_id)
+        notify_text, download_text = _subscription_policy_texts(sub)
+        lines.append(
+            f"\n{i}. 📺 <b>{html_module.escape(title)}</b>\n"
+            f"   Источник: {_subscription_source_text(sub)}\n"
+            f"   Прогресс: {_subscription_progress_text(sub)}\n"
+            f"   Уведомления: {notify_text}\n"
+            f"   Скачивание: {download_text}\n"
+            f"   Статус: {html_module.escape(_subscription_status_text(sub))}"
+        )
         rows.append([
             InlineKeyboardButton(
                 f"🔕 {i}. Отписаться",
@@ -9336,21 +9442,31 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     offset = len(my_subs)
     for i, (key, sub) in enumerate(jackett_subs_all.items(), offset + 1):
-        query_text = sub.get("query", "?")
-        short_q = query_text[:40] + "…" if len(query_text) > 40 else query_text
-        last_check = sub.get("last_check", "—")
-        lines.append(f"\n📡 <b>{_html.escape(short_q)}</b>")
-        lines.append(f"   Проверено: {last_check}")
+        title = str(sub.get("query") or sub.get("title") or key)
+        short_title = _format_sub_title(title)
+        notify_text, download_text = _subscription_policy_texts(sub)
+        lines.append(
+            f"\n{i}. 🌐 <b>{html_module.escape(short_title)}</b>\n"
+            f"   Источник: {html_module.escape(_subscription_source_text(sub))}\n"
+            f"   Прогресс: {_subscription_progress_text(sub)}\n"
+            f"   Уведомления: {notify_text}\n"
+            f"   Скачивание: {download_text}\n"
+            f"   Проверено: {_format_subscription_datetime(sub.get('last_check'))}\n"
+            f"   Статус: {html_module.escape(_subscription_status_text(sub))}"
+        )
         rows.append([
             InlineKeyboardButton(
-                f"🔄 {short_q[:20]}",
-                callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
-            ),
-            InlineKeyboardButton("🗑️", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+                f"🔕 {i}. Отписаться",
+                callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
+            )
         ])
 
     if is_movie_sub:
-        lines.append("\n🎬 <b>Подписка на новинки:</b> включена")
+        lines.append(
+            "\n🎬 <b>Новинки /new</b>\n"
+            "   Уведомления: включены\n"
+            "   Статус: присылаю новые фильмы и мультфильмы из подборки"
+        )
         rows.append([
             InlineKeyboardButton(
                 "🔕 Отписаться от /new",
@@ -9358,9 +9474,7 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         ])
 
-    if _next_subscription_check_at is not None:
-        next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
-        lines.append(f"\n🕐 Следующая проверка: {next_dt.strftime('%H:%M')}")
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
 
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
