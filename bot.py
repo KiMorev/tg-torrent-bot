@@ -9437,6 +9437,11 @@ async def _series_bulk_search_once(
                 ),
                 timeout=45.0,
             )
+            if JACKETT_FETCH_LIMIT and len(raw) >= JACKETT_FETCH_LIMIT:
+                warnings.append(
+                    f"Jackett: выдача достигла лимита {JACKETT_FETCH_LIMIT}, "
+                    "часть раздач могла не попасть в план."
+                )
             return [_series_bulk_result_from_jackett(item) for item in raw], warnings
         except (JackettError, asyncio.TimeoutError) as exc:
             warnings.append(f"Jackett: {str(exc)[:80]}")

@@ -474,6 +474,58 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 2"])
         self.assertIn("Сезон 2 - WEB-DL", final_text)
 
+    def test_fetch_limit_warning_is_shown_and_targeted_search_still_runs(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.user_data["srch_jackett_selected"] = {"rutracker"}
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        kp_client = MagicMock()
+        kp_client.search_series_seasons = MagicMock(return_value=2)
+        jackett = MagicMock()
+
+        def search_side_effect(search_query: str, **_kwargs):
+            if search_query == "Клиника Сезон: 2":
+                return [_jackett_result(
+                    "Клиника / Scrubs / Сезон: 2 / WEB-DL 1080p / Original / Sub"
+                )]
+            return [_jackett_result(
+                "Клиника / Scrubs / Сезон: 99 / WEB-DL 1080p / Original / Sub"
+            )]
+
+        jackett.search = MagicMock(side_effect=search_side_effect)
+        ds = MagicMock()
+        ds.list_tasks = MagicMock(return_value=[])
+
+        with (
+            patch.object(bot, "JACKETT_FETCH_LIMIT", 1),
+            patch.object(bot, "kinopoisk_client", kp_client),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())),
+            patch.object(bot, "ds_client", ds),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "rutracker_client", None),
+        ):
+            self._open_profile_and_build(update, ctx)
+
+        final_text = query.edit_message_text.await_args.args[0]
+        called_queries = [call.args[0] for call in jackett.search.call_args_list]
+        self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 2"])
+        self.assertIn("План собран не полностью", final_text)
+        self.assertIn("Jackett: выдача достигла лимита 1", final_text)
+        self.assertIn("Сезон 2 - WEB-DL", final_text)
+
     def test_confirm_screen_lists_only_ready_seasons(self):
         result = {
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
