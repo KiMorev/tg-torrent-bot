@@ -23,7 +23,7 @@
 | Кнопки и callback-data | `keyboards.py`; регистрация обработчиков в `bot.py::main`; правила в `AGENTS.md` | `tests/test_keyboards.py`, `tests/test_handlers.py` |
 | Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
 | Скачивание и очередь | `bot.py`: `_download_and_add`, `search_direct_download`, `_do_process_magnet`, `_do_process_torrent`, `_run_pending_downloads_once`; `download_station.py`; `torrent_utils.py` | `tests/test_handlers.py`, `tests/test_background.py`, `tests/test_download_station_locking.py`, `tests/test_disk_space_guard.py`, `tests/test_torrent_utils.py` |
-| Сериалы и подписки | `bot.py`: `search_subscribe_*`, `_check_subscriptions`, `_check_jackett_subscriptions`; `jackett_subscriptions.py`; `subscription_policy.py`; `formatters.py` | `tests/test_subscription_policy.py`, `tests/test_subscription_picker_ui.py`, `tests/test_jackett_subscriptions.py`, `tests/test_background.py` |
+| Сериалы и подписки | `bot.py`: `search_subscribe_*`, `_check_subscriptions`, `_check_jackett_subscriptions`; `jackett_subscriptions.py`; `subscription_policy.py`; `series_bulk_planner.py`; `formatters.py` | `tests/test_subscription_policy.py`, `tests/test_subscription_picker_ui.py`, `tests/test_jackett_subscriptions.py`, `tests/test_series_bulk_planner.py`, `tests/test_background.py` |
 | `/new` и подбор новинок | `bot.py`: `_refresh_movie_discovery_cache*`, `_run_movie_discovery_notifications`, `movie_new_*`; `movie_discovery.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_movie_discovery.py`, `tests/test_handlers.py`, `tests/test_kinopoisk.py`, `tests/test_gpt_features.py` |
 | Plex-проверки и уведомления | `bot.py`: `_plex_*`, `_run_task_notifications_once`; `plex.py`; `diagnostics.py`; `keyboards.py` | `tests/test_plex.py`, `tests/test_plex_series_context.py`, `tests/test_background.py`, `tests/test_keyboards.py` |
 | `/status`, карточки задач, автообновление | `bot.py`: `status`, `task_callback`, `_task_card_refresh_loop`; `task_views.py`; `task_policies.py`; `formatters.py` | `tests/test_task_views.py`, `tests/test_task_policies.py`, `tests/test_handlers.py` |
@@ -84,6 +84,7 @@
 | `jackett.py` | Jackett API: search, indexers, download proxy, magnet redirect. |
 | `jackett_subscriptions.py` | Якорь подписки и выбор новой серии/раздачи из Jackett results. |
 | `subscription_policy.py` | Решение, уведомлять ли и скачивать ли по подписке. |
+| `series_bulk_planner.py` | Чистый планировщик массовой загрузки сезонов: scoring кандидатов и статусы сезонов. |
 | `kinopoisk.py` | KP API, извлечение id, поиск карточек и метаданных. |
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
 | `plex.py` | Plex API, фильмы, сериалы, сезоны, качество, unmatched detection. |

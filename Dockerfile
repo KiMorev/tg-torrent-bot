@@ -13,7 +13,7 @@ RUN pip install \
     --index-url https://pypi.org/simple \
     -r requirements.txt
 
-COPY access_control.py app_context.py bot.py config.py diagnostics.py download_station.py state_store.py storage.py subscription_policy.py voice_transcription.py gpt_client.py gpt_features.py rutracker.py kinopoisk.py jackett.py jackett_subscriptions.py movie_discovery.py formatters.py keyboards.py plex.py progressive_status.py task_policies.py task_views.py torrent_utils.py tracker_service.py ./
+COPY access_control.py app_context.py bot.py config.py diagnostics.py download_station.py state_store.py storage.py subscription_policy.py series_bulk_planner.py voice_transcription.py gpt_client.py gpt_features.py rutracker.py kinopoisk.py jackett.py jackett_subscriptions.py movie_discovery.py formatters.py keyboards.py plex.py progressive_status.py task_policies.py task_views.py torrent_utils.py tracker_service.py ./
 COPY assets/ ./assets/
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
