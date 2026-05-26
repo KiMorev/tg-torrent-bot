@@ -9493,6 +9493,9 @@ async def _series_bulk_selected_indexers(context: ContextTypes.DEFAULT_TYPE) -> 
     return selected
 
 
+_SERIES_BULK_FETCH_LIMIT_WARNING_PREFIX = "Jackett: выдача достигла лимита"
+
+
 async def _series_bulk_search_once(
     context: ContextTypes.DEFAULT_TYPE,
     search_query: str,
@@ -9515,7 +9518,7 @@ async def _series_bulk_search_once(
             )
             if JACKETT_FETCH_LIMIT and len(raw) >= JACKETT_FETCH_LIMIT:
                 warnings.append(
-                    f"Jackett: выдача достигла лимита {JACKETT_FETCH_LIMIT}, "
+                    f"{_SERIES_BULK_FETCH_LIMIT_WARNING_PREFIX} {JACKETT_FETCH_LIMIT}, "
                     "часть раздач могла не попасть в план."
                 )
             return [_series_bulk_result_from_jackett(item) for item in raw], warnings
@@ -9534,7 +9537,33 @@ async def _series_bulk_search_once(
     return results, warnings
 
 
-def _series_bulk_seasons_for_targeted_search(plan) -> list[int]:
+def _series_bulk_is_fetch_limit_warning(warning: str) -> bool:
+    return str(warning).startswith(_SERIES_BULK_FETCH_LIMIT_WARNING_PREFIX)
+
+
+def _series_bulk_has_fetch_limit_warning(warnings) -> bool:
+    return any(_series_bulk_is_fetch_limit_warning(warning) for warning in warnings)
+
+
+def _series_bulk_without_fetch_limit_warnings(warnings: list[str]) -> list[str]:
+    return [
+        warning
+        for warning in warnings
+        if not _series_bulk_is_fetch_limit_warning(warning)
+    ]
+
+
+def _series_bulk_seasons_for_targeted_search(
+    plan,
+    *,
+    fetch_limit_supplement: bool = False,
+) -> list[int]:
+    if fetch_limit_supplement:
+        return [
+            season.season
+            for season in plan.seasons
+            if season.status not in {STATUS_ALREADY_IN_PLEX, STATUS_ALREADY_DOWNLOADING}
+        ]
     return [
         season.season
         for season in plan.seasons
@@ -10947,7 +10976,9 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             return ConversationHandler.END
 
         await _series_bulk_edit_wait(query, context, series_query, "search")
-        wide_results, search_warnings = await _series_bulk_search_once(context, series_query)
+        wide_results, wide_warnings = await _series_bulk_search_once(context, series_query)
+        search_warnings = list(wide_warnings)
+        wide_hit_fetch_limit = _series_bulk_has_fetch_limit_warning(wide_warnings)
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
         combined_results = _series_bulk_merge_results(results, wide_results)
@@ -10970,7 +11001,11 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             downloading_seasons=downloading_seasons,
             verified_season_range=verified,
         )
-        targeted_seasons = _series_bulk_seasons_for_targeted_search(preliminary_plan)
+        targeted_seasons = _series_bulk_seasons_for_targeted_search(
+            preliminary_plan,
+            fetch_limit_supplement=wide_hit_fetch_limit,
+        )
+        targeted_hit_fetch_limit = False
         if targeted_seasons:
             await _series_bulk_edit_wait(query, context, series_query, "targeted")
             for season in targeted_seasons:
@@ -10978,8 +11013,12 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
                 season_results, season_warnings = await _series_bulk_search_once(context, season_query)
                 if _series_bulk_build_cancelled(context, build_token):
                     return ConversationHandler.END
+                if _series_bulk_has_fetch_limit_warning(season_warnings):
+                    targeted_hit_fetch_limit = True
                 search_warnings.extend(season_warnings)
                 combined_results = _series_bulk_merge_results(combined_results, season_results)
+        if wide_hit_fetch_limit and verified and not targeted_hit_fetch_limit:
+            search_warnings = _series_bulk_without_fetch_limit_warnings(search_warnings)
 
         await _series_bulk_edit_wait(query, context, series_query, "plan")
         if _series_bulk_build_cancelled(context, build_token):
