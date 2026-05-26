@@ -53,6 +53,20 @@ def _jackett_result(title: str, *, url: str = "", seeders: int = 20) -> SimpleNa
     )
 
 
+def _bulk_plan(*, seasons: list[int], results: list[dict]):
+    return bot.build_series_bulk_plan(
+        series_title="Клиника",
+        seasons=seasons,
+        results=results,
+        profile=bot.SeriesBulkProfile(
+            quality="1080p",
+            require_original=True,
+            require_subs=True,
+        ),
+        verified_season_range=True,
+    )
+
+
 class SearchDownloadPickTests(unittest.TestCase):
     """search_download_pick — first tap «⬇️ N» on a partial result opens download choices."""
 
@@ -173,6 +187,9 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("Сезон 2 - WEB-DL", final_text)
         ctx.bot.send_animation.assert_awaited_once()
         gif_msg.delete.assert_awaited_once()
+        kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertIn("⬇️ Скачать уверенные (1)", labels)
 
     def test_wide_search_adds_candidates_outside_current_results(self):
         query = _make_query("srch:bulk_plan:0")
@@ -263,6 +280,92 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         called_queries = [call.args[0] for call in jackett.search.call_args_list]
         self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 2"])
         self.assertIn("Сезон 2 - WEB-DL", final_text)
+
+    def test_confirm_screen_lists_only_ready_seasons(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1, 2], results=[result])
+        query = _make_query("srch:bulk_confirm")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_confirm(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Будет создано задач: 1", text)
+        self.assertIn("Сезон 1 - WEB-DL", text)
+        self.assertNotIn("Сезон 2 -", text)
+        kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertIn("✅ Скачать 1", labels)
+        self.assertIn("⬅️ К плану", labels)
+
+    def test_run_downloads_ready_seasons_and_returns_summary(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1, 2], results=[result])
+        query = _make_query("srch:bulk_run")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+
+        with (
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task_1", "torrent-файл"))) as dl,
+            patch.object(bot, "_remember_task_owner") as owner,
+            patch.object(bot, "_remember_task_meta") as meta,
+        ):
+            state = asyncio.run(bot.search_series_bulk_run(update, ctx))
+
+        self.assertEqual(state, bot.ConversationHandler.END)
+        dl.assert_awaited_once()
+        entry = dl.await_args.args[0]
+        self.assertEqual(entry["title"], result["title"])
+        owner.assert_called_once_with("task_1", 100)
+        meta.assert_called_once()
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Добавлено: 1", final_text)
+        self.assertIn("task_1", final_text)
+        self.assertIn("Сезон 1", final_text)
+        self.assertNotIn("Сезон 2", final_text)
+
+    def test_run_reports_failed_ready_season(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result])
+        query = _make_query("srch:bulk_run")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+
+        with (
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=bot.DownloadStationError("no space"))),
+        ):
+            asyncio.run(bot.search_series_bulk_run(update, ctx))
+
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Добавлено: 0", final_text)
+        self.assertIn("Не удалось добавить: 1", final_text)
+        self.assertIn("Download Station", final_text)
 
 
 class SearchSubscribePickTests(unittest.TestCase):
