@@ -384,6 +384,58 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(query.edit_message_text.await_count, 1)
         self.assertIn("Определяю список сезонов", query.edit_message_text.await_args.args[0])
 
+    def test_bulk_build_shows_long_running_notice(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        asyncio.run(bot.search_series_bulk_plan(update, ctx))
+        query.edit_message_text.reset_mock()
+        query.data = "srch:bulk_build"
+        fake_store, _saved_jobs = _fake_series_bulk_store()
+
+        async def known_seasons(_series_query, _results):
+            await asyncio.sleep(0.02)
+            return [1], True
+
+        with (
+            patch.object(bot, "_SERIES_BULK_LONG_NOTICE_SECONDS", 0.001),
+            patch.object(bot, "_SERIES_BULK_LONG_NOTICE_INTERVAL_SECONDS", 999),
+            patch.object(bot, "_series_bulk_known_seasons", AsyncMock(side_effect=known_seasons)),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())),
+            patch.object(bot, "_series_bulk_downloading_seasons", AsyncMock(return_value=set())),
+            patch.object(bot, "_series_bulk_search_once", AsyncMock(return_value=([], []))),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(bot.search_series_bulk_build_plan(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        notice_calls = [
+            call
+            for call in query.edit_message_text.await_args_list
+            if "Всё ещё собираю план" in call.args[0]
+        ]
+        self.assertTrue(notice_calls)
+        labels = [
+            b.text
+            for row in notice_calls[0].kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("❌ Отмена", labels)
+        self.assertIn("📚 Скачать недостающие сезоны: Клиника", query.edit_message_text.await_args.args[0])
+
     def test_wide_search_adds_candidates_outside_current_results(self):
         query = _make_query("srch:bulk_plan:0")
         query.message = MagicMock()

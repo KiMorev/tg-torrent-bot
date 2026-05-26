@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hashlib
 import html as html_module
 import json
@@ -9265,7 +9266,16 @@ def _series_bulk_error_keyboard(index: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _series_bulk_wait_text(series_query: str, active_stage: str = "seasons") -> str:
+_SERIES_BULK_LONG_NOTICE_SECONDS = 75.0
+_SERIES_BULK_LONG_NOTICE_INTERVAL_SECONDS = 75.0
+
+
+def _series_bulk_wait_text(
+    series_query: str,
+    active_stage: str = "seasons",
+    *,
+    long_running: bool = False,
+) -> str:
     stages = [
         ("seasons", "Определяю список сезонов"),
         ("plex", "Проверяю Plex"),
@@ -9289,7 +9299,73 @@ def _series_bulk_wait_text(series_query: str, active_stage: str = "seasons") -> 
             lines.append(f"• {label}")
         else:
             lines.append(f"✅ {label}")
+    if long_running:
+        lines.extend([
+            "",
+            "⏳ Всё ещё собираю план.",
+            "Некоторые сезоны ищутся отдельно, поэтому это может занять ещё пару минут.",
+        ])
     return "\n".join(lines)
+
+
+async def _series_bulk_edit_wait(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    series_query: str,
+    active_stage: str,
+    *,
+    long_running: bool = False,
+) -> None:
+    if long_running:
+        context.user_data["srch_series_bulk_long_notice"] = True
+    context.user_data["srch_series_bulk_wait_stage"] = active_stage
+    await query.edit_message_text(
+        _series_bulk_wait_text(
+            series_query,
+            active_stage,
+            long_running=bool(context.user_data.get("srch_series_bulk_long_notice")),
+        ),
+        reply_markup=_series_bulk_wait_keyboard(),
+    )
+
+
+async def _series_bulk_long_notice_loop(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    series_query: str,
+    build_token: str,
+) -> None:
+    try:
+        await asyncio.sleep(_SERIES_BULK_LONG_NOTICE_SECONDS)
+        while not _series_bulk_build_cancelled(context, build_token):
+            if context.user_data.get("srch_series_bulk_build_token") != build_token:
+                return
+            active_stage = str(context.user_data.get("srch_series_bulk_wait_stage") or "search")
+            try:
+                await _series_bulk_edit_wait(
+                    query,
+                    context,
+                    series_query,
+                    active_stage,
+                    long_running=True,
+                )
+            except Exception:
+                logger.debug("Series bulk plan: long notice update failed", exc_info=True)
+            await asyncio.sleep(_SERIES_BULK_LONG_NOTICE_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _series_bulk_stop_long_notice(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    if task.done():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 async def _series_bulk_send_animation(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None):
@@ -10844,10 +10920,11 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
     _cancel_didmean_prefetch(context)
     chat_id = _chat_id_from_query(query)
     animation_msg = await _series_bulk_send_animation(context, chat_id)
+    long_notice_task: asyncio.Task | None = None
     try:
-        await query.edit_message_text(
-            _series_bulk_wait_text(series_query, "seasons"),
-            reply_markup=_series_bulk_wait_keyboard(),
+        await _series_bulk_edit_wait(query, context, series_query, "seasons")
+        long_notice_task = asyncio.create_task(
+            _series_bulk_long_notice_loop(query, context, series_query, build_token)
         )
         seasons, verified = await _series_bulk_known_seasons(series_query, results)
         if _series_bulk_build_cancelled(context, build_token):
@@ -10859,26 +10936,17 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         if profile is None:
             profile = _series_bulk_profile_from_result(context, result)
 
-        await query.edit_message_text(
-            _series_bulk_wait_text(series_query, "plex"),
-            reply_markup=_series_bulk_wait_keyboard(),
-        )
+        await _series_bulk_edit_wait(query, context, series_query, "plex")
         plex_seasons = await _get_plex_seasons_for_series(series_query)
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
 
-        await query.edit_message_text(
-            _series_bulk_wait_text(series_query, "downloads"),
-            reply_markup=_series_bulk_wait_keyboard(),
-        )
+        await _series_bulk_edit_wait(query, context, series_query, "downloads")
         downloading_seasons = await _series_bulk_downloading_seasons(series_query)
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
 
-        await query.edit_message_text(
-            _series_bulk_wait_text(series_query, "search"),
-            reply_markup=_series_bulk_wait_keyboard(),
-        )
+        await _series_bulk_edit_wait(query, context, series_query, "search")
         wide_results, search_warnings = await _series_bulk_search_once(context, series_query)
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
@@ -10904,10 +10972,7 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         )
         targeted_seasons = _series_bulk_seasons_for_targeted_search(preliminary_plan)
         if targeted_seasons:
-            await query.edit_message_text(
-                _series_bulk_wait_text(series_query, "targeted"),
-                reply_markup=_series_bulk_wait_keyboard(),
-            )
+            await _series_bulk_edit_wait(query, context, series_query, "targeted")
             for season in targeted_seasons:
                 season_query = _normalize_season_in_query(f"{series_query} Сезон {season}")
                 season_results, season_warnings = await _series_bulk_search_once(context, season_query)
@@ -10916,10 +10981,7 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
                 search_warnings.extend(season_warnings)
                 combined_results = _series_bulk_merge_results(combined_results, season_results)
 
-        await query.edit_message_text(
-            _series_bulk_wait_text(series_query, "plan"),
-            reply_markup=_series_bulk_wait_keyboard(),
-        )
+        await _series_bulk_edit_wait(query, context, series_query, "plan")
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
         plan = build_series_bulk_plan(
@@ -10968,6 +11030,9 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         )
         return SEARCH_RESULTS
     finally:
+        await _series_bulk_stop_long_notice(long_notice_task)
+        context.user_data.pop("srch_series_bulk_wait_stage", None)
+        context.user_data.pop("srch_series_bulk_long_notice", None)
         _series_bulk_finish_build(context, build_token)
         await _series_bulk_delete_animation(animation_msg)
 
