@@ -81,6 +81,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.movie_discovery_cache_file, Path("/tmp/tg_torrent_drop/movie_discovery.json"))
         self.assertEqual(settings.movie_discovery_settings_file, Path("/tmp/tg_torrent_drop/movie_discovery_settings.json"))
         self.assertEqual(settings.movie_discovery_debug_file, Path("/tmp/tg_torrent_drop/movie_discovery_debug.json"))
+        self.assertEqual(settings.series_bulk_jobs_file, Path("/tmp/tg_torrent_drop/series_bulk_jobs.json"))
         self.assertEqual(settings.movie_discovery_rutracker_tm, 32)
         self.assertTrue(settings.movie_discovery_jackett_require_date)
         self.assertEqual(settings.movie_discovery_jackett_max_age_days, 32)
@@ -111,6 +112,7 @@ class ConfigParsingTests(unittest.TestCase):
             "MOVIE_DISCOVERY_INTERVAL_HOURS": "0",
             "MOVIE_DISCOVERY_CACHE_FILE": "/cache/new.json",
             "MOVIE_DISCOVERY_DEBUG_FILE": "/cache/new_debug.json",
+            "SERIES_BULK_JOBS_FILE": "/cache/series_bulk_jobs.json",
             "MOVIE_DISCOVERY_RUTRACKER_TM": "7",
             "MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE": "false",
             "MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS": "0",
@@ -139,6 +141,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.movie_discovery_interval_hours, 1)
         self.assertEqual(settings.movie_discovery_cache_file, Path("/cache/new.json"))
         self.assertEqual(settings.movie_discovery_debug_file, Path("/cache/new_debug.json"))
+        self.assertEqual(settings.series_bulk_jobs_file, Path("/cache/series_bulk_jobs.json"))
         self.assertEqual(settings.movie_discovery_rutracker_tm, 7)
         self.assertFalse(settings.movie_discovery_jackett_require_date)
         self.assertEqual(settings.movie_discovery_jackett_max_age_days, 1)

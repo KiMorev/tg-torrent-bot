@@ -122,6 +122,7 @@
 | `movie_discovery_settings.json` | Настройки `/new`, подписчики, per-user seen/shown flags, Jackett trackers. |
 | `movie_discovery_debug.json` | Debug snapshot последнего refresh `/new`. |
 | `pending_downloads.json` | Очередь отложенных скачиваний и retry-state. |
+| `series_bulk_jobs.json` | Планы массового скачивания сезонов и ручные решения по ним. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `gpt_usage.json` | Использование GPT-функций. |

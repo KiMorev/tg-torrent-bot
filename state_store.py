@@ -28,6 +28,7 @@ class JsonStateStore:
         topic_subscriptions_file: Path | None = None,
         task_meta_file: Path | None = None,
         pending_downloads_file: Path | None = None,
+        series_bulk_jobs_file: Path | None = None,
         storage_history_file: Path | None = None,
         voice_usage_file: Path | None = None,
         gpt_usage_file: Path | None = None,
@@ -43,6 +44,7 @@ class JsonStateStore:
         self.topic_subscriptions_file = topic_subscriptions_file
         self.task_meta_file = task_meta_file
         self.pending_downloads_file = pending_downloads_file
+        self.series_bulk_jobs_file = series_bulk_jobs_file
         self.storage_history_file = storage_history_file
         self.voice_usage_file = voice_usage_file
         self.gpt_usage_file = gpt_usage_file
@@ -433,6 +435,33 @@ class JsonStateStore:
         # Stable order for diff-friendly JSON.
         ordered = {k: entries[k] for k in sorted(entries.keys())}
         self.save_json_file(self.pending_downloads_file, ordered, "pending downloads")
+
+    def load_series_bulk_jobs(self) -> dict[str, dict]:
+        """Load persistent series bulk plans.
+
+        Shape: ``{job_id: job_dict}``. Invalid top-level payloads and non-dict
+        entries are ignored so one malformed item doesn't break the whole file.
+        """
+        if not self.series_bulk_jobs_file:
+            return {}
+        payload = self.load_json_file(self.series_bulk_jobs_file, {})
+        if not isinstance(payload, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for job_id, job in payload.items():
+            if isinstance(job, dict) and job_id:
+                out[str(job_id)] = job
+        return out
+
+    def save_series_bulk_jobs(self, jobs: dict[str, dict]) -> None:
+        if not self.series_bulk_jobs_file:
+            return
+        ordered = {
+            str(job_id): jobs[job_id]
+            for job_id in sorted(jobs.keys())
+            if isinstance(jobs[job_id], dict) and job_id
+        }
+        self.save_json_file(self.series_bulk_jobs_file, ordered, "series bulk jobs")
 
     def load_movie_discovery_cache(self) -> dict:
         if not self.movie_discovery_cache_file:

@@ -41,6 +41,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         topic_subscriptions_file=settings.topic_subscriptions_file,
         task_meta_file=settings.task_meta_file,
         pending_downloads_file=settings.pending_downloads_file,
+        series_bulk_jobs_file=settings.series_bulk_jobs_file,
         storage_history_file=settings.storage_history_file,
         voice_usage_file=settings.voice_usage_file,
         gpt_usage_file=settings.gpt_usage_file,

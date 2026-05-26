@@ -17,6 +17,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         topic_subscriptions_file=d / "subscriptions.json",
         task_meta_file=d / "task_meta.json",
         pending_downloads_file=d / "pending_downloads.json",
+        series_bulk_jobs_file=d / "series_bulk_jobs.json",
     )
 
 
@@ -104,6 +105,54 @@ class StateStoreTests(unittest.TestCase):
         self.assertIn("good", loaded)
         self.assertNotIn("bad", loaded)
         self.assertNotIn("alsobad", loaded)
+
+    def test_series_bulk_jobs_roundtrip(self) -> None:
+        jobs = {
+            "bulk_b": {
+                "id": "bulk_b",
+                "chat_id": 100,
+                "series_title": "Клиника",
+                "status": "planned",
+                "profile": {"quality": "1080p", "require_original": True},
+                "seasons": {
+                    "1": {
+                        "status": "selected",
+                        "task_id": "task_1",
+                        "result": {"title": "Клиника / Сезон: 1"},
+                    },
+                    "2": {
+                        "status": "needs_decision",
+                        "resolved": "пропущен",
+                    },
+                },
+            },
+            "bulk_a": {
+                "id": "bulk_a",
+                "chat_id": 200,
+                "series_title": "Фарго",
+                "status": "running",
+                "seasons": {},
+            },
+        }
+
+        self.store.save_series_bulk_jobs(jobs)
+        loaded = self.store.load_series_bulk_jobs()
+
+        self.assertEqual(loaded, jobs)
+
+    def test_series_bulk_jobs_empty_when_missing(self) -> None:
+        self.assertEqual(self.store.load_series_bulk_jobs(), {})
+
+    def test_series_bulk_jobs_ignores_non_dict_entries(self) -> None:
+        self.store.save_json_file(
+            self.store.series_bulk_jobs_file,
+            {"good": {"series_title": "Клиника"}, "bad": "string", "alsobad": 42},
+            "test",
+        )
+
+        loaded = self.store.load_series_bulk_jobs()
+
+        self.assertEqual(loaded, {"good": {"series_title": "Клиника"}})
 
     def test_task_meta_roundtrip(self) -> None:
         self.store.remember_task_meta("tid1", {
