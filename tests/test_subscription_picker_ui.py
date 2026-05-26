@@ -850,6 +850,29 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["seasons"]["1"]["task_id"], "task_1")
         self.assertEqual(job["seasons"]["1"]["method"], "torrent-файл")
 
+    def test_run_downloads_ignores_duplicate_action_while_running(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result])
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_action_running"] = "batch"
+        query = _make_query("srch:bulk_run")
+        update = MagicMock(callback_query=query)
+
+        with patch.object(bot, "_attempt_pending_download", AsyncMock()) as dl:
+            state = asyncio.run(bot.search_series_bulk_run(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        dl.assert_not_awaited()
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Уже выполняю скачивание", text)
+
     def test_run_reports_failed_ready_season(self):
         result = {
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
@@ -1154,6 +1177,24 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["pack_downloads"][0]["task_id"], "task_pack")
         self.assertEqual(job["pack_downloads"][0]["season_range"], [1, 3])
 
+    def test_pack_download_ignores_duplicate_action_while_running(self):
+        pack = _pack_result()
+        plan = _bulk_plan(seasons=[1, 2, 3], results=[pack])
+        ctx = _make_context(results=[pack])
+        ctx.user_data["srch_series_bulk_plan"] = plan
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_action_running"] = "pack"
+        query = _make_query("srch:bulk_pack_run:0")
+        update = MagicMock(callback_query=query)
+
+        with patch.object(bot, "_attempt_pending_download", AsyncMock()) as dl:
+            state = asyncio.run(bot.search_series_bulk_pack_run(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        dl.assert_not_awaited()
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Уже выполняю скачивание", text)
+
     def test_missing_season_can_be_opened_for_soft_search(self):
         results = [{
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
@@ -1266,6 +1307,24 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for b in row
         ]
         self.assertIn("⬇️ Скачать 1", labels)
+
+    def test_bulk_search_rutracker_fallback_has_timeout_warning(self):
+        ctx = _make_context(results=[])
+        rutracker = MagicMock()
+
+        async def timeout_wait_for(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        with (
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "rutracker_client", rutracker),
+            patch.object(bot.asyncio, "wait_for", timeout_wait_for),
+        ):
+            results, warnings = asyncio.run(bot._series_bulk_search_once(ctx, "Клиника"))
+
+        self.assertEqual(results, [])
+        self.assertIn("Rutracker: таймаут поиска 45 сек", warnings)
 
     def test_skip_manual_review_marks_season_resolved_and_returns_to_plan(self):
         results = [

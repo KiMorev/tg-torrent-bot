@@ -8959,6 +8959,18 @@ def _series_bulk_finish_build(context: ContextTypes.DEFAULT_TYPE, token: str) ->
         context.user_data.pop("srch_series_bulk_cancelled_token", None)
 
 
+def _series_bulk_start_action(context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
+    if context.user_data.get("srch_series_bulk_action_running"):
+        return False
+    context.user_data["srch_series_bulk_action_running"] = action
+    return True
+
+
+def _series_bulk_finish_action(context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
+    if context.user_data.get("srch_series_bulk_action_running") == action:
+        context.user_data.pop("srch_series_bulk_action_running", None)
+
+
 def _series_bulk_resolved(context: ContextTypes.DEFAULT_TYPE) -> dict[int, str]:
     raw = context.user_data.setdefault("srch_series_bulk_resolved", {})
     if not isinstance(raw, dict):
@@ -10143,8 +10155,14 @@ async def _series_bulk_search_once(
 
     if rutracker_client:
         try:
-            raw = await asyncio.to_thread(rutracker_client.search, base_query)
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(rutracker_client.search, base_query),
+                timeout=45.0,
+            )
             results.extend(_series_bulk_result_from_rutracker(item) for item in raw)
+        except asyncio.TimeoutError:
+            warnings.append("Rutracker: таймаут поиска 45 сек")
+            logger.info("Series bulk plan: Rutracker search timed out for %r", base_query)
         except RutrackerError as exc:
             warnings.append(f"Rutracker: {str(exc)[:80]}")
             logger.info("Series bulk plan: Rutracker search failed for %r: %s", base_query, exc)
@@ -11104,74 +11122,83 @@ async def search_series_bulk_pack_run(update: Update, context: ContextTypes.DEFA
             notice="Не нашёл выбранный пак. Откройте список паков ещё раз.",
         )
     _index, result = selected
-
-    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
-    if disk_check is not None and disk_check[0] == "block":
-        await query.edit_message_text(
-            disk_check[1],
-            reply_markup=_series_bulk_pack_list_keyboard(plan),
-            parse_mode="HTML",
-        )
-        return SEARCH_RESULTS
-
-    await query.edit_message_text(
-        f"⏳ Добавляю пак сезонов: {_series_bulk_pack_label(result)}",
-        reply_markup=_series_bulk_wait_keyboard(),
-    )
-    chat_id = _chat_id_from_query(query)
-    try:
-        task_id, method = await _series_bulk_add_download(
-            context,
-            result,
-            chat_id=chat_id,
-            meta_source="series_bulk_pack",
-        )
-    except Exception as exc:
-        logger.warning(
-            "Series bulk pack download failed: title=%s error=%s",
-            result.get("title"),
-            exc,
-            exc_info=True,
-        )
+    if not _series_bulk_start_action(context, "pack"):
         return await _series_bulk_show_plan(
             query,
             context,
-            notice=f"❌ Пак не удалось добавить: {_format_download_error(exc)}",
+            notice="⏳ Уже выполняю скачивание по этому плану. Дождитесь завершения текущего действия.",
         )
 
-    season_range = _series_bulk_pack_range(result)
-    covered_seasons = _series_bulk_pack_covered_seasons(plan, season_range)
-    summary = f"скачан паком: {task_id or method}"
-    for season in covered_seasons:
-        _series_bulk_mark_resolved(context, season, summary)
-        _series_bulk_clear_failed(context, season)
-        _series_bulk_record_job_season(
+    try:
+        disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+        if disk_check is not None and disk_check[0] == "block":
+            await query.edit_message_text(
+                disk_check[1],
+                reply_markup=_series_bulk_pack_list_keyboard(plan),
+                parse_mode="HTML",
+            )
+            return SEARCH_RESULTS
+
+        await query.edit_message_text(
+            f"⏳ Добавляю пак сезонов: {_series_bulk_pack_label(result)}",
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        chat_id = _chat_id_from_query(query)
+        try:
+            task_id, method = await _series_bulk_add_download(
+                context,
+                result,
+                chat_id=chat_id,
+                meta_source="series_bulk_pack",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Series bulk pack download failed: title=%s error=%s",
+                result.get("title"),
+                exc,
+                exc_info=True,
+            )
+            return await _series_bulk_show_plan(
+                query,
+                context,
+                notice=f"❌ Пак не удалось добавить: {_format_download_error(exc)}",
+            )
+
+        season_range = _series_bulk_pack_range(result)
+        covered_seasons = _series_bulk_pack_covered_seasons(plan, season_range)
+        summary = f"скачан паком: {task_id or method}"
+        for season in covered_seasons:
+            _series_bulk_mark_resolved(context, season, summary)
+            _series_bulk_clear_failed(context, season)
+            _series_bulk_record_job_season(
+                context,
+                season,
+                "pack_downloaded",
+                task_id=task_id or "",
+                method=method,
+                summary=summary,
+                result=result,
+            )
+        _series_bulk_record_job_pack(
             context,
-            season,
-            "pack_downloaded",
-            task_id=task_id or "",
-            method=method,
-            summary=summary,
             result=result,
+            task_id=task_id,
+            method=method,
+            season_range=season_range,
         )
-    _series_bulk_record_job_pack(
-        context,
-        result=result,
-        task_id=task_id,
-        method=method,
-        season_range=season_range,
-    )
-    _series_bulk_set_job_status(context, "pack_downloaded")
+        _series_bulk_set_job_status(context, "pack_downloaded")
 
-    if covered_seasons:
-        season_text = f"{_series_bulk_seasons_label(covered_seasons)} пометил как скачанные паком."
-    else:
-        season_text = "План по сезонам не помечал: диапазон пака не распознан."
-    return await _series_bulk_show_plan(
-        query,
-        context,
-        notice=f"✅ Пак добавлен: {task_id or method}.\n{season_text}",
-    )
+        if covered_seasons:
+            season_text = f"{_series_bulk_seasons_label(covered_seasons)} пометил как скачанные паком."
+        else:
+            season_text = "План по сезонам не помечал: диапазон пака не распознан."
+        return await _series_bulk_show_plan(
+            query,
+            context,
+            notice=f"✅ Пак добавлен: {task_id or method}.\n{season_text}",
+        )
+    finally:
+        _series_bulk_finish_action(context, "pack")
 
 
 async def search_series_bulk_candidate_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -11690,133 +11717,143 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
         )
         return SEARCH_RESULTS
 
-    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
-    if disk_check is not None and disk_check[0] == "block":
-        await query.edit_message_text(
-            disk_check[1],
-            reply_markup=_search_error_keyboard(),
-            parse_mode="HTML",
+    if not _series_bulk_start_action(context, "batch"):
+        return await _series_bulk_show_plan(
+            query,
+            context,
+            notice="⏳ Уже выполняю скачивание по этому плану. Дождитесь завершения текущего действия.",
         )
-        return SEARCH_RESULTS
 
-    chat_id = _chat_id_from_query(query)
-    successes: list[dict] = []
-    failures: list[dict] = []
-    pending_retries: list[dict] = []
-    total = len(ready)
-    _series_bulk_set_job_status(context, "batch_running")
-    await query.edit_message_text(
-        f"⏳ Добавляю уверенные сезоны: 0/{total}",
-        reply_markup=_series_bulk_wait_keyboard(),
-    )
-    for position, season in enumerate(ready, start=1):
-        assert season.selected is not None
-        result = season.selected.result
+    try:
+        disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+        if disk_check is not None and disk_check[0] == "block":
+            await query.edit_message_text(
+                disk_check[1],
+                reply_markup=_search_error_keyboard(),
+                parse_mode="HTML",
+            )
+            return SEARCH_RESULTS
+
+        chat_id = _chat_id_from_query(query)
+        successes: list[dict] = []
+        failures: list[dict] = []
+        pending_retries: list[dict] = []
+        total = len(ready)
+        _series_bulk_set_job_status(context, "batch_running")
         await query.edit_message_text(
-            f"⏳ Добавляю уверенные сезоны: {position}/{total}\n"
-            f"Сезон {season.season}: {_series_bulk_candidate_label(season.selected)}",
+            f"⏳ Добавляю уверенные сезоны: 0/{total}",
             reply_markup=_series_bulk_wait_keyboard(),
         )
-        try:
-            entry = _pending_download_entry_from_result(
-                result,
-                chat_id=chat_id,
-                subscribe=False,
-                error="",
+        for position, season in enumerate(ready, start=1):
+            assert season.selected is not None
+            result = season.selected.result
+            await query.edit_message_text(
+                f"⏳ Добавляю уверенные сезоны: {position}/{total}\n"
+                f"Сезон {season.season}: {_series_bulk_candidate_label(season.selected)}",
+                reply_markup=_series_bulk_wait_keyboard(),
             )
-            task_id, method = await _attempt_pending_download(entry)
-            if task_id:
-                _remember_task_owner(task_id, chat_id)
-                _remember_task_meta(task_id, _build_task_meta_from_result(result, source="series_bulk"))
-            successes.append({
-                "season": season.season,
-                "task_id": task_id or "-",
-                "method": method,
-            })
-            _series_bulk_mark_resolved(
-                context,
-                season.season,
-                f"скачан: {task_id or method}",
-            )
-            _series_bulk_clear_failed(context, season.season)
-            _series_bulk_record_job_season(
-                context,
-                season.season,
-                "downloaded",
-                task_id=task_id or "",
-                method=method,
-                result=result,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Series bulk download failed: season=%s title=%s error=%s",
-                season.season,
-                (result or {}).get("title"),
-                exc,
-                exc_info=True,
-            )
-            error = _format_download_error(exc)
-            if _pending_downloads_enabled() and _is_pending_retryable_download_error(exc):
-                job_id = str(context.user_data.get("srch_series_bulk_job_id") or "")
-                entry_id, _entry = _queue_pending_download_from_result(
+            try:
+                entry = _pending_download_entry_from_result(
                     result,
                     chat_id=chat_id,
                     subscribe=False,
-                    error=error,
-                    series_bulk={
-                        "job_id": job_id,
-                        "season": season.season,
-                    } if job_id else None,
+                    error="",
                 )
-                pending_retries.append({
+                task_id, method = await _attempt_pending_download(entry)
+                if task_id:
+                    _remember_task_owner(task_id, chat_id)
+                    _remember_task_meta(task_id, _build_task_meta_from_result(result, source="series_bulk"))
+                successes.append({
                     "season": season.season,
-                    "entry_id": entry_id,
-                    "error": error,
+                    "task_id": task_id or "-",
+                    "method": method,
                 })
-                summary = f"в очереди на повтор: {entry_id}"
-                _series_bulk_mark_resolved(context, season.season, summary)
+                _series_bulk_mark_resolved(
+                    context,
+                    season.season,
+                    f"скачан: {task_id or method}",
+                )
                 _series_bulk_clear_failed(context, season.season)
                 _series_bulk_record_job_season(
                     context,
                     season.season,
-                    "pending_retry",
-                    error=error,
-                    summary=summary,
+                    "downloaded",
+                    task_id=task_id or "",
+                    method=method,
                     result=result,
-                    pending_entry_id=entry_id,
                 )
-                continue
-            failures.append({
-                "season": season.season,
-                "error": error,
-            })
-            _series_bulk_mark_failed(context, season.season, error)
-            _series_bulk_mark_failed_candidate(
-                context,
-                season.season,
-                _series_bulk_candidate_index(season, season.selected),
-            )
-            _series_bulk_record_job_season(
-                context,
-                season.season,
-                "failed",
-                error=error,
-                result=result,
-            )
+            except Exception as exc:
+                logger.warning(
+                    "Series bulk download failed: season=%s title=%s error=%s",
+                    season.season,
+                    (result or {}).get("title"),
+                    exc,
+                    exc_info=True,
+                )
+                error = _format_download_error(exc)
+                if _pending_downloads_enabled() and _is_pending_retryable_download_error(exc):
+                    job_id = str(context.user_data.get("srch_series_bulk_job_id") or "")
+                    entry_id, _entry = _queue_pending_download_from_result(
+                        result,
+                        chat_id=chat_id,
+                        subscribe=False,
+                        error=error,
+                        series_bulk={
+                            "job_id": job_id,
+                            "season": season.season,
+                        } if job_id else None,
+                    )
+                    pending_retries.append({
+                        "season": season.season,
+                        "entry_id": entry_id,
+                        "error": error,
+                    })
+                    summary = f"в очереди на повтор: {entry_id}"
+                    _series_bulk_mark_resolved(context, season.season, summary)
+                    _series_bulk_clear_failed(context, season.season)
+                    _series_bulk_record_job_season(
+                        context,
+                        season.season,
+                        "pending_retry",
+                        error=error,
+                        summary=summary,
+                        result=result,
+                        pending_entry_id=entry_id,
+                    )
+                    continue
+                failures.append({
+                    "season": season.season,
+                    "error": error,
+                })
+                _series_bulk_mark_failed(context, season.season, error)
+                _series_bulk_mark_failed_candidate(
+                    context,
+                    season.season,
+                    _series_bulk_candidate_index(season, season.selected),
+                )
+                _series_bulk_record_job_season(
+                    context,
+                    season.season,
+                    "failed",
+                    error=error,
+                    result=result,
+                )
 
-    if failures and (successes or pending_retries):
-        _series_bulk_set_job_status(context, "batch_completed_with_errors")
-    elif pending_retries:
-        _series_bulk_set_job_status(context, "batch_completed_with_pending")
-    elif failures:
-        _series_bulk_set_job_status(context, "batch_failed")
-    else:
-        _series_bulk_set_job_status(context, "batch_completed")
-    await query.edit_message_text(
-        _series_bulk_done_text(successes, failures, pending_retries),
-        reply_markup=_series_bulk_done_keyboard(bool(successes), bool(failures)),
-    )
-    return SEARCH_RESULTS if failures else ConversationHandler.END
+        if failures and (successes or pending_retries):
+            _series_bulk_set_job_status(context, "batch_completed_with_errors")
+        elif pending_retries:
+            _series_bulk_set_job_status(context, "batch_completed_with_pending")
+        elif failures:
+            _series_bulk_set_job_status(context, "batch_failed")
+        else:
+            _series_bulk_set_job_status(context, "batch_completed")
+        await query.edit_message_text(
+            _series_bulk_done_text(successes, failures, pending_retries),
+            reply_markup=_series_bulk_done_keyboard(bool(successes), bool(failures)),
+        )
+        return SEARCH_RESULTS if failures else ConversationHandler.END
+    finally:
+        _series_bulk_finish_action(context, "batch")
 
 
 async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
