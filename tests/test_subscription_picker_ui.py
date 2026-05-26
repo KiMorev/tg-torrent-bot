@@ -416,16 +416,106 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=bot.DownloadStationError("no space"))),
             patch.object(bot, "state_store", fake_store),
         ):
-            asyncio.run(bot.search_series_bulk_run(update, ctx))
+            state = asyncio.run(bot.search_series_bulk_run(update, ctx))
 
+        self.assertEqual(state, bot.SEARCH_RESULTS)
         final_text = query.edit_message_text.await_args.args[0]
         self.assertIn("Добавлено: 0", final_text)
         self.assertIn("Не удалось добавить: 1", final_text)
         self.assertIn("Download Station", final_text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("⚙️ Разобрать ошибки", labels)
+        self.assertIn("Download Station", ctx.user_data["srch_series_bulk_failed"]["1"])
         job = saved_jobs["bulk_test"]
         self.assertEqual(job["status"], "batch_failed")
         self.assertEqual(job["seasons"]["1"]["runtime_status"], "failed")
         self.assertIn("Download Station", job["seasons"]["1"]["error"])
+
+    def test_failed_ready_season_review_offers_retry(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result])
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_failed"] = {"1": "Download Station: no space"}
+        ctx.user_data["srch_series_bulk_failed_candidates"] = {"1": 0}
+        query = _make_query("srch:bulk_review")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_review(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Сезон 1 - не удалось добавить", text)
+        self.assertIn("Download Station: no space", text)
+        self.assertIn("Текущий вариант", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("🔄 Попробовать снова", labels)
+        self.assertIn("⏭ Пропустить сезон", labels)
+
+    def test_retry_failed_ready_season_clears_error_and_records_task(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result])
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_results"] = [result]
+        ctx.user_data["srch_series_bulk_failed"] = {"1": "Download Station: no space"}
+        ctx.user_data["srch_series_bulk_failed_candidates"] = {"1": 0}
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
+        query = _make_query("srch:bulk_retry")
+        query.message.chat.id = 100
+        update = MagicMock(callback_query=query)
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "batch_failed",
+                "seasons": {
+                    "1": {
+                        "season": 1,
+                        "runtime_status": "failed",
+                        "error": "Download Station: no space",
+                    },
+                },
+            },
+        })
+
+        with (
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task_2", "torrent-файл"))),
+            patch.object(bot, "_remember_task_owner") as owner,
+            patch.object(bot, "_remember_task_meta") as meta,
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(bot.search_series_bulk_retry(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        self.assertEqual(ctx.user_data["srch_series_bulk_failed"], {})
+        self.assertIn("скачан после повтора", ctx.user_data["srch_series_bulk_resolved"]["1"])
+        owner.assert_called_once_with("task_2", 100)
+        meta.assert_called_once()
+        entry = saved_jobs["bulk_test"]["seasons"]["1"]
+        self.assertEqual(entry["runtime_status"], "downloaded")
+        self.assertEqual(entry["task_id"], "task_2")
+        self.assertNotIn("error", entry)
 
     def test_plan_keyboard_offers_manual_review_for_disputed_season(self):
         results = [
