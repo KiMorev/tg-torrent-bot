@@ -42,6 +42,14 @@ def _make_context(*, results: list[dict] | None = None) -> MagicMock:
     return ctx
 
 
+def _make_message_update(*, chat_id: int = 100) -> MagicMock:
+    update = MagicMock()
+    update.effective_chat = SimpleNamespace(id=chat_id)
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    return update
+
+
 def _jackett_result(title: str, *, url: str = "", seeders: int = 20) -> SimpleNamespace:
     return SimpleNamespace(
         title=title,
@@ -79,6 +87,7 @@ def _bulk_profile():
 def _fake_series_bulk_store(initial: dict | None = None):
     jobs = copy.deepcopy(initial or {})
     store = MagicMock()
+    store.load_approved_chat_ids.return_value = set()
     store.load_series_bulk_jobs.side_effect = lambda: copy.deepcopy(jobs)
 
     def save_series_bulk_jobs(updated):
@@ -87,6 +96,49 @@ def _fake_series_bulk_store(initial: dict | None = None):
 
     store.save_series_bulk_jobs.side_effect = save_series_bulk_jobs
     return store, jobs
+
+
+def _series_bulk_job(
+    *,
+    job_id: str = "bulk_test",
+    chat_id: int = 100,
+    title: str = "Клиника",
+    status: str = "planned",
+) -> dict:
+    result = {
+        "title": f"{title} / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+        "source": "jackett",
+        "tracker_name": "rutracker",
+        "torrent_url": "https://jackett.local/dl/1",
+        "seeders": 20,
+        "size": "10 GB",
+    }
+    profile = _bulk_profile()
+    plan = bot.build_series_bulk_plan(
+        series_title=title,
+        seasons=[1, 2],
+        results=[result],
+        profile=profile,
+        verified_season_range=True,
+    )
+    return {
+        "id": job_id,
+        "chat_id": chat_id,
+        "series_title": title,
+        "created_at": "2026-05-26T10:00:00+03:00",
+        "updated_at": "2026-05-26T11:00:00+03:00",
+        "status": status,
+        "profile": bot._series_bulk_profile_snapshot(profile),
+        "result_count": 7,
+        "warnings": [],
+        "verified_season_range": True,
+        "source_result": result,
+        "seasons": {
+            str(season.season): bot._series_bulk_season_job_entry(season)
+            for season in plan.seasons
+        },
+        "pack_candidates": [],
+    }
 
 
 def _fake_series_bulk_and_pending_store(initial: dict | None = None):
@@ -651,6 +703,66 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertNotIn("План собран не полностью", final_text)
         self.assertNotIn("Jackett: выдача достигла лимита 2", final_text)
         self.assertIn("Сезон 2 - WEB-DL", final_text)
+
+    def test_bulk_command_lists_saved_plans_for_current_chat(self):
+        update = _make_message_update(chat_id=100)
+        ctx = _make_context()
+        fake_store, _saved_jobs = _fake_series_bulk_store({
+            "bulk_test": _series_bulk_job(job_id="bulk_test", chat_id=100),
+            "bulk_other": _series_bulk_job(job_id="bulk_other", chat_id=200, title="Чужой"),
+        })
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            asyncio.run(bot.series_bulk_command(update, ctx))
+
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Сохранённые планы сезонов", text)
+        self.assertIn("Клиника", text)
+        self.assertNotIn("Чужой", text)
+        kb = update.message.reply_text.await_args.kwargs["reply_markup"]
+        buttons = {b.text: b.callback_data for row in kb.inline_keyboard for b in row}
+        self.assertEqual(buttons["📚 1. Клиника"], "srch:bulk_open:bulk_test")
+        self.assertIn("✖️ Закрыть", buttons)
+
+    def test_bulk_open_restores_saved_job_context_and_plan_actions(self):
+        job = _series_bulk_job()
+        query = _make_query("srch:bulk_open:bulk_test")
+        query.message = MagicMock()
+        query.message.chat = SimpleNamespace(id=100)
+        update = MagicMock(callback_query=query)
+        update.effective_chat = SimpleNamespace(id=100)
+        ctx = _make_context(results=[])
+        fake_store, _saved_jobs = _fake_series_bulk_store({"bulk_test": job})
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(bot.search_series_bulk_open(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        self.assertEqual(ctx.user_data["srch_series_bulk_job_id"], "bulk_test")
+        restored_plan = ctx.user_data["srch_series_bulk_plan"]
+        self.assertEqual(restored_plan.series_title, "Клиника")
+        self.assertEqual(ctx.user_data["srch_series_bulk_result_count"], 7)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Открыл сохранённый план", text)
+        self.assertIn("Проверено раздач: 7", text)
+        self.assertIn("Сезон 1 - WEB-DL", text)
+        self.assertIn("Сезон 2 - не найдено", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("⬇️ Скачать уверенные (1)", labels)
+        self.assertIn("⚙️ Разобрать спорные (1)", labels)
 
     def test_confirm_screen_lists_only_ready_seasons(self):
         result = {

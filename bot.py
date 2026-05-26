@@ -115,6 +115,8 @@ from jackett_subscriptions import (
     select_jackett_subscription_candidate,
 )
 from series_bulk_planner import (
+    CandidateEvaluation,
+    ReleaseProfile,
     STATUS_ALREADY_DOWNLOADING,
     STATUS_ALREADY_IN_PLEX,
     STATUS_EXACT,
@@ -127,6 +129,7 @@ from series_bulk_planner import (
     VOICE_ORIGINAL_ONLY,
     VOICE_REQUIRE_SELECTED,
     SeriesBulkProfile,
+    SeriesBulkPlan,
     SeasonPlan,
     build_series_bulk_plan,
     release_profile_from_title,
@@ -326,6 +329,7 @@ SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate war
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
+    BotCommand("bulk", "Планы сезонов"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
@@ -9622,6 +9626,354 @@ def _series_bulk_merge_results(*groups: list[dict]) -> list[dict]:
     return merged
 
 
+def _series_bulk_profile_from_snapshot(snapshot: dict | None) -> SeriesBulkProfile:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    voices_raw = data.get("voices") or ()
+    if isinstance(voices_raw, str):
+        voices = (voices_raw,)
+    elif isinstance(voices_raw, (list, tuple, set)):
+        voices = tuple(str(value) for value in voices_raw if value)
+    else:
+        voices = ()
+    return SeriesBulkProfile(
+        quality=str(data.get("quality") or "any"),
+        require_original=bool(data.get("require_original")),
+        require_subs=bool(data.get("require_subs")),
+        voice_policy=str(data.get("voice_policy") or VOICE_ANY_FROM_REFERENCE),
+        voices=voices,
+        release_type=str(data.get("release_type") or ""),
+        release_group=str(data.get("release_group") or ""),
+        tracker=str(data.get("tracker") or ""),
+        source=str(data.get("source") or ""),
+    )
+
+
+def _series_bulk_release_from_snapshot(snapshot: dict | None) -> ReleaseProfile:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    voices_raw = data.get("voices") or ()
+    if isinstance(voices_raw, str):
+        voices = (voices_raw,)
+    elif isinstance(voices_raw, (list, tuple, set)):
+        voices = tuple(str(value) for value in voices_raw if value)
+    else:
+        voices = ()
+    try:
+        size_gb = float(data.get("size_gb") or 0.0)
+    except (TypeError, ValueError):
+        size_gb = 0.0
+    return ReleaseProfile(
+        quality=str(data.get("quality") or ""),
+        release_type=str(data.get("release_type") or ""),
+        voices=voices,
+        has_original=bool(data.get("has_original")),
+        has_subs=bool(data.get("has_subs")),
+        has_russian_audio=bool(data.get("has_russian_audio")),
+        release_group=str(data.get("release_group") or ""),
+        size_gb=size_gb,
+    )
+
+
+def _series_bulk_candidate_from_snapshot(
+    snapshot: dict | None,
+    *,
+    default_season: int,
+) -> CandidateEvaluation | None:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    result = data.get("result")
+    if not isinstance(result, dict) or not result:
+        return None
+    try:
+        season = int(data.get("season") or default_season)
+    except (TypeError, ValueError):
+        season = default_season
+    try:
+        score = float(data.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+
+    episode_progress = None
+    raw_progress = data.get("episode_progress")
+    if isinstance(raw_progress, (list, tuple)) and len(raw_progress) == 2:
+        try:
+            episode_progress = (int(raw_progress[0]), int(raw_progress[1]))
+        except (TypeError, ValueError):
+            episode_progress = None
+
+    return CandidateEvaluation(
+        result=_series_bulk_result_snapshot(result),
+        season=season,
+        release=_series_bulk_release_from_snapshot(data.get("release")),
+        score=score,
+        confidence=str(data.get("confidence") or STATUS_NEEDS_DECISION),
+        reasons=tuple(str(value) for value in data.get("reasons") or ()),
+        warnings=tuple(str(value) for value in data.get("warnings") or ()),
+        hard_failures=tuple(str(value) for value in data.get("hard_failures") or ()),
+        episode_progress=episode_progress,
+    )
+
+
+def _series_bulk_plan_from_job(job: dict) -> SeriesBulkPlan | None:
+    seasons_raw = job.get("seasons")
+    if not isinstance(seasons_raw, dict):
+        return None
+
+    seasons: list[SeasonPlan] = []
+    for key, entry_raw in sorted(seasons_raw.items(), key=lambda item: str(item[0])):
+        entry = entry_raw if isinstance(entry_raw, dict) else {}
+        try:
+            season_num = int(entry.get("season") or key)
+        except (TypeError, ValueError):
+            continue
+        selected = _series_bulk_candidate_from_snapshot(
+            entry.get("selected"),
+            default_season=season_num,
+        )
+        candidates = [
+            candidate
+            for candidate in (
+                _series_bulk_candidate_from_snapshot(item, default_season=season_num)
+                for item in entry.get("candidates") or ()
+            )
+            if candidate is not None
+        ]
+        if selected is not None:
+            selected_key = _series_bulk_result_key(selected.result)
+            if all(_series_bulk_result_key(candidate.result) != selected_key for candidate in candidates):
+                candidates.insert(0, selected)
+        status = str(entry.get("plan_status") or entry.get("status") or STATUS_MISSING)
+        seasons.append(SeasonPlan(
+            season=season_num,
+            status=status,
+            selected=selected,
+            candidates=tuple(candidates),
+            reasons=tuple(str(value) for value in entry.get("reasons") or ()),
+        ))
+
+    if not seasons:
+        return None
+
+    return SeriesBulkPlan(
+        series_title=str(job.get("series_title") or "Сериал"),
+        seasons=tuple(sorted(seasons, key=lambda item: item.season)),
+        pack_candidates=tuple(
+            item for item in (job.get("pack_candidates") or ())
+            if isinstance(item, dict)
+        ),
+        verified_season_range=bool(job.get("verified_season_range", True)),
+    )
+
+
+def _series_bulk_results_from_job(job: dict) -> list[dict]:
+    groups: list[list[dict]] = []
+    source_result = job.get("source_result")
+    if isinstance(source_result, dict) and source_result:
+        groups.append([source_result])
+    pack_candidates = [item for item in job.get("pack_candidates") or () if isinstance(item, dict)]
+    if pack_candidates:
+        groups.append(pack_candidates)
+
+    season_results: list[dict] = []
+    seasons = job.get("seasons")
+    if isinstance(seasons, dict):
+        for entry in seasons.values():
+            if not isinstance(entry, dict):
+                continue
+            result = entry.get("result")
+            if isinstance(result, dict) and result:
+                season_results.append(result)
+            selected = entry.get("selected")
+            if isinstance(selected, dict) and isinstance(selected.get("result"), dict):
+                season_results.append(selected["result"])
+            for candidate in entry.get("candidates") or ():
+                if isinstance(candidate, dict) and isinstance(candidate.get("result"), dict):
+                    season_results.append(candidate["result"])
+    if season_results:
+        groups.append(season_results)
+    return _series_bulk_merge_results(*groups)
+
+
+_SERIES_BULK_FAILED_RUNTIME_STATUSES = {
+    "failed",
+    "pending_failed",
+    "partial_downloaded_subscription_failed",
+}
+_SERIES_BULK_RESOLVED_RUNTIME_STATUSES = {
+    "downloaded",
+    "pending_retry",
+    "partial_downloaded",
+    "downloaded_and_subscribed",
+    "subscribed",
+    "skipped",
+}
+
+
+def _series_bulk_context_maps_from_job(job: dict) -> tuple[dict[str, str], dict[str, str], dict[str, int]]:
+    resolved: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    failed_candidates: dict[str, int] = {}
+    seasons = job.get("seasons")
+    if not isinstance(seasons, dict):
+        return resolved, failed, failed_candidates
+
+    for key, entry in seasons.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            season = int(entry.get("season") or key)
+        except (TypeError, ValueError):
+            continue
+        season_key = str(season)
+        runtime_status = str(entry.get("runtime_status") or "")
+        summary = str(entry.get("summary") or "")
+        if runtime_status in _SERIES_BULK_FAILED_RUNTIME_STATUSES:
+            failed[season_key] = str(entry.get("error") or summary or "ошибка")
+            failed_candidates[season_key] = 0
+        elif runtime_status in _SERIES_BULK_RESOLVED_RUNTIME_STATUSES:
+            if runtime_status == "pending_retry":
+                summary = summary or "в очереди на повтор"
+            elif runtime_status == "downloaded":
+                summary = summary or f"скачан: {entry.get('task_id') or entry.get('method') or 'задача создана'}"
+            elif runtime_status == "skipped":
+                summary = summary or "пропущен"
+            else:
+                summary = summary or "решено"
+            resolved[season_key] = summary
+    return resolved, failed, failed_candidates
+
+
+def _series_bulk_restore_context_from_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    job_id: str,
+    job: dict,
+) -> bool:
+    plan = _series_bulk_plan_from_job(job)
+    if plan is None:
+        return False
+    profile = _series_bulk_profile_from_snapshot(job.get("profile"))
+    results = _series_bulk_results_from_job(job)
+    resolved, failed, failed_candidates = _series_bulk_context_maps_from_job(job)
+    try:
+        result_count = int(job.get("result_count") or len(results))
+    except (TypeError, ValueError):
+        result_count = len(results)
+    context.user_data["srch_series_bulk_plan"] = plan
+    context.user_data["srch_series_bulk_profile"] = profile
+    context.user_data["srch_series_bulk_results"] = results
+    context.user_data["srch_series_bulk_result_count"] = result_count
+    context.user_data["srch_series_bulk_warnings"] = tuple(str(value) for value in job.get("warnings") or ())
+    context.user_data["srch_series_bulk_resolved"] = resolved
+    context.user_data["srch_series_bulk_failed"] = failed
+    context.user_data["srch_series_bulk_failed_candidates"] = failed_candidates
+    context.user_data["srch_series_bulk_job_id"] = job_id
+    context.user_data["srch_results"] = results
+    context.user_data["srch_query"] = plan.series_title
+    context.user_data["srch_search_query"] = plan.series_title
+    context.user_data.pop("srch_series_bulk_review_season", None)
+    return True
+
+
+_SERIES_BULK_JOB_STATUS_LABELS = {
+    "planned": "план собран",
+    "batch_running": "скачивание идёт",
+    "batch_completed": "часть задач добавлена",
+    "batch_completed_with_pending": "есть очередь повтора",
+    "batch_completed_with_errors": "есть ошибки",
+    "batch_failed": "добавление не удалось",
+}
+
+
+def _series_bulk_job_matches_chat(job: dict, chat_id: int | None) -> bool:
+    if chat_id is None:
+        return False
+    try:
+        return int(job.get("chat_id")) == chat_id
+    except (TypeError, ValueError):
+        return False
+
+
+def _series_bulk_jobs_for_chat(chat_id: int | None, *, limit: int = 10) -> list[tuple[str, dict]]:
+    try:
+        jobs = state_store.load_series_bulk_jobs()
+    except Exception:
+        logger.warning("Series bulk jobs list failed", exc_info=True)
+        return []
+    if not isinstance(jobs, dict):
+        return []
+
+    items: list[tuple[str, dict]] = []
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        if not _series_bulk_job_matches_chat(job, chat_id):
+            continue
+        if not isinstance(job.get("seasons"), dict):
+            continue
+        items.append((str(job_id), job))
+
+    items.sort(
+        key=lambda item: str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+        reverse=True,
+    )
+    return items[:limit]
+
+
+def _series_bulk_short_text(value: object, *, limit: int = 42) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "Без названия"
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1].rstrip() + "…"
+
+
+def _series_bulk_short_datetime(value: object) -> str:
+    text = str(value or "")
+    try:
+        return datetime.fromisoformat(text).strftime("%d.%m %H:%M")
+    except (TypeError, ValueError):
+        return text or "неизвестно"
+
+
+def _series_bulk_jobs_text(jobs: list[tuple[str, dict]]) -> str:
+    if not jobs:
+        return (
+            "📚 Сохранённых планов сезонов нет.\n\n"
+            "План появится после кнопки «📚 Скачать недостающие сезоны» в найденном сериале."
+        )
+
+    lines = [
+        "📚 Сохранённые планы сезонов",
+        "",
+        "Откройте план, чтобы продолжить скачивание или разбор спорных сезонов.",
+        "",
+    ]
+    for index, (_job_id, job) in enumerate(jobs, start=1):
+        status = _SERIES_BULK_JOB_STATUS_LABELS.get(
+            str(job.get("status") or ""),
+            str(job.get("status") or "неизвестно"),
+        )
+        seasons = job.get("seasons") if isinstance(job.get("seasons"), dict) else {}
+        lines.extend([
+            f"{index}. {_series_bulk_short_text(job.get('series_title'))}",
+            f"   Статус: {status}",
+            f"   Сезонов в плане: {len(seasons)}",
+            f"   Обновлено: {_series_bulk_short_datetime(job.get('updated_at') or job.get('created_at'))}",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def _series_bulk_jobs_keyboard(jobs: list[tuple[str, dict]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, (job_id, job) in enumerate(jobs, start=1):
+        rows.append([InlineKeyboardButton(
+            f"📚 {index}. {_series_bulk_short_text(job.get('series_title'), limit=30)}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_open:{job_id}",
+        )])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
 def _series_bulk_soft_search_queries(series_title: str, season: int) -> list[str]:
     raw_queries = [
         _normalize_season_in_query(f"{series_title} Сезон {season}"),
@@ -10018,10 +10370,17 @@ def _series_bulk_profile_line(profile: SeriesBulkProfile | None) -> str:
 def _series_bulk_status_line(
     season_plan: SeasonPlan,
     failed_error: str | None = None,
+    resolved_summary: str | None = None,
 ) -> str:
     season = season_plan.season
     if failed_error:
         return f"⚠️ Сезон {season} - не удалось добавить, нужен разбор"
+    if resolved_summary:
+        if "очеред" in resolved_summary:
+            return f"⏳ Сезон {season} - {resolved_summary}"
+        if "пропущ" in resolved_summary:
+            return f"⏭ Сезон {season} - {resolved_summary}"
+        return f"✅ Сезон {season} - {resolved_summary}"
     if season_plan.status == STATUS_ALREADY_IN_PLEX:
         return f"✅ Сезон {season} - уже есть в Plex"
     if season_plan.status == STATUS_ALREADY_DOWNLOADING:
@@ -10081,7 +10440,14 @@ def _series_bulk_plan_text(
             *[f"• {warning}" for warning in dict.fromkeys(warnings)],
         ])
     lines.extend(["", f"Проверено раздач: {result_count}", ""])
-    lines.extend(_series_bulk_status_line(season, failed.get(season.season)) for season in plan.seasons)
+    lines.extend(
+        _series_bulk_status_line(
+            season,
+            failed.get(season.season),
+            resolved.get(season.season),
+        )
+        for season in plan.seasons
+    )
 
     ready = len(_series_bulk_ready_seasons(plan, resolved, failed))
     skipped = sum(1 for season in plan.seasons if season.status in {
@@ -10362,6 +10728,10 @@ async def _series_bulk_show_plan(
     profile = context.user_data.get("srch_series_bulk_profile")
     results = context.user_data.get("srch_series_bulk_results") or context.user_data.get("srch_results") or []
     warnings = tuple(context.user_data.get("srch_series_bulk_warnings") or ())
+    try:
+        result_count = int(context.user_data.get("srch_series_bulk_result_count") or len(results))
+    except (TypeError, ValueError):
+        result_count = len(results)
     if plan is None or profile is None:
         await query.edit_message_text("План потерян. Соберите его заново.")
         return ConversationHandler.END
@@ -10371,7 +10741,7 @@ async def _series_bulk_show_plan(
     text = _series_bulk_plan_text(
         plan,
         profile,
-        result_count=len(results),
+        result_count=result_count,
         warnings=warnings,
         resolved=resolved,
         failed=failed,
@@ -10383,6 +10753,65 @@ async def _series_bulk_show_plan(
         reply_markup=_series_bulk_plan_keyboard(plan, resolved, failed),
     )
     return SEARCH_RESULTS
+
+
+async def series_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        logger.warning("Rejected /bulk from chat_id=%s", _chat_id(update))
+        await _reply_access_pending(update, context)
+        return
+    if update.message is None:
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    jobs = _series_bulk_jobs_for_chat(chat_id)
+    await update.message.reply_text(
+        _series_bulk_jobs_text(jobs),
+        reply_markup=_series_bulk_jobs_keyboard(jobs),
+    )
+
+
+async def search_series_bulk_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None:
+        return ConversationHandler.END
+    await query.answer()
+
+    chat_id = _chat_id_from_query(query)
+    if chat_id is None and update.effective_chat:
+        chat_id = update.effective_chat.id
+    if not _is_allowed(update):
+        await query.edit_message_text(
+            "Нет доступа к этому плану.",
+            reply_markup=_series_bulk_jobs_keyboard([]),
+        )
+        return ConversationHandler.END
+
+    job_id = str(query.data or "").rsplit(":", 1)[-1]
+    try:
+        jobs = state_store.load_series_bulk_jobs()
+    except Exception:
+        logger.warning("Series bulk job open failed: id=%s", job_id, exc_info=True)
+        jobs = {}
+    job = jobs.get(job_id) if isinstance(jobs, dict) else None
+    if not isinstance(job, dict) or not _series_bulk_job_matches_chat(job, chat_id):
+        await query.edit_message_text(
+            "План не найден или уже недоступен.",
+            reply_markup=_series_bulk_jobs_keyboard([]),
+        )
+        return ConversationHandler.END
+    if not _series_bulk_restore_context_from_job(context, job_id, job):
+        await query.edit_message_text(
+            "Не удалось восстановить этот план. Соберите его заново.",
+            reply_markup=_series_bulk_jobs_keyboard([]),
+        )
+        return ConversationHandler.END
+
+    return await _series_bulk_show_plan(
+        query,
+        context,
+        notice="📚 Открыл сохранённый план.",
+    )
 
 
 async def _series_bulk_show_review_or_plan(
@@ -10944,6 +11373,7 @@ async def search_series_bulk_rebuild(update: Update, context: ContextTypes.DEFAU
     for key in (
         "srch_series_bulk_plan",
         "srch_series_bulk_results",
+        "srch_series_bulk_result_count",
         "srch_series_bulk_warnings",
         "srch_series_bulk_review_season",
         "srch_series_bulk_job_id",
@@ -13359,6 +13789,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         extras.append(
             "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
         )
+        extras.append("• /bulk — открыть сохранённый план недостающих сезонов и продолжить после рестарта")
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
 
@@ -15896,6 +16327,7 @@ def main() -> None:
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("new", movie_new_command))
+    app.add_handler(CommandHandler("bulk", series_bulk_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
@@ -15928,9 +16360,11 @@ def main() -> None:
             CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+(?::[0-9a-f]{12})?$"),
             # Re-run the last search from an error message (conversation already ended).
             CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
+            CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
         ],
             states={
                 SEARCH_OPTIONS: [
+                    CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_quick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quick$"),
                     CallbackQueryHandler(search_show_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:adv$"),
                     CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
@@ -15941,6 +16375,7 @@ def main() -> None:
                     MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_ADVANCED: [
+                    CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quality:"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:toggle:"),
                     CallbackQueryHandler(search_do, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:do_search$"),
@@ -15952,6 +16387,7 @@ def main() -> None:
                     MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_RESULTS: [
+                    CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),
                     CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z_]+$"),
@@ -15994,6 +16430,7 @@ def main() -> None:
                     MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_SEASON_SELECT: [
+                    CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_season_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season:\d+$"),
                     CallbackQueryHandler(search_season_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_skip$"),
                     CallbackQueryHandler(search_season_input_ask, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:season_input$"),
@@ -16003,6 +16440,7 @@ def main() -> None:
                     CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                 ],
                 SEARCH_JACKETT_SELECT: [
+                    CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(
                         search_jackett_toggle,
                         pattern=rf"^{SEARCH_CALLBACK_PREFIX}:{JACKETT_SELECT_PREFIX}_toggle:",
