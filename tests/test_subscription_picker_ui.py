@@ -336,6 +336,54 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["seasons"]["2"]["plan_status"], bot.STATUS_EXACT)
         self.assertEqual(job["seasons"]["2"]["runtime_status"], "pending")
 
+    def test_bulk_build_cancel_after_season_lookup_stops_without_job(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        gif_msg = MagicMock()
+        gif_msg.delete = AsyncMock()
+        ctx.bot.send_animation = AsyncMock(return_value=gif_msg)
+        asyncio.run(bot.search_series_bulk_plan(update, ctx))
+        query.edit_message_text.reset_mock()
+        query.data = "srch:bulk_build"
+        fake_store, saved_jobs = _fake_series_bulk_store()
+
+        async def known_seasons(_series_query, _results):
+            token = ctx.user_data["srch_series_bulk_build_token"]
+            ctx.user_data["srch_series_bulk_cancelled_token"] = token
+            return [1], True
+
+        with (
+            patch.object(bot, "_series_bulk_known_seasons", AsyncMock(side_effect=known_seasons)),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())) as plex,
+            patch.object(bot, "_series_bulk_search_once", AsyncMock(return_value=([], []))) as search,
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(bot.search_series_bulk_build_plan(update, ctx))
+
+        self.assertEqual(state, bot.ConversationHandler.END)
+        self.assertNotIn("srch_series_bulk_plan", ctx.user_data)
+        self.assertNotIn("srch_series_bulk_job_id", ctx.user_data)
+        self.assertEqual(saved_jobs, {})
+        plex.assert_not_awaited()
+        search.assert_not_awaited()
+        ctx.bot.send_animation.assert_awaited_once()
+        gif_msg.delete.assert_awaited_once()
+        self.assertEqual(query.edit_message_text.await_count, 1)
+        self.assertIn("Определяю список сезонов", query.edit_message_text.await_args.args[0])
+
     def test_wide_search_adds_candidates_outside_current_results(self):
         query = _make_query("srch:bulk_plan:0")
         query.message = MagicMock()

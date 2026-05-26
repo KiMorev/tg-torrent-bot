@@ -8762,6 +8762,33 @@ def _series_bulk_wait_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def _series_bulk_start_build(context: ContextTypes.DEFAULT_TYPE) -> str:
+    token = uuid.uuid4().hex
+    context.user_data["srch_series_bulk_build_token"] = token
+    context.user_data.pop("srch_series_bulk_cancelled_token", None)
+    return token
+
+
+def _series_bulk_mark_build_cancelled(context: ContextTypes.DEFAULT_TYPE) -> None:
+    token = context.user_data.get("srch_series_bulk_build_token")
+    if token:
+        context.user_data["srch_series_bulk_cancelled_token"] = token
+
+
+def _series_bulk_build_cancelled(
+    context: ContextTypes.DEFAULT_TYPE,
+    token: str,
+) -> bool:
+    return bool(token and context.user_data.get("srch_series_bulk_cancelled_token") == token)
+
+
+def _series_bulk_finish_build(context: ContextTypes.DEFAULT_TYPE, token: str) -> None:
+    if context.user_data.get("srch_series_bulk_build_token") == token:
+        context.user_data.pop("srch_series_bulk_build_token", None)
+    if context.user_data.get("srch_series_bulk_cancelled_token") == token:
+        context.user_data.pop("srch_series_bulk_cancelled_token", None)
+
+
 def _series_bulk_resolved(context: ContextTypes.DEFAULT_TYPE) -> dict[int, str]:
     raw = context.user_data.setdefault("srch_series_bulk_resolved", {})
     if not isinstance(raw, dict):
@@ -10785,20 +10812,24 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
 async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    build_token = _series_bulk_start_build(context)
     try:
         index = int(context.user_data.get("srch_series_bulk_index"))
     except (TypeError, ValueError):
+        _series_bulk_finish_build(context, build_token)
         await query.edit_message_text("План потерян. Вернитесь к результатам и откройте его заново.")
         return SEARCH_RESULTS
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
+        _series_bulk_finish_build(context, build_token)
         await query.edit_message_text("Результат недоступен.")
         return ConversationHandler.END
 
     result = results[index]
     series_query = _extract_series_base_query(str(result.get("title") or ""))
     if not series_query:
+        _series_bulk_finish_build(context, build_token)
         await query.edit_message_text(
             "Не смог уверенно определить сериал по названию раздачи.",
             reply_markup=_series_bulk_error_keyboard(index),
@@ -10814,6 +10845,8 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             reply_markup=_series_bulk_wait_keyboard(),
         )
         seasons, verified = await _series_bulk_known_seasons(series_query, results)
+        if _series_bulk_build_cancelled(context, build_token):
+            return ConversationHandler.END
         clicked_season = _extract_season_from_query(str(result.get("title") or ""))
         if clicked_season and clicked_season not in seasons:
             seasons = sorted({*seasons, clicked_season})
@@ -10826,22 +10859,29 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             reply_markup=_series_bulk_wait_keyboard(),
         )
         plex_seasons = await _get_plex_seasons_for_series(series_query)
+        if _series_bulk_build_cancelled(context, build_token):
+            return ConversationHandler.END
 
         await query.edit_message_text(
             _series_bulk_wait_text(series_query, "downloads"),
             reply_markup=_series_bulk_wait_keyboard(),
         )
         downloading_seasons = await _series_bulk_downloading_seasons(series_query)
+        if _series_bulk_build_cancelled(context, build_token):
+            return ConversationHandler.END
 
         await query.edit_message_text(
             _series_bulk_wait_text(series_query, "search"),
             reply_markup=_series_bulk_wait_keyboard(),
         )
         wide_results, search_warnings = await _series_bulk_search_once(context, series_query)
+        if _series_bulk_build_cancelled(context, build_token):
+            return ConversationHandler.END
         combined_results = _series_bulk_merge_results(results, wide_results)
         if not verified:
             seasons = sorted({*seasons, *_seasons_available_in_results(combined_results)})
         if not seasons:
+            _series_bulk_finish_build(context, build_token)
             await query.edit_message_text(
                 "Не нашёл ни одного сезона для плана.",
                 reply_markup=_series_bulk_error_keyboard(index),
@@ -10866,6 +10906,8 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             for season in targeted_seasons:
                 season_query = _normalize_season_in_query(f"{series_query} Сезон {season}")
                 season_results, season_warnings = await _series_bulk_search_once(context, season_query)
+                if _series_bulk_build_cancelled(context, build_token):
+                    return ConversationHandler.END
                 search_warnings.extend(season_warnings)
                 combined_results = _series_bulk_merge_results(combined_results, season_results)
 
@@ -10873,6 +10915,8 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             _series_bulk_wait_text(series_query, "plan"),
             reply_markup=_series_bulk_wait_keyboard(),
         )
+        if _series_bulk_build_cancelled(context, build_token):
+            return ConversationHandler.END
         plan = build_series_bulk_plan(
             series_title=series_query,
             seasons=seasons,
@@ -10912,12 +10956,14 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         return SEARCH_RESULTS
     except Exception as exc:
         logger.exception("Series bulk plan failed: %s", exc)
+        _series_bulk_finish_build(context, build_token)
         await query.edit_message_text(
             "Не удалось собрать план сезонов. Можно попробовать ещё раз.",
             reply_markup=_series_bulk_error_keyboard(index),
         )
         return SEARCH_RESULTS
     finally:
+        _series_bulk_finish_build(context, build_token)
         await _series_bulk_delete_animation(animation_msg)
 
 
@@ -11364,6 +11410,7 @@ async def plex_cancel_standalone(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    _series_bulk_mark_build_cancelled(context)
     has_photo = context.user_data.pop("srch_confirm_has_photo", False)
     photo_msg_id = context.user_data.pop("srch_confirm_message_id", None)
     photo_chat_id = context.user_data.pop("srch_confirm_chat_id", None)
@@ -15589,7 +15636,7 @@ def main() -> None:
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),
                     CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z_]+$"),
-                    CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$"),
+                    CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$", block=False),
                     CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
                     CallbackQueryHandler(search_series_bulk_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_retry$"),
                     CallbackQueryHandler(search_series_bulk_soft_search, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_soft$"),
@@ -15657,6 +15704,9 @@ def main() -> None:
                 ConversationHandler.TIMEOUT: [
                     MessageHandler(filters.ALL, search_timeout),
                     CallbackQueryHandler(search_timeout),
+                ],
+                ConversationHandler.WAITING: [
+                    CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
                 ],
             },
             fallbacks=[CommandHandler("cancel", search_cancel)],
