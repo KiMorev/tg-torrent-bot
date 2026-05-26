@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from formatters import _short_title, _tracker_abbr
+from formatters import _extract_series_base_query, _short_title, _tracker_abbr
 
 # ---------------------------------------------------------------------------
 # Callback prefixes & scope constants
@@ -645,6 +645,12 @@ def _search_advanced_keyboard(settings: dict, tracker_label: str = "") -> Inline
 SEARCH_PAGE_SIZE = 5
 
 
+def _search_result_has_download_picker(result: dict) -> bool:
+    if result.get("partial") or result.get("series"):
+        return True
+    return bool(_extract_series_base_query(str(result.get("title") or "")))
+
+
 def _search_results_keyboard(
     results: list[dict],
     page: int = 0,
@@ -669,7 +675,7 @@ def _search_results_keyboard(
             f"⬇️ {start + i + 1}",
             callback_data=(
                 f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{start + i}"
-                if result.get("partial")
+                if _search_result_has_download_picker(result)
                 else f"{SEARCH_CALLBACK_PREFIX}:dl:{start + i}"
             ),
         )

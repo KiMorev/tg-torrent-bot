@@ -387,6 +387,19 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         legacy = [t for t in buttons if t.startswith(("⬇️📺", "⬇️🎯"))]
         self.assertEqual(legacy, [], "legacy direct-subscribe buttons must be removed")
 
+    def test_full_series_result_opens_download_picker(self) -> None:
+        results = [{"title": "Клиника / Scrubs / Сезон: 3 / WEB-DL 1080p", "partial": False}]
+        keyboard = _search_results_keyboard(results)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["⬇️ 1"], "srch:dl_pick:0")
+        self.assertNotIn("🔔 1", buttons)
+
+    def test_movie_result_downloads_directly(self) -> None:
+        results = [{"title": "Драйв / Drive (2011) WEB-DL 1080p", "partial": False}]
+        keyboard = _search_results_keyboard(results)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["⬇️ 1"], "srch:dl:0")
+
     def test_neither_button_shown_by_default(self) -> None:
         keyboard = _search_results_keyboard([])
         labels = [b.text for row in keyboard.inline_keyboard for b in row]

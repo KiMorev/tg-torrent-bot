@@ -113,6 +113,20 @@ from jackett_subscriptions import (
     build_jackett_subscription,
     select_jackett_subscription_candidate,
 )
+from series_bulk_planner import (
+    STATUS_ALREADY_DOWNLOADING,
+    STATUS_ALREADY_IN_PLEX,
+    STATUS_EXACT,
+    STATUS_GOOD,
+    STATUS_MISSING,
+    STATUS_NEEDS_DECISION,
+    STATUS_PARTIAL,
+    VOICE_ANY_FROM_REFERENCE,
+    SeriesBulkProfile,
+    SeasonPlan,
+    build_series_bulk_plan,
+    release_profile_from_title,
+)
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from plex import (
     PlexMovie,
@@ -5955,6 +5969,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             "size": r.size,
             "seeders": r.seeders,
             "partial": partial,
+            "series": _extract_series_base_query(r.title) is not None,
             "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
             "magnet_url": None,
             "torrent_url": None,
@@ -6750,6 +6765,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                         "size": r.size,
                         "seeders": r.seeders,
                         "partial": partial,
+                        "series": _extract_series_base_query(r.title) is not None,
                         "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
                         "magnet_url": r.magnet_url,
                         "torrent_url": r.torrent_url,
@@ -6807,6 +6823,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "size": r.size,
                 "seeders": r.seeders,
                 "partial": partial,
+                "series": _extract_series_base_query(r.title) is not None,
                 "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
                 "magnet_url": None,
                 "torrent_url": None,
@@ -8684,20 +8701,347 @@ def _download_picker_text(result: dict) -> str:
     return f"🎬 {title}{progress}\n\nЧто скачать?"
 
 
-def _download_picker_keyboard(index: int) -> InlineKeyboardMarkup:
+def _download_picker_keyboard(
+    index: int,
+    *,
+    partial: bool = True,
+    show_bulk_plan: bool = False,
+) -> InlineKeyboardMarkup:
     prefix = SEARCH_CALLBACK_PREFIX
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("⬇️ Скачать сейчас",
                               callback_data=f"{prefix}:dl:{index}")],
-        [InlineKeyboardButton("⬇️ Скачать сейчас + новые серии по мере выхода",
-                              callback_data=f"{prefix}:sub_preset:{index}:each")],
-        [InlineKeyboardButton("📦 Скачать, когда сезон завершится",
-                              callback_data=f"{prefix}:sub_preset:{index}:after")],
+    ]
+    if partial:
+        rows.extend([
+            [InlineKeyboardButton("⬇️ Скачать сейчас + новые серии по мере выхода",
+                                  callback_data=f"{prefix}:sub_preset:{index}:each")],
+            [InlineKeyboardButton("📦 Скачать, когда сезон завершится",
+                                  callback_data=f"{prefix}:sub_preset:{index}:after")],
+        ])
+    if show_bulk_plan:
+        rows.append([InlineKeyboardButton("📚 Скачать недостающие сезоны",
+                                          callback_data=f"{prefix}:bulk_plan:{index}")])
+    rows.extend([
         [InlineKeyboardButton("⬅️ К результатам",
                               callback_data=f"{prefix}:sub_back_results:0")],
         [InlineKeyboardButton("❌ Отмена",
                               callback_data=f"{prefix}:cancel")],
     ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_bulk_wait_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel"),
+    ]])
+
+
+def _series_bulk_plan_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ К результатам", callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_back_results:0")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
+def _series_bulk_error_keyboard(index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_plan:{index}")],
+        [InlineKeyboardButton("⬅️ К результатам", callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_back_results:0")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
+def _series_bulk_wait_text(series_query: str, active_stage: str = "seasons") -> str:
+    stages = [
+        ("seasons", "Определяю список сезонов"),
+        ("plex", "Проверяю Plex"),
+        ("downloads", "Проверяю текущие загрузки"),
+        ("plan", "Оцениваю кандидатов"),
+    ]
+    seen_active = False
+    lines = [
+        f"📚 Собираю план: {series_query}",
+        "",
+        "Это может занять несколько минут: проверю сезоны, Plex, текущие загрузки и раздачи.",
+        "",
+    ]
+    for key, label in stages:
+        if key == active_stage:
+            lines.append(f"⏳ {label}")
+            seen_active = True
+        elif seen_active:
+            lines.append(f"• {label}")
+        else:
+            lines.append(f"✅ {label}")
+    return "\n".join(lines)
+
+
+async def _series_bulk_send_animation(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None):
+    if chat_id is None or not SEARCH_ANIMATION_PATH.exists():
+        return None
+    try:
+        with open(SEARCH_ANIMATION_PATH, "rb") as fh:
+            return await context.bot.send_animation(chat_id=chat_id, animation=fh)
+    except Exception:
+        logger.debug("Series bulk plan: animation send failed", exc_info=True)
+        return None
+
+
+async def _series_bulk_delete_animation(animation_msg) -> None:
+    if animation_msg is None:
+        return
+    try:
+        await animation_msg.delete()
+    except Exception:
+        logger.debug("Series bulk plan: animation cleanup failed", exc_info=True)
+
+
+def _series_bulk_profile_from_result(
+    context: ContextTypes.DEFAULT_TYPE,
+    result: dict,
+) -> SeriesBulkProfile:
+    title = str(result.get("title") or "")
+    release = release_profile_from_title(title, size=str(result.get("size") or ""))
+    search_query = str(
+        context.user_data.get("srch_search_query")
+        or context.user_data.get("srch_query")
+        or title
+    )
+    _base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
+    settings = context.user_data.get("srch_settings") or {}
+    quality = (
+        context.user_data.get("srch_preferred_quality")
+        or preferred_quality
+        or settings.get("quality")
+        or "any"
+    )
+    if quality == "any":
+        quality = "any"
+    audio_required = bool(audio_required or settings.get("audio"))
+    subs_required = bool(subs_required or settings.get("subs"))
+    return SeriesBulkProfile(
+        quality=quality,
+        require_original=audio_required,
+        require_subs=subs_required,
+        voice_policy=VOICE_ANY_FROM_REFERENCE,
+        voices=release.voices,
+        release_type=release.release_type,
+        release_group=release.release_group,
+        tracker=str(result.get("tracker_name") or result.get("category") or ""),
+        source=str(result.get("source") or ""),
+    )
+
+
+async def _series_bulk_known_seasons(series_query: str, results: list[dict]) -> tuple[list[int], bool]:
+    if kinopoisk_client:
+        try:
+            total = await asyncio.wait_for(
+                asyncio.to_thread(kinopoisk_client.search_series_seasons, series_query),
+                timeout=8,
+            )
+            if total and int(total) > 0:
+                return list(range(1, int(total) + 1)), True
+        except Exception:
+            logger.debug("Series bulk plan: season count lookup failed", exc_info=True)
+
+    seasons = set(_seasons_available_in_results(results))
+    return sorted(seasons), False
+
+
+async def _series_bulk_downloading_seasons(series_query: str) -> set[int]:
+    if ds_client is None:
+        return set()
+    try:
+        tasks = await asyncio.to_thread(ds_client.list_tasks)
+    except Exception:
+        logger.debug("Series bulk plan: Download Station task lookup failed", exc_info=True)
+        return set()
+
+    target = _normalize_movie_title(series_query).lower()
+    found: set[int] = set()
+    for task in tasks:
+        if str(task.get("status") or "").lower() not in _ACTIVE_STATUSES:
+            continue
+        title = str(task.get("title") or task.get("id") or "")
+        season = _extract_season_from_query(title)
+        if not season:
+            continue
+        task_series = _extract_series_base_query(title) or title
+        if target and target in _normalize_movie_title(task_series).lower():
+            found.add(season)
+    return found
+
+
+def _series_bulk_candidate_label(candidate) -> str:
+    release = candidate.release
+    parts = [
+        release.release_type,
+        release.quality,
+        "/".join(release.voices[:2]),
+    ]
+    if release.has_original:
+        parts.append("Original")
+    if release.has_subs:
+        parts.append("Sub")
+    label = " · ".join(part for part in parts if part)
+    if label:
+        return label
+    return _short_title(candidate.result, limit=72)
+
+
+def _series_bulk_status_line(season_plan: SeasonPlan) -> str:
+    season = season_plan.season
+    if season_plan.status == STATUS_ALREADY_IN_PLEX:
+        return f"✅ Сезон {season} - уже есть в Plex"
+    if season_plan.status == STATUS_ALREADY_DOWNLOADING:
+        return f"⏬ Сезон {season} - уже качается"
+    if season_plan.status in {STATUS_EXACT, STATUS_GOOD} and season_plan.selected:
+        return f"✅ Сезон {season} - {_series_bulk_candidate_label(season_plan.selected)}"
+    if season_plan.status == STATUS_NEEDS_DECISION:
+        count = len(season_plan.candidates)
+        return f"⚠️ Сезон {season} - найдено кандидатов: {count}, нужен выбор"
+    if season_plan.status == STATUS_PARTIAL:
+        candidate = season_plan.candidates[0] if season_plan.candidates else None
+        if candidate and candidate.episode_progress:
+            cur, total = candidate.episode_progress
+            return f"⏳ Сезон {season} - доступно {cur}/{total} серий"
+        return f"⏳ Сезон {season} - найден неполный сезон"
+    if season_plan.status == STATUS_MISSING:
+        return f"❌ Сезон {season} - не найдено"
+    return f"• Сезон {season} - {season_plan.status}"
+
+
+def _series_bulk_plan_text(plan, profile: SeriesBulkProfile, *, result_count: int) -> str:
+    quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
+    voices = " / ".join(profile.voices) if profile.voices else "не ограничиваю"
+    lines = [
+        f"📚 Скачать недостающие сезоны: {plan.series_title}",
+        "",
+        "Перед скачиванием показываю план, чтобы не добавить лишнее.",
+        "",
+        "Профиль:",
+        f"• Качество: {quality}",
+        f"• Оригинальная дорожка: {'нужна' if profile.require_original else 'не требовалась'}",
+        f"• Субтитры: {'нужны' if profile.require_subs else 'не требовались'}",
+        f"• Озвучка: {voices}",
+    ]
+    if profile.release_type:
+        lines.append(f"• Тип релиза: {profile.release_type}")
+    if not plan.verified_season_range:
+        lines.extend([
+            "",
+            "⚠️ Полный диапазон сезонов не подтверждён.",
+            "Показываю сезоны, которые удалось найти в текущей выдаче.",
+        ])
+    lines.extend(["", f"Проверено раздач: {result_count}", ""])
+    lines.extend(_series_bulk_status_line(season) for season in plan.seasons)
+
+    ready = sum(1 for season in plan.seasons if season.status in {STATUS_EXACT, STATUS_GOOD})
+    skipped = sum(1 for season in plan.seasons if season.status in {
+        STATUS_ALREADY_IN_PLEX,
+        STATUS_ALREADY_DOWNLOADING,
+        STATUS_MISSING,
+    })
+    decisions = sum(1 for season in plan.seasons if season.status in {
+        STATUS_NEEDS_DECISION,
+        STATUS_PARTIAL,
+    })
+    lines.extend([
+        "",
+        f"Можно скачать после подтверждения: {ready}",
+        f"Пропущу: {skipped}",
+        f"Нужно решение: {decisions}",
+    ])
+    if plan.pack_candidates:
+        lines.append(f"Найдены паки сезонов: {len(plan.pack_candidates)} (не выбираю автоматически)")
+    return "\n".join(lines)
+
+
+async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Ошибка при разборе запроса.")
+        return ConversationHandler.END
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    result = results[index]
+    series_query = _extract_series_base_query(str(result.get("title") or ""))
+    if not series_query:
+        await query.edit_message_text(
+            "Не смог уверенно определить сериал по названию раздачи.",
+            reply_markup=_series_bulk_error_keyboard(index),
+        )
+        return SEARCH_RESULTS
+
+    _cancel_didmean_prefetch(context)
+    chat_id = _chat_id_from_query(query)
+    animation_msg = await _series_bulk_send_animation(context, chat_id)
+    try:
+        await query.edit_message_text(
+            _series_bulk_wait_text(series_query, "seasons"),
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        seasons, verified = await _series_bulk_known_seasons(series_query, results)
+        clicked_season = _extract_season_from_query(str(result.get("title") or ""))
+        if clicked_season and clicked_season not in seasons:
+            seasons = sorted({*seasons, clicked_season})
+        if not seasons:
+            await query.edit_message_text(
+                "Не нашёл ни одного сезона для плана.",
+                reply_markup=_series_bulk_error_keyboard(index),
+            )
+            return SEARCH_RESULTS
+
+        await query.edit_message_text(
+            _series_bulk_wait_text(series_query, "plex"),
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        plex_seasons = await _get_plex_seasons_for_series(series_query)
+
+        await query.edit_message_text(
+            _series_bulk_wait_text(series_query, "downloads"),
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        downloading_seasons = await _series_bulk_downloading_seasons(series_query)
+
+        await query.edit_message_text(
+            _series_bulk_wait_text(series_query, "plan"),
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        profile = _series_bulk_profile_from_result(context, result)
+        plan = build_series_bulk_plan(
+            series_title=series_query,
+            seasons=seasons,
+            results=results,
+            profile=profile,
+            plex_seasons=plex_seasons,
+            downloading_seasons=downloading_seasons,
+            verified_season_range=verified,
+        )
+        context.user_data["srch_series_bulk_plan"] = plan
+        context.user_data["srch_series_bulk_profile"] = profile
+        await query.edit_message_text(
+            _series_bulk_plan_text(plan, profile, result_count=len(results)),
+            reply_markup=_series_bulk_plan_keyboard(),
+        )
+        return SEARCH_RESULTS
+    except Exception as exc:
+        logger.exception("Series bulk plan failed: %s", exc)
+        await query.edit_message_text(
+            "Не удалось собрать план сезонов. Можно попробовать ещё раз.",
+            reply_markup=_series_bulk_error_keyboard(index),
+        )
+        return SEARCH_RESULTS
+    finally:
+        await _series_bulk_delete_animation(animation_msg)
 
 
 def _subscribe_picker_text(result: dict) -> str:
@@ -8725,7 +9069,7 @@ def _subscribe_picker_keyboard(index: int) -> InlineKeyboardMarkup:
 
 
 async def search_download_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User tapped «⬇️ N» on a partial result — show download choices."""
+    """User tapped «⬇️ N» on a series result — show download choices."""
     query = update.callback_query
     await query.answer()
     try:
@@ -8739,9 +9083,14 @@ async def search_download_pick(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Результат недоступен.")
         return ConversationHandler.END
 
+    result = results[index]
     await query.edit_message_text(
-        _download_picker_text(results[index]),
-        reply_markup=_download_picker_keyboard(index),
+        _download_picker_text(result),
+        reply_markup=_download_picker_keyboard(
+            index,
+            partial=bool(result.get("partial")),
+            show_bulk_plan=bool(result.get("series") or _extract_series_base_query(result.get("title", ""))),
+        ),
         parse_mode="HTML",
     )
     return SEARCH_RESULTS
@@ -13361,6 +13710,7 @@ def main() -> None:
                 ],
                 SEARCH_RESULTS: [
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
+                    CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
                     # Partial-series download/notification picker callbacks
                     CallbackQueryHandler(search_subscribe_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_pick:\d+$"),

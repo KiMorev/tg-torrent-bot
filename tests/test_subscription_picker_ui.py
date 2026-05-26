@@ -35,6 +35,8 @@ def _make_context(*, results: list[dict] | None = None) -> MagicMock:
     if results is None:
         results = [{"title": "Test Show", "partial": True}]
     ctx.user_data = {"srch_results": results}
+    ctx.bot = MagicMock()
+    ctx.bot.send_animation = AsyncMock()
     return ctx
 
 
@@ -75,6 +77,89 @@ class SearchDownloadPickTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Show &lt;Finale&gt; &amp; S02E01", text)
         self.assertNotIn("Show <Finale> & S02E01", text)
+
+    def test_full_series_offers_bulk_plan_without_partial_subscription_rows(self):
+        update = MagicMock(callback_query=_make_query("srch:dl_pick:0"))
+        ctx = _make_context(results=[{
+            "title": "Клиника / Scrubs / Сезон: 3 / WEB-DL 1080p",
+            "partial": False,
+            "series": True,
+        }])
+        asyncio.run(bot.search_download_pick(update, ctx))
+
+        kb = update.callback_query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertIn("📚 Скачать недостающие сезоны", labels)
+        self.assertNotIn("⬇️ Скачать сейчас + новые серии по мере выхода", labels)
+        self.assertNotIn("📦 Скачать, когда сезон завершится", labels)
+
+    def test_partial_series_keeps_subscription_rows_and_bulk_plan(self):
+        update = MagicMock(callback_query=_make_query("srch:dl_pick:0"))
+        ctx = _make_context(results=[{
+            "title": "Клиника / Scrubs / Сезон: 3 / Серии: 5 из 8 / WEB-DL 1080p",
+            "partial": True,
+            "series": True,
+            "ep_str": "5/8 эп.",
+        }])
+        asyncio.run(bot.search_download_pick(update, ctx))
+
+        kb = update.callback_query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertIn("📚 Скачать недостающие сезоны", labels)
+        self.assertIn("⬇️ Скачать сейчас + новые серии по мере выхода", labels)
+        self.assertIn("📦 Скачать, когда сезон завершится", labels)
+
+
+class SearchSeriesBulkPlanTests(unittest.TestCase):
+    def test_builds_plan_from_series_result_and_cleans_animation(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [
+            {
+                "title": "Клиника / Scrubs / Сезон: 2 / WEB-DL 1080p / Original / Sub",
+                "partial": False,
+                "series": True,
+                "size": "10 GB",
+                "seeders": 20,
+                "source": "jackett",
+                "tracker_name": "rutracker",
+            },
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+                "partial": False,
+                "series": True,
+                "size": "10 GB",
+                "seeders": 20,
+                "source": "jackett",
+                "tracker_name": "rutracker",
+            },
+        ]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        gif_msg = MagicMock()
+        gif_msg.delete = AsyncMock()
+        ctx.bot.send_animation = AsyncMock(return_value=gif_msg)
+        kp_client = MagicMock()
+        kp_client.search_series_seasons = MagicMock(return_value=2)
+        ds = MagicMock()
+        ds.list_tasks = MagicMock(return_value=[])
+
+        with (
+            patch.object(bot, "kinopoisk_client", kp_client),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value={1})),
+            patch.object(bot, "ds_client", ds),
+        ):
+            state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("📚 Скачать недостающие сезоны: Клиника", final_text)
+        self.assertIn("Сезон 1 - уже есть в Plex", final_text)
+        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        ctx.bot.send_animation.assert_awaited_once()
+        gif_msg.delete.assert_awaited_once()
 
 
 class SearchSubscribePickTests(unittest.TestCase):
