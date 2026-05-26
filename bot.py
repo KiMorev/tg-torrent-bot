@@ -8757,6 +8757,8 @@ def _series_bulk_wait_text(series_query: str, active_stage: str = "seasons") -> 
         ("seasons", "Определяю список сезонов"),
         ("plex", "Проверяю Plex"),
         ("downloads", "Проверяю текущие загрузки"),
+        ("search", "Ищу раздачи на трекерах"),
+        ("targeted", "Уточняю проблемные сезоны"),
         ("plan", "Оцениваю кандидатов"),
     ]
     seen_active = False
@@ -8795,6 +8797,137 @@ async def _series_bulk_delete_animation(animation_msg) -> None:
         await animation_msg.delete()
     except Exception:
         logger.debug("Series bulk plan: animation cleanup failed", exc_info=True)
+
+
+def _series_bulk_result_from_jackett(result) -> dict:
+    ep = _parse_episode_info(result.title)
+    partial = ep is not None and ep[0] < ep[1]
+    return {
+        "source": "jackett",
+        "topic_id": "",
+        "title": result.title,
+        "url": result.topic_url or "",
+        "category": result.tracker,
+        "size": result.size,
+        "seeders": result.seeders,
+        "partial": partial,
+        "series": _extract_series_base_query(result.title) is not None,
+        "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
+        "magnet_url": result.magnet_url,
+        "torrent_url": result.torrent_url,
+        "tracker_name": result.tracker,
+    }
+
+
+def _series_bulk_result_from_rutracker(result) -> dict:
+    ep = _parse_episode_info(result.title)
+    partial = ep is not None and ep[0] < ep[1]
+    return {
+        "source": "rutracker",
+        "topic_id": result.topic_id,
+        "title": result.title,
+        "url": f"https://rutracker.org/forum/viewtopic.php?t={result.topic_id}",
+        "category": result.category,
+        "size": result.size,
+        "seeders": result.seeders,
+        "partial": partial,
+        "series": _extract_series_base_query(result.title) is not None,
+        "ep_str": f"{ep[0]}/{ep[1]} эп." if ep else "",
+        "magnet_url": None,
+        "torrent_url": None,
+        "tracker_name": "rutracker",
+    }
+
+
+def _series_bulk_result_key(result: dict) -> tuple[str, str]:
+    source = str(result.get("source") or "")
+    stable = (
+        str(result.get("topic_id") or "")
+        or str(result.get("url") or "")
+        or str(result.get("torrent_url") or "")
+        or str(result.get("magnet_url") or "")
+        or str(result.get("title") or "").lower()
+    )
+    return source, stable
+
+
+def _series_bulk_merge_results(*groups: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    merged: list[dict] = []
+    for group in groups:
+        for result in group:
+            if not isinstance(result, dict):
+                continue
+            key = _series_bulk_result_key(result)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(result)
+    return merged
+
+
+async def _series_bulk_selected_indexers(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    selected = context.user_data.get("srch_jackett_selected")
+    if isinstance(selected, set):
+        return selected
+    if isinstance(selected, (list, tuple)):
+        return {str(item) for item in selected if item}
+    if not jackett_client:
+        return set()
+    try:
+        indexers = await asyncio.to_thread(jackett_client.get_indexers)
+    except JackettError:
+        logger.debug("Series bulk plan: Jackett indexer lookup failed", exc_info=True)
+        return set()
+    rutracker_ids = {i["id"] for i in indexers if "rutracker" in i["id"].lower()}
+    selected = rutracker_ids if rutracker_ids else {i["id"] for i in indexers}
+    context.user_data["srch_jackett_indexers"] = indexers
+    context.user_data["srch_jackett_selected"] = selected
+    return selected
+
+
+async def _series_bulk_search_once(
+    context: ContextTypes.DEFAULT_TYPE,
+    search_query: str,
+) -> tuple[list[dict], list[str]]:
+    base_query, _quality, _audio, _subs = _split_query_settings(search_query)
+    results: list[dict] = []
+    warnings: list[str] = []
+
+    selected = await _series_bulk_selected_indexers(context)
+    if jackett_client and selected:
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    jackett_client.search,
+                    base_query,
+                    indexers=list(selected),
+                    fetch_limit=JACKETT_FETCH_LIMIT,
+                ),
+                timeout=45.0,
+            )
+            return [_series_bulk_result_from_jackett(item) for item in raw], warnings
+        except (JackettError, asyncio.TimeoutError) as exc:
+            warnings.append(f"Jackett: {str(exc)[:80]}")
+            logger.info("Series bulk plan: Jackett search failed for %r: %s", base_query, exc)
+
+    if rutracker_client:
+        try:
+            raw = await asyncio.to_thread(rutracker_client.search, base_query)
+            results.extend(_series_bulk_result_from_rutracker(item) for item in raw)
+        except RutrackerError as exc:
+            warnings.append(f"Rutracker: {str(exc)[:80]}")
+            logger.info("Series bulk plan: Rutracker search failed for %r: %s", base_query, exc)
+
+    return results, warnings
+
+
+def _series_bulk_seasons_for_targeted_search(plan) -> list[int]:
+    return [
+        season.season
+        for season in plan.seasons
+        if season.status in {STATUS_MISSING, STATUS_NEEDS_DECISION, STATUS_PARTIAL}
+    ]
 
 
 def _series_bulk_profile_from_result(
@@ -8912,7 +9045,13 @@ def _series_bulk_status_line(season_plan: SeasonPlan) -> str:
     return f"• Сезон {season} - {season_plan.status}"
 
 
-def _series_bulk_plan_text(plan, profile: SeriesBulkProfile, *, result_count: int) -> str:
+def _series_bulk_plan_text(
+    plan,
+    profile: SeriesBulkProfile,
+    *,
+    result_count: int,
+    warnings: tuple[str, ...] = (),
+) -> str:
     quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
     voices = " / ".join(profile.voices) if profile.voices else "не ограничиваю"
     lines = [
@@ -8932,7 +9071,13 @@ def _series_bulk_plan_text(plan, profile: SeriesBulkProfile, *, result_count: in
         lines.extend([
             "",
             "⚠️ Полный диапазон сезонов не подтверждён.",
-            "Показываю сезоны, которые удалось найти в текущей выдаче.",
+            "Показываю сезоны, которые удалось найти на трекерах.",
+        ])
+    if warnings:
+        lines.extend([
+            "",
+            "⚠️ План собран не полностью:",
+            *[f"• {warning}" for warning in dict.fromkeys(warnings)],
         ])
     lines.extend(["", f"Проверено раздач: {result_count}", ""])
     lines.extend(_series_bulk_status_line(season) for season in plan.seasons)
@@ -8993,12 +9138,7 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         clicked_season = _extract_season_from_query(str(result.get("title") or ""))
         if clicked_season and clicked_season not in seasons:
             seasons = sorted({*seasons, clicked_season})
-        if not seasons:
-            await query.edit_message_text(
-                "Не нашёл ни одного сезона для плана.",
-                reply_markup=_series_bulk_error_keyboard(index),
-            )
-            return SEARCH_RESULTS
+        profile = _series_bulk_profile_from_result(context, result)
 
         await query.edit_message_text(
             _series_bulk_wait_text(series_query, "plex"),
@@ -9013,14 +9153,49 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         downloading_seasons = await _series_bulk_downloading_seasons(series_query)
 
         await query.edit_message_text(
+            _series_bulk_wait_text(series_query, "search"),
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        wide_results, search_warnings = await _series_bulk_search_once(context, series_query)
+        combined_results = _series_bulk_merge_results(results, wide_results)
+        if not verified:
+            seasons = sorted({*seasons, *_seasons_available_in_results(combined_results)})
+        if not seasons:
+            await query.edit_message_text(
+                "Не нашёл ни одного сезона для плана.",
+                reply_markup=_series_bulk_error_keyboard(index),
+            )
+            return SEARCH_RESULTS
+
+        preliminary_plan = build_series_bulk_plan(
+            series_title=series_query,
+            seasons=seasons,
+            results=combined_results,
+            profile=profile,
+            plex_seasons=plex_seasons,
+            downloading_seasons=downloading_seasons,
+            verified_season_range=verified,
+        )
+        targeted_seasons = _series_bulk_seasons_for_targeted_search(preliminary_plan)
+        if targeted_seasons:
+            await query.edit_message_text(
+                _series_bulk_wait_text(series_query, "targeted"),
+                reply_markup=_series_bulk_wait_keyboard(),
+            )
+            for season in targeted_seasons:
+                season_query = _normalize_season_in_query(f"{series_query} Сезон {season}")
+                season_results, season_warnings = await _series_bulk_search_once(context, season_query)
+                search_warnings.extend(season_warnings)
+                combined_results = _series_bulk_merge_results(combined_results, season_results)
+
+        await query.edit_message_text(
             _series_bulk_wait_text(series_query, "plan"),
             reply_markup=_series_bulk_wait_keyboard(),
         )
-        profile = _series_bulk_profile_from_result(context, result)
         plan = build_series_bulk_plan(
             series_title=series_query,
             seasons=seasons,
-            results=results,
+            results=combined_results,
             profile=profile,
             plex_seasons=plex_seasons,
             downloading_seasons=downloading_seasons,
@@ -9028,8 +9203,15 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         )
         context.user_data["srch_series_bulk_plan"] = plan
         context.user_data["srch_series_bulk_profile"] = profile
+        context.user_data["srch_series_bulk_results"] = combined_results
+        context.user_data["srch_series_bulk_warnings"] = tuple(search_warnings)
         await query.edit_message_text(
-            _series_bulk_plan_text(plan, profile, result_count=len(results)),
+            _series_bulk_plan_text(
+                plan,
+                profile,
+                result_count=len(combined_results),
+                warnings=tuple(search_warnings),
+            ),
             reply_markup=_series_bulk_plan_keyboard(),
         )
         return SEARCH_RESULTS

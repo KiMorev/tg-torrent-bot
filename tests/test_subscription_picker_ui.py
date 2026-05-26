@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("BOT_TOKEN", "111:testtoken")
@@ -38,6 +39,18 @@ def _make_context(*, results: list[dict] | None = None) -> MagicMock:
     ctx.bot = MagicMock()
     ctx.bot.send_animation = AsyncMock()
     return ctx
+
+
+def _jackett_result(title: str, *, url: str = "", seeders: int = 20) -> SimpleNamespace:
+    return SimpleNamespace(
+        title=title,
+        topic_url=url or f"https://example.test/{abs(hash(title))}",
+        tracker="rutracker",
+        size="10 GB",
+        seeders=seeders,
+        magnet_url="",
+        torrent_url="",
+    )
 
 
 class SearchDownloadPickTests(unittest.TestCase):
@@ -160,6 +173,96 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("Сезон 2 - WEB-DL", final_text)
         ctx.bot.send_animation.assert_awaited_once()
         gif_msg.delete.assert_awaited_once()
+
+    def test_wide_search_adds_candidates_outside_current_results(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.user_data["srch_jackett_selected"] = {"rutracker"}
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        kp_client = MagicMock()
+        kp_client.search_series_seasons = MagicMock(return_value=2)
+        jackett = MagicMock()
+        jackett.search = MagicMock(return_value=[
+            _jackett_result("Клиника / Scrubs / Сезон: 2 / WEB-DL 1080p / Original / Sub"),
+        ])
+        ds = MagicMock()
+        ds.list_tasks = MagicMock(return_value=[])
+
+        with (
+            patch.object(bot, "kinopoisk_client", kp_client),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())),
+            patch.object(bot, "ds_client", ds),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "rutracker_client", None),
+        ):
+            asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Сезон 1 - WEB-DL", final_text)
+        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        self.assertIn("Проверено раздач: 2", final_text)
+        jackett.search.assert_called_once()
+        self.assertEqual(jackett.search.call_args.args[0], "Клиника")
+
+    def test_targeted_search_runs_for_missing_season_after_wide_search(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.user_data["srch_jackett_selected"] = {"rutracker"}
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        kp_client = MagicMock()
+        kp_client.search_series_seasons = MagicMock(return_value=2)
+        jackett = MagicMock()
+
+        def search_side_effect(search_query: str, **_kwargs):
+            if search_query == "Клиника Сезон: 2":
+                return [_jackett_result(
+                    "Клиника / Scrubs / Сезон: 2 / WEB-DL 1080p / Original / Sub"
+                )]
+            return []
+
+        jackett.search = MagicMock(side_effect=search_side_effect)
+        ds = MagicMock()
+        ds.list_tasks = MagicMock(return_value=[])
+
+        with (
+            patch.object(bot, "kinopoisk_client", kp_client),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())),
+            patch.object(bot, "ds_client", ds),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "rutracker_client", None),
+        ):
+            asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        final_text = query.edit_message_text.await_args.args[0]
+        called_queries = [call.args[0] for call in jackett.search.call_args_list]
+        self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 2"])
+        self.assertIn("Сезон 2 - WEB-DL", final_text)
 
 
 class SearchSubscribePickTests(unittest.TestCase):
