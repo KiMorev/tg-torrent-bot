@@ -160,6 +160,74 @@ class SearchDownloadPickTests(unittest.TestCase):
 
 
 class SearchSeriesBulkPlanTests(unittest.TestCase):
+    def _open_profile_and_build(self, update, ctx):
+        asyncio.run(bot.search_series_bulk_plan(update, ctx))
+        update.callback_query.data = "srch:bulk_build"
+        return asyncio.run(bot.search_series_bulk_build_plan(update, ctx))
+
+    def test_bulk_plan_opens_profile_settings_before_build(self):
+        query = _make_query("srch:bulk_plan:0")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+
+        state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Что важно сохранить при подборе сезонов", text)
+        self.assertIn("Качество: 1080p", text)
+        self.assertIn("Original: нужен", text)
+        self.assertIn("Субтитры: нужны", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("✅ Собрать план", labels)
+        self.assertIn("⬅️ К выбору", labels)
+        self.assertTrue(any("Как в раздаче" in label for label in labels))
+
+    def test_bulk_profile_voice_toggle_updates_draft(self):
+        query = _make_query("srch:bulk_plan:0")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        query.data = "srch:bulk_prof:voice_any_ru"
+        state = asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        profile = ctx.user_data["srch_series_bulk_profile_draft"]
+        self.assertEqual(profile.voice_policy, bot.VOICE_ANY_RUSSIAN)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Озвучка: любая русская", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("✅ Любая русская", labels)
+
     def test_builds_plan_from_series_result_and_cleans_animation(self):
         query = _make_query("srch:bulk_plan:0")
         query.message = MagicMock()
@@ -202,7 +270,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             patch.object(bot, "ds_client", ds),
             patch.object(bot, "state_store", fake_store),
         ):
-            state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
+            state = self._open_profile_and_build(update, ctx)
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         final_text = query.edit_message_text.await_args.args[0]
@@ -257,7 +325,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             patch.object(bot, "jackett_client", jackett),
             patch.object(bot, "rutracker_client", None),
         ):
-            asyncio.run(bot.search_series_bulk_plan(update, ctx))
+            self._open_profile_and_build(update, ctx)
 
         final_text = query.edit_message_text.await_args.args[0]
         self.assertIn("Сезон 1 - WEB-DL", final_text)
@@ -306,7 +374,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             patch.object(bot, "jackett_client", jackett),
             patch.object(bot, "rutracker_client", None),
         ):
-            asyncio.run(bot.search_series_bulk_plan(update, ctx))
+            self._open_profile_and_build(update, ctx)
 
         final_text = query.edit_message_text.await_args.args[0]
         called_queries = [call.args[0] for call in jackett.search.call_args_list]

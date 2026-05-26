@@ -121,7 +121,10 @@ from series_bulk_planner import (
     STATUS_MISSING,
     STATUS_NEEDS_DECISION,
     STATUS_PARTIAL,
+    VOICE_ANY_RUSSIAN,
     VOICE_ANY_FROM_REFERENCE,
+    VOICE_ORIGINAL_ONLY,
+    VOICE_REQUIRE_SELECTED,
     SeriesBulkProfile,
     SeasonPlan,
     build_series_bulk_plan,
@@ -9439,6 +9442,161 @@ def _series_bulk_profile_from_result(
     )
 
 
+def _series_bulk_profile_copy(
+    profile: SeriesBulkProfile,
+    **updates,
+) -> SeriesBulkProfile:
+    data = {
+        "quality": profile.quality,
+        "require_original": profile.require_original,
+        "require_subs": profile.require_subs,
+        "voice_policy": profile.voice_policy,
+        "voices": profile.voices,
+        "release_type": profile.release_type,
+        "release_group": profile.release_group,
+        "tracker": profile.tracker,
+        "source": profile.source,
+    }
+    data.update(updates)
+    return SeriesBulkProfile(**data)
+
+
+def _series_bulk_profile_voice_label(profile: SeriesBulkProfile) -> str:
+    if profile.voice_policy == VOICE_ANY_RUSSIAN:
+        return "любая русская"
+    if profile.voice_policy == VOICE_REQUIRE_SELECTED:
+        voices = " / ".join(profile.voices[:3]) if profile.voices else "выбранные студии"
+        return f"только {voices}"
+    if profile.voice_policy == VOICE_ORIGINAL_ONLY:
+        return "только Original"
+    return "как в выбранной раздаче"
+
+
+def _series_bulk_profile_text(result: dict, profile: SeriesBulkProfile) -> str:
+    title = str(result.get("title") or "")[:120]
+    quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
+    voices = " / ".join(profile.voices[:3]) if profile.voices else "не найдены"
+    return "\n".join([
+        "📚 Скачать недостающие сезоны",
+        "",
+        title,
+        "",
+        "Что важно сохранить при подборе сезонов?",
+        "",
+        f"• Качество: {quality}",
+        f"• Original: {'нужен' if profile.require_original else 'не важно'}",
+        f"• Субтитры: {'нужны' if profile.require_subs else 'не важно'}",
+        f"• Озвучка: {_series_bulk_profile_voice_label(profile)}",
+        f"• Студии в выбранной раздаче: {voices}",
+    ])
+
+
+def _series_bulk_profile_keyboard(
+    index: int,
+    profile: SeriesBulkProfile,
+) -> InlineKeyboardMarkup:
+    quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
+    voice_options = [
+        ("Как в раздаче", "voice_ref", VOICE_ANY_FROM_REFERENCE),
+        ("Любая русская", "voice_any_ru", VOICE_ANY_RUSSIAN),
+        ("Только эти студии", "voice_selected", VOICE_REQUIRE_SELECTED),
+        ("Только Original", "voice_original", VOICE_ORIGINAL_ONLY),
+    ]
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            f"🎞 Качество: {quality}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:quality",
+        )],
+        [InlineKeyboardButton(
+            f"🎧 Original: {'нужен' if profile.require_original else 'не важно'}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:original",
+        )],
+        [InlineKeyboardButton(
+            f"💬 Субтитры: {'нужны' if profile.require_subs else 'не важно'}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:subs",
+        )],
+    ]
+    for label, action, policy in voice_options:
+        prefix = "✅" if profile.voice_policy == policy else "🎙"
+        rows.append([InlineKeyboardButton(
+            f"{prefix} {label}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:{action}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton("✅ Собрать план", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_build")],
+        [InlineKeyboardButton("⬅️ К выбору", callback_data=f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{index}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_bulk_profile_from_context(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> SeriesBulkProfile | None:
+    profile = context.user_data.get("srch_series_bulk_profile_draft")
+    return profile if isinstance(profile, SeriesBulkProfile) else None
+
+
+async def _series_bulk_show_profile(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    try:
+        index = int(context.user_data.get("srch_series_bulk_index"))
+    except (TypeError, ValueError):
+        await query.edit_message_text("План потерян. Вернитесь к результатам и откройте его заново.")
+        return SEARCH_RESULTS
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    profile = _series_bulk_profile_from_context(context)
+    if profile is None:
+        profile = _series_bulk_profile_from_result(context, results[index])
+        context.user_data["srch_series_bulk_profile_draft"] = profile
+    await query.edit_message_text(
+        _series_bulk_profile_text(results[index], profile),
+        reply_markup=_series_bulk_profile_keyboard(index, profile),
+    )
+    return SEARCH_RESULTS
+
+
+async def search_series_bulk_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    profile = _series_bulk_profile_from_context(context)
+    if profile is None:
+        return await _series_bulk_show_profile(query, context)
+
+    action = query.data.rsplit(":", 1)[-1]
+    if action == "quality":
+        base_quality = str(context.user_data.get("srch_series_bulk_base_quality") or "1080p")
+        profile = _series_bulk_profile_copy(
+            profile,
+            quality=base_quality if profile.quality == "any" else "any",
+        )
+    elif action == "original":
+        profile = _series_bulk_profile_copy(profile, require_original=not profile.require_original)
+    elif action == "subs":
+        profile = _series_bulk_profile_copy(profile, require_subs=not profile.require_subs)
+    elif action == "voice_ref":
+        profile = _series_bulk_profile_copy(profile, voice_policy=VOICE_ANY_FROM_REFERENCE)
+    elif action == "voice_any_ru":
+        profile = _series_bulk_profile_copy(profile, voice_policy=VOICE_ANY_RUSSIAN)
+    elif action == "voice_selected":
+        profile = _series_bulk_profile_copy(profile, voice_policy=VOICE_REQUIRE_SELECTED)
+    elif action == "voice_original":
+        profile = _series_bulk_profile_copy(
+            profile,
+            voice_policy=VOICE_ORIGINAL_ONLY,
+            require_original=True,
+        )
+    context.user_data["srch_series_bulk_profile_draft"] = profile
+    return await _series_bulk_show_profile(query, context)
+
+
 async def _series_bulk_known_seasons(series_query: str, results: list[dict]) -> tuple[list[int], bool]:
     if kinopoisk_client:
         try:
@@ -10443,6 +10601,37 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         )
         return SEARCH_RESULTS
 
+    profile = _series_bulk_profile_from_result(context, result)
+    base_quality = profile.quality if profile.quality and profile.quality != "any" else "1080p"
+    context.user_data["srch_series_bulk_index"] = index
+    context.user_data["srch_series_bulk_profile_draft"] = profile
+    context.user_data["srch_series_bulk_base_quality"] = base_quality
+    return await _series_bulk_show_profile(query, context)
+
+
+async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(context.user_data.get("srch_series_bulk_index"))
+    except (TypeError, ValueError):
+        await query.edit_message_text("План потерян. Вернитесь к результатам и откройте его заново.")
+        return SEARCH_RESULTS
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    result = results[index]
+    series_query = _extract_series_base_query(str(result.get("title") or ""))
+    if not series_query:
+        await query.edit_message_text(
+            "Не смог уверенно определить сериал по названию раздачи.",
+            reply_markup=_series_bulk_error_keyboard(index),
+        )
+        return SEARCH_RESULTS
+
     _cancel_didmean_prefetch(context)
     chat_id = _chat_id_from_query(query)
     animation_msg = await _series_bulk_send_animation(context, chat_id)
@@ -10455,7 +10644,9 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         clicked_season = _extract_season_from_query(str(result.get("title") or ""))
         if clicked_season and clicked_season not in seasons:
             seasons = sorted({*seasons, clicked_season})
-        profile = _series_bulk_profile_from_result(context, result)
+        profile = _series_bulk_profile_from_context(context)
+        if profile is None:
+            profile = _series_bulk_profile_from_result(context, result)
 
         await query.edit_message_text(
             _series_bulk_wait_text(series_query, "plex"),
@@ -15224,6 +15415,8 @@ def main() -> None:
                 SEARCH_RESULTS: [
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),
+                    CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z_]+$"),
+                    CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$"),
                     CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
                     CallbackQueryHandler(search_series_bulk_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_retry$"),
                     CallbackQueryHandler(search_series_bulk_candidate_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:\d+$"),
