@@ -29,6 +29,29 @@ VALID_DOWNLOAD_POLICIES = frozenset({
     DOWNLOAD_ASK,
 })
 
+_NOTIFY_POLICY_LABELS_RU = {
+    NOTIFY_EACH_UPDATE: "о каждой новой серии",
+    NOTIFY_FINAL_ONLY: "только когда сезон завершится",
+    NOTIFY_SILENT: "не уведомлять",
+}
+_NOTIFY_POLICY_ICONS_RU = {
+    NOTIFY_EACH_UPDATE: "🔔",
+    NOTIFY_FINAL_ONLY: "🎯",
+    NOTIFY_SILENT: "🔇",
+}
+_DOWNLOAD_POLICY_LABELS_RU = {
+    DOWNLOAD_AUTO_EACH_UPDATE: "новые серии по мере выхода",
+    DOWNLOAD_ONLY_WHEN_COMPLETE: "когда сезон завершится",
+    DOWNLOAD_NOTIFY_ONLY: "не скачивать автоматически",
+    DOWNLOAD_ASK: "спрашивать перед скачиванием",
+}
+_DOWNLOAD_POLICY_ICONS_RU = {
+    DOWNLOAD_AUTO_EACH_UPDATE: "⬇️",
+    DOWNLOAD_ONLY_WHEN_COMPLETE: "📦",
+    DOWNLOAD_NOTIFY_ONLY: "⏸",
+    DOWNLOAD_ASK: "❓",
+}
+
 
 def _resolved_policies(sub: dict) -> tuple[str, str]:
     """Read (notify_policy, download_policy), defaulting invalid/missing values."""
@@ -74,19 +97,26 @@ def should_download(sub: dict, *, is_complete: bool) -> bool:
     return True
 
 
+def notify_policy_label_ru(policy: str | None, *, icon: bool = False) -> str:
+    resolved, _ = _resolved_policies({"notify_policy": policy})
+    label = _NOTIFY_POLICY_LABELS_RU.get(resolved, resolved)
+    if icon:
+        return f"{_NOTIFY_POLICY_ICONS_RU.get(resolved, '')} {label}".strip()
+    return label
+
+
+def download_policy_label_ru(policy: str | None, *, icon: bool = False) -> str:
+    _, resolved = _resolved_policies({"download_policy": policy})
+    label = _DOWNLOAD_POLICY_LABELS_RU.get(resolved, resolved)
+    if icon:
+        return f"{_DOWNLOAD_POLICY_ICONS_RU.get(resolved, '')} {label}".strip()
+    return label
+
+
 def policies_summary_ru(sub: dict) -> str:
     """Compact human-readable description of a subscription's policy pair.
     For use in admin diagnostics and subscription-list UI."""
     n, d = _resolved_policies(sub)
-    n_label = {
-        NOTIFY_EACH_UPDATE: "📺 о каждой",
-        NOTIFY_FINAL_ONLY:  "🎯 при финале",
-        NOTIFY_SILENT:      "🔇 молча",
-    }.get(n, n)
-    d_label = {
-        DOWNLOAD_AUTO_EACH_UPDATE:   "⬇️ каждую",
-        DOWNLOAD_ONLY_WHEN_COMPLETE: "📦 после финала",
-        DOWNLOAD_NOTIFY_ONLY:        "⏸ без загрузки",
-        DOWNLOAD_ASK:                "❓ спрашивать",
-    }.get(d, d)
+    n_label = notify_policy_label_ru(n, icon=True)
+    d_label = download_policy_label_ru(d, icon=True)
     return f"{n_label} · {d_label}"

@@ -53,8 +53,8 @@ class SearchDownloadPickTests(unittest.TestCase):
         self.assertIn("Что скачать", text)
         labels = [b.text for row in kb.inline_keyboard for b in row]
         self.assertIn("⬇️ Скачать сейчас", labels)
-        self.assertIn("⬇️ Скачать сейчас + обновлять", labels)
-        self.assertIn("📦 Дождаться полного сезона и скачать", labels)
+        self.assertIn("⬇️ Скачать сейчас + новые серии по мере выхода", labels)
+        self.assertIn("📦 Скачать, когда сезон завершится", labels)
         self.assertTrue(any("К результатам" in l for l in labels))
 
     def test_stale_index_returns_error_message(self):
@@ -225,7 +225,7 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
         labels = [b.text for row in kb.inline_keyboard for b in row]
         # Three notify choices + back.
         self.assertTrue(any("каждой" in l for l in labels))
-        self.assertTrue(any("сезон закроется" in l for l in labels))
+        self.assertTrue(any("сезон завершится" in l for l in labels))
         self.assertTrue(any("Не уведомлять" in l for l in labels))
 
     def test_step1_escapes_title_in_html_message(self):
@@ -258,7 +258,7 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
         self.assertIn("Шаг 2", text)
         labels = [b.text for row in kb.inline_keyboard for b in row]
         # Step 2 must offer the only_when_complete option.
-        self.assertTrue(any("Одним торрентом" in l for l in labels))
+        self.assertTrue(any("Когда сезон завершится" in l for l in labels))
 
     def test_step2_escapes_title_in_html_message(self):
         update = MagicMock(callback_query=_make_query(
@@ -283,7 +283,7 @@ class SearchSubscribeAdvancedFlowTests(unittest.TestCase):
 
         kb = update.callback_query.edit_message_text.await_args.kwargs.get("reply_markup")
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertFalse(any("только уведомления" in l.lower() for l in labels))
+        self.assertFalse(any("Не скачивать автоматически" in l for l in labels))
 
     def test_step2_commits_with_both_axes(self):
         update = MagicMock(callback_query=_make_query(

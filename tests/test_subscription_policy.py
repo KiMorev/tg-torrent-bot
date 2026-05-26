@@ -92,14 +92,14 @@ class PoliciesSummaryTests(unittest.TestCase):
             "download_policy": DOWNLOAD_ONLY_WHEN_COMPLETE,
         }
         s = policies_summary_ru(sub)
-        self.assertIn("финал", s.lower())
-        self.assertIn("после финала", s.lower())
+        self.assertIn("сезон завершится", s.lower())
+        self.assertIn("когда сезон завершится", s.lower())
 
     def test_handles_missing_fields_with_defaults(self):
         s = policies_summary_ru({})
         # Defaults are each_update + auto_each_update
-        self.assertIn("каждой", s)
-        self.assertIn("каждую", s)
+        self.assertIn("о каждой новой серии", s)
+        self.assertIn("новые серии по мере выхода", s)
 
 
 class JackettSubscriptionBuilderTests(unittest.TestCase):

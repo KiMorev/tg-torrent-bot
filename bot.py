@@ -534,7 +534,7 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
             "• ▶️ Открытие готового контента в Plex одной кнопкой"
         )
     bullets.append(
-        "• Для неполных сериалов: ⬇️ — скачать сейчас/автообновлять/ждать полный сезон, 🔔 — только уведомления"
+        "• Для неполных сериалов: ⬇️ — скачать сейчас, новые серии по мере выхода или ждать завершения сезона; 🔔 — уведомления"
     )
     return "\n".join(bullets) if joined else bullets
 
@@ -5791,7 +5791,7 @@ def _build_results_text(results_data: list[dict], search_query: str, page: int, 
     start = page * SEARCH_PAGE_SIZE
     visible_results = results_data[start : start + SEARCH_PAGE_SIZE]
     if any(r.get("partial") for r in visible_results):
-        lines.append("⬇️ N — варианты скачивания; 🔔 N — только уведомления.")
+        lines.append("⬇️ N — варианты скачивания; 🔔 N — варианты уведомлений.")
     for index, r in enumerate(visible_results, start=start):
         icon = "⭐" if r.get("recommended") else "🔎"
         ep_note = f"  ⚠️ {r['ep_str']}" if r.get("partial") and r.get("ep_str") else ""
@@ -8530,6 +8530,7 @@ from subscription_policy import (
     VALID_DOWNLOAD_POLICIES, VALID_NOTIFY_POLICIES,
     DOWNLOAD_AUTO_EACH_UPDATE, DOWNLOAD_ONLY_WHEN_COMPLETE,
     DOWNLOAD_NOTIFY_ONLY, DOWNLOAD_ASK,
+    download_policy_label_ru, notify_policy_label_ru,
     policies_summary_ru,
 )
 
@@ -8688,9 +8689,9 @@ def _download_picker_keyboard(index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇️ Скачать сейчас",
                               callback_data=f"{prefix}:dl:{index}")],
-        [InlineKeyboardButton("⬇️ Скачать сейчас + обновлять",
+        [InlineKeyboardButton("⬇️ Скачать сейчас + новые серии по мере выхода",
                               callback_data=f"{prefix}:sub_preset:{index}:each")],
-        [InlineKeyboardButton("📦 Дождаться полного сезона и скачать",
+        [InlineKeyboardButton("📦 Скачать, когда сезон завершится",
                               callback_data=f"{prefix}:sub_preset:{index}:after")],
         [InlineKeyboardButton("⬅️ К результатам",
                               callback_data=f"{prefix}:sub_back_results:0")],
@@ -8815,7 +8816,7 @@ def _advanced_notify_keyboard(index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔔 О каждой новой серии",
                               callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_EACH_UPDATE}")],
-        [InlineKeyboardButton("🎯 Только когда сезон закроется",
+        [InlineKeyboardButton("🎯 Только когда сезон завершится",
                               callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_FINAL_ONLY}")],
         [InlineKeyboardButton("🔇 Не уведомлять",
                               callback_data=f"{prefix}:sub_set_notify:{index}:{NOTIFY_SILENT}")],
@@ -8830,7 +8831,7 @@ def _advanced_download_text(result: dict, notify_policy: str) -> str:
     title = html_module.escape(str(result.get("title") or "")[:120])
     notify_label = {
         NOTIFY_EACH_UPDATE: "🔔 О каждой новой серии",
-        NOTIFY_FINAL_ONLY:  "🎯 Только когда сезон закроется",
+        NOTIFY_FINAL_ONLY:  "🎯 Только когда сезон завершится",
         NOTIFY_SILENT:      "🔇 Не уведомлять",
     }.get(notify_policy, notify_policy)
     return (
@@ -8843,14 +8844,14 @@ def _advanced_download_text(result: dict, notify_policy: str) -> str:
 def _advanced_download_keyboard(index: int, notify_policy: str = NOTIFY_EACH_UPDATE) -> InlineKeyboardMarkup:
     prefix = SEARCH_CALLBACK_PREFIX
     rows = [
-        [InlineKeyboardButton("⬇️ Каждую серию по мере выхода",
+        [InlineKeyboardButton("⬇️ Новые серии по мере выхода",
                               callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_AUTO_EACH_UPDATE}")],
-        [InlineKeyboardButton("📦 Одним торрентом, когда сезон закроется",
+        [InlineKeyboardButton("📦 Когда сезон завершится",
                               callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_ONLY_WHEN_COMPLETE}")],
     ]
     if notify_policy != NOTIFY_SILENT:
         rows.append([
-            InlineKeyboardButton("⏸ Не скачивать (только уведомления)",
+            InlineKeyboardButton("⏸ Не скачивать автоматически",
                                  callback_data=f"{prefix}:sub_set_download:{index}:{DOWNLOAD_NOTIFY_ONLY}")
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад",
@@ -9297,18 +9298,10 @@ def _subscription_policy_texts(sub: dict) -> tuple[str, str]:
     notify_policy, download_policy = _coerce_subscription_policies(
         sub.get("notify_policy"), sub.get("download_policy")
     )
-    notify_label = {
-        NOTIFY_EACH_UPDATE: "о каждой новой серии",
-        NOTIFY_FINAL_ONLY: "только когда сезон завершится",
-        NOTIFY_SILENT: "не уведомлять",
-    }.get(notify_policy, notify_policy)
-    download_label = {
-        DOWNLOAD_AUTO_EACH_UPDATE: "каждое обновление",
-        DOWNLOAD_ONLY_WHEN_COMPLETE: "когда сезон завершится",
-        DOWNLOAD_NOTIFY_ONLY: "не скачивать автоматически",
-        DOWNLOAD_ASK: "спрашивать перед скачиванием",
-    }.get(download_policy, download_policy)
-    return notify_label, download_label
+    return (
+        notify_policy_label_ru(notify_policy),
+        download_policy_label_ru(download_policy),
+    )
 
 
 def _subscription_episode_pair(sub: dict) -> tuple[int | None, int | None]:
@@ -9573,7 +9566,7 @@ def _subscription_download_keyboard(sub_key: str, sub: dict) -> InlineKeyboardMa
         return f"✅ {text}" if policy == current_download else text
 
     choices = [
-        (DOWNLOAD_AUTO_EACH_UPDATE, "⬇️ Каждое обновление"),
+        (DOWNLOAD_AUTO_EACH_UPDATE, "⬇️ Новые серии по мере выхода"),
         (DOWNLOAD_ONLY_WHEN_COMPLETE, "📦 Когда сезон завершится"),
     ]
     if current_notify != NOTIFY_SILENT:

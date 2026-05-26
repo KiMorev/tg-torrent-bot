@@ -746,8 +746,8 @@ class AdminPanelTests(unittest.TestCase):
             self.assertEqual(sub["download_policy"], DOWNLOAD_NOTIFY_ONLY)
 
         text = update.callback_query.edit_message_text.call_args.args[0]
-        self.assertIn("при финале", text)
-        self.assertIn("без загрузки", text)
+        self.assertIn("только когда сезон завершится", text)
+        self.assertIn("не скачивать автоматически", text)
 
     def test_subs_command_renders_subscription_details(self):
         from subscription_policy import (
@@ -1024,7 +1024,7 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Нужно оставить хотя бы одно действие", text)
         keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
         labels = [button.text for row in keyboard.inline_keyboard for button in row]
-        self.assertIn("✅ ⬇️ Каждое обновление", labels)
+        self.assertIn("✅ ⬇️ Новые серии по мере выхода", labels)
         self.assertIn("📦 Когда сезон завершится", labels)
         self.assertFalse(any("Не скачивать" in label for label in labels))
 
@@ -5300,7 +5300,7 @@ class SearchResultsTextTests(unittest.TestCase):
             0,
         )
 
-        self.assertIn("⬇️ N — варианты скачивания; 🔔 N — только уведомления.", text)
+        self.assertIn("⬇️ N — варианты скачивания; 🔔 N — варианты уведомлений.", text)
 
     def test_plain_results_do_not_explain_subscribe_button(self):
         text = bot._build_results_text(
