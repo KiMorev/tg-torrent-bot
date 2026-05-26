@@ -5075,6 +5075,93 @@ async def _notify_pending_dropped(app: Application, entry: dict) -> None:
         logger.warning("Failed to notify pending-dropped for chat_id=%s", chat_id, exc_info=True)
 
 
+def _pending_series_bulk_meta(entry: dict) -> tuple[str, int] | None:
+    meta = entry.get("series_bulk")
+    if not isinstance(meta, dict):
+        return None
+    job_id = str(meta.get("job_id") or "")
+    try:
+        season = int(meta.get("season"))
+    except (TypeError, ValueError):
+        season = 0
+    if not job_id or season <= 0:
+        return None
+    return job_id, season
+
+
+def _series_bulk_job_status_from_entries(job: dict) -> str:
+    seasons = job.get("seasons")
+    if not isinstance(seasons, dict):
+        return str(job.get("status") or "planned")
+    statuses = {
+        str(entry.get("runtime_status") or "")
+        for entry in seasons.values()
+        if isinstance(entry, dict)
+    }
+    has_pending = "pending_retry" in statuses
+    has_failed = bool(statuses & {
+        "failed",
+        "pending_failed",
+        "partial_downloaded_subscription_failed",
+    })
+    has_downloaded = "downloaded" in statuses
+    if has_pending:
+        return "batch_completed_with_errors" if has_failed else "batch_completed_with_pending"
+    if has_failed:
+        return "batch_completed_with_errors" if has_downloaded else "batch_failed"
+    if has_downloaded:
+        return "batch_completed"
+    return str(job.get("status") or "planned")
+
+
+def _series_bulk_record_pending_retry_result(
+    entry: dict,
+    runtime_status: str,
+    *,
+    task_id: str = "",
+    method: str = "",
+    error: str = "",
+    summary: str = "",
+) -> None:
+    meta = _pending_series_bulk_meta(entry)
+    if meta is None:
+        return
+    job_id, season = meta
+    jobs = state_store.load_series_bulk_jobs()
+    job = jobs.get(job_id)
+    if not isinstance(job, dict):
+        logger.info("Series bulk pending retry: job not found job_id=%s season=%s", job_id, season)
+        return
+    seasons = job.setdefault("seasons", {})
+    if not isinstance(seasons, dict):
+        seasons = {}
+        job["seasons"] = seasons
+    season_entry = seasons.setdefault(str(season), {"season": season})
+    if not isinstance(season_entry, dict):
+        season_entry = {"season": season}
+        seasons[str(season)] = season_entry
+
+    season_entry["runtime_status"] = runtime_status
+    season_entry["season"] = season
+    if task_id:
+        season_entry["task_id"] = str(task_id)
+    if method:
+        season_entry["method"] = str(method)
+    if summary:
+        season_entry["summary"] = str(summary)
+    if error:
+        season_entry["error"] = str(error)
+    else:
+        season_entry.pop("error", None)
+    season_entry["result"] = _series_bulk_result_snapshot(
+        _pending_entry_to_search_result(entry)
+    )
+    season_entry.pop("pending_entry_id", None)
+    job["updated_at"] = _series_bulk_job_now()
+    job["status"] = _series_bulk_job_status_from_entries(job)
+    state_store.save_series_bulk_jobs(jobs)
+
+
 async def _run_pending_downloads_once(app: Application) -> None:
     """One pass over the pending queue: retry each entry, drop expired ones."""
     if not _pending_downloads_enabled():
@@ -5095,6 +5182,12 @@ async def _run_pending_downloads_once(app: Application) -> None:
             added_at = now  # malformed → treat as just-added (give it a chance)
         if now - added_at > ttl:
             await _notify_pending_dropped(app, entry)
+            _series_bulk_record_pending_retry_result(
+                entry,
+                "pending_failed",
+                error=str(entry.get("last_error") or "истёк срок отложенных попыток"),
+                summary="отложенный повтор не сработал",
+            )
             del pending[entry_id]
             changed = True
             continue
@@ -5116,6 +5209,13 @@ async def _run_pending_downloads_once(app: Application) -> None:
         logger.info("Pending download succeeded: id=%s task_id=%s method=%s",
                     entry_id, task_id, method)
         await _notify_pending_success(app, entry, task_id, method)
+        _series_bulk_record_pending_retry_result(
+            entry,
+            "downloaded",
+            task_id=task_id or "",
+            method=method,
+            summary=f"скачан после отложенного повтора: {task_id or method}",
+        )
         del pending[entry_id]
         changed = True
 
@@ -7511,23 +7611,17 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = query.message.chat.id if query.message else None
     last_error = str(context.user_data.get("srch_last_dl_error") or "")
 
-    pending = _load_pending_downloads()
-    entry_id = uuid.uuid4().hex[:12]
-    pending[entry_id] = _pending_download_entry_from_result(
-        result, chat_id=chat_id,
+    entry_id, entry = _queue_pending_download_from_result(
+        result,
+        chat_id=chat_id,
         subscribe=bool(context.user_data.get("srch_last_subscribe", False)),
         notify_policy=context.user_data.get("srch_last_notify_policy"),
         download_policy=context.user_data.get("srch_last_download_policy"),
         error=last_error,
     )
-    _save_pending_downloads(pending)
-    logger.info(
-        "Pending download queued: id=%s title=%s chat_id=%s",
-        entry_id, pending[entry_id]["title"], chat_id,
-    )
 
     interval_min = max(1, PENDING_DOWNLOADS_INTERVAL_SECONDS // 60)
-    title_text = pending[entry_id]["title"][:80]
+    title_text = entry["title"][:80]
     await query.edit_message_text(
         f"⏳ «{title_text}» поставлено в очередь.\n"
         f"Попробую скачать снова через ~{interval_min} мин.\n"
@@ -8013,6 +8107,7 @@ def _pending_download_entry_from_result(
     notify_policy: str | None = None,
     download_policy: str | None = None,
     error: str,
+    series_bulk: dict | None = None,
 ) -> dict:
     """Build a pending-queue entry from a search result + last error message."""
     entry = {
@@ -8037,11 +8132,43 @@ def _pending_download_entry_from_result(
         # can restore the exact user intent when it eventually succeeds.
         entry["notify_policy"] = notify_policy
         entry["download_policy"] = download_policy
+    if isinstance(series_bulk, dict) and series_bulk:
+        entry["series_bulk"] = _series_bulk_jsonable(series_bulk)
     for key in ("topic_id", "movie_title", "year", "quality"):
         value = result.get(key)
         if value not in (None, ""):
             entry[key] = value
     return entry
+
+
+def _queue_pending_download_from_result(
+    result: dict,
+    *,
+    chat_id: int | None,
+    subscribe: bool,
+    error: str,
+    notify_policy: str | None = None,
+    download_policy: str | None = None,
+    series_bulk: dict | None = None,
+) -> tuple[str, dict]:
+    pending = _load_pending_downloads()
+    entry_id = uuid.uuid4().hex[:12]
+    entry = _pending_download_entry_from_result(
+        result,
+        chat_id=chat_id,
+        subscribe=subscribe,
+        notify_policy=notify_policy,
+        download_policy=download_policy,
+        error=error,
+        series_bulk=series_bulk,
+    )
+    pending[entry_id] = entry
+    _save_pending_downloads(pending)
+    logger.info(
+        "Pending download queued: id=%s title=%s chat_id=%s",
+        entry_id, entry["title"], chat_id,
+    )
+    return entry_id, entry
 
 
 def _pending_entry_to_search_result(entry: dict) -> dict:
@@ -8063,6 +8190,43 @@ def _pending_entry_to_search_result(entry: dict) -> dict:
         if topic_id:
             result["topic_id"] = topic_id
     return result
+
+
+def _is_pending_retryable_download_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    transient_markers = (
+        "http 5",
+        "500",
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "timed out",
+        "connection",
+        "подключ",
+        "недоступ",
+        "временно",
+        "отложен",
+        "пауз",
+        "не json",
+    )
+    if isinstance(exc, JackettError):
+        return "404" in msg or any(marker in msg for marker in transient_markers)
+    if isinstance(exc, RutrackerError):
+        return any(marker in msg for marker in transient_markers)
+    if isinstance(exc, DownloadStationError):
+        return (
+            "dsm api недоступен" in msg
+            or "достигнут лимит задач" in msg
+            or any(marker in msg for marker in (
+                "timeout",
+                "timed out",
+                "connection",
+                "urlerror",
+                "не json",
+            ))
+        )
+    return False
 
 
 def _format_download_error(exc: Exception) -> str:
@@ -9076,6 +9240,7 @@ def _series_bulk_record_job_season(
     summary: str | None = None,
     result: dict | None = None,
     subscription: dict | None = None,
+    pending_entry_id: str | None = None,
 ) -> None:
     def _record(job: dict) -> None:
         seasons = job.setdefault("seasons", {})
@@ -9095,6 +9260,8 @@ def _series_bulk_record_job_season(
             entry["result"] = _series_bulk_result_snapshot(result)
         if subscription is not None:
             entry["subscription"] = _series_bulk_jsonable(subscription)
+        if pending_entry_id is not None:
+            entry["pending_entry_id"] = str(pending_entry_id)
 
     _series_bulk_update_job(context, _record)
 
@@ -9976,7 +10143,12 @@ def _series_bulk_confirm_text(
     return "\n".join(lines)
 
 
-def _series_bulk_done_text(successes: list[dict], failures: list[dict]) -> str:
+def _series_bulk_done_text(
+    successes: list[dict],
+    failures: list[dict],
+    pending_retries: list[dict] | None = None,
+) -> str:
+    pending_retries = pending_retries or []
     lines = ["📚 Загрузка уверенных сезонов завершена", ""]
     if successes:
         lines.append(f"Добавлено: {len(successes)}")
@@ -9986,6 +10158,11 @@ def _series_bulk_done_text(successes: list[dict], failures: list[dict]) -> str:
             )
     else:
         lines.append("Добавлено: 0")
+    if pending_retries:
+        interval_min = max(1, PENDING_DOWNLOADS_INTERVAL_SECONDS // 60)
+        lines.extend(["", f"В очереди на повтор: {len(pending_retries)}"])
+        for item in pending_retries:
+            lines.append(f"⏳ Сезон {item['season']} - попробую снова через ~{interval_min} мин")
     if failures:
         lines.extend(["", f"Не удалось добавить: {len(failures)}"])
         for item in failures:
@@ -10804,6 +10981,7 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = _chat_id_from_query(query)
     successes: list[dict] = []
     failures: list[dict] = []
+    pending_retries: list[dict] = []
     total = len(ready)
     _series_bulk_set_job_status(context, "batch_running")
     await query.edit_message_text(
@@ -10857,6 +11035,36 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
                 exc_info=True,
             )
             error = _format_download_error(exc)
+            if _pending_downloads_enabled() and _is_pending_retryable_download_error(exc):
+                job_id = str(context.user_data.get("srch_series_bulk_job_id") or "")
+                entry_id, _entry = _queue_pending_download_from_result(
+                    result,
+                    chat_id=chat_id,
+                    subscribe=False,
+                    error=error,
+                    series_bulk={
+                        "job_id": job_id,
+                        "season": season.season,
+                    } if job_id else None,
+                )
+                pending_retries.append({
+                    "season": season.season,
+                    "entry_id": entry_id,
+                    "error": error,
+                })
+                summary = f"в очереди на повтор: {entry_id}"
+                _series_bulk_mark_resolved(context, season.season, summary)
+                _series_bulk_clear_failed(context, season.season)
+                _series_bulk_record_job_season(
+                    context,
+                    season.season,
+                    "pending_retry",
+                    error=error,
+                    summary=summary,
+                    result=result,
+                    pending_entry_id=entry_id,
+                )
+                continue
             failures.append({
                 "season": season.season,
                 "error": error,
@@ -10875,14 +11083,16 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
                 result=result,
             )
 
-    if failures and successes:
+    if failures and (successes or pending_retries):
         _series_bulk_set_job_status(context, "batch_completed_with_errors")
+    elif pending_retries:
+        _series_bulk_set_job_status(context, "batch_completed_with_pending")
     elif failures:
         _series_bulk_set_job_status(context, "batch_failed")
     else:
         _series_bulk_set_job_status(context, "batch_completed")
     await query.edit_message_text(
-        _series_bulk_done_text(successes, failures),
+        _series_bulk_done_text(successes, failures, pending_retries),
         reply_markup=_series_bulk_done_keyboard(bool(successes), bool(failures)),
     )
     return SEARCH_RESULTS if failures else ConversationHandler.END

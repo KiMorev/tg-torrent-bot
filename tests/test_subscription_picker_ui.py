@@ -89,6 +89,19 @@ def _fake_series_bulk_store(initial: dict | None = None):
     return store, jobs
 
 
+def _fake_series_bulk_and_pending_store(initial: dict | None = None):
+    store, jobs = _fake_series_bulk_store(initial)
+    pending: dict[str, dict] = {}
+    store.load_pending_downloads.side_effect = lambda: copy.deepcopy(pending)
+
+    def save_pending_downloads(updated):
+        pending.clear()
+        pending.update(copy.deepcopy(updated))
+
+    store.save_pending_downloads.side_effect = save_pending_downloads
+    return store, jobs, pending
+
+
 class SearchDownloadPickTests(unittest.TestCase):
     """search_download_pick — first tap «⬇️ N» on a partial result opens download choices."""
 
@@ -729,7 +742,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         query.message = MagicMock()
         query.message.chat = MagicMock(id=100)
         update = MagicMock(callback_query=query)
-        fake_store, saved_jobs = _fake_series_bulk_store({
+        fake_store, saved_jobs, saved_pending = _fake_series_bulk_and_pending_store({
             "bulk_test": {
                 "id": "bulk_test",
                 "status": "planned",
@@ -740,6 +753,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         with (
             patch.object(bot, "_check_disk_space_for_download", return_value=None),
             patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=bot.DownloadStationError("no space"))),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
             patch.object(bot, "state_store", fake_store),
         ):
             state = asyncio.run(bot.search_series_bulk_run(update, ctx))
@@ -760,6 +774,56 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["status"], "batch_failed")
         self.assertEqual(job["seasons"]["1"]["runtime_status"], "failed")
         self.assertIn("Download Station", job["seasons"]["1"]["error"])
+        self.assertEqual(saved_pending, {})
+
+    def test_run_queues_retryable_ready_season(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result])
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
+        query = _make_query("srch:bulk_run")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        fake_store, saved_jobs, saved_pending = _fake_series_bulk_and_pending_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {"1": {"season": 1}},
+            },
+        })
+
+        with (
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=bot.JackettError("HTTP 404"))),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_INTERVAL_SECONDS", 300),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(bot.search_series_bulk_run(update, ctx))
+
+        self.assertEqual(state, bot.ConversationHandler.END)
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("В очереди на повтор: 1", final_text)
+        self.assertIn("Сезон 1", final_text)
+        self.assertEqual(len(saved_pending), 1)
+        entry_id, entry = next(iter(saved_pending.items()))
+        self.assertEqual(entry["title"], result["title"])
+        self.assertEqual(entry["series_bulk"]["job_id"], "bulk_test")
+        self.assertEqual(entry["series_bulk"]["season"], 1)
+        self.assertIn("404", entry["last_error"])
+        self.assertIn("в очереди", ctx.user_data["srch_series_bulk_resolved"]["1"])
+        self.assertNotIn("1", ctx.user_data.get("srch_series_bulk_failed", {}))
+        job = saved_jobs["bulk_test"]
+        self.assertEqual(job["status"], "batch_completed_with_pending")
+        self.assertEqual(job["seasons"]["1"]["runtime_status"], "pending_retry")
+        self.assertEqual(job["seasons"]["1"]["pending_entry_id"], entry_id)
 
     def test_failed_ready_season_review_offers_retry(self):
         result = {

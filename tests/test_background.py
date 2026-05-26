@@ -36,6 +36,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         auto_delete_tasks_file=d / "auto_delete.json",
         topic_subscriptions_file=d / "subscriptions.json",
         pending_downloads_file=d / "pending_downloads.json",
+        series_bulk_jobs_file=d / "series_bulk_jobs.json",
     )
 
 
@@ -634,6 +635,110 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         self.assertNotIn("Слежу за прогрессом", sent_text)
         remember_owner.assert_not_called()
         remember_meta.assert_not_called()
+
+    def test_series_bulk_success_updates_job_and_removes_pending_marker(self) -> None:
+        from datetime import datetime
+        self._store.save_pending_downloads({
+            "bulk-pending-1": {
+                "chat_id": 100,
+                "added_at": datetime.now(bot.DISPLAY_TIMEZONE).isoformat(),
+                "title": "Клиника / Scrubs / Сезон: 1",
+                "topic_url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+                "torrent_url": "http://jackett/dl/1",
+                "magnet_url": None,
+                "tracker": "rutracker",
+                "source": "jackett",
+                "subscribe": False,
+                "attempts": 0,
+                "last_attempt_at": None,
+                "last_error": "❌ Jackett HTTP 404",
+                "series_bulk": {"job_id": "bulk_test", "season": 1},
+            }
+        })
+        self._store.save_series_bulk_jobs({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "batch_completed_with_pending",
+                "seasons": {
+                    "1": {
+                        "season": 1,
+                        "runtime_status": "pending_retry",
+                        "pending_entry_id": "bulk-pending-1",
+                    }
+                },
+            }
+        })
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task1", "torrent-файл"))),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+
+        self.assertEqual(self._store.load_pending_downloads(), {})
+        job = self._store.load_series_bulk_jobs()["bulk_test"]
+        season = job["seasons"]["1"]
+        self.assertEqual(job["status"], "batch_completed")
+        self.assertEqual(season["runtime_status"], "downloaded")
+        self.assertEqual(season["task_id"], "task1")
+        self.assertEqual(season["method"], "torrent-файл")
+        self.assertNotIn("pending_entry_id", season)
+        self.assertNotIn("error", season)
+
+    def test_series_bulk_ttl_expiry_marks_job_pending_failed(self) -> None:
+        from datetime import datetime, timedelta
+        self._store.save_pending_downloads({
+            "bulk-pending-1": {
+                "chat_id": 100,
+                "added_at": (datetime.now(bot.DISPLAY_TIMEZONE) - timedelta(hours=25)).isoformat(),
+                "title": "Клиника / Scrubs / Сезон: 1",
+                "topic_url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+                "torrent_url": "http://jackett/dl/1",
+                "magnet_url": None,
+                "tracker": "rutracker",
+                "source": "jackett",
+                "subscribe": False,
+                "attempts": 3,
+                "last_attempt_at": None,
+                "last_error": "❌ Jackett HTTP 404",
+                "series_bulk": {"job_id": "bulk_test", "season": 1},
+            }
+        })
+        self._store.save_series_bulk_jobs({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "batch_completed_with_pending",
+                "seasons": {
+                    "1": {
+                        "season": 1,
+                        "runtime_status": "pending_retry",
+                        "pending_entry_id": "bulk-pending-1",
+                    }
+                },
+            }
+        })
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=AssertionError("should not be called"))),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(mock_app))
+
+        self.assertEqual(self._store.load_pending_downloads(), {})
+        job = self._store.load_series_bulk_jobs()["bulk_test"]
+        season = job["seasons"]["1"]
+        self.assertEqual(job["status"], "batch_failed")
+        self.assertEqual(season["runtime_status"], "pending_failed")
+        self.assertIn("Jackett HTTP 404", season["error"])
+        self.assertNotIn("pending_entry_id", season)
 
     def test_attempt_pending_download_uses_magnet_from_jackett_redirect(self) -> None:
         from jackett import JackettMagnetRedirect
