@@ -133,6 +133,7 @@ from series_bulk_planner import (
     SeasonPlan,
     build_series_bulk_plan,
     release_profile_from_title,
+    season_pack_range_from_title,
 )
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from plex import (
@@ -5108,7 +5109,7 @@ def _series_bulk_job_status_from_entries(job: dict) -> str:
         "pending_failed",
         "partial_downloaded_subscription_failed",
     })
-    has_downloaded = "downloaded" in statuses
+    has_downloaded = bool(statuses & {"downloaded", "pack_downloaded"})
     if has_pending:
         return "batch_completed_with_errors" if has_failed else "batch_completed_with_pending"
     if has_failed:
@@ -9270,6 +9271,30 @@ def _series_bulk_record_job_season(
     _series_bulk_update_job(context, _record)
 
 
+def _series_bulk_record_job_pack(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    result: dict,
+    task_id: str | None,
+    method: str | None,
+    season_range: tuple[int, int] | None,
+) -> None:
+    def _record(job: dict) -> None:
+        packs = job.setdefault("pack_downloads", [])
+        if not isinstance(packs, list):
+            packs = []
+            job["pack_downloads"] = packs
+        packs.append({
+            "added_at": _series_bulk_job_now(),
+            "task_id": str(task_id or ""),
+            "method": str(method or ""),
+            "season_range": list(season_range) if season_range else None,
+            "result": _series_bulk_result_snapshot(result),
+        })
+
+    _series_bulk_update_job(context, _record)
+
+
 def _series_bulk_ready_seasons(
     plan,
     resolved: dict[int, str] | None = None,
@@ -9313,6 +9338,7 @@ def _series_bulk_plan_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     ready_count = len(_series_bulk_ready_seasons(plan, resolved, failed)) if plan is not None else 0
     decision_count = len(_series_bulk_decision_seasons(plan, resolved, failed)) if plan is not None else 0
+    pack_count = len(_series_bulk_pack_candidates(plan)) if plan is not None else 0
     if ready_count:
         rows.append([InlineKeyboardButton(
             f"⬇️ Скачать уверенные ({ready_count})",
@@ -9322,6 +9348,11 @@ def _series_bulk_plan_keyboard(
         rows.append([InlineKeyboardButton(
             f"⚙️ Разобрать спорные ({decision_count})",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_review",
+        )])
+    if pack_count:
+        rows.append([InlineKeyboardButton(
+            f"📦 Показать паки сезонов ({pack_count})",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_packs",
         )])
     rows.extend([
         [InlineKeyboardButton("🔄 Пересобрать план", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_rebuild")],
@@ -9337,6 +9368,69 @@ def _series_bulk_confirm_keyboard(ready_count: int) -> InlineKeyboardMarkup:
             f"✅ Скачать {ready_count}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_run",
         )],
+        [InlineKeyboardButton("⬅️ К плану", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_back_plan")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
+def _series_bulk_pack_list_text(plan) -> str:
+    packs = _series_bulk_pack_candidates(plan)
+    if not packs:
+        return "Паки сезонов не найдены."
+    lines = [
+        f"📦 Паки сезонов: {plan.series_title}",
+        "",
+        "Пак — это одна большая раздача на несколько сезонов. Я не выбираю её автоматически: проверьте перевод, качество, размер и сиды.",
+        "",
+    ]
+    for index, result in enumerate(packs[:5], start=1):
+        lines.extend([
+            f"{index}. {_series_bulk_pack_label(result)}",
+            _short_title(result, limit=110),
+        ])
+    return "\n".join(lines)
+
+
+def _series_bulk_pack_list_keyboard(plan) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, _result in enumerate(_series_bulk_pack_candidates(plan)[:5], start=1):
+        rows.append([InlineKeyboardButton(
+            f"📦 Выбрать пак {index}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_pack_confirm:{index - 1}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton("⬅️ К плану", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_back_plan")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_bulk_pack_confirm_text(plan, result: dict) -> str:
+    season_range = _series_bulk_pack_range(result)
+    lines = [
+        f"📦 Скачать пак сезонов: {plan.series_title}",
+        "",
+        _series_bulk_pack_label(result),
+        _short_title(result, limit=130),
+        "",
+        "Скачаю эту раздачу одним торрентом. Это ручной выбор: я не проверяю состав файлов внутри пака.",
+    ]
+    if season_range:
+        lines.append(
+            f"После добавления отмечу сезоны {season_range[0]}-{season_range[1]} в этом плане как скачанные паком."
+        )
+    else:
+        lines.append("Диапазон сезонов не распознан, поэтому сам план по сезонам не буду помечать решённым.")
+    return "\n".join(lines)
+
+
+def _series_bulk_pack_confirm_keyboard(index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅ Скачать пак",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_pack_run:{index}",
+        )],
+        [InlineKeyboardButton("⬅️ К пакам", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_packs")],
         [InlineKeyboardButton("⬅️ К плану", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_back_plan")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
     ])
@@ -9799,6 +9893,7 @@ _SERIES_BULK_FAILED_RUNTIME_STATUSES = {
 }
 _SERIES_BULK_RESOLVED_RUNTIME_STATUSES = {
     "downloaded",
+    "pack_downloaded",
     "pending_retry",
     "partial_downloaded",
     "downloaded_and_subscribed",
@@ -9879,6 +9974,7 @@ _SERIES_BULK_JOB_STATUS_LABELS = {
     "batch_completed_with_pending": "есть очередь повтора",
     "batch_completed_with_errors": "есть ошибки",
     "batch_failed": "добавление не удалось",
+    "pack_downloaded": "пак добавлен",
 }
 
 
@@ -10352,6 +10448,42 @@ def _series_bulk_candidate_label(candidate) -> str:
     return _short_title(candidate.result, limit=72)
 
 
+def _series_bulk_pack_candidates(plan) -> tuple[dict, ...]:
+    return tuple(
+        result
+        for result in getattr(plan, "pack_candidates", ()) or ()
+        if isinstance(result, dict)
+    )
+
+
+def _series_bulk_pack_range(result: dict) -> tuple[int, int] | None:
+    return season_pack_range_from_title(str(result.get("title") or ""))
+
+
+def _series_bulk_pack_label(result: dict) -> str:
+    title = str(result.get("title") or "")
+    release = release_profile_from_title(title, size=str(result.get("size") or ""))
+    season_range = _series_bulk_pack_range(result)
+    parts: list[str] = []
+    if season_range:
+        parts.append(f"сезоны {season_range[0]}-{season_range[1]}")
+    if release.release_type:
+        parts.append(release.release_type)
+    if release.quality:
+        parts.append(release.quality)
+    if release.voices:
+        parts.append(" / ".join(release.voices[:2]))
+    if release.has_original:
+        parts.append("Original")
+    if release.has_subs:
+        parts.append("Sub")
+    if result.get("size"):
+        parts.append(str(result.get("size")))
+    if result.get("seeders") is not None:
+        parts.append(f"сиды: {result.get('seeders')}")
+    return " · ".join(parts) or _short_title(result, limit=72)
+
+
 def _series_bulk_profile_line(profile: SeriesBulkProfile | None) -> str:
     if profile is None:
         return ""
@@ -10538,6 +10670,44 @@ def _series_bulk_done_text(
 
 def _series_bulk_plan_from_context(context: ContextTypes.DEFAULT_TYPE):
     return context.user_data.get("srch_series_bulk_plan")
+
+
+def _series_bulk_pack_from_query(context: ContextTypes.DEFAULT_TYPE, data: str | None) -> tuple[int, dict] | None:
+    plan = _series_bulk_plan_from_context(context)
+    if plan is None:
+        return None
+    try:
+        index = int(str(data or "").rsplit(":", 1)[-1])
+    except (TypeError, ValueError):
+        return None
+    packs = _series_bulk_pack_candidates(plan)
+    if not (0 <= index < len(packs)):
+        return None
+    return index, packs[index]
+
+
+def _series_bulk_pack_covered_seasons(plan, season_range: tuple[int, int] | None) -> list[int]:
+    if not season_range:
+        return []
+    start, end = season_range
+    seasons: list[int] = []
+    for season in getattr(plan, "seasons", ()):
+        if season.status in {STATUS_ALREADY_IN_PLEX, STATUS_ALREADY_DOWNLOADING}:
+            continue
+        if start <= season.season <= end:
+            seasons.append(season.season)
+    return seasons
+
+
+def _series_bulk_seasons_label(seasons: list[int]) -> str:
+    if not seasons:
+        return "Сезоны"
+    ordered = sorted(seasons)
+    if len(ordered) > 1 and ordered == list(range(ordered[0], ordered[-1] + 1)):
+        return f"Сезоны {ordered[0]}-{ordered[-1]}"
+    if len(ordered) == 1:
+        return f"Сезон {ordered[0]}"
+    return "Сезоны " + ", ".join(str(season) for season in ordered)
 
 
 def _series_bulk_current_review(
@@ -10881,6 +11051,127 @@ async def search_series_bulk_review(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     return await _series_bulk_show_review_or_plan(query, context)
+
+
+async def search_series_bulk_pack_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    plan = _series_bulk_plan_from_context(context)
+    if plan is None:
+        return await _series_bulk_show_plan(query, context)
+    packs = _series_bulk_pack_candidates(plan)
+    if not packs:
+        return await _series_bulk_show_plan(
+            query,
+            context,
+            notice="Паки сезонов в этом плане не найдены.",
+        )
+    await query.edit_message_text(
+        _series_bulk_pack_list_text(plan),
+        reply_markup=_series_bulk_pack_list_keyboard(plan),
+    )
+    return SEARCH_RESULTS
+
+
+async def search_series_bulk_pack_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    plan = _series_bulk_plan_from_context(context)
+    selected = _series_bulk_pack_from_query(context, query.data)
+    if plan is None or selected is None:
+        return await _series_bulk_show_plan(
+            query,
+            context,
+            notice="Не нашёл выбранный пак. Откройте список паков ещё раз.",
+        )
+    index, result = selected
+    await query.edit_message_text(
+        _series_bulk_pack_confirm_text(plan, result),
+        reply_markup=_series_bulk_pack_confirm_keyboard(index),
+    )
+    return SEARCH_RESULTS
+
+
+async def search_series_bulk_pack_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    plan = _series_bulk_plan_from_context(context)
+    selected = _series_bulk_pack_from_query(context, query.data)
+    if plan is None or selected is None:
+        return await _series_bulk_show_plan(
+            query,
+            context,
+            notice="Не нашёл выбранный пак. Откройте список паков ещё раз.",
+        )
+    _index, result = selected
+
+    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+    if disk_check is not None and disk_check[0] == "block":
+        await query.edit_message_text(
+            disk_check[1],
+            reply_markup=_series_bulk_pack_list_keyboard(plan),
+            parse_mode="HTML",
+        )
+        return SEARCH_RESULTS
+
+    await query.edit_message_text(
+        f"⏳ Добавляю пак сезонов: {_series_bulk_pack_label(result)}",
+        reply_markup=_series_bulk_wait_keyboard(),
+    )
+    chat_id = _chat_id_from_query(query)
+    try:
+        task_id, method = await _series_bulk_add_download(
+            context,
+            result,
+            chat_id=chat_id,
+            meta_source="series_bulk_pack",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Series bulk pack download failed: title=%s error=%s",
+            result.get("title"),
+            exc,
+            exc_info=True,
+        )
+        return await _series_bulk_show_plan(
+            query,
+            context,
+            notice=f"❌ Пак не удалось добавить: {_format_download_error(exc)}",
+        )
+
+    season_range = _series_bulk_pack_range(result)
+    covered_seasons = _series_bulk_pack_covered_seasons(plan, season_range)
+    summary = f"скачан паком: {task_id or method}"
+    for season in covered_seasons:
+        _series_bulk_mark_resolved(context, season, summary)
+        _series_bulk_clear_failed(context, season)
+        _series_bulk_record_job_season(
+            context,
+            season,
+            "pack_downloaded",
+            task_id=task_id or "",
+            method=method,
+            summary=summary,
+            result=result,
+        )
+    _series_bulk_record_job_pack(
+        context,
+        result=result,
+        task_id=task_id,
+        method=method,
+        season_range=season_range,
+    )
+    _series_bulk_set_job_status(context, "pack_downloaded")
+
+    if covered_seasons:
+        season_text = f"{_series_bulk_seasons_label(covered_seasons)} пометил как скачанные паком."
+    else:
+        season_text = "План по сезонам не помечал: диапазон пака не распознан."
+    return await _series_bulk_show_plan(
+        query,
+        context,
+        notice=f"✅ Пак добавлен: {task_id or method}.\n{season_text}",
+    )
 
 
 async def search_series_bulk_candidate_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -16393,6 +16684,9 @@ def main() -> None:
                     CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z_]+$"),
                     CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$", block=False),
                     CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
+                    CallbackQueryHandler(search_series_bulk_pack_list, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_packs$"),
+                    CallbackQueryHandler(search_series_bulk_pack_confirm, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_pack_confirm:\d+$"),
+                    CallbackQueryHandler(search_series_bulk_pack_run, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_pack_run:\d+$"),
                     CallbackQueryHandler(search_series_bulk_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_retry$"),
                     CallbackQueryHandler(search_series_bulk_soft_search, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_soft$"),
                     CallbackQueryHandler(search_series_bulk_candidate_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:\d+$"),

@@ -142,6 +142,11 @@ def release_profile_from_title(title: str, *, size: str = "") -> ReleaseProfile:
     )
 
 
+def season_pack_range_from_title(title: str) -> tuple[int, int] | None:
+    """Return the season range for a pack title, if the title clearly has one."""
+    return _detect_season_pack(title)
+
+
 def build_series_bulk_plan(
     *,
     series_title: str,

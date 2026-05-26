@@ -141,6 +141,17 @@ def _series_bulk_job(
     }
 
 
+def _pack_result() -> dict:
+    return {
+        "title": "Клиника / Scrubs / Сезоны: 1-3 / WEB-DL 1080p / Original / Sub",
+        "source": "jackett",
+        "tracker_name": "rutracker",
+        "torrent_url": "https://jackett.local/dl/pack",
+        "seeders": 30,
+        "size": "30 GB",
+    }
+
+
 def _fake_series_bulk_and_pending_store(initial: dict | None = None):
     store, jobs = _fake_series_bulk_store(initial)
     pending: dict[str, dict] = {}
@@ -1042,6 +1053,106 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         labels = [b.text for row in kb.inline_keyboard for b in row]
 
         self.assertIn("⚙️ Разобрать спорные (1)", labels)
+
+    def test_plan_keyboard_offers_pack_list_when_season_pack_found(self):
+        plan = _bulk_plan(seasons=[1, 2, 3], results=[_pack_result()])
+
+        kb = bot._series_bulk_plan_keyboard(plan, {})
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+
+        self.assertIn("📦 Показать паки сезонов (1)", labels)
+        self.assertIn("srch:bulk_packs", callbacks)
+
+    def test_pack_list_and_confirm_are_manual_choice_screens(self):
+        plan = _bulk_plan(seasons=[1, 2, 3], results=[_pack_result()])
+        ctx = _make_context(results=[_pack_result()])
+        ctx.user_data["srch_series_bulk_plan"] = plan
+        query = _make_query("srch:bulk_packs")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_pack_list(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Паки сезонов", text)
+        self.assertIn("не выбираю её автоматически", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("📦 Выбрать пак 1", labels)
+
+        query = _make_query("srch:bulk_pack_confirm:0")
+        update = MagicMock(callback_query=query)
+        ctx.user_data["srch_series_bulk_plan"] = plan
+        state = asyncio.run(bot.search_series_bulk_pack_confirm(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Скачать пак сезонов", text)
+        self.assertIn("Скачаю эту раздачу одним торрентом", text)
+        self.assertIn("сезоны 1-3", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("✅ Скачать пак", labels)
+        self.assertIn("⬅️ К пакам", labels)
+
+    def test_pack_download_marks_covered_seasons_resolved(self):
+        pack = _pack_result()
+        plan = _bulk_plan(seasons=[1, 2, 3], results=[pack])
+        ctx = _make_context(results=[pack])
+        ctx.user_data["srch_series_bulk_plan"] = plan
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_results"] = [pack]
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
+        query = _make_query("srch:bulk_pack_run:0")
+        query.message.chat.id = 100
+        update = MagicMock(callback_query=query)
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {
+                    str(season.season): bot._series_bulk_season_job_entry(season)
+                    for season in plan.seasons
+                },
+                "pack_candidates": [pack],
+            },
+        })
+
+        with (
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task_pack", "torrent-файл"))) as dl,
+            patch.object(bot, "_remember_task_owner") as owner,
+            patch.object(bot, "_remember_task_meta") as meta,
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(bot.search_series_bulk_pack_run(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        dl.assert_awaited_once()
+        self.assertEqual(dl.await_args.args[0]["title"], pack["title"])
+        owner.assert_called_once_with("task_pack", 100)
+        meta.assert_called_once()
+        self.assertEqual(ctx.user_data["srch_series_bulk_resolved"]["1"], "скачан паком: task_pack")
+        self.assertEqual(ctx.user_data["srch_series_bulk_resolved"]["2"], "скачан паком: task_pack")
+        self.assertEqual(ctx.user_data["srch_series_bulk_resolved"]["3"], "скачан паком: task_pack")
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Пак добавлен: task_pack", text)
+        self.assertIn("Сезоны 1-3 пометил", text)
+        self.assertIn("Можно скачать после подтверждения: 0", text)
+        job = saved_jobs["bulk_test"]
+        self.assertEqual(job["status"], "pack_downloaded")
+        self.assertEqual(job["seasons"]["1"]["runtime_status"], "pack_downloaded")
+        self.assertEqual(job["seasons"]["2"]["runtime_status"], "pack_downloaded")
+        self.assertEqual(job["seasons"]["3"]["runtime_status"], "pack_downloaded")
+        self.assertEqual(job["pack_downloads"][0]["task_id"], "task_pack")
+        self.assertEqual(job["pack_downloads"][0]["season_range"], [1, 3])
 
     def test_missing_season_can_be_opened_for_soft_search(self):
         results = [{
