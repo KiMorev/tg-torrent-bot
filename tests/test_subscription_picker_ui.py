@@ -67,6 +67,14 @@ def _bulk_plan(*, seasons: list[int], results: list[dict]):
     )
 
 
+def _bulk_profile():
+    return bot.SeriesBulkProfile(
+        quality="1080p",
+        require_original=True,
+        require_subs=True,
+    )
+
+
 class SearchDownloadPickTests(unittest.TestCase):
     """search_download_pick — first tap «⬇️ N» on a partial result opens download choices."""
 
@@ -366,6 +374,214 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("Добавлено: 0", final_text)
         self.assertIn("Не удалось добавить: 1", final_text)
         self.assertIn("Download Station", final_text)
+
+    def test_plan_keyboard_offers_manual_review_for_disputed_season(self):
+        results = [
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / NewStudio",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+        ]
+        plan = _bulk_plan(seasons=[1], results=results)
+
+        kb = bot._series_bulk_plan_keyboard(plan, {})
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+
+        self.assertIn("⚙️ Разобрать спорные (1)", labels)
+
+    def test_review_screen_lists_disputed_candidates(self):
+        results = [
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / NewStudio",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+        ]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=results)
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        query = _make_query("srch:bulk_review")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_review(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Сезон 1 - нужен выбор", text)
+        self.assertIn("LostFilm", text)
+        self.assertIn("NewStudio", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("⬇️ Скачать 1", labels)
+        self.assertIn("⏭ Пропустить сезон", labels)
+
+    def test_skip_manual_review_marks_season_resolved_and_returns_to_plan(self):
+        results = [
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / NewStudio",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+        ]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=results)
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_results"] = results
+        query = _make_query("srch:bulk_skip")
+        update = MagicMock(callback_query=query)
+
+        asyncio.run(bot.search_series_bulk_skip(update, ctx))
+
+        self.assertEqual(ctx.user_data["srch_series_bulk_resolved"], {"1": "пропущен"})
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Решено вручную", text)
+        self.assertIn("Сезон 1 - пропущен", text)
+        self.assertIn("Нужно решение: 0", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertNotIn("⚙️ Разобрать спорные (1)", labels)
+
+    def test_candidate_download_marks_disputed_season_resolved(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+            "size": "10 GB",
+        }
+        other = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / NewStudio",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/2",
+            "seeders": 20,
+            "size": "10 GB",
+        }
+        ctx = _make_context(results=[result, other])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result, other])
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_results"] = [result, other]
+        query = _make_query("srch:bulk_cand_dl:0")
+        query.message.chat.id = 100
+        update = MagicMock(callback_query=query)
+
+        with (
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task_1", "torrent-файл"))) as dl,
+            patch.object(bot, "_remember_task_owner") as owner,
+            patch.object(bot, "_remember_task_meta") as meta,
+        ):
+            asyncio.run(bot.search_series_bulk_candidate_download(update, ctx))
+
+        dl.assert_awaited_once()
+        self.assertEqual(dl.await_args.args[0]["title"], result["title"])
+        owner.assert_called_once_with("task_1", 100)
+        meta.assert_called_once()
+        self.assertIn("скачан вручную", ctx.user_data["srch_series_bulk_resolved"]["1"])
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("добавил задачу task_1", text)
+        self.assertIn("Нужно решение: 0", text)
+
+    def test_partial_review_offers_download_and_subscription_actions(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 2 / Серии: 1-5 из 8 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "url": "https://tracker.local/topic/2",
+            "seeders": 20,
+            "size": "10 GB",
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=[result])
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        query = _make_query("srch:bulk_review")
+        update = MagicMock(callback_query=query)
+
+        asyncio.run(bot.search_series_bulk_review(update, ctx))
+
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("найден неполный сезон", text)
+        self.assertIn("5/8", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("⬇️ Скачать доступные серии", labels)
+        self.assertIn("⬇️ Скачать доступные + новые по мере выхода", labels)
+        self.assertIn("📦 Скачать, когда сезон завершится", labels)
+        self.assertIn("🔔 Только уведомлять", labels)
+        self.assertIn("🎯 Сообщить о финале", labels)
+
+    def test_partial_finale_action_creates_subscription_and_returns_to_plan(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 2 / Серии: 1-5 из 8 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "url": "https://tracker.local/topic/2",
+            "seeders": 20,
+            "size": "10 GB",
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=[result])
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        ctx.user_data["srch_series_bulk_results"] = [result]
+        query = _make_query("srch:bulk_partial:after")
+        query.message.chat.id = 100
+        update = MagicMock(callback_query=query)
+        saved = {}
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {}
+        fake_store.save_topic_subscriptions.side_effect = lambda subs: saved.update(subs)
+
+        with patch.object(bot, "state_store", fake_store):
+            asyncio.run(bot.search_series_bulk_partial_action(update, ctx))
+
+        self.assertEqual(len(saved), 1)
+        sub = next(iter(saved.values()))
+        self.assertEqual(sub["query"], "Клиника 1080p Original Sub")
+        self.assertEqual(sub["notify_policy"], NOTIFY_FINAL_ONLY)
+        self.assertEqual(sub["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
+        self.assertEqual(ctx.user_data["srch_series_bulk_resolved"]["2"], "подписка: скачать сезон после финала")
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("скачать сезон после финала", text)
+        self.assertIn("Нужно решение: 0", text)
 
 
 class SearchSubscribePickTests(unittest.TestCase):

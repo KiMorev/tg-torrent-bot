@@ -8583,24 +8583,16 @@ def _subscription_done_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
-async def _create_subscription_only(
-    query,
+def _save_subscription_for_result(
     context: ContextTypes.DEFAULT_TYPE,
-    index: int,
+    result: dict,
     *,
+    chat_id: int | None,
     notify_policy: str,
     download_policy: str,
-) -> int:
-    results = context.user_data.get("srch_results", [])
-    if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
-        return ConversationHandler.END
-
-    result = results[index]
+    seen_results: list[dict] | None = None,
+) -> tuple[str, dict]:
     title = str(result.get("title") or "")
-    chat_id = _chat_id_from_query(query)
-    if not isinstance(chat_id, int):
-        chat_id = None
     notify_policy, download_policy = _coerce_subscription_policies(
         notify_policy, download_policy
     )
@@ -8619,12 +8611,11 @@ async def _create_subscription_only(
             chat_id=chat_id,
             query=search_query,
             result=result,
-            seen_results=context.user_data.get("srch_results", []),
+            seen_results=seen_results if seen_results is not None else context.user_data.get("srch_results", []),
             added_at=now_text,
             notify_policy=notify_policy,
             download_policy=download_policy,
         )
-        saved_sub = subs[sub_key]
         saved_key = sub_key
     else:
         topic_id = str(result.get("topic_id") or "")
@@ -8632,12 +8623,8 @@ async def _create_subscription_only(
             topic_id = _extract_rutracker_topic_id(str(result.get("url") or ""))
         episode_info = _parse_episode_info(title)
         if not topic_id or not episode_info or chat_id is None:
-            await query.edit_message_text(
-                "Не удалось создать подписку для этого результата.",
-                reply_markup=_subscription_done_keyboard(),
-            )
-            return ConversationHandler.END
-        saved_sub = {
+            raise RuntimeError("Не удалось создать подписку для этого результата.")
+        subs[topic_id] = {
             "chat_id": chat_id,
             "title": title,
             "last_episode_end": episode_info[0],
@@ -8646,10 +8633,45 @@ async def _create_subscription_only(
             "notify_policy": notify_policy,
             "download_policy": download_policy,
         }
-        subs[topic_id] = saved_sub
         saved_key = topic_id
 
     state_store.save_topic_subscriptions(subs)
+    return saved_key, subs[saved_key]
+
+
+async def _create_subscription_only(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
+    *,
+    notify_policy: str,
+    download_policy: str,
+) -> int:
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        await query.edit_message_text("Результат недоступен.")
+        return ConversationHandler.END
+
+    result = results[index]
+    title = str(result.get("title") or "")
+    chat_id = _chat_id_from_query(query)
+    if not isinstance(chat_id, int):
+        chat_id = None
+    try:
+        saved_key, saved_sub = _save_subscription_for_result(
+            context,
+            result,
+            chat_id=chat_id,
+            notify_policy=notify_policy,
+            download_policy=download_policy,
+        )
+    except RuntimeError as exc:
+        await query.edit_message_text(
+            str(exc),
+            reply_markup=_subscription_done_keyboard(),
+        )
+        return ConversationHandler.END
+
     logger.info(
         "Subscription added without initial download: key=%s policy=%s/%s",
         saved_key, notify_policy, download_policy,
@@ -8737,6 +8759,32 @@ def _series_bulk_wait_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def _series_bulk_resolved(context: ContextTypes.DEFAULT_TYPE) -> dict[int, str]:
+    raw = context.user_data.setdefault("srch_series_bulk_resolved", {})
+    if not isinstance(raw, dict):
+        raw = {}
+        context.user_data["srch_series_bulk_resolved"] = raw
+    resolved: dict[int, str] = {}
+    for key, value in raw.items():
+        try:
+            resolved[int(key)] = str(value)
+        except (TypeError, ValueError):
+            continue
+    return resolved
+
+
+def _series_bulk_mark_resolved(
+    context: ContextTypes.DEFAULT_TYPE,
+    season: int,
+    summary: str,
+) -> None:
+    raw = context.user_data.setdefault("srch_series_bulk_resolved", {})
+    if not isinstance(raw, dict):
+        raw = {}
+        context.user_data["srch_series_bulk_resolved"] = raw
+    raw[str(season)] = summary
+
+
 def _series_bulk_ready_seasons(plan) -> list[SeasonPlan]:
     return [
         season
@@ -8745,13 +8793,35 @@ def _series_bulk_ready_seasons(plan) -> list[SeasonPlan]:
     ]
 
 
-def _series_bulk_plan_keyboard(plan=None) -> InlineKeyboardMarkup:
+def _series_bulk_decision_seasons(
+    plan,
+    resolved: dict[int, str] | None = None,
+) -> list[SeasonPlan]:
+    resolved = resolved or {}
+    return [
+        season
+        for season in getattr(plan, "seasons", ())
+        if season.status in {STATUS_NEEDS_DECISION, STATUS_PARTIAL}
+        and season.season not in resolved
+    ]
+
+
+def _series_bulk_plan_keyboard(
+    plan=None,
+    resolved: dict[int, str] | None = None,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     ready_count = len(_series_bulk_ready_seasons(plan)) if plan is not None else 0
+    decision_count = len(_series_bulk_decision_seasons(plan, resolved)) if plan is not None else 0
     if ready_count:
         rows.append([InlineKeyboardButton(
             f"⬇️ Скачать уверенные ({ready_count})",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_confirm",
+        )])
+    if decision_count:
+        rows.append([InlineKeyboardButton(
+            f"⚙️ Разобрать спорные ({decision_count})",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_review",
         )])
     rows.extend([
         [InlineKeyboardButton("⬅️ К результатам", callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_back_results:0")],
@@ -8779,6 +8849,45 @@ def _series_bulk_done_keyboard(has_success: bool) -> InlineKeyboardMarkup:
             callback_data=_task_callback("list", TASK_LIST_SCOPE_MY),
         )])
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_bulk_review_keyboard(season_plan: SeasonPlan) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if season_plan.status == STATUS_NEEDS_DECISION:
+        for index, _candidate in enumerate(season_plan.candidates[:3], start=1):
+            rows.append([InlineKeyboardButton(
+                f"⬇️ Скачать {index}",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:{index - 1}",
+            )])
+    elif season_plan.status == STATUS_PARTIAL:
+        rows.extend([
+            [InlineKeyboardButton(
+                "⬇️ Скачать доступные серии",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_partial:download",
+            )],
+            [InlineKeyboardButton(
+                "⬇️ Скачать доступные + новые по мере выхода",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_partial:each",
+            )],
+            [InlineKeyboardButton(
+                "📦 Скачать, когда сезон завершится",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_partial:after",
+            )],
+            [InlineKeyboardButton(
+                "🔔 Только уведомлять",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_partial:notify",
+            )],
+            [InlineKeyboardButton(
+                "🎯 Сообщить о финале",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_partial:final",
+            )],
+        ])
+    rows.extend([
+        [InlineKeyboardButton("⏭ Пропустить сезон", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_skip")],
+        [InlineKeyboardButton("⬅️ К плану", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_back_plan")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -9061,6 +9170,21 @@ def _series_bulk_candidate_label(candidate) -> str:
     return _short_title(candidate.result, limit=72)
 
 
+def _series_bulk_profile_line(profile: SeriesBulkProfile | None) -> str:
+    if profile is None:
+        return ""
+    parts: list[str] = []
+    if profile.quality and profile.quality != "any":
+        parts.append(profile.quality)
+    if profile.require_original:
+        parts.append("Original")
+    if profile.require_subs:
+        parts.append("Sub")
+    if profile.voices:
+        parts.append(" / ".join(profile.voices[:3]))
+    return " · ".join(parts)
+
+
 def _series_bulk_status_line(season_plan: SeasonPlan) -> str:
     season = season_plan.season
     if season_plan.status == STATUS_ALREADY_IN_PLEX:
@@ -9089,7 +9213,9 @@ def _series_bulk_plan_text(
     *,
     result_count: int,
     warnings: tuple[str, ...] = (),
+    resolved: dict[int, str] | None = None,
 ) -> str:
+    resolved = resolved or {}
     quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
     voices = " / ".join(profile.voices) if profile.voices else "не ограничиваю"
     lines = [
@@ -9126,16 +9252,17 @@ def _series_bulk_plan_text(
         STATUS_ALREADY_DOWNLOADING,
         STATUS_MISSING,
     })
-    decisions = sum(1 for season in plan.seasons if season.status in {
-        STATUS_NEEDS_DECISION,
-        STATUS_PARTIAL,
-    })
+    decisions = len(_series_bulk_decision_seasons(plan, resolved))
     lines.extend([
         "",
         f"Можно скачать после подтверждения: {ready}",
         f"Пропущу: {skipped}",
         f"Нужно решение: {decisions}",
     ])
+    if resolved:
+        lines.extend(["", "Решено вручную:"])
+        for season, summary in sorted(resolved.items()):
+            lines.append(f"• Сезон {season} - {summary}")
     if plan.pack_candidates:
         lines.append(f"Найдены паки сезонов: {len(plan.pack_candidates)} (не выбираю автоматически)")
     return "\n".join(lines)
@@ -9197,6 +9324,399 @@ def _series_bulk_plan_from_context(context: ContextTypes.DEFAULT_TYPE):
     return context.user_data.get("srch_series_bulk_plan")
 
 
+def _series_bulk_current_review(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> SeasonPlan | None:
+    plan = _series_bulk_plan_from_context(context)
+    if plan is None:
+        return None
+
+    resolved = _series_bulk_resolved(context)
+    decision_seasons = _series_bulk_decision_seasons(plan, resolved)
+    if not decision_seasons:
+        context.user_data.pop("srch_series_bulk_review_season", None)
+        return None
+
+    current = context.user_data.get("srch_series_bulk_review_season")
+    try:
+        current_season = int(current)
+    except (TypeError, ValueError):
+        current_season = None
+
+    if current_season is not None:
+        for season in decision_seasons:
+            if season.season == current_season:
+                return season
+
+    season = decision_seasons[0]
+    context.user_data["srch_series_bulk_review_season"] = season.season
+    return season
+
+
+def _series_bulk_review_text(
+    season_plan: SeasonPlan,
+    profile: SeriesBulkProfile | None,
+    *,
+    notice: str = "",
+) -> str:
+    lines: list[str] = []
+    if notice:
+        lines.extend([notice, ""])
+
+    season = season_plan.season
+    if season_plan.status == STATUS_PARTIAL:
+        lines.append(f"⏳ Сезон {season} - найден неполный сезон")
+        candidate = season_plan.candidates[0] if season_plan.candidates else None
+        if candidate and candidate.episode_progress:
+            cur, total = candidate.episode_progress
+            lines.append(f"Сейчас доступно: {cur}/{total} серий.")
+        lines.extend([
+            "",
+            "Автоматически не скачиваю: нужно выбрать, что делать с неполным сезоном.",
+        ])
+        if candidate:
+            lines.extend([
+                "",
+                f"Кандидат: {_series_bulk_candidate_label(candidate)}",
+                _short_title(candidate.result, limit=110),
+            ])
+    else:
+        lines.append(f"⚠️ Сезон {season} - нужен выбор")
+        lines.extend([
+            "",
+            "Нашёл несколько близких вариантов и не выбираю автоматически.",
+        ])
+
+    profile_line = _series_bulk_profile_line(profile)
+    if profile_line:
+        lines.extend(["", f"Профиль поиска: {profile_line}"])
+
+    if season_plan.status == STATUS_NEEDS_DECISION:
+        lines.append("")
+        for index, candidate in enumerate(season_plan.candidates[:3], start=1):
+            result = candidate.result
+            details = [
+                f"сиды: {result.get('seeders')}",
+                f"размер: {result.get('size')}",
+            ]
+            lines.extend([
+                f"{index}. {_series_bulk_candidate_label(candidate)}",
+                _short_title(result, limit=110),
+                " · ".join(part for part in details if not part.endswith(": None")),
+            ])
+
+    return "\n".join(line for line in lines if line is not None)
+
+
+async def _series_bulk_show_plan(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    notice: str = "",
+) -> int:
+    plan = _series_bulk_plan_from_context(context)
+    profile = context.user_data.get("srch_series_bulk_profile")
+    results = context.user_data.get("srch_series_bulk_results") or context.user_data.get("srch_results") or []
+    warnings = tuple(context.user_data.get("srch_series_bulk_warnings") or ())
+    if plan is None or profile is None:
+        await query.edit_message_text("План потерян. Соберите его заново.")
+        return ConversationHandler.END
+
+    resolved = _series_bulk_resolved(context)
+    text = _series_bulk_plan_text(
+        plan,
+        profile,
+        result_count=len(results),
+        warnings=warnings,
+        resolved=resolved,
+    )
+    if notice:
+        text = f"{notice}\n\n{text}"
+    await query.edit_message_text(
+        text,
+        reply_markup=_series_bulk_plan_keyboard(plan, resolved),
+    )
+    return SEARCH_RESULTS
+
+
+async def _series_bulk_show_review_or_plan(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    notice: str = "",
+) -> int:
+    season_plan = _series_bulk_current_review(context)
+    profile = context.user_data.get("srch_series_bulk_profile")
+    if season_plan is None:
+        return await _series_bulk_show_plan(query, context, notice=notice)
+    await query.edit_message_text(
+        _series_bulk_review_text(season_plan, profile, notice=notice),
+        reply_markup=_series_bulk_review_keyboard(season_plan),
+    )
+    return SEARCH_RESULTS
+
+
+async def _series_bulk_add_download(
+    context: ContextTypes.DEFAULT_TYPE,
+    result: dict,
+    *,
+    chat_id: int | None,
+    meta_source: str,
+) -> tuple[str, str]:
+    entry = _pending_download_entry_from_result(
+        result,
+        chat_id=chat_id,
+        subscribe=False,
+        error="",
+    )
+    task_id, method = await _attempt_pending_download(entry)
+    if task_id:
+        _remember_task_owner(task_id, chat_id)
+        _remember_task_meta(task_id, _build_task_meta_from_result(result, source=meta_source))
+    return task_id, method
+
+
+def _series_bulk_partial_summary(action: str, saved_sub: dict | None = None) -> str:
+    if action == "each":
+        return "доступные серии добавлены, новые будут докачиваться"
+    if action == "after":
+        return "подписка: скачать сезон после финала"
+    if action == "notify":
+        return "подписка: уведомлять о новых сериях"
+    if action == "final":
+        return "подписка: сообщить о финале"
+    if saved_sub:
+        return f"подписка: {policies_summary_ru(saved_sub)}"
+    return "решено"
+
+
+async def search_series_bulk_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    return await _series_bulk_show_review_or_plan(query, context)
+
+
+async def search_series_bulk_candidate_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    season_plan = _series_bulk_current_review(context)
+    if season_plan is None:
+        return await _series_bulk_show_plan(query, context)
+    try:
+        candidate_index = int(query.data.rsplit(":", 1)[1])
+        candidate = season_plan.candidates[candidate_index]
+    except (ValueError, IndexError):
+        return await _series_bulk_show_review_or_plan(
+            query,
+            context,
+            notice="Не нашёл выбранный вариант. Откройте разбор ещё раз.",
+        )
+
+    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+    if disk_check is not None and disk_check[0] == "block":
+        await query.edit_message_text(
+            disk_check[1],
+            reply_markup=_series_bulk_review_keyboard(season_plan),
+            parse_mode="HTML",
+        )
+        return SEARCH_RESULTS
+
+    await query.edit_message_text(
+        f"⏳ Добавляю сезон {season_plan.season}: {_series_bulk_candidate_label(candidate)}",
+        reply_markup=_series_bulk_wait_keyboard(),
+    )
+    try:
+        chat_id = _chat_id_from_query(query)
+        task_id, method = await _series_bulk_add_download(
+            context,
+            candidate.result,
+            chat_id=chat_id,
+            meta_source="series_bulk_manual",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Series bulk manual download failed: season=%s title=%s error=%s",
+            season_plan.season,
+            candidate.result.get("title"),
+            exc,
+            exc_info=True,
+        )
+        return await _series_bulk_show_review_or_plan(
+            query,
+            context,
+            notice=f"❌ Сезон {season_plan.season}: {_format_download_error(exc)}",
+        )
+
+    _series_bulk_mark_resolved(
+        context,
+        season_plan.season,
+        f"скачан вручную: {task_id or method}",
+    )
+    return await _series_bulk_show_review_or_plan(
+        query,
+        context,
+        notice=f"✅ Сезон {season_plan.season}: добавил задачу {task_id or method}.",
+    )
+
+
+async def search_series_bulk_partial_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    season_plan = _series_bulk_current_review(context)
+    if season_plan is None:
+        return await _series_bulk_show_plan(query, context)
+    if season_plan.status != STATUS_PARTIAL or not season_plan.candidates:
+        return await _series_bulk_show_review_or_plan(
+            query,
+            context,
+            notice="Этот сезон уже не выглядит неполным. Откройте план ещё раз.",
+        )
+
+    action = query.data.rsplit(":", 1)[-1]
+    candidate = season_plan.candidates[0]
+    result = candidate.result
+    chat_id = _chat_id_from_query(query)
+
+    if action == "download":
+        disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+        if disk_check is not None and disk_check[0] == "block":
+            await query.edit_message_text(
+                disk_check[1],
+                reply_markup=_series_bulk_review_keyboard(season_plan),
+                parse_mode="HTML",
+            )
+            return SEARCH_RESULTS
+        await query.edit_message_text(
+            f"⏳ Добавляю доступные серии сезона {season_plan.season}",
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        try:
+            task_id, method = await _series_bulk_add_download(
+                context,
+                result,
+                chat_id=chat_id,
+                meta_source="series_bulk_partial",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Series bulk partial download failed: season=%s title=%s error=%s",
+                season_plan.season,
+                result.get("title"),
+                exc,
+                exc_info=True,
+            )
+            return await _series_bulk_show_review_or_plan(
+                query,
+                context,
+                notice=f"❌ Сезон {season_plan.season}: {_format_download_error(exc)}",
+            )
+        _series_bulk_mark_resolved(
+            context,
+            season_plan.season,
+            f"доступные серии добавлены: {task_id or method}",
+        )
+        return await _series_bulk_show_review_or_plan(
+            query,
+            context,
+            notice=f"✅ Сезон {season_plan.season}: доступные серии добавлены.",
+        )
+
+    if action not in _SUB_PRESETS:
+        return await _series_bulk_show_review_or_plan(
+            query,
+            context,
+            notice="Неизвестное действие для неполного сезона.",
+        )
+
+    notify_policy, download_policy, download_now = _SUB_PRESETS[action]
+    task_id = ""
+    if download_now:
+        disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+        if disk_check is not None and disk_check[0] == "block":
+            await query.edit_message_text(
+                disk_check[1],
+                reply_markup=_series_bulk_review_keyboard(season_plan),
+                parse_mode="HTML",
+            )
+            return SEARCH_RESULTS
+        await query.edit_message_text(
+            f"⏳ Добавляю доступные серии и подписку сезона {season_plan.season}",
+            reply_markup=_series_bulk_wait_keyboard(),
+        )
+        try:
+            task_id, _method = await _series_bulk_add_download(
+                context,
+                result,
+                chat_id=chat_id,
+                meta_source="series_bulk_partial",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Series bulk partial download+subscription failed: season=%s title=%s error=%s",
+                season_plan.season,
+                result.get("title"),
+                exc,
+                exc_info=True,
+            )
+            return await _series_bulk_show_review_or_plan(
+                query,
+                context,
+                notice=f"❌ Сезон {season_plan.season}: {_format_download_error(exc)}",
+            )
+
+    try:
+        _saved_key, saved_sub = _save_subscription_for_result(
+            context,
+            result,
+            chat_id=chat_id if isinstance(chat_id, int) else None,
+            notify_policy=notify_policy,
+            download_policy=download_policy,
+            seen_results=(
+                context.user_data.get("srch_series_bulk_results")
+                or context.user_data.get("srch_results", [])
+            ),
+        )
+    except RuntimeError as exc:
+        if task_id:
+            _series_bulk_mark_resolved(
+                context,
+                season_plan.season,
+                "доступные серии добавлены, подписка не создана",
+            )
+            return await _series_bulk_show_review_or_plan(
+                query,
+                context,
+                notice=f"⚠️ Сезон {season_plan.season}: доступные серии добавлены, но подписку не создал: {exc}",
+            )
+        return await _series_bulk_show_review_or_plan(
+            query,
+            context,
+            notice=f"❌ Сезон {season_plan.season}: {exc}",
+        )
+
+    summary = _series_bulk_partial_summary(action, saved_sub)
+    _series_bulk_mark_resolved(context, season_plan.season, summary)
+    return await _series_bulk_show_review_or_plan(
+        query,
+        context,
+        notice=f"✅ Сезон {season_plan.season}: {summary}.",
+    )
+
+
+async def search_series_bulk_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    season_plan = _series_bulk_current_review(context)
+    if season_plan is None:
+        return await _series_bulk_show_plan(query, context)
+    _series_bulk_mark_resolved(context, season_plan.season, "пропущен")
+    return await _series_bulk_show_review_or_plan(
+        query,
+        context,
+        notice=f"⏭ Сезон {season_plan.season}: пропущен.",
+    )
+
+
 async def search_series_bulk_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -9205,7 +9725,7 @@ async def search_series_bulk_confirm(update: Update, context: ContextTypes.DEFAU
     if not ready_count:
         await query.edit_message_text(
             _series_bulk_confirm_text(plan) if plan is not None else "План потерян. Соберите его заново.",
-            reply_markup=_series_bulk_plan_keyboard(plan),
+            reply_markup=_series_bulk_plan_keyboard(plan, _series_bulk_resolved(context)),
         )
         return SEARCH_RESULTS
 
@@ -9219,18 +9739,7 @@ async def search_series_bulk_confirm(update: Update, context: ContextTypes.DEFAU
 async def search_series_bulk_back_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    plan = _series_bulk_plan_from_context(context)
-    profile = context.user_data.get("srch_series_bulk_profile")
-    results = context.user_data.get("srch_series_bulk_results") or context.user_data.get("srch_results") or []
-    warnings = tuple(context.user_data.get("srch_series_bulk_warnings") or ())
-    if plan is None or profile is None:
-        await query.edit_message_text("План потерян. Соберите его заново.")
-        return ConversationHandler.END
-    await query.edit_message_text(
-        _series_bulk_plan_text(plan, profile, result_count=len(results), warnings=warnings),
-        reply_markup=_series_bulk_plan_keyboard(plan),
-    )
-    return SEARCH_RESULTS
+    return await _series_bulk_show_plan(query, context)
 
 
 async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -9241,7 +9750,7 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
     if not ready:
         await query.edit_message_text(
             "Нет уверенных сезонов для скачивания.",
-            reply_markup=_series_bulk_plan_keyboard(plan),
+            reply_markup=_series_bulk_plan_keyboard(plan, _series_bulk_resolved(context)),
         )
         return SEARCH_RESULTS
 
@@ -9408,6 +9917,8 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["srch_series_bulk_profile"] = profile
         context.user_data["srch_series_bulk_results"] = combined_results
         context.user_data["srch_series_bulk_warnings"] = tuple(search_warnings)
+        context.user_data["srch_series_bulk_resolved"] = {}
+        context.user_data.pop("srch_series_bulk_review_season", None)
         await query.edit_message_text(
             _series_bulk_plan_text(
                 plan,
@@ -9415,7 +9926,7 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
                 result_count=len(combined_results),
                 warnings=tuple(search_warnings),
             ),
-            reply_markup=_series_bulk_plan_keyboard(plan),
+            reply_markup=_series_bulk_plan_keyboard(plan, {}),
         )
         return SEARCH_RESULTS
     except Exception as exc:
@@ -14096,6 +14607,10 @@ def main() -> None:
                 SEARCH_RESULTS: [
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),
+                    CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
+                    CallbackQueryHandler(search_series_bulk_candidate_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:\d+$"),
+                    CallbackQueryHandler(search_series_bulk_partial_action, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_partial:[a-z_]+$"),
+                    CallbackQueryHandler(search_series_bulk_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_skip$"),
                     CallbackQueryHandler(search_series_bulk_confirm, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_confirm$"),
                     CallbackQueryHandler(search_series_bulk_back_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_back_plan$"),
                     CallbackQueryHandler(search_series_bulk_run, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_run$"),
