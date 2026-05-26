@@ -9101,7 +9101,7 @@ def _series_bulk_decision_seasons(
         if season.season in failed:
             seasons.append(season)
             continue
-        if season.status in {STATUS_NEEDS_DECISION, STATUS_PARTIAL}:
+        if season.status in {STATUS_MISSING, STATUS_NEEDS_DECISION, STATUS_PARTIAL}:
             seasons.append(season)
     return seasons
 
@@ -9190,6 +9190,15 @@ def _series_bulk_review_keyboard(
                 f"⬇️ Скачать {index}",
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:{index - 1}",
             )])
+        rows.append([InlineKeyboardButton(
+            "🔄 Искать мягче",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_soft",
+        )])
+    elif season_plan.status == STATUS_MISSING:
+        rows.append([InlineKeyboardButton(
+            "🔄 Искать мягче",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_soft",
+        )])
     elif season_plan.status == STATUS_PARTIAL:
         rows.extend([
             [InlineKeyboardButton(
@@ -9343,6 +9352,24 @@ def _series_bulk_merge_results(*groups: list[dict]) -> list[dict]:
     return merged
 
 
+def _series_bulk_soft_search_queries(series_title: str, season: int) -> list[str]:
+    raw_queries = [
+        _normalize_season_in_query(f"{series_title} Сезон {season}"),
+        _normalize_season_in_query(f"{series_title} {season} сезон"),
+        f"{series_title} S{season:02d}",
+        f"{series_title} Season {season}",
+    ]
+    seen: set[str] = set()
+    queries: list[str] = []
+    for query in raw_queries:
+        normalized = " ".join(str(query).split())
+        key = normalized.lower()
+        if normalized and key not in seen:
+            seen.add(key)
+            queries.append(normalized)
+    return queries
+
+
 async def _series_bulk_selected_indexers(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
     selected = context.user_data.get("srch_jackett_selected")
     if isinstance(selected, set):
@@ -9460,6 +9487,20 @@ def _series_bulk_profile_copy(
     }
     data.update(updates)
     return SeriesBulkProfile(**data)
+
+
+def _series_bulk_soft_profile(profile: SeriesBulkProfile | None) -> SeriesBulkProfile:
+    base = profile if isinstance(profile, SeriesBulkProfile) else SeriesBulkProfile()
+    return _series_bulk_profile_copy(
+        base,
+        quality="any",
+        require_original=False,
+        require_subs=False,
+        voice_policy=VOICE_ANY_FROM_REFERENCE,
+        voices=(),
+        release_type="",
+        release_group="",
+    )
 
 
 def _series_bulk_profile_voice_label(profile: SeriesBulkProfile) -> str:
@@ -9742,7 +9783,6 @@ def _series_bulk_plan_text(
     skipped = sum(1 for season in plan.seasons if season.status in {
         STATUS_ALREADY_IN_PLEX,
         STATUS_ALREADY_DOWNLOADING,
-        STATUS_MISSING,
     })
     decisions = len(_series_bulk_decision_seasons(plan, resolved, failed))
     lines.extend([
@@ -9850,6 +9890,57 @@ def _series_bulk_current_review(
     return season
 
 
+def _series_bulk_replace_season(plan, updated: SeasonPlan):
+    seasons = [
+        updated if season.season == updated.season else season
+        for season in getattr(plan, "seasons", ())
+    ]
+    if all(season.season != updated.season for season in seasons):
+        seasons.append(updated)
+    seasons.sort(key=lambda item: item.season)
+    return type(plan)(
+        series_title=plan.series_title,
+        seasons=tuple(seasons),
+        pack_candidates=plan.pack_candidates,
+        verified_season_range=plan.verified_season_range,
+    )
+
+
+def _series_bulk_candidate_tuple_for_manual_choice(season_plan: SeasonPlan) -> tuple:
+    candidates = []
+    if season_plan.selected is not None:
+        candidates.append(season_plan.selected)
+    candidates.extend(season_plan.candidates)
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for candidate in candidates:
+        key = _series_bulk_result_key(candidate.result)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return tuple(unique[:5])
+
+
+def _series_bulk_manual_season_from_soft_result(
+    current: SeasonPlan,
+    soft_result: SeasonPlan,
+) -> SeasonPlan:
+    if soft_result.status == STATUS_MISSING:
+        return current if current.candidates else soft_result
+    if soft_result.status == STATUS_PARTIAL:
+        return soft_result
+    candidates = _series_bulk_candidate_tuple_for_manual_choice(soft_result)
+    if not candidates:
+        return current
+    return SeasonPlan(
+        season=current.season,
+        status=STATUS_NEEDS_DECISION,
+        candidates=candidates,
+        reasons=("soft search candidates",),
+    )
+
+
 def _series_bulk_review_text(
     season_plan: SeasonPlan,
     profile: SeriesBulkProfile | None,
@@ -9912,6 +10003,13 @@ def _series_bulk_review_text(
                 f"Кандидат: {_series_bulk_candidate_label(candidate)}",
                 _short_title(candidate.result, limit=110),
             ])
+    elif season_plan.status == STATUS_MISSING:
+        lines.append(f"❌ Сезон {season} - не найдено")
+        lines.extend([
+            "",
+            "По обычным правилам подходящей раздачи нет.",
+            "Можно попробовать мягкий поиск: без жёстких требований к качеству, Original, субтитрам и озвучке.",
+        ])
     else:
         lines.append(f"⚠️ Сезон {season} - нужен выбор")
         lines.extend([
@@ -10217,6 +10315,58 @@ async def search_series_bulk_retry(update: Update, context: ContextTypes.DEFAULT
         context,
         notice=f"✅ Сезон {season_plan.season}: добавил задачу {task_id or method}.",
     )
+
+
+async def search_series_bulk_soft_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    plan = _series_bulk_plan_from_context(context)
+    season_plan = _series_bulk_current_review(context)
+    profile = context.user_data.get("srch_series_bulk_profile")
+    if plan is None or season_plan is None:
+        return await _series_bulk_show_plan(query, context)
+
+    await query.edit_message_text(
+        f"⏳ Ищу шире: сезон {season_plan.season}",
+        reply_markup=_series_bulk_wait_keyboard(),
+    )
+    found_results: list[dict] = []
+    search_warnings: list[str] = []
+    for search_query in _series_bulk_soft_search_queries(plan.series_title, season_plan.season):
+        results, warnings = await _series_bulk_search_once(context, search_query)
+        found_results = _series_bulk_merge_results(found_results, results)
+        search_warnings.extend(warnings)
+
+    existing_results = (
+        context.user_data.get("srch_series_bulk_results")
+        or context.user_data.get("srch_results")
+        or []
+    )
+    combined_results = _series_bulk_merge_results(existing_results, found_results)
+    new_result_count = max(0, len(combined_results) - len(existing_results))
+    soft_plan = build_series_bulk_plan(
+        series_title=plan.series_title,
+        seasons=[season_plan.season],
+        results=combined_results,
+        profile=_series_bulk_soft_profile(profile),
+        verified_season_range=getattr(plan, "verified_season_range", True),
+    )
+    updated = _series_bulk_manual_season_from_soft_result(season_plan, soft_plan.seasons[0])
+    context.user_data["srch_series_bulk_plan"] = _series_bulk_replace_season(plan, updated)
+    context.user_data["srch_series_bulk_results"] = combined_results
+    if search_warnings:
+        existing_warnings = tuple(context.user_data.get("srch_series_bulk_warnings") or ())
+        context.user_data["srch_series_bulk_warnings"] = tuple(
+            dict.fromkeys((*existing_warnings, *search_warnings))
+        )
+    context.user_data["srch_series_bulk_review_season"] = season_plan.season
+    if updated.status == STATUS_MISSING:
+        notice = f"🔄 Сезон {season_plan.season}: новых вариантов не нашёл."
+    elif new_result_count == 0:
+        notice = f"🔄 Сезон {season_plan.season}: новых вариантов не нашёл, оставил текущие."
+    else:
+        notice = f"🔄 Сезон {season_plan.season}: нашёл варианты шире, выберите вручную."
+    return await _series_bulk_show_review_or_plan(query, context, notice=notice)
 
 
 async def search_series_bulk_partial_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -15442,6 +15592,7 @@ def main() -> None:
                     CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$"),
                     CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
                     CallbackQueryHandler(search_series_bulk_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_retry$"),
+                    CallbackQueryHandler(search_series_bulk_soft_search, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_soft$"),
                     CallbackQueryHandler(search_series_bulk_candidate_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:\d+$"),
                     CallbackQueryHandler(search_series_bulk_partial_action, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_partial:[a-z_]+$"),
                     CallbackQueryHandler(search_series_bulk_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_skip$"),

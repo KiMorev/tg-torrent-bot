@@ -654,6 +654,32 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertIn("⚙️ Разобрать спорные (1)", labels)
 
+    def test_missing_season_can_be_opened_for_soft_search(self):
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "seeders": 20,
+            "size": "10 GB",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=results)
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        query = _make_query("srch:bulk_review")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_review(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Сезон 2 - не найдено", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("🔄 Искать мягче", labels)
+
     def test_review_screen_lists_disputed_candidates(self):
         results = [
             {
@@ -690,7 +716,56 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for b in row
         ]
         self.assertIn("⬇️ Скачать 1", labels)
+        self.assertIn("🔄 Искать мягче", labels)
         self.assertIn("⏭ Пропустить сезон", labels)
+
+    def test_soft_search_adds_manual_candidate_without_changing_profile(self):
+        initial = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "seeders": 20,
+            "size": "10 GB",
+        }
+        found = {
+            "title": "Клиника / Scrubs / Сезон: 2 / WEBRip 720p / BaibaKo",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/soft",
+            "seeders": 12,
+            "size": "8 GB",
+        }
+        profile = _bulk_profile()
+        ctx = _make_context(results=[initial])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=[initial])
+        ctx.user_data["srch_series_bulk_profile"] = profile
+        ctx.user_data["srch_series_bulk_results"] = [initial]
+        query = _make_query("srch:bulk_soft")
+        update = MagicMock(callback_query=query)
+
+        async def search_once(search_query, *_args, **_kwargs):
+            if search_query.endswith("S02"):
+                return [found], []
+            return [], []
+
+        with patch.object(bot, "_series_bulk_search_once", AsyncMock(side_effect=search_once)) as search:
+            state = asyncio.run(bot.search_series_bulk_soft_search(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        self.assertEqual(search.await_count, 3)
+        self.assertIs(ctx.user_data["srch_series_bulk_profile"], profile)
+        updated = ctx.user_data["srch_series_bulk_plan"].seasons[0]
+        self.assertEqual(updated.status, bot.STATUS_NEEDS_DECISION)
+        self.assertEqual(updated.candidates[0].result["title"], found["title"])
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("нашёл варианты шире", text)
+        self.assertIn("WEBRip", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("⬇️ Скачать 1", labels)
 
     def test_skip_manual_review_marks_season_resolved_and_returns_to_plan(self):
         results = [
