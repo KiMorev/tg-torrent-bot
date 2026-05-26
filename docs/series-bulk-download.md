@@ -613,8 +613,10 @@ Download Station. Это нормально может занять нескол
 
 ## Состояние
 
-Нужна отдельная сущность плана/джобы, чтобы процесс переживал рестарт и не
-терялся после первого добавленного сезона.
+Есть отдельная сущность плана/джобы, чтобы фиксировать собранный план и
+результаты действий по каждому сезону. Текущий Telegram-flow уже создаёт job и
+обновляет её при скачивании/ручном выборе/подписке, но отдельного resume-экрана
+после рестарта пока нет.
 
 Рабочий файл: `series_bulk_jobs.json`.
 
@@ -622,11 +624,12 @@ Download Station. Это нормально может занять нескол
 
 ```json
 {
-  "bulk_20260526_ab12": {
-    "id": "bulk_20260526_ab12",
+  "bulk_20260526_120000_ab12cd34": {
+    "id": "bulk_20260526_120000_ab12cd34",
     "chat_id": 100,
     "series_title": "Клиника",
     "created_at": "2026-05-26T12:00:00+03:00",
+    "updated_at": "2026-05-26T12:05:00+03:00",
     "status": "planned",
     "profile": {
       "quality": "1080p",
@@ -635,13 +638,28 @@ Download Station. Это нормально может занять нескол
       "voice_policy": "any_from_reference",
       "voices": ["LostFilm", "NewStudio", "Кравец"],
       "release_type": "WEB-DL",
-      "indexers": ["rutracker"]
+      "tracker": "rutracker",
+      "source": "jackett"
     },
+    "result_count": 18,
+    "warnings": [],
+    "verified_season_range": true,
     "seasons": {
       "4": {
-        "status": "selected",
-        "confidence": "exact",
-        "task_id": "",
+        "season": 4,
+        "plan_status": "exact",
+        "runtime_status": "downloaded",
+        "task_id": "dbid_123",
+        "method": "torrent-file",
+        "selected": {
+          "confidence": "exact",
+          "score": 100,
+          "result": {
+            "title": "Клиника / Scrubs / Сезон: 4 / WEB-DL 1080p",
+            "source": "jackett",
+            "url": "https://..."
+          }
+        },
         "result": {
           "title": "Клиника / Scrubs / Сезон: 4 / WEB-DL 1080p",
           "source": "jackett",
@@ -649,7 +667,9 @@ Download Station. Это нормально может занять нескол
         }
       },
       "6": {
-        "status": "needs_decision",
+        "season": 6,
+        "plan_status": "needs_decision",
+        "runtime_status": "pending",
         "candidates": []
       }
     }
@@ -732,7 +752,7 @@ center, если фича пойдёт раньше.
 4. 🟡 Batch executor.
    - ✅ добавляет `exact/good` сезоны в Download Station;
    - ✅ не дублирует то, что уже есть в Plex или качается;
-   - ⬜ сохраняет результат по каждому сезону в `series_bulk_jobs.json`;
+   - ✅ сохраняет результат по каждому сезону в `series_bulk_jobs.json`;
    - ⬜ переводит ошибки по сезону в `needs_decision` или pending retry.
 
 5. ✅ Вынести низкоуровневое скачивание.
@@ -748,8 +768,9 @@ center, если фича пойдёт раньше.
 
 7. 🟡 State.
    - ✅ `series_bulk_jobs.json` и load/save API;
-   - ⬜ Telegram UI ещё не привязан к persistent bulk job;
-   - ⬜ сезоны ещё не связываются с созданными `task_id` в state.
+   - ✅ Telegram UI создаёт persistent bulk job при сборке плана;
+   - ✅ сезоны связываются с созданными `task_id` и подписками в state;
+   - ⬜ нет отдельного resume-экрана после рестарта.
 
 8. 🟡 Поиск и fetch-limit.
    - ✅ широкий поиск;
@@ -807,7 +828,7 @@ center, если фича пойдёт раньше.
 
 7. 🟡 Добавить executor bulk-плана.
    - ✅ добавляет только `exact/good`;
-   - ⬜ пишет task_id по каждому сезону в `series_bulk_jobs.json`;
+   - ✅ пишет task_id по каждому сезону в `series_bulk_jobs.json`;
    - ⬜ ошибки переводит в `needs_decision` или pending retry;
    - ✅ отправляет итог.
 
@@ -823,11 +844,11 @@ center, если фича пойдёт раньше.
 10. ✅ Обновить `docs/bot-structure.md`, если появятся новые callbacks, state-файл
     или модуль планировщика.
 
-Осталось после текущего шага: перевести Telegram UI на persistent bulk job,
-дописать выбор политики озвучки или явно отказаться от него, добавить реальную
-отмену долгой сборки, явную защиту от fetch-limit, кнопки `🔄 Пересобрать план`
-и `🔄 Искать мягче`, а также сохранять результаты executor'а по сезонам в
-`series_bulk_jobs.json`.
+Осталось после текущего шага: дописать выбор политики озвучки или явно
+отказаться от него, добавить реальную отмену долгой сборки, явную защиту от
+fetch-limit, кнопки `🔄 Пересобрать план` и `🔄 Искать мягче`, восстановление
+bulk-flow после рестарта, а также перевод ошибок сезона в `needs_decision` или
+pending retry.
 
 ## Тесты
 

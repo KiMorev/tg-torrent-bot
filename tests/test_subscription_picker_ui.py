@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import unittest
 from types import SimpleNamespace
@@ -73,6 +74,19 @@ def _bulk_profile():
         require_original=True,
         require_subs=True,
     )
+
+
+def _fake_series_bulk_store(initial: dict | None = None):
+    jobs = copy.deepcopy(initial or {})
+    store = MagicMock()
+    store.load_series_bulk_jobs.side_effect = lambda: copy.deepcopy(jobs)
+
+    def save_series_bulk_jobs(updated):
+        jobs.clear()
+        jobs.update(copy.deepcopy(updated))
+
+    store.save_series_bulk_jobs.side_effect = save_series_bulk_jobs
+    return store, jobs
 
 
 class SearchDownloadPickTests(unittest.TestCase):
@@ -180,11 +194,13 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         kp_client.search_series_seasons = MagicMock(return_value=2)
         ds = MagicMock()
         ds.list_tasks = MagicMock(return_value=[])
+        fake_store, saved_jobs = _fake_series_bulk_store()
 
         with (
             patch.object(bot, "kinopoisk_client", kp_client),
             patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value={1})),
             patch.object(bot, "ds_client", ds),
+            patch.object(bot, "state_store", fake_store),
         ):
             state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
 
@@ -198,6 +214,14 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
         labels = [b.text for row in kb.inline_keyboard for b in row]
         self.assertIn("⬇️ Скачать уверенные (1)", labels)
+        job_id = ctx.user_data["srch_series_bulk_job_id"]
+        self.assertIn(job_id, saved_jobs)
+        job = saved_jobs[job_id]
+        self.assertEqual(job["status"], "planned")
+        self.assertEqual(job["series_title"], "Клиника")
+        self.assertEqual(job["seasons"]["1"]["plan_status"], bot.STATUS_ALREADY_IN_PLEX)
+        self.assertEqual(job["seasons"]["2"]["plan_status"], bot.STATUS_EXACT)
+        self.assertEqual(job["seasons"]["2"]["runtime_status"], "pending")
 
     def test_wide_search_adds_candidates_outside_current_results(self):
         query = _make_query("srch:bulk_plan:0")
@@ -323,17 +347,27 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             "seeders": 20,
         }
         ctx = _make_context(results=[result])
-        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1, 2], results=[result])
+        plan = _bulk_plan(seasons=[1, 2], results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = plan
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
         query = _make_query("srch:bulk_run")
         query.message = MagicMock()
         query.message.chat = MagicMock(id=100)
         update = MagicMock(callback_query=query)
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {"1": {"season": 1}, "2": {"season": 2}},
+            },
+        })
 
         with (
             patch.object(bot, "_check_disk_space_for_download", return_value=None),
             patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task_1", "torrent-файл"))) as dl,
             patch.object(bot, "_remember_task_owner") as owner,
             patch.object(bot, "_remember_task_meta") as meta,
+            patch.object(bot, "state_store", fake_store),
         ):
             state = asyncio.run(bot.search_series_bulk_run(update, ctx))
 
@@ -348,6 +382,11 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("task_1", final_text)
         self.assertIn("Сезон 1", final_text)
         self.assertNotIn("Сезон 2", final_text)
+        job = saved_jobs["bulk_test"]
+        self.assertEqual(job["status"], "batch_completed")
+        self.assertEqual(job["seasons"]["1"]["runtime_status"], "downloaded")
+        self.assertEqual(job["seasons"]["1"]["task_id"], "task_1")
+        self.assertEqual(job["seasons"]["1"]["method"], "torrent-файл")
 
     def test_run_reports_failed_ready_season(self):
         result = {
@@ -359,14 +398,23 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         }
         ctx = _make_context(results=[result])
         ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result])
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
         query = _make_query("srch:bulk_run")
         query.message = MagicMock()
         query.message.chat = MagicMock(id=100)
         update = MagicMock(callback_query=query)
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {"1": {"season": 1}},
+            },
+        })
 
         with (
             patch.object(bot, "_check_disk_space_for_download", return_value=None),
             patch.object(bot, "_attempt_pending_download", AsyncMock(side_effect=bot.DownloadStationError("no space"))),
+            patch.object(bot, "state_store", fake_store),
         ):
             asyncio.run(bot.search_series_bulk_run(update, ctx))
 
@@ -374,6 +422,10 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("Добавлено: 0", final_text)
         self.assertIn("Не удалось добавить: 1", final_text)
         self.assertIn("Download Station", final_text)
+        job = saved_jobs["bulk_test"]
+        self.assertEqual(job["status"], "batch_failed")
+        self.assertEqual(job["seasons"]["1"]["runtime_status"], "failed")
+        self.assertIn("Download Station", job["seasons"]["1"]["error"])
 
     def test_plan_keyboard_offers_manual_review_for_disputed_season(self):
         results = [
@@ -458,10 +510,19 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=results)
         ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
         ctx.user_data["srch_series_bulk_results"] = results
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
         query = _make_query("srch:bulk_skip")
         update = MagicMock(callback_query=query)
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {"1": {"season": 1}},
+            },
+        })
 
-        asyncio.run(bot.search_series_bulk_skip(update, ctx))
+        with patch.object(bot, "state_store", fake_store):
+            asyncio.run(bot.search_series_bulk_skip(update, ctx))
 
         self.assertEqual(ctx.user_data["srch_series_bulk_resolved"], {"1": "пропущен"})
         text = query.edit_message_text.await_args.args[0]
@@ -474,6 +535,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for b in row
         ]
         self.assertNotIn("⚙️ Разобрать спорные (1)", labels)
+        self.assertEqual(saved_jobs["bulk_test"]["seasons"]["1"]["runtime_status"], "skipped")
 
     def test_candidate_download_marks_disputed_season_resolved(self):
         result = {
@@ -496,15 +558,24 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[1], results=[result, other])
         ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
         ctx.user_data["srch_series_bulk_results"] = [result, other]
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
         query = _make_query("srch:bulk_cand_dl:0")
         query.message.chat.id = 100
         update = MagicMock(callback_query=query)
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {"1": {"season": 1}},
+            },
+        })
 
         with (
             patch.object(bot, "_check_disk_space_for_download", return_value=None),
             patch.object(bot, "_attempt_pending_download", AsyncMock(return_value=("task_1", "torrent-файл"))) as dl,
             patch.object(bot, "_remember_task_owner") as owner,
             patch.object(bot, "_remember_task_meta") as meta,
+            patch.object(bot, "state_store", fake_store),
         ):
             asyncio.run(bot.search_series_bulk_candidate_download(update, ctx))
 
@@ -516,6 +587,10 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("добавил задачу task_1", text)
         self.assertIn("Нужно решение: 0", text)
+        entry = saved_jobs["bulk_test"]["seasons"]["1"]
+        self.assertEqual(entry["runtime_status"], "downloaded")
+        self.assertEqual(entry["task_id"], "task_1")
+        self.assertIn("скачан вручную", entry["summary"])
 
     def test_partial_review_offers_download_and_subscription_actions(self):
         result = {
@@ -562,11 +637,18 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=[result])
         ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
         ctx.user_data["srch_series_bulk_results"] = [result]
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
         query = _make_query("srch:bulk_partial:after")
         query.message.chat.id = 100
         update = MagicMock(callback_query=query)
         saved = {}
-        fake_store = MagicMock()
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": {
+                "id": "bulk_test",
+                "status": "planned",
+                "seasons": {"2": {"season": 2}},
+            },
+        })
         fake_store.load_topic_subscriptions.return_value = {}
         fake_store.save_topic_subscriptions.side_effect = lambda subs: saved.update(subs)
 
@@ -582,6 +664,9 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("скачать сезон после финала", text)
         self.assertIn("Нужно решение: 0", text)
+        entry = saved_jobs["bulk_test"]["seasons"]["2"]
+        self.assertEqual(entry["runtime_status"], "subscribed")
+        self.assertEqual(entry["subscription"]["download_policy"], DOWNLOAD_ONLY_WHEN_COMPLETE)
 
 
 class SearchSubscribePickTests(unittest.TestCase):

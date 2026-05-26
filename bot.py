@@ -8785,6 +8785,204 @@ def _series_bulk_mark_resolved(
     raw[str(season)] = summary
 
 
+def _series_bulk_job_now() -> str:
+    return datetime.now(DISPLAY_TIMEZONE).isoformat(timespec="seconds")
+
+
+def _series_bulk_jsonable(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _series_bulk_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_series_bulk_jsonable(v) for v in value]
+    return str(value)
+
+
+def _series_bulk_result_snapshot(result: dict | None) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    return _series_bulk_jsonable(result)
+
+
+def _series_bulk_profile_snapshot(profile: SeriesBulkProfile | None) -> dict:
+    if profile is None:
+        return {}
+    return {
+        "quality": profile.quality,
+        "require_original": profile.require_original,
+        "require_subs": profile.require_subs,
+        "voice_policy": profile.voice_policy,
+        "voices": list(profile.voices),
+        "release_type": profile.release_type,
+        "release_group": profile.release_group,
+        "tracker": profile.tracker,
+        "source": profile.source,
+    }
+
+
+def _series_bulk_release_snapshot(release) -> dict:
+    return {
+        "quality": release.quality,
+        "release_type": release.release_type,
+        "voices": list(release.voices),
+        "has_original": release.has_original,
+        "has_subs": release.has_subs,
+        "has_russian_audio": release.has_russian_audio,
+        "release_group": release.release_group,
+        "size_gb": release.size_gb,
+    }
+
+
+def _series_bulk_candidate_snapshot(candidate) -> dict:
+    return {
+        "season": candidate.season,
+        "score": candidate.score,
+        "confidence": candidate.confidence,
+        "reasons": list(candidate.reasons),
+        "warnings": list(candidate.warnings),
+        "hard_failures": list(candidate.hard_failures),
+        "episode_progress": list(candidate.episode_progress) if candidate.episode_progress else None,
+        "release": _series_bulk_release_snapshot(candidate.release),
+        "result": _series_bulk_result_snapshot(candidate.result),
+    }
+
+
+def _series_bulk_initial_runtime_status(plan_status: str) -> str:
+    if plan_status in {
+        STATUS_ALREADY_IN_PLEX,
+        STATUS_ALREADY_DOWNLOADING,
+        STATUS_MISSING,
+    }:
+        return plan_status
+    return "pending"
+
+
+def _series_bulk_season_job_entry(season_plan: SeasonPlan) -> dict:
+    return {
+        "season": season_plan.season,
+        "plan_status": season_plan.status,
+        "runtime_status": _series_bulk_initial_runtime_status(season_plan.status),
+        "reasons": list(season_plan.reasons),
+        "selected": (
+            _series_bulk_candidate_snapshot(season_plan.selected)
+            if season_plan.selected is not None else None
+        ),
+        "candidates": [
+            _series_bulk_candidate_snapshot(candidate)
+            for candidate in season_plan.candidates[:5]
+        ],
+    }
+
+
+def _series_bulk_create_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    plan,
+    profile: SeriesBulkProfile,
+    results: list[dict],
+    warnings: tuple[str, ...],
+    source_result: dict,
+    chat_id: int | None,
+) -> str:
+    now = _series_bulk_job_now()
+    job_id = f"bulk_{datetime.now(DISPLAY_TIMEZONE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    job = {
+        "id": job_id,
+        "chat_id": chat_id if isinstance(chat_id, int) else None,
+        "series_title": str(getattr(plan, "series_title", "")),
+        "created_at": now,
+        "updated_at": now,
+        "status": "planned",
+        "profile": _series_bulk_profile_snapshot(profile),
+        "result_count": len(results),
+        "warnings": list(dict.fromkeys(warnings)),
+        "verified_season_range": bool(getattr(plan, "verified_season_range", False)),
+        "source_result": _series_bulk_result_snapshot(source_result),
+        "seasons": {
+            str(season.season): _series_bulk_season_job_entry(season)
+            for season in getattr(plan, "seasons", ())
+        },
+        "pack_candidates": [
+            _series_bulk_result_snapshot(result)
+            for result in getattr(plan, "pack_candidates", ())[:5]
+        ],
+    }
+    try:
+        jobs = state_store.load_series_bulk_jobs()
+        jobs[job_id] = job
+        state_store.save_series_bulk_jobs(jobs)
+    except Exception:
+        logger.warning("Series bulk job save failed: id=%s", job_id, exc_info=True)
+        return ""
+    context.user_data["srch_series_bulk_job_id"] = job_id
+    return job_id
+
+
+def _series_bulk_update_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    updater,
+) -> None:
+    job_id = str(context.user_data.get("srch_series_bulk_job_id") or "")
+    if not job_id:
+        return
+    try:
+        jobs = state_store.load_series_bulk_jobs()
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            return
+        updater(job)
+        job["updated_at"] = _series_bulk_job_now()
+        jobs[job_id] = job
+        state_store.save_series_bulk_jobs(jobs)
+    except Exception:
+        logger.warning("Series bulk job update failed: id=%s", job_id, exc_info=True)
+
+
+def _series_bulk_set_job_status(
+    context: ContextTypes.DEFAULT_TYPE,
+    status: str,
+) -> None:
+    def _set_status(job: dict) -> None:
+        job["status"] = status
+
+    _series_bulk_update_job(context, _set_status)
+
+
+def _series_bulk_record_job_season(
+    context: ContextTypes.DEFAULT_TYPE,
+    season: int,
+    runtime_status: str,
+    *,
+    task_id: str | None = None,
+    method: str | None = None,
+    error: str | None = None,
+    summary: str | None = None,
+    result: dict | None = None,
+    subscription: dict | None = None,
+) -> None:
+    def _record(job: dict) -> None:
+        seasons = job.setdefault("seasons", {})
+        entry = seasons.setdefault(str(season), {"season": season})
+        entry["runtime_status"] = runtime_status
+        if task_id is not None:
+            entry["task_id"] = str(task_id)
+        if method is not None:
+            entry["method"] = str(method)
+        if error is not None:
+            entry["error"] = str(error)
+        elif runtime_status not in {"failed", "partial_downloaded_subscription_failed"}:
+            entry.pop("error", None)
+        if summary is not None:
+            entry["summary"] = str(summary)
+        if result is not None:
+            entry["result"] = _series_bulk_result_snapshot(result)
+        if subscription is not None:
+            entry["subscription"] = _series_bulk_jsonable(subscription)
+
+    _series_bulk_update_job(context, _record)
+
+
 def _series_bulk_ready_seasons(plan) -> list[SeasonPlan]:
     return [
         season
@@ -9541,16 +9739,34 @@ async def search_series_bulk_candidate_download(update: Update, context: Context
             exc,
             exc_info=True,
         )
+        error = _format_download_error(exc)
+        _series_bulk_record_job_season(
+            context,
+            season_plan.season,
+            "failed",
+            error=error,
+            result=candidate.result,
+        )
         return await _series_bulk_show_review_or_plan(
             query,
             context,
-            notice=f"❌ Сезон {season_plan.season}: {_format_download_error(exc)}",
+            notice=f"❌ Сезон {season_plan.season}: {error}",
         )
 
+    summary = f"скачан вручную: {task_id or method}"
     _series_bulk_mark_resolved(
         context,
         season_plan.season,
-        f"скачан вручную: {task_id or method}",
+        summary,
+    )
+    _series_bulk_record_job_season(
+        context,
+        season_plan.season,
+        "downloaded",
+        task_id=task_id or "",
+        method=method,
+        summary=summary,
+        result=candidate.result,
     )
     return await _series_bulk_show_review_or_plan(
         query,
@@ -9605,15 +9821,33 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
                 exc,
                 exc_info=True,
             )
+            error = _format_download_error(exc)
+            _series_bulk_record_job_season(
+                context,
+                season_plan.season,
+                "failed",
+                error=error,
+                result=result,
+            )
             return await _series_bulk_show_review_or_plan(
                 query,
                 context,
-                notice=f"❌ Сезон {season_plan.season}: {_format_download_error(exc)}",
+                notice=f"❌ Сезон {season_plan.season}: {error}",
             )
+        summary = f"доступные серии добавлены: {task_id or method}"
         _series_bulk_mark_resolved(
             context,
             season_plan.season,
-            f"доступные серии добавлены: {task_id or method}",
+            summary,
+        )
+        _series_bulk_record_job_season(
+            context,
+            season_plan.season,
+            "partial_downloaded",
+            task_id=task_id or "",
+            method=method,
+            summary=summary,
+            result=result,
         )
         return await _series_bulk_show_review_or_plan(
             query,
@@ -9630,6 +9864,7 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
 
     notify_policy, download_policy, download_now = _SUB_PRESETS[action]
     task_id = ""
+    method = ""
     if download_now:
         disk_check = await asyncio.to_thread(_check_disk_space_for_download)
         if disk_check is not None and disk_check[0] == "block":
@@ -9644,7 +9879,7 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
             reply_markup=_series_bulk_wait_keyboard(),
         )
         try:
-            task_id, _method = await _series_bulk_add_download(
+            task_id, method = await _series_bulk_add_download(
                 context,
                 result,
                 chat_id=chat_id,
@@ -9658,10 +9893,18 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
                 exc,
                 exc_info=True,
             )
+            error = _format_download_error(exc)
+            _series_bulk_record_job_season(
+                context,
+                season_plan.season,
+                "failed",
+                error=error,
+                result=result,
+            )
             return await _series_bulk_show_review_or_plan(
                 query,
                 context,
-                notice=f"❌ Сезон {season_plan.season}: {_format_download_error(exc)}",
+                notice=f"❌ Сезон {season_plan.season}: {error}",
             )
 
     try:
@@ -9678,16 +9921,34 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
         )
     except RuntimeError as exc:
         if task_id:
+            summary = "доступные серии добавлены, подписка не создана"
             _series_bulk_mark_resolved(
                 context,
                 season_plan.season,
-                "доступные серии добавлены, подписка не создана",
+                summary,
+            )
+            _series_bulk_record_job_season(
+                context,
+                season_plan.season,
+                "partial_downloaded_subscription_failed",
+                task_id=task_id,
+                method=method,
+                error=str(exc),
+                summary=summary,
+                result=result,
             )
             return await _series_bulk_show_review_or_plan(
                 query,
                 context,
                 notice=f"⚠️ Сезон {season_plan.season}: доступные серии добавлены, но подписку не создал: {exc}",
             )
+        _series_bulk_record_job_season(
+            context,
+            season_plan.season,
+            "failed",
+            error=str(exc),
+            result=result,
+        )
         return await _series_bulk_show_review_or_plan(
             query,
             context,
@@ -9696,6 +9957,16 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
 
     summary = _series_bulk_partial_summary(action, saved_sub)
     _series_bulk_mark_resolved(context, season_plan.season, summary)
+    _series_bulk_record_job_season(
+        context,
+        season_plan.season,
+        "downloaded_and_subscribed" if download_now else "subscribed",
+        task_id=task_id or None,
+        method=method or None,
+        summary=summary,
+        result=result,
+        subscription=saved_sub,
+    )
     return await _series_bulk_show_review_or_plan(
         query,
         context,
@@ -9710,6 +9981,12 @@ async def search_series_bulk_skip(update: Update, context: ContextTypes.DEFAULT_
     if season_plan is None:
         return await _series_bulk_show_plan(query, context)
     _series_bulk_mark_resolved(context, season_plan.season, "пропущен")
+    _series_bulk_record_job_season(
+        context,
+        season_plan.season,
+        "skipped",
+        summary="пропущен",
+    )
     return await _series_bulk_show_review_or_plan(
         query,
         context,
@@ -9767,6 +10044,7 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
     successes: list[dict] = []
     failures: list[dict] = []
     total = len(ready)
+    _series_bulk_set_job_status(context, "batch_running")
     await query.edit_message_text(
         f"⏳ Добавляю уверенные сезоны: 0/{total}",
         reply_markup=_series_bulk_wait_keyboard(),
@@ -9795,6 +10073,14 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
                 "task_id": task_id or "-",
                 "method": method,
             })
+            _series_bulk_record_job_season(
+                context,
+                season.season,
+                "downloaded",
+                task_id=task_id or "",
+                method=method,
+                result=result,
+            )
         except Exception as exc:
             logger.warning(
                 "Series bulk download failed: season=%s title=%s error=%s",
@@ -9803,11 +10089,25 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
                 exc,
                 exc_info=True,
             )
+            error = _format_download_error(exc)
             failures.append({
                 "season": season.season,
-                "error": _format_download_error(exc),
+                "error": error,
             })
+            _series_bulk_record_job_season(
+                context,
+                season.season,
+                "failed",
+                error=error,
+                result=result,
+            )
 
+    if failures and successes:
+        _series_bulk_set_job_status(context, "batch_completed_with_errors")
+    elif failures:
+        _series_bulk_set_job_status(context, "batch_failed")
+    else:
+        _series_bulk_set_job_status(context, "batch_completed")
     await query.edit_message_text(
         _series_bulk_done_text(successes, failures),
         reply_markup=_series_bulk_done_keyboard(bool(successes)),
@@ -9919,6 +10219,16 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["srch_series_bulk_warnings"] = tuple(search_warnings)
         context.user_data["srch_series_bulk_resolved"] = {}
         context.user_data.pop("srch_series_bulk_review_season", None)
+        context.user_data.pop("srch_series_bulk_job_id", None)
+        _series_bulk_create_job(
+            context,
+            plan=plan,
+            profile=profile,
+            results=combined_results,
+            warnings=tuple(search_warnings),
+            source_result=result,
+            chat_id=chat_id,
+        )
         await query.edit_message_text(
             _series_bulk_plan_text(
                 plan,

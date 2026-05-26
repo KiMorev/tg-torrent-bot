@@ -51,7 +51,7 @@
 | Текстовый поиск | `text_message_entry` -> `search_got_query` -> `_run_search` -> `SEARCH_RESULTS`. |
 | Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> тот же поиск через `_run_search`. |
 | Скачивание из результата | `search_download_pick` или `search_direct_download` -> Plex pre-check -> `_download_and_add` -> Download Station. |
-| План недостающих сезонов | `search_download_pick` -> `search_series_bulk_plan` -> wide/targeted tracker search -> `series_bulk_planner.py` -> `search_series_bulk_confirm` -> `search_series_bulk_run` для уверенных сезонов; `search_series_bulk_review` разбирает `needs_decision`/`partial` сезоны вручную. |
+| План недостающих сезонов | `search_download_pick` -> `search_series_bulk_plan` -> wide/targeted tracker search -> `series_bulk_planner.py` -> `series_bulk_jobs.json` job -> `search_series_bulk_confirm` -> `search_series_bulk_run` для уверенных сезонов; `search_series_bulk_review` разбирает `needs_decision`/`partial` сезоны вручную и пишет результат сезона в job. |
 | Magnet или `.torrent` файлом | `text_message_entry` или `handle_doc` -> `_process_magnet_uri` / `_do_process_torrent` -> Download Station. |
 | Подписка на сериал | `search_subscribe_pick` -> `search_subscribe_preset` или advanced callbacks -> запись в `topic_subscriptions.json`; `/subs` -> `sub:settings:*` меняет `notify_policy`/`download_policy`. |
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
@@ -122,7 +122,7 @@
 | `movie_discovery_settings.json` | Настройки `/new`, подписчики, per-user seen/shown flags, Jackett trackers. |
 | `movie_discovery_debug.json` | Debug snapshot последнего refresh `/new`. |
 | `pending_downloads.json` | Очередь отложенных скачиваний и retry-state. |
-| `series_bulk_jobs.json` | Планы массового скачивания сезонов и ручные решения по ним. |
+| `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `gpt_usage.json` | Использование GPT-функций. |
