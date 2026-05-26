@@ -228,6 +228,50 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ]
         self.assertIn("✅ Любая русская", labels)
 
+    def test_bulk_rebuild_returns_to_profile_with_current_settings(self):
+        query = _make_query("srch:bulk_rebuild")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data.update({
+            "srch_series_bulk_index": 0,
+            "srch_series_bulk_plan": _bulk_plan(seasons=[1], results=results),
+            "srch_series_bulk_profile": bot.SeriesBulkProfile(
+                quality="any",
+                require_original=False,
+                require_subs=False,
+                voice_policy=bot.VOICE_ANY_RUSSIAN,
+            ),
+            "srch_series_bulk_results": results,
+            "srch_series_bulk_warnings": ("source warning",),
+            "srch_series_bulk_resolved": {1: "скачан"},
+            "srch_series_bulk_failed": {2: "ошибка"},
+            "srch_series_bulk_failed_candidates": {2: 0},
+            "srch_series_bulk_review_season": 2,
+            "srch_series_bulk_job_id": "old_job",
+        })
+
+        state = asyncio.run(bot.search_series_bulk_rebuild(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Что важно сохранить при подборе сезонов", text)
+        self.assertIn("Качество: любое", text)
+        self.assertIn("Озвучка: любая русская", text)
+        self.assertNotIn("srch_series_bulk_plan", ctx.user_data)
+        self.assertNotIn("srch_series_bulk_job_id", ctx.user_data)
+        self.assertEqual(ctx.user_data["srch_series_bulk_resolved"], {})
+        self.assertEqual(ctx.user_data["srch_series_bulk_failed"], {})
+        self.assertEqual(ctx.user_data["srch_series_bulk_failed_candidates"], {})
+
     def test_builds_plan_from_series_result_and_cleans_animation(self):
         query = _make_query("srch:bulk_plan:0")
         query.message = MagicMock()
@@ -282,6 +326,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
         labels = [b.text for row in kb.inline_keyboard for b in row]
         self.assertIn("⬇️ Скачать уверенные (1)", labels)
+        self.assertIn("🔄 Пересобрать план", labels)
         job_id = ctx.user_data["srch_series_bulk_job_id"]
         self.assertIn(job_id, saved_jobs)
         job = saved_jobs[job_id]

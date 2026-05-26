@@ -9125,6 +9125,7 @@ def _series_bulk_plan_keyboard(
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_review",
         )])
     rows.extend([
+        [InlineKeyboardButton("🔄 Пересобрать план", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_rebuild")],
         [InlineKeyboardButton("⬅️ К результатам", callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_back_results:0")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
     ])
@@ -10466,6 +10467,28 @@ async def search_series_bulk_back_plan(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
     return await _series_bulk_show_plan(query, context)
+
+
+async def search_series_bulk_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    profile = context.user_data.get("srch_series_bulk_profile")
+    if not isinstance(profile, SeriesBulkProfile):
+        profile = _series_bulk_profile_from_context(context)
+    if isinstance(profile, SeriesBulkProfile):
+        context.user_data["srch_series_bulk_profile_draft"] = profile
+    for key in (
+        "srch_series_bulk_plan",
+        "srch_series_bulk_results",
+        "srch_series_bulk_warnings",
+        "srch_series_bulk_review_season",
+        "srch_series_bulk_job_id",
+    ):
+        context.user_data.pop(key, None)
+    context.user_data["srch_series_bulk_resolved"] = {}
+    context.user_data["srch_series_bulk_failed"] = {}
+    context.user_data["srch_series_bulk_failed_candidates"] = {}
+    return await _series_bulk_show_profile(query, context)
 
 
 async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -15424,6 +15447,7 @@ def main() -> None:
                     CallbackQueryHandler(search_series_bulk_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_skip$"),
                     CallbackQueryHandler(search_series_bulk_confirm, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_confirm$"),
                     CallbackQueryHandler(search_series_bulk_back_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_back_plan$"),
+                    CallbackQueryHandler(search_series_bulk_rebuild, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_rebuild$"),
                     CallbackQueryHandler(search_series_bulk_run, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_run$"),
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
                     # Partial-series download/notification picker callbacks
