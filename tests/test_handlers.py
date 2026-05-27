@@ -3247,7 +3247,8 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("трекеры не добавляю", final_text)
         markup = final_call.kwargs.get("reply_markup")
         labels = [button.text for row in markup.inline_keyboard for button in row]
-        self.assertIn("📋 К списку загрузок", labels)
+        self.assertNotIn("📋 Показать задачу", labels)
+        self.assertIn("📚 К списку загрузок", labels)
 
     async def test_wait_for_magnet_task_id_allows_missing_progress_message(self):
         mock_ds = MagicMock()

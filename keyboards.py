@@ -442,8 +442,8 @@ def _new_task_keyboard(task_id: str) -> InlineKeyboardMarkup:
     return _download_added_keyboard(task_id)
 
 
-def _task_reply_markup(task_id: str) -> InlineKeyboardMarkup | None:
-    return _new_task_keyboard(task_id) if task_id else None
+def _task_reply_markup(task_id: str | None) -> InlineKeyboardMarkup:
+    return _download_added_keyboard(task_id or None)
 
 
 def _delete_confirm_keyboard(task_id: str) -> InlineKeyboardMarkup:

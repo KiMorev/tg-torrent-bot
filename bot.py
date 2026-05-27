@@ -8786,7 +8786,7 @@ async def _download_and_add(
 
         await query.edit_message_text(
             success_text,
-            reply_markup=_task_reply_markup(task_id) or _download_list_keyboard(),
+            reply_markup=_task_reply_markup(task_id),
         )
         _register_task_card_from_query(query, task_id)
         if task_id and _card_chat_id and _card_msg_id:
@@ -15502,7 +15502,7 @@ async def _do_process_magnet(
     await _safe_edit_message(
         progress_message,
         msg_text,
-        reply_markup=_task_reply_markup(task_id) or _download_list_keyboard(),
+        reply_markup=_task_reply_markup(task_id),
     )
     _register_task_card_from_message(
         progress_message,
