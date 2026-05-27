@@ -41,14 +41,15 @@ class KeyboardTests(unittest.TestCase):
         )
 
         plex_button = keyboard.inline_keyboard[0][0]
-        self.assertEqual(plex_button.text, "▶️ Открыть Plex")
+        self.assertEqual(plex_button.text, "▶️ Смотреть в Plex")
         self.assertEqual(plex_button.url, "https://example.com/plex")
 
     def test_final_notification_keyboard_hides_plex_button_when_disabled(self) -> None:
         keyboard = _final_notification_keyboard("tid1", show_plex=False)
 
         labels = [button.text for row in keyboard.inline_keyboard for button in row]
-        self.assertNotIn("▶️ Открыть Plex", labels)
+        self.assertNotIn("▶️ Смотреть в Plex", labels)
+        self.assertIn("📋 Показать задачу", labels)
 
     def test_final_notification_keyboard_uses_plex_universal_link(self) -> None:
         """Default URL must be Telegram-supported (https) and a Plex Universal
@@ -57,7 +58,7 @@ class KeyboardTests(unittest.TestCase):
         keyboard = _final_notification_keyboard("tid1", show_plex=True)
 
         plex_button = keyboard.inline_keyboard[0][0]
-        self.assertEqual(plex_button.text, "▶️ Открыть Plex")
+        self.assertEqual(plex_button.text, "▶️ Смотреть в Plex")
         self.assertTrue(
             plex_button.url.startswith("https://app.plex.tv"),
             f"Expected https://app.plex.tv URL, got {plex_button.url!r}",
@@ -76,14 +77,14 @@ class KeyboardTests(unittest.TestCase):
         last_row_label = keyboard.inline_keyboard[-1][0].text
         self.assertEqual(last_row_label, "✖️ Закрыть")
 
-    def test_final_notification_delete_button_names_task_action(self) -> None:
+    def test_final_notification_keyboard_has_no_delete_button(self) -> None:
         keyboard = _final_notification_keyboard("tid1", show_plex=True)
         buttons = {
             button.text: button.callback_data
             for row in keyboard.inline_keyboard
             for button in row
         }
-        self.assertEqual(buttons["🗑️ Удалить задачу"], "task:delete_ask:tid1")
+        self.assertNotIn("🗑️ Удалить задачу", buttons)
 
     def test_admin_panel_keyboard_links_core_sections(self) -> None:
         keyboard = _admin_panel_keyboard()

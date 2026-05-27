@@ -3587,6 +3587,9 @@ class PlexPreDownloadCheckTests(unittest.TestCase):
 class PlexPollingTests(unittest.TestCase):
     """Tests for _plex_find_by_ds_title and _plex_poll_after_finish."""
 
+    def _labels(self, keyboard):
+        return [button.text for row in keyboard.inline_keyboard for button in row]
+
     def _make_plex_movie(self, title: str, year: int, file_paths: list[str], resolution: str = "1080"):
         m = MagicMock()
         m.title = title
@@ -3675,6 +3678,9 @@ class PlexPollingTests(unittest.TestCase):
         text = fake_app.bot.send_message.call_args.kwargs["text"]
         self.assertIn("сервер был недоступен", text)
         self.assertNotIn("не появился в Plex", text)
+        labels = self._labels(fake_app.bot.send_message.call_args.kwargs["reply_markup"])
+        self.assertIn("📋 Показать задачу", labels)
+        self.assertIn("✖️ Закрыть", labels)
 
     def test_poll_after_finish_falls_back_to_title_year_when_substring_misses(self):
         """If _plex_find_by_ds_title returns None (e.g. Plex renamed the file or
@@ -3726,6 +3732,10 @@ class PlexPollingTests(unittest.TestCase):
         self.assertIn("✅", call_kwargs["text"])
         # The notification now uses the canonical Plex title, not the raw torrent name.
         self.assertIn("Dune", call_kwargs["text"])
+        labels = self._labels(call_kwargs["reply_markup"])
+        self.assertIn("▶️ Смотреть в Plex", labels)
+        self.assertIn("✖️ Закрыть", labels)
+        self.assertNotIn("📋 Показать задачу", labels)
 
     def test_poll_after_finish_sends_timeout_notification_when_not_found(self):
         """Polling should send a timeout-notification when exhausted without finding the movie."""
@@ -3746,6 +3756,9 @@ class PlexPollingTests(unittest.TestCase):
         call_kwargs = fake_app.bot.send_message.call_args.kwargs
         self.assertIn("⚠️", call_kwargs["text"])
         self.assertIn("Some.Movie.2024", call_kwargs["text"])
+        labels = self._labels(call_kwargs["reply_markup"])
+        self.assertIn("📋 Показать задачу", labels)
+        self.assertIn("✖️ Закрыть", labels)
 
     def test_poll_after_finish_marks_task_done_not_removed(self):
         """After completing, task_id stays in _PLEX_POLLING_TASKS with value None.
@@ -3820,7 +3833,10 @@ class PlexPollingTests(unittest.TestCase):
         fake_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=888)
         # Timeout notification should also be sent
         fake_app.bot.send_message.assert_awaited_once()
-        self.assertIn("⚠️", fake_app.bot.send_message.call_args.kwargs["text"])
+        kwargs = fake_app.bot.send_message.call_args.kwargs
+        self.assertIn("⚠️", kwargs["text"])
+        labels = self._labels(kwargs["reply_markup"])
+        self.assertIn("📋 Показать задачу", labels)
 
     def test_poll_after_finish_uses_meta_canonical_lookup_for_movie(self):
         """When meta is provided for a movie, poll must use _plex_library_find first
@@ -4986,49 +5002,19 @@ class NotificationKeyboardTests(unittest.TestCase):
         self.assertIn("🎬 Открыть /new", labels)
         self.assertIn("🔕 Отписаться", labels)
 
-    def test_plex_button_appears_only_for_final_download_statuses(self):
+    def test_final_download_statuses_show_task_button_not_generic_plex(self):
         with patch.object(bot, "PLEX_ENABLED", True):
             finished_labels = self._labels(_notification_keyboard("tid1", "finished", "bt"))
             seeding_labels = self._labels(_notification_keyboard("tid1", "seeding", "bt"))
             error_labels = self._labels(_notification_keyboard("tid1", "error", "bt"))
 
-        self.assertIn("▶️ Открыть Plex", finished_labels)
-        self.assertIn("▶️ Открыть Plex", seeding_labels)
-        self.assertNotIn("▶️ Открыть Plex", error_labels)
-
-    def test_plex_button_uses_telegram_supported_scheme(self):
-        """Telegram rejects ``plex://`` inline-button URLs since May 2026.
-        We use ``https://`` URLs: app.plex.tv/desktop by default, or the user's
-        configured PLEX_DEEPLINK_BASE_URL when set."""
-        with (
-            patch.object(bot, "PLEX_ENABLED", True),
-            patch.object(bot, "PLEX_DEEPLINK_BASE_URL", ""),
-        ):
-            keyboard = _notification_keyboard("tid1", "finished", "bt")
-        urls = self._urls(keyboard)
-        plex_url = urls.get("▶️ Открыть Plex", "")
-        self.assertTrue(
-            plex_url.startswith("https://"),
-            f"Telegram rejects non-https URLs in inline buttons; got: {plex_url!r}",
-        )
-        self.assertTrue(
-            "plex.tv" in plex_url,
-            f"Expected a Plex URL, got: {plex_url!r}",
-        )
-
-    def test_plex_button_honours_custom_deeplink_base_url(self):
-        """When PLEX_DEEPLINK_BASE_URL is set, the placeholder URL uses it
-        (no query params yet — the metadata-specific link is built later by
-        Plex polling). This is the iOS-native-app workaround: user hosts a
-        redirect page that does location.href='plex://...'."""
-        with (
-            patch.object(bot, "PLEX_ENABLED", True),
-            patch.object(bot, "PLEX_DEEPLINK_BASE_URL", "https://nas.example.com/plex.html"),
-        ):
-            keyboard = _notification_keyboard("tid1", "finished", "bt")
-        urls = self._urls(keyboard)
-        plex_url = urls.get("▶️ Открыть Plex", "")
-        self.assertEqual(plex_url, "https://nas.example.com/plex.html")
+        self.assertIn("📋 Показать задачу", finished_labels)
+        self.assertIn("📋 Показать задачу", seeding_labels)
+        self.assertNotIn("▶️ Открыть Plex", finished_labels)
+        self.assertNotIn("▶️ Открыть Plex", seeding_labels)
+        self.assertNotIn("▶️ Смотреть в Plex", finished_labels)
+        self.assertNotIn("▶️ Смотреть в Plex", seeding_labels)
+        self.assertNotIn("📋 Показать задачу", error_labels)
 
 
 class PlexDeepLinkHelperTests(unittest.TestCase):

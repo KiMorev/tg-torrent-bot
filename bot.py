@@ -4035,9 +4035,15 @@ async def _plex_poll_after_finish(
             )
             log_reason = "Plex unreachable"
         await _delete_hint_messages()
+        keyboard = _final_notification_keyboard(task_id, show_plex=False)
         for cid in chat_ids:
             try:
-                await app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
+                await app.bot.send_message(
+                    chat_id=cid,
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
             except Exception:
                 logger.warning(
                     "Plex poll: failed to send timeout-notification chat_id=%s", cid, exc_info=True
@@ -4162,14 +4168,7 @@ def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> 
 
 def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
     if (status or "").lower() in {"finished", "seeding"}:
-        # Placeholder Plex URL — no specific item yet. The specific deep-link
-        # with metadataKey is sent later by _plex_poll_after_finish once Plex
-        # has indexed the file. _plex_deep_link() honours PLEX_DEEPLINK_BASE_URL
-        # if configured (user-hosted redirect → native app on iOS); otherwise
-        # falls back to https://app.plex.tv/desktop (Plex Web in Safari).
-        return _final_notification_keyboard(
-            task_id, show_plex=PLEX_ENABLED, plex_url=_plex_deep_link(),
-        )
+        return _final_notification_keyboard(task_id, show_plex=False)
 
     return _make_task_keyboard(task_id, status, task_type)
 
