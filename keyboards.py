@@ -414,14 +414,32 @@ def _final_notification_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _download_added_keyboard(
+    task_id: str | None,
+    *,
+    can_show_other_season: bool = False,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_show_other_season and task_id:
+        rows.append([InlineKeyboardButton(
+            "🔎 Другой сезон",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:series_base",
+        )])
+    if task_id:
+        rows.append([InlineKeyboardButton(
+            "📋 Показать задачу",
+            callback_data=_task_callback("info", task_id),
+        )])
+    rows.append([InlineKeyboardButton(
+        "📚 К списку загрузок",
+        callback_data=_task_callback("list", task_id or TASK_LIST_SCOPE_DEFAULT),
+    )])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
 def _new_task_keyboard(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))],
-            [InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))],
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
-        ]
-    )
+    return _download_added_keyboard(task_id)
 
 
 def _task_reply_markup(task_id: str) -> InlineKeyboardMarkup | None:
@@ -760,17 +778,7 @@ def _search_after_add_keyboard(task_id: str) -> InlineKeyboardMarkup:
     Includes a shortcut to search for another season of the same show,
     plus the standard task-management buttons.
     """
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "🔎 Другой сезон",
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:series_base",
-        )],
-        [
-            InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id)),
-            InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id)),
-        ],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
-    ])
+    return _download_added_keyboard(task_id, can_show_other_season=True)
 
 
 def _season_back_to_picker_keyboard() -> InlineKeyboardMarkup:

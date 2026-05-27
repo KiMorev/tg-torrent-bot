@@ -8,6 +8,7 @@ from keyboards import (
     _admin_movie_status_keyboard,
     _admin_panel_keyboard,
     _cluster_picker_keyboard,
+    _download_added_keyboard,
     _download_list_keyboard,
     _final_notification_keyboard,
     _jackett_select_keyboard,
@@ -667,6 +668,14 @@ class TasksKeyboardCloseTests(unittest.TestCase):
 
     def test_new_task_keyboard_has_close_button(self) -> None:
         buttons = self._buttons(_new_task_keyboard("task_123"))
+        self.assertEqual(buttons["📋 Показать задачу"], "task:info:task_123")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:task_123")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_download_added_keyboard_without_task_id_has_only_list_and_close(self) -> None:
+        buttons = self._buttons(_download_added_keyboard(None))
+        self.assertNotIn("📋 Показать задачу", buttons)
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
     def test_download_list_keyboard_has_close_button(self) -> None:
@@ -675,6 +684,9 @@ class TasksKeyboardCloseTests(unittest.TestCase):
 
     def test_search_after_add_keyboard_has_close_button(self) -> None:
         buttons = self._buttons(_search_after_add_keyboard("task_123"))
+        self.assertEqual(buttons["🔎 Другой сезон"], "srch:series_base")
+        self.assertEqual(buttons["📋 Показать задачу"], "task:info:task_123")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:task_123")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
     def test_task_error_keyboard_has_retry_list_and_close(self) -> None:
