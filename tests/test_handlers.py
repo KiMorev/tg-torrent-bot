@@ -3236,14 +3236,14 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
                 0,
                 subscribe=False,
                 _skip_plex_check=True,
-            )
+        )
 
         add_trackers.assert_not_called()
         remember_owner.assert_not_called()
         remember_meta.assert_not_called()
         final_call = update.callback_query.edit_message_text.await_args
         final_text = final_call.args[0]
-        self.assertIn("ID пока не появился", final_text)
+        self.assertIn("Задача может появиться в списке загрузок", final_text)
         self.assertIn("трекеры не добавляю", final_text)
         markup = final_call.kwargs.get("reply_markup")
         labels = [button.text for row in markup.inline_keyboard for button in row]
@@ -5326,14 +5326,31 @@ class TaskAddedMessageTests(unittest.TestCase):
             accepted_without_task_id=True,
         )
 
-        self.assertTrue(text.startswith("Magnet-ссылка отправлена в Download Station."))
+        self.assertTrue(text.startswith("✅ Magnet отправлен в очередь скачивания"))
         self.assertNotIn("Задача добавлена", text)
 
     def test_regular_task_keeps_added_intro(self):
         text = bot._task_added_message("torrent-файл", task_id="task_123")
 
-        self.assertTrue(text.startswith("Задача добавлена в Download Station."))
-        self.assertIn("ID: task_123", text)
+        self.assertTrue(text.startswith("✅ Задача добавлена в очередь скачивания"))
+        self.assertNotIn("ID: task_123", text)
+        self.assertIn("Статус обновится автоматически", text)
+
+    def test_successful_tracker_result_is_hidden_from_added_message(self):
+        result = bot.TrackerApplyResult(added_count=5, available_count=5)
+
+        with patch.object(bot, "_public_trackers_enabled", return_value=True):
+            text = bot._task_added_message("torrent-файл", task_id="task_123", tracker_result=result)
+
+        self.assertNotIn("Public-трекеры", text)
+
+    def test_tracker_skip_reason_remains_visible(self):
+        result = bot.TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
+
+        with patch.object(bot, "_public_trackers_enabled", return_value=True):
+            text = bot._task_added_message("torrent-файл", task_id="task_123", tracker_result=result)
+
+        self.assertIn("Public-трекеры: приватный torrent, не добавляю", text)
 
 
 class TaskCallbackErrorKeyboardTests(unittest.TestCase):

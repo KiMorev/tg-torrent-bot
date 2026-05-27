@@ -666,6 +666,16 @@ def _tracker_result_lines(result: TrackerApplyResult | None) -> list[str]:
     )
 
 
+def _download_added_tracker_lines(result: TrackerApplyResult | None) -> list[str]:
+    if not result or not _public_trackers_enabled():
+        return []
+    if result.skipped_reason:
+        return [f"Public-трекеры: {result.skipped_reason}"]
+    if not result.added_count and not result.available_count:
+        return ["Public-трекеры: список недоступен"]
+    return []
+
+
 def _add_public_trackers_to_download_task(task_id: str) -> TrackerApplyResult:
     return _tracker_service().add_public_trackers_to_download_task(task_id)
 
@@ -5501,21 +5511,25 @@ def _task_added_message(
     accepted_without_task_id: bool = False,
 ) -> str:
     intro = (
-        "Magnet-ссылка отправлена в Download Station."
+        "✅ Magnet отправлен в очередь скачивания"
         if accepted_without_task_id
-        else "Задача добавлена в Download Station."
+        else "✅ Задача добавлена в очередь скачивания"
     )
-    lines = [
-        intro,
-        f"Тип: {task_type}",
-    ]
+    lines = [intro]
 
     if title:
+        lines.append("")
         lines.append(f"Имя: {title}")
     if task_id:
-        lines.append(f"ID: {task_id}")
+        lines.extend([
+            "",
+            "Статус обновится автоматически.",
+            "Можно открыть задачу сейчас.",
+        ])
 
-    lines.extend(_tracker_result_lines(tracker_result))
+    tracker_lines = _download_added_tracker_lines(tracker_result)
+    if tracker_lines:
+        lines.extend(["", *tracker_lines])
 
     return "\n".join(lines)
 
@@ -5531,7 +5545,10 @@ def _missing_task_id_error(method: str) -> MissingTaskIdError:
 
 
 def _magnet_without_task_id_note() -> str:
-    return "ID пока не появился. Откройте список загрузок через кнопку ниже."
+    return (
+        "Задача может появиться в списке загрузок через несколько секунд.\n\n"
+        "Откройте список загрузок, чтобы проверить её вручную."
+    )
 
 
 def _is_message_not_modified(error: BadRequest) -> bool:

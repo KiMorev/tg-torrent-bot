@@ -631,7 +631,7 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         self.assertNotIn(entry_id, loaded)
         mock_app.bot.send_message.assert_awaited_once()
         sent_text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
-        self.assertIn("ID пока не появился", sent_text)
+        self.assertIn("Задача может появиться в списке загрузок", sent_text)
         self.assertNotIn("Слежу за прогрессом", sent_text)
         remember_owner.assert_not_called()
         remember_meta.assert_not_called()
