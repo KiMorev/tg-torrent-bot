@@ -538,19 +538,19 @@ class DownloadErrorKeyboardTests(unittest.TestCase):
 
     def test_default_has_retry_and_close(self) -> None:
         buttons = self._buttons(_download_error_keyboard(index=3))
-        self.assertEqual(buttons["🔄 Повторить"], "srch:retry_dl:3")
+        self.assertEqual(buttons["🔄 Повторить сейчас"], "srch:retry_dl:3")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
         self.assertNotIn("⏳ Поставить в очередь", buttons)
 
     def test_can_queue_adds_queue_button(self) -> None:
         buttons = self._buttons(_download_error_keyboard(index=5, can_queue=True))
-        self.assertEqual(buttons["🔄 Повторить"], "srch:retry_dl:5")
+        self.assertEqual(buttons["🔄 Повторить сейчас"], "srch:retry_dl:5")
         self.assertEqual(buttons["⏳ Поставить в очередь"], "srch:queue_dl:5")
         self.assertIn("✖️ Закрыть", buttons)
 
     def test_can_retry_false_hides_retry(self) -> None:
         buttons = self._buttons(_download_error_keyboard(index=0, can_retry=False))
-        self.assertNotIn("🔄 Повторить", buttons)
+        self.assertNotIn("🔄 Повторить сейчас", buttons)
         self.assertIn("✖️ Закрыть", buttons)
 
     def test_close_is_always_last_row(self) -> None:
@@ -571,37 +571,39 @@ class NoResultsKeyboardTests(unittest.TestCase):
         buttons = self._buttons(_no_results_keyboard(
             has_quality=False, jackett_can_expand=False,
         ))
-        self.assertEqual(list(buttons.keys()), ["❌ Отмена"])
+        self.assertEqual(list(buttons.keys()), ["🔄 Повторить поиск", "❌ Отмена"])
+        self.assertEqual(buttons["🔄 Повторить поиск"], "srch:retry")
         self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
 
     def test_has_quality_only_shows_no_quality_button(self) -> None:
         buttons = self._buttons(_no_results_keyboard(
             has_quality=True, jackett_can_expand=False,
         ))
-        self.assertIn("🔍 Без фильтра качества", buttons)
-        self.assertEqual(buttons["🔍 Без фильтра качества"], "srch:no_quality")
-        self.assertNotIn("🌐 На всех трекерах", buttons)
-        self.assertNotIn("🔍🌐 Без качества + все трекеры", buttons)
+        self.assertIn("🎞 Искать без качества", buttons)
+        self.assertEqual(buttons["🎞 Искать без качества"], "srch:no_quality")
+        self.assertNotIn("🌐 Искать на всех трекерах", buttons)
+        self.assertNotIn("🎞🌐 Без качества + все трекеры", buttons)
         self.assertIn("❌ Отмена", buttons)
 
     def test_jackett_can_expand_only_shows_expand_button(self) -> None:
         buttons = self._buttons(_no_results_keyboard(
             has_quality=False, jackett_can_expand=True,
         ))
-        self.assertIn("🌐 На всех трекерах", buttons)
-        self.assertEqual(buttons["🌐 На всех трекерах"], "srch:expand_all_trackers")
-        self.assertNotIn("🔍 Без фильтра качества", buttons)
-        self.assertNotIn("🔍🌐 Без качества + все трекеры", buttons)
+        self.assertIn("🌐 Искать на всех трекерах", buttons)
+        self.assertEqual(buttons["🌐 Искать на всех трекерах"], "srch:expand_all_trackers")
+        self.assertNotIn("🎞 Искать без качества", buttons)
+        self.assertNotIn("🎞🌐 Без качества + все трекеры", buttons)
         self.assertIn("❌ Отмена", buttons)
 
     def test_both_flags_true_shows_three_fallbacks_plus_cancel(self) -> None:
         buttons = self._buttons(_no_results_keyboard(
             has_quality=True, jackett_can_expand=True,
         ))
-        self.assertEqual(len(buttons), 4)
-        self.assertEqual(buttons["🔍 Без фильтра качества"], "srch:no_quality")
-        self.assertEqual(buttons["🌐 На всех трекерах"], "srch:expand_all_trackers")
-        self.assertEqual(buttons["🔍🌐 Без качества + все трекеры"], "srch:no_quality_all_trackers")
+        self.assertEqual(len(buttons), 5)
+        self.assertEqual(buttons["🔄 Повторить поиск"], "srch:retry")
+        self.assertEqual(buttons["🎞 Искать без качества"], "srch:no_quality")
+        self.assertEqual(buttons["🌐 Искать на всех трекерах"], "srch:expand_all_trackers")
+        self.assertEqual(buttons["🎞🌐 Без качества + все трекеры"], "srch:no_quality_all_trackers")
         self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
 
     def test_suggestions_use_short_index_callbacks(self) -> None:

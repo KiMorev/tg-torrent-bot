@@ -6377,6 +6377,56 @@ def _format_search_query_label(search_query: str, *, escape_html: bool = False) 
     return f"«{shown}»{suffix}"
 
 
+def _search_constraints_line(
+    preferred_quality: str | None,
+    audio_required: bool,
+    subs_required: bool,
+) -> str:
+    constraints: list[str] = []
+    if preferred_quality:
+        constraints.append(preferred_quality)
+    if audio_required:
+        constraints.append("Original")
+    if subs_required:
+        constraints.append("субтитры")
+    return ", ".join(constraints)
+
+
+def _search_empty_text(
+    search_query: str,
+    *,
+    preferred_quality: str | None = None,
+    audio_required: bool = False,
+    subs_required: bool = False,
+    banner: str = "",
+    body: str = "",
+    action_hint: str = "",
+) -> str:
+    lines = [
+        "🔍 Ничего не нашёл",
+        "",
+        f"По запросу {_format_search_query_label(search_query)} ничего не найдено.",
+    ]
+    constraints = _search_constraints_line(preferred_quality, audio_required, subs_required)
+    if constraints:
+        lines.append(f"Ограничения: {constraints}.")
+    if banner:
+        lines.extend(["", banner])
+    if body:
+        lines.extend(["", body])
+    if action_hint:
+        lines.extend(["", action_hint])
+    return "\n".join(lines)
+
+
+def _search_source_error_text(service: str, raw: str) -> str:
+    return (
+        "⚠️ Поиск сейчас не получился\n\n"
+        f"{_friendly_error(service, raw)}\n\n"
+        "Что можно сделать: повторить поиск после паузы или проверить статус сервисов в /admin."
+    )
+
+
 def _classify_results_by_quality(results: list[dict]) -> dict[str, list[dict]]:
     """Group results by detected quality bucket (Plex-normalised string).
 
@@ -6789,7 +6839,11 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     banner = "⚠️ Jackett недоступен, ищу напрямую в Rutracker"
                     # fall through to Rutracker path below
                 else:
-                    await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+                    await edit_fn(
+                        _search_source_error_text("jackett", str(e)),
+                        reply_markup=_search_error_keyboard(),
+                        parse_mode="HTML",
+                    )
                     return ConversationHandler.END
 
         selected: set[str] = context.user_data.get("srch_jackett_selected", set())
@@ -6859,7 +6913,11 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
                     # fall through to Rutracker path
                 else:
-                    await edit_fn(_friendly_error("jackett", raw_err), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+                    await edit_fn(
+                        _search_source_error_text("jackett", raw_err),
+                        reply_markup=_search_error_keyboard(),
+                        parse_mode="HTML",
+                    )
                     return ConversationHandler.END
             else:
                 for r in j_results_raw:
@@ -6907,7 +6965,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             if rutracker_is_only_source:
                 # Context A — pure-Rutracker install. Nothing to fall back to.
                 await edit_fn(
-                    _friendly_error("rutracker", str(rt_err)),
+                    _search_source_error_text("rutracker", str(rt_err)),
                     reply_markup=_search_error_keyboard(), parse_mode="HTML",
                 )
                 return ConversationHandler.END
@@ -7041,16 +7099,20 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 )
         # Compose text: optional banner (e.g. «both sources down») + framing
         # that emphasises did-you-mean buttons when we have any.
-        no_results_text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено."
-        if banner:
-            no_results_text = f"{no_results_text}\n{banner}"
+        no_results_text = _search_empty_text(
+            search_query,
+            preferred_quality=preferred_quality,
+            audio_required=audio_required,
+            subs_required=subs_required,
+            banner=banner,
+        )
         if multi_tracker_coverage_lost:
             # New branch (A): Jackett errored + we lost non-rutracker coverage.
             # Don't suggest variants — push the user toward a retry instead.
             no_results_text = (
                 f"{no_results_text}\n\n"
                 "⚠️ Поисковики ответили не полностью — это похоже на временный сбой.\n"
-                "Попробуйте повторить поиск через минуту."
+                "Лучшее следующее действие: повторить поиск через минуту."
             )
         elif original_kp_match:
             # New branch (B): user's query is a real title on KP, just not on
@@ -7070,7 +7132,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             )
         else:
             no_results_text = (
-                f"{no_results_text}\nПопробуйте ослабить фильтры или другой запрос."
+                f"{no_results_text}\n\n"
+                "Можно ослабить фильтры, расширить список трекеров или попробовать другой вариант названия."
             )
         await edit_fn(
             no_results_text,
@@ -7123,9 +7186,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         suggestions = await _gpt_get_did_you_mean(base_query)
         suggestions = _remember_didmean_suggestions(context, suggestions)
         text = (
-            f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
-            + "\n".join(filter_banner_parts)
-            + "\nПопробуйте отключить фильтры аудио/субтитров в настройках."
+            _search_empty_text(
+                search_query,
+                preferred_quality=preferred_quality,
+                audio_required=audio_required,
+                subs_required=subs_required,
+                body="\n".join(filter_banner_parts),
+                action_hint="Можно отключить Original/субтитры в настройках поиска и попробовать снова.",
+            )
         )
         await edit_fn(
             text,
@@ -7239,8 +7307,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             _remember_didmean_suggestions(context, [])
             if has_quality:
                 await edit_fn(
-                    f"По запросу {_format_search_query_label(search_query)} раздач с указанным качеством не найдено.\n"
-                    f"Попробуйте ослабить фильтры:",
+                    _search_empty_text(
+                        search_query,
+                        preferred_quality=preferred_quality,
+                        audio_required=audio_required,
+                        subs_required=subs_required,
+                        body="Раздачи есть, но с указанным качеством сезон не нашёл.",
+                        action_hint="Лучшее следующее действие: искать без ограничения качества.",
+                    ),
                     reply_markup=_no_results_keyboard(
                         has_quality=True,
                         jackett_can_expand=jackett_can_expand,
@@ -7256,8 +7330,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             if available and in_picker_flow:
                 seasons_str = ", ".join(str(n) for n in available)
                 await edit_fn(
-                    f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
-                    f"На трекерах найдены сезоны: {seasons_str}.",
+                    _search_empty_text(
+                        search_query,
+                        preferred_quality=preferred_quality,
+                        audio_required=audio_required,
+                        subs_required=subs_required,
+                        body=f"На трекерах найдены сезоны: {seasons_str}.",
+                        action_hint="Можно вернуться к выбору сезона.",
+                    ),
                     reply_markup=_season_back_to_picker_keyboard(),
                 )
                 return SEARCH_SEASON_SELECT
@@ -7265,8 +7345,13 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             # Generic dead-end after season filter wiped everything: offer to
             # broaden trackers (the requested season may exist elsewhere).
             await edit_fn(
-                f"По запросу {_format_search_query_label(search_query)} ничего не найдено.\n"
-                "Попробуйте ослабить фильтры или другой запрос.",
+                _search_empty_text(
+                    search_query,
+                    preferred_quality=preferred_quality,
+                    audio_required=audio_required,
+                    subs_required=subs_required,
+                    action_hint="Можно расширить поиск или попробовать другой вариант названия сезона.",
+                ),
                 reply_markup=_no_results_keyboard(
                     has_quality=False,
                     jackett_can_expand=jackett_can_expand,
@@ -8267,6 +8352,32 @@ def _format_download_error(exc: Exception) -> str:
     return f"❌ Ошибка: {msg[:200]}"
 
 
+def _download_failure_text(exc: Exception, *, can_queue: bool) -> str:
+    detail = _format_download_error(exc)
+    lines = [
+        "⚠️ Не удалось добавить загрузку",
+        "",
+        detail,
+        "",
+    ]
+    if isinstance(exc, DownloadStationError):
+        lines.append("Раздача найдена, но Download Station не принял задачу.")
+    else:
+        lines.append("Раздача найдена, но torrent-файл сейчас не удалось получить.")
+
+    if can_queue:
+        lines.extend([
+            "",
+            "Можно повторить сейчас или поставить в очередь: бот попробует скачать автоматически позже.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Можно повторить попытку сейчас. Если ошибка повторится, проверьте источник или Download Station.",
+        ])
+    return "\n".join(lines)
+
+
 # Disk-space guard thresholds. <5% free → BLOCK download (DSM would likely
 # fail anyway, but better to fail-fast with a clear message). <15% free →
 # warn in logs and surface in /admin diagnostics, but don't block (user
@@ -8665,15 +8776,16 @@ async def _download_and_add(
             _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
     except (RutrackerError, JackettError, DownloadStationError) as e:
         logger.warning("Download failed for index=%s: %s", index, e, exc_info=True)
-        error_text = _format_download_error(e)
+        can_queue = _pending_downloads_enabled()
+        error_text = _download_failure_text(e, can_queue=can_queue)
         # Remember the error so the pending-queue handler (if user clicks
         # «⏳ Поставить в очередь») can record it on the queued entry.
-        context.user_data["srch_last_dl_error"] = error_text
+        context.user_data["srch_last_dl_error"] = _format_download_error(e)
         await query.edit_message_text(
             error_text,
             reply_markup=_download_error_keyboard(
                 index=index,
-                can_queue=_pending_downloads_enabled(),
+                can_queue=can_queue,
                 can_retry=True,
             ),
         )
@@ -10611,6 +10723,23 @@ def _series_bulk_plan_text(
         f"Пропущу: {skipped}",
         f"Нужно решение: {decisions}",
     ])
+    if ready == 0:
+        if decisions:
+            lines.extend([
+                "",
+                "Автоматически скачивать нечего: оставшиеся сезоны требуют ручного выбора.",
+                "Следующее действие: нажмите «⚙️ Разобрать спорные».",
+            ])
+        elif skipped:
+            lines.extend([
+                "",
+                "Автоматически скачивать нечего: сезоны уже есть в Plex или уже качаются.",
+            ])
+        elif plan.pack_candidates:
+            lines.extend([
+                "",
+                "Автоматически скачивать нечего, но есть паки сезонов для ручной проверки.",
+            ])
     if resolved:
         lines.extend(["", "Решено вручную:"])
         for season, summary in sorted(resolved.items()):
@@ -10631,8 +10760,8 @@ def _series_bulk_confirm_text(
     ready = _series_bulk_ready_seasons(plan, resolved, failed)
     if not ready:
         return (
-            "Нет уверенных сезонов для автоскачивания.\n\n"
-            "Спорные и неполные сезоны нужно будет разобрать отдельно."
+            "📚 Уверенных сезонов для автоскачивания нет.\n\n"
+            "Я не буду добавлять раздачи наугад. Спорные, неполные или ненайденные сезоны нужно разобрать вручную."
         )
 
     lines = [
@@ -11712,7 +11841,10 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
     ready = _series_bulk_ready_seasons(plan, resolved, failed) if plan is not None else []
     if not ready:
         await query.edit_message_text(
-            "Нет уверенных сезонов для скачивания.",
+            _series_bulk_confirm_text(plan, resolved, failed) if plan is not None else (
+                "📚 Уверенных сезонов для автоскачивания нет.\n\n"
+                "Я не буду добавлять раздачи наугад. Спорные, неполные или ненайденные сезоны нужно разобрать вручную."
+            ),
             reply_markup=_series_bulk_plan_keyboard(plan, resolved, failed),
         )
         return SEARCH_RESULTS
@@ -16733,6 +16865,7 @@ def main() -> None:
                     CallbackQueryHandler(search_series_bulk_back_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_back_plan$"),
                     CallbackQueryHandler(search_series_bulk_rebuild, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_rebuild$"),
                     CallbackQueryHandler(search_series_bulk_run, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_run$"),
+                    CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
                     CallbackQueryHandler(search_direct_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl:\d+$"),
                     # Partial-series download/notification picker callbacks
                     CallbackQueryHandler(search_subscribe_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_pick:\d+$"),

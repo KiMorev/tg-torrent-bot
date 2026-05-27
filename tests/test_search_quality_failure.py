@@ -338,11 +338,12 @@ class FullSearchFlowQualityProtectionTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = message.edit_text.call_args
         text = args[0] if args else kwargs.get("text", "")
         self.assertIn("По запросу «ганстерленд» (качество: 1080p) ничего не найдено.", text)
+        self.assertIn("Ограничения: 1080p", text)
         self.assertNotIn("«ганстерленд 1080p»", text)
 
         keyboard = kwargs["reply_markup"].inline_keyboard
         labels = [b.text for row in keyboard for b in row]
-        self.assertTrue(any("Без фильтра качества" in lbl for lbl in labels))
+        self.assertTrue(any("Искать без качества" in lbl for lbl in labels))
 
     async def test_original_query_on_kp_swaps_message(self):
         """Bug B: when KP confirms the user's query is a real film, show

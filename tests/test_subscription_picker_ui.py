@@ -800,6 +800,49 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("✅ Скачать 1", labels)
         self.assertIn("⬅️ К плану", labels)
 
+    def test_confirm_without_ready_seasons_explains_manual_review(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=[result])
+        query = _make_query("srch:bulk_confirm")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_confirm(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Уверенных сезонов", text)
+        self.assertIn("разобрать вручную", text)
+        kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertIn("⚙️ Разобрать спорные (1)", labels)
+
+    def test_run_without_ready_seasons_explains_manual_review(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "source": "jackett",
+            "tracker_name": "rutracker",
+            "torrent_url": "https://jackett.local/dl/1",
+            "seeders": 20,
+        }
+        ctx = _make_context(results=[result])
+        ctx.user_data["srch_series_bulk_plan"] = _bulk_plan(seasons=[2], results=[result])
+        query = _make_query("srch:bulk_run")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_run(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Уверенных сезонов", text)
+        self.assertIn("разобрать вручную", text)
+
     def test_run_downloads_ready_seasons_and_returns_summary(self):
         result = {
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",

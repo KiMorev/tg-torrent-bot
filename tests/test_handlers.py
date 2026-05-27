@@ -3309,6 +3309,13 @@ class FormatDownloadErrorTests(unittest.TestCase):
         text = bot._format_download_error(exc)
         self.assertIn("Download Station", text)
 
+    def test_download_failure_text_explains_queue_option(self):
+        from jackett import JackettError
+        text = bot._download_failure_text(JackettError("HTTP 404"), can_queue=True)
+        self.assertIn("Не удалось добавить загрузку", text)
+        self.assertIn("Раздача найдена", text)
+        self.assertIn("поставить в очередь", text)
+
     def test_unknown_error_truncated(self):
         exc = ValueError("X" * 500)
         text = bot._format_download_error(exc)

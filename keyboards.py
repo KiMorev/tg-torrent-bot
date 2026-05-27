@@ -484,19 +484,23 @@ def _no_results_keyboard(
             f"🔍 {suggestion}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:didmean:{idx}",
         )])
+    rows.append([InlineKeyboardButton(
+        "🔄 Повторить поиск",
+        callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry",
+    )])
     if has_quality:
         rows.append([InlineKeyboardButton(
-            "🔍 Без фильтра качества",
+            "🎞 Искать без качества",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:no_quality",
         )])
     if jackett_can_expand:
         rows.append([InlineKeyboardButton(
-            "🌐 На всех трекерах",
+            "🌐 Искать на всех трекерах",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:expand_all_trackers",
         )])
     if has_quality and jackett_can_expand:
         rows.append([InlineKeyboardButton(
-            "🔍🌐 Без качества + все трекеры",
+            "🎞🌐 Без качества + все трекеры",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:no_quality_all_trackers",
         )])
     rows.append([InlineKeyboardButton(
@@ -567,7 +571,7 @@ def _download_error_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     if can_retry:
         rows.append([InlineKeyboardButton(
-            "🔄 Повторить",
+            "🔄 Повторить сейчас",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry_dl:{index}",
         )])
     if can_queue:
