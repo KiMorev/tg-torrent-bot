@@ -883,10 +883,17 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         owner.assert_called_once_with("task_1", 100)
         meta.assert_called_once()
         final_text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Добавлено: 1", final_text)
+        self.assertIn("✅ План обработан", final_text)
+        self.assertIn("Добавлено задач: 1", final_text)
         self.assertIn("task_1", final_text)
         self.assertIn("Сезон 1", final_text)
         self.assertNotIn("Сезон 2", final_text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("📚 К списку загрузок", labels)
         job = saved_jobs["bulk_test"]
         self.assertEqual(job["status"], "batch_completed")
         self.assertEqual(job["seasons"]["1"]["runtime_status"], "downloaded")
@@ -949,8 +956,8 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         final_text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Добавлено: 0", final_text)
-        self.assertIn("Не удалось добавить: 1", final_text)
+        self.assertIn("Добавлено задач: 0", final_text)
+        self.assertIn("Требуют решения: 1", final_text)
         self.assertIn("Download Station", final_text)
         labels = [
             b.text
@@ -958,6 +965,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for b in row
         ]
         self.assertIn("⚙️ Разобрать ошибки", labels)
+        self.assertNotIn("📚 К списку загрузок", labels)
         self.assertIn("Download Station", ctx.user_data["srch_series_bulk_failed"]["1"])
         job = saved_jobs["bulk_test"]
         self.assertEqual(job["status"], "batch_failed")
@@ -1001,6 +1009,12 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         final_text = query.edit_message_text.await_args.args[0]
         self.assertIn("В очереди на повтор: 1", final_text)
         self.assertIn("Сезон 1", final_text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("📚 К списку загрузок", labels)
         self.assertEqual(len(saved_pending), 1)
         entry_id, entry = next(iter(saved_pending.items()))
         self.assertEqual(entry["title"], result["title"])

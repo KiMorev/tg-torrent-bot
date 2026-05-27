@@ -9577,16 +9577,16 @@ def _series_bulk_pack_confirm_keyboard(index: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _series_bulk_done_keyboard(has_success: bool, has_failures: bool = False) -> InlineKeyboardMarkup:
+def _series_bulk_done_keyboard(has_downloads: bool, has_failures: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if has_failures:
         rows.append([InlineKeyboardButton(
             "⚙️ Разобрать ошибки",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_review",
         )])
-    if has_success:
+    if has_downloads:
         rows.append([InlineKeyboardButton(
-            "📋 К списку загрузок",
+            "📚 К списку загрузок",
             callback_data=_task_callback("list", TASK_LIST_SCOPE_MY),
         )])
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
@@ -10811,24 +10811,28 @@ def _series_bulk_done_text(
     pending_retries: list[dict] | None = None,
 ) -> str:
     pending_retries = pending_retries or []
-    lines = ["📚 Загрузка уверенных сезонов завершена", ""]
+    lines = ["✅ План обработан", ""]
     if successes:
-        lines.append(f"Добавлено: {len(successes)}")
+        lines.append(f"Добавлено задач: {len(successes)}")
         for item in successes:
             lines.append(
                 f"✅ Сезон {item['season']} - {item['task_id']} ({item['method']})"
             )
     else:
-        lines.append("Добавлено: 0")
+        lines.append("Добавлено задач: 0")
     if pending_retries:
         interval_min = max(1, PENDING_DOWNLOADS_INTERVAL_SECONDS // 60)
         lines.extend(["", f"В очереди на повтор: {len(pending_retries)}"])
         for item in pending_retries:
             lines.append(f"⏳ Сезон {item['season']} - попробую снова через ~{interval_min} мин")
     if failures:
-        lines.extend(["", f"Не удалось добавить: {len(failures)}"])
+        lines.extend(["", f"Требуют решения: {len(failures)}"])
         for item in failures:
             lines.append(f"❌ Сезон {item['season']} - {item['error']}")
+    if failures:
+        lines.extend(["", "Можно открыть загрузки или разобрать ошибки в плане."])
+    elif successes or pending_retries:
+        lines.extend(["", "Можно открыть список загрузок."])
     return "\n".join(lines)
 
 
@@ -11998,7 +12002,7 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
             _series_bulk_set_job_status(context, "batch_completed")
         await query.edit_message_text(
             _series_bulk_done_text(successes, failures, pending_retries),
-            reply_markup=_series_bulk_done_keyboard(bool(successes), bool(failures)),
+            reply_markup=_series_bulk_done_keyboard(bool(successes or pending_retries), bool(failures)),
         )
         return SEARCH_RESULTS if failures else ConversationHandler.END
     finally:
