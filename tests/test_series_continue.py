@@ -6,6 +6,7 @@ from series_continue import (
     build_series_catch_up_candidates,
     external_guid_id,
     identity_from_plex_show,
+    resolve_series_completeness,
 )
 
 
@@ -213,6 +214,68 @@ class SeriesCatchUpCandidateBuilderTests(unittest.TestCase):
         )
 
         self.assertEqual(len(candidates), 1)
+
+
+class SeriesCompletenessResolverTests(unittest.TestCase):
+    def _candidate(self, **overrides) -> SeriesCatchUpCandidate:
+        identity = identity_from_plex_show(
+            PlexShow(title="Show", year=2020, rating_key="show-1", seasons={})
+        )
+        payload = {
+            "identity": identity,
+            "season_number": 1,
+            "present_count": 6,
+        }
+        payload.update(overrides)
+        return SeriesCatchUpCandidate(**payload)
+
+    def test_gap_uses_present_episode_indexes(self):
+        result = resolve_series_completeness(
+            self._candidate(present_episode_numbers=(1, 2, 4), present_count=3)
+        )
+
+        self.assertEqual(result.confidence, "gap")
+        self.assertEqual(result.missing_episode_numbers, (3,))
+
+    def test_known_total_detects_missing_tail(self):
+        result = resolve_series_completeness(
+            self._candidate(known_total=10, present_count=6)
+        )
+
+        self.assertEqual(result.confidence, "exact_total")
+        self.assertEqual(result.known_total, 10)
+        self.assertEqual(result.missing_episode_numbers, (7, 8, 9, 10))
+
+    def test_known_total_equal_present_without_history_is_unknown(self):
+        result = resolve_series_completeness(
+            self._candidate(known_total=6, present_count=6)
+        )
+
+        self.assertEqual(result.confidence, "unknown")
+
+    def test_history_partial_without_total_is_separate_signal(self):
+        result = resolve_series_completeness(
+            self._candidate(
+                known_total=0,
+                present_count=6,
+                topic_id="12345",
+                history_last_episode_end=6,
+            )
+        )
+
+        self.assertEqual(result.confidence, "history_partial")
+        self.assertEqual(result.known_total, 0)
+
+    def test_watch_state_is_ignored(self):
+        candidate = self._candidate(known_total=10, present_count=6)
+
+        plain = resolve_series_completeness(candidate)
+        watched = resolve_series_completeness(
+            candidate,
+            watch_state={"viewedLeafCount": 10, "viewCount": 1},
+        )
+
+        self.assertEqual(watched, plain)
 
 
 if __name__ == "__main__":

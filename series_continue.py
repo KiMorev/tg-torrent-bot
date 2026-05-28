@@ -41,6 +41,14 @@ class SeriesCatchUpCandidate:
     history_last_episode_end: int = 0
 
 
+@dataclass(frozen=True)
+class SeriesCompleteness:
+    confidence: str
+    reason_for_user: str
+    missing_episode_numbers: tuple[int, ...] = field(default_factory=tuple)
+    known_total: int = 0
+
+
 def external_guid_id(external_guids: list[str] | tuple[str, ...], scheme: str) -> str:
     prefix = f"{scheme.strip().lower()}://"
     for raw in external_guids:
@@ -124,6 +132,59 @@ def build_series_catch_up_candidates(
             c.identity.title.casefold(),
             c.season_number,
         ),
+    )
+
+
+def resolve_series_completeness(
+    candidate: SeriesCatchUpCandidate,
+    *,
+    present_episode_numbers: Iterable[int] | None = None,
+    known_total: int | None = None,
+    watch_state: Mapping[str, object] | None = None,
+) -> SeriesCompleteness:
+    """Explain why a candidate looks incomplete or uncertain.
+
+    ``watch_state`` is accepted for caller convenience but ignored by design:
+    viewed/unviewed flags must not decide whether a season can be continued.
+    """
+    del watch_state
+    present = _normalise_episode_numbers(
+        candidate.present_episode_numbers
+        if present_episode_numbers is None
+        else present_episode_numbers
+    )
+    gap = _missing_inside_present_range(present)
+    if gap:
+        return SeriesCompleteness(
+            confidence="gap",
+            reason_for_user=f"В Plex есть пропуск в сезоне: не хватает {', '.join(map(str, gap))}.",
+            missing_episode_numbers=gap,
+            known_total=_safe_int(known_total) or candidate.known_total,
+        )
+
+    total = _safe_int(known_total)
+    if total <= 0:
+        total = candidate.known_total
+    present_count = int(candidate.present_count or 0)
+    if total > 0 and present_count < total:
+        return SeriesCompleteness(
+            confidence="exact_total",
+            reason_for_user=f"В Plex {present_count} из {total} серий.",
+            missing_episode_numbers=_missing_after_present(present, present_count, total),
+            known_total=total,
+        )
+
+    if candidate.topic_id or candidate.history_last_episode_end > 0:
+        return SeriesCompleteness(
+            confidence="history_partial",
+            reason_for_user="Есть история прошлой загрузки, но точный размер сезона ещё не подтверждён.",
+            known_total=total,
+        )
+
+    return SeriesCompleteness(
+        confidence="unknown",
+        reason_for_user="По быстрым данным нельзя уверенно понять, нужен ли сезон для докачки.",
+        known_total=total,
     )
 
 
@@ -248,6 +309,32 @@ def _entry_int(entry: dict, *keys: str) -> int:
         if parsed:
             return parsed
     return 0
+
+
+def _normalise_episode_numbers(values: Iterable[int]) -> tuple[int, ...]:
+    numbers = sorted({_safe_int(value) for value in values})
+    return tuple(number for number in numbers if number > 0)
+
+
+def _missing_inside_present_range(present: tuple[int, ...]) -> tuple[int, ...]:
+    if not present:
+        return ()
+    present_set = set(present)
+    return tuple(number for number in range(1, max(present) + 1) if number not in present_set)
+
+
+def _missing_after_present(
+    present: tuple[int, ...],
+    present_count: int,
+    known_total: int,
+) -> tuple[int, ...]:
+    if known_total <= 0:
+        return ()
+    present_set = set(present)
+    if present_set:
+        return tuple(number for number in range(1, known_total + 1) if number not in present_set)
+    start = max(0, present_count) + 1
+    return tuple(range(start, known_total + 1))
 
 
 def _safe_int(value: object) -> int:
