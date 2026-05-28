@@ -680,11 +680,11 @@ UI:
 
 ### Tracker
 
-- [ ] Коммит 1. Plex identity resolver и модель кандидата
-  - Статус: `todo`
-  - Коммит: -
-  - Тесты: -
-  - Хвосты: -
+- [x] Коммит 1. Plex identity resolver и модель кандидата
+  - Статус: `done`
+  - Коммит: `2bc59a0`
+  - Тесты: `tests/test_plex.py`, `tests/test_series_continue.py`, `tests/test_config.py::DockerfileCoverageTest`, полный `python -m pytest tests/ -v`
+  - Хвосты: UI `/continue`, detector неполных сезонов, completeness resolver, topic update и скачивание остаются следующими пунктами.
 - [ ] Коммит 2. Быстрый Plex/history detector без watch-state
   - Статус: `todo`
   - Коммит: -
