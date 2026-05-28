@@ -6010,6 +6010,22 @@ def _build_search_query(base: str, settings: dict) -> str:
     return " ".join(parts)
 
 
+_ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY = "admin_last_diagnostics_report"
+
+
+def _cache_diagnostics_report(context: ContextTypes.DEFAULT_TYPE, report) -> None:
+    chat_data = getattr(context, "chat_data", None)
+    if isinstance(chat_data, dict):
+        chat_data[_ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY] = report
+
+
+def _cached_diagnostics_report(context: ContextTypes.DEFAULT_TYPE):
+    chat_data = getattr(context, "chat_data", None)
+    if not isinstance(chat_data, dict):
+        return None
+    return chat_data.get(_ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY)
+
+
 async def _build_diagnostics_report():
     return await asyncio.to_thread(
         run_diagnostics,
@@ -6031,13 +6047,31 @@ async def _build_diagnostics_report():
     )
 
 
-async def _build_diagnostics_text() -> str:
+async def _build_diagnostics_text(context: ContextTypes.DEFAULT_TYPE | None = None) -> str:
     report = await _build_diagnostics_report()
+    if context is not None:
+        _cache_diagnostics_report(context, report)
     return format_diagnostics(report)
 
 
-async def _build_diagnostics_section_text(section: str) -> str:
-    report = await _build_diagnostics_report()
+async def _build_cached_diagnostics_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    report = _cached_diagnostics_report(context)
+    if report is None:
+        return await _build_diagnostics_text(context)
+    return format_diagnostics(report)
+
+
+async def _build_diagnostics_section_text(
+    section: str,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+    *,
+    refresh: bool = True,
+) -> str:
+    report = None if refresh or context is None else _cached_diagnostics_report(context)
+    if report is None:
+        report = await _build_diagnostics_report()
+        if context is not None:
+            _cache_diagnostics_report(context, report)
     return format_diagnostics_section(report, section)
 
 
@@ -14573,14 +14607,23 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         await _safe_edit_callback(
             query,
-            await _build_diagnostics_text(),
+            await _build_diagnostics_text(context),
             parse_mode="HTML",
             reply_markup=_admin_diagnostics_keyboard(),
         )
         return
 
-    if action.startswith("diag_"):
-        section = action.removeprefix("diag_")
+    if action == "diagnostics_back":
+        await _safe_edit_callback(
+            query,
+            await _build_cached_diagnostics_text(context),
+            parse_mode="HTML",
+            reply_markup=_admin_diagnostics_keyboard(),
+        )
+        return
+
+    if action.startswith("diag_refresh:"):
+        section = action.removeprefix("diag_refresh:")
         await _safe_edit_callback(
             query,
             "🧭 Проверяю раздел…",
@@ -14588,7 +14631,23 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         await _safe_edit_callback(
             query,
-            await _build_diagnostics_section_text(section),
+            await _build_diagnostics_section_text(section, context, refresh=True),
+            parse_mode="HTML",
+            reply_markup=_admin_diagnostics_detail_keyboard(section),
+        )
+        return
+
+    if action.startswith("diag_"):
+        section = action.removeprefix("diag_")
+        if _cached_diagnostics_report(context) is None:
+            await _safe_edit_callback(
+                query,
+                "🧭 Проверяю раздел…",
+                reply_markup=_admin_diagnostics_detail_keyboard(section),
+            )
+        await _safe_edit_callback(
+            query,
+            await _build_diagnostics_section_text(section, context, refresh=False),
             parse_mode="HTML",
             reply_markup=_admin_diagnostics_detail_keyboard(section),
         )

@@ -154,8 +154,8 @@ class KeyboardTests(unittest.TestCase):
             for button in row
         }
 
-        self.assertEqual(buttons["🔄 Проверить снова"], "admin:diag_jackett")
-        self.assertEqual(buttons["⬅️ Назад"], "admin:diagnostics")
+        self.assertEqual(buttons["🔄 Проверить снова"], "admin:diag_refresh:jackett")
+        self.assertEqual(buttons["⬅️ Назад"], "admin:diagnostics_back")
         self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
 

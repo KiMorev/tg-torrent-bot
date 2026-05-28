@@ -266,9 +266,9 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
 def _admin_diagnostics_detail_keyboard(section: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback(f"diag_{section}"))],
+            [InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback(f"diag_refresh:{section}"))],
             [
-                InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("diagnostics")),
+                InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("diagnostics_back")),
                 InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
             ],
         ]

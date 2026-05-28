@@ -728,6 +728,62 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("reply_markup", update.callback_query.edit_message_text.call_args_list[0].kwargs)
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "jackett detail")
 
+    def test_admin_diagnostics_back_uses_cached_report_without_refresh(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:diagnostics_back")
+        context = _make_context()
+        cached_report = object()
+        context.chat_data = {bot._ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY: cached_report}
+        build_report = AsyncMock()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_build_diagnostics_report", build_report),
+            patch.object(bot, "format_diagnostics", MagicMock(return_value="cached diag")),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        build_report.assert_not_awaited()
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.edit_message_text.assert_called_once()
+        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "cached diag")
+
+    def test_admin_diagnostics_detail_uses_cached_report_without_refresh(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:diag_plex")
+        context = _make_context()
+        cached_report = object()
+        context.chat_data = {bot._ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY: cached_report}
+        build_report = AsyncMock()
+        format_section = MagicMock(return_value="plex detail")
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_build_diagnostics_report", build_report),
+            patch.object(bot, "format_diagnostics_section", format_section),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        build_report.assert_not_awaited()
+        format_section.assert_called_once_with(cached_report, "plex")
+        update.callback_query.edit_message_text.assert_called_once()
+        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "plex detail")
+
+    def test_admin_diagnostics_detail_refresh_updates_cached_report(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:diag_refresh:plex")
+        context = _make_context()
+        context.chat_data = {}
+        fresh_report = object()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_build_diagnostics_report", AsyncMock(return_value=fresh_report)),
+            patch.object(bot, "format_diagnostics_section", MagicMock(return_value="fresh plex detail")),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        self.assertIs(context.chat_data[bot._ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY], fresh_report)
+        self.assertEqual(update.callback_query.edit_message_text.call_count, 2)
+        self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "fresh plex detail")
+
     def test_admin_subscriptions_callback_shows_all_owners(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:subscriptions")
         context = _make_context()

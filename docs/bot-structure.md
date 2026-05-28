@@ -67,7 +67,7 @@
 |---|---|---|
 | `srch:*` | `keyboards.py`, локально в search-блоке `bot.py` | `ConversationHandler` в `bot.py::main` |
 | `task:*` | `keyboards.py` | `task_callback` |
-| `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai` |
+| `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
 | `access:*` | `keyboards.py` | `access_callback` |
 | `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
 | `new:*` | `bot.py`, `keyboards.py` | `movie_new_*` callbacks, часть внутри search conversation |
