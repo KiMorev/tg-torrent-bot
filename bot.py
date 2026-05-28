@@ -16638,6 +16638,8 @@ def _gpt_record_usage(
             "feature": feature,
             "type": error_label,
         }
+    else:
+        gpt_usage.pop("last_error", None)
 
     state_store.save_gpt_usage(gpt_usage)
 

@@ -1,5 +1,5 @@
 import unittest
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -656,11 +656,30 @@ class GptChatDiagnosticTests(unittest.TestCase):
         usage = {
             "month": "2026-05",
             "features": {"kp_confidence": {"calls": 5, "input_tokens": 100, "output_tokens": 30, "estimated_cost_usd": 0.00005}},
-            "last_error": {"ts": "2026-05-22T10:00", "feature": "kp_confidence", "type": "timeout"},
+            "last_error": {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "feature": "kp_confidence",
+                "type": "timeout",
+            },
         }
         report = self._run(enabled=True, api_key="sk-test", usage=usage)
         svc = self._gpt_service(report)
         self.assertEqual(svc.status, "warn")
+
+    def test_stale_transient_error_returns_ok(self):
+        usage = {
+            "month": "2026-05",
+            "features": {"kp_confidence": {"calls": 5, "input_tokens": 100, "output_tokens": 30, "estimated_cost_usd": 0.00005}},
+            "last_error": {
+                "ts": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(timespec="seconds"),
+                "feature": "kp_confidence",
+                "type": "network",
+            },
+        }
+        report = self._run(enabled=True, api_key="sk-test", usage=usage)
+        svc = self._gpt_service(report)
+        self.assertEqual(svc.status, "ok")
+        self.assertIn("статус снова зелёный", " ".join(svc.details))
 
 
 if __name__ == "__main__":

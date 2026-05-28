@@ -1,7 +1,7 @@
 import html
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, tzinfo
+from datetime import datetime, timedelta, tzinfo
 
 import requests
 
@@ -27,6 +27,10 @@ STATUS_ICONS = {
     "error": "❌",
     "disabled": "⛔",
 }
+
+GPT_TRANSIENT_ERROR_TTL = timedelta(hours=24)
+GPT_TRANSIENT_ERROR_TYPES = {"timeout", "network", "rate_limit", "server_error"}
+GPT_TERMINAL_ERROR_TYPES = {"quota_exceeded", "auth"}
 
 
 DIAGNOSTICS_SECTIONS = {
@@ -64,6 +68,20 @@ def _short_datetime(value: object) -> str:
         except ValueError:
             return html.escape(raw)
     return dt.strftime("%d.%m %H:%M")
+
+
+def _is_recent_datetime(value: object, ttl: timedelta) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return True
+
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    return now - dt <= ttl
 
 
 def _indexer_count(label: str) -> int:
@@ -669,18 +687,20 @@ def _gpt_chat_diagnostic(
         feature = str(last_error.get("feature") or "—")
         details.append(f"   Последняя ошибка ({ts}, {feature}): {err_type}")
 
-        if err_type in ("quota_exceeded", "auth"):
+        if err_type in GPT_TERMINAL_ERROR_TYPES:
             return ServiceDiagnostic(
                 name, "error",
                 _summary("error", icon, name, f"последняя ошибка: {err_type}"),
                 details,
             )
-        if err_type in ("timeout", "network", "rate_limit", "server_error"):
+        if err_type in GPT_TRANSIENT_ERROR_TYPES and _is_recent_datetime(ts, GPT_TRANSIENT_ERROR_TTL):
             return ServiceDiagnostic(
                 name, "warn",
                 _summary("warn", icon, name, f"временная ошибка: {err_type}"),
                 details,
             )
+        if err_type in GPT_TRANSIENT_ERROR_TYPES:
+            details.append("   Временная ошибка старше 24 ч: статус снова зелёный.")
 
     return ServiceDiagnostic(
         name, "ok",

@@ -126,7 +126,7 @@
 | `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
-| `gpt_usage.json` | Использование GPT-функций. |
+| `gpt_usage.json` | Использование GPT-функций; `last_error` очищается успешным GPT-вызовом, transient-ошибки старше 24 ч не желтят диагностику. |
 | `torrent_titles_cache.json` | Кэш заголовков torrent/magnet для поиска task id. |
 | `public_trackers.txt` | Текстовый кэш публичных BT-трекеров. |
 

@@ -711,6 +711,25 @@ class GptRecordUsageRealVsEstimateTests(unittest.TestCase):
         self.assertEqual(bucket["estimated_cost_usd"], 0.0)
         self.assertIn("claude-3-haiku", bucket["unknown_models"])
 
+    def test_success_clears_previous_last_error(self):
+        store, load, save = self._isolated_usage_io()
+        store["data"] = {
+            "month": "2026-05",
+            "features": {},
+            "last_error": {"ts": "2026-05-28T10:00:00+03:00", "feature": "explain_card", "type": "network"},
+        }
+        with (
+            patch.object(self.bot.state_store, "load_gpt_usage", side_effect=load),
+            patch.object(self.bot.state_store, "save_gpt_usage", side_effect=save),
+        ):
+            self.bot._gpt_record_usage(
+                feature="explain_card",
+                input_tokens=0, output_tokens=0,
+                error_label=None,
+                usage={"input_tokens": 50, "output_tokens": 10, "model": "gpt-4o-mini"},
+            )
+        self.assertNotIn("last_error", store["data"])
+
 
 if __name__ == "__main__":
     unittest.main()
