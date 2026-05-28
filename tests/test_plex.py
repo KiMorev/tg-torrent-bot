@@ -459,6 +459,24 @@ class ParseShowTests(unittest.TestCase):
         show = _parse_show(_xml(xml))
         self.assertEqual(show.year, 0)
 
+    def test_parse_show_extracts_original_title_and_external_guids(self):
+        xml = (
+            '<Directory title="Белгравия" originalTitle="Belgravia" year="2020" '
+            'ratingKey="2223" guid="plex://show/abc">'
+            '<Guid id="imdb://tt9642982"/>'
+            '<Guid id="tmdb://85862"/>'
+            '<Guid id="tvdb://362204"/>'
+            '</Directory>'
+        )
+        show = _parse_show(_xml(xml))
+        self.assertEqual(show.original_title, "Belgravia")
+        self.assertEqual(show.guid, "plex://show/abc")
+        self.assertEqual(show.external_guids, [
+            "imdb://tt9642982",
+            "tmdb://85862",
+            "tvdb://362204",
+        ])
+
 
 class PlexClientFindShowSectionTests(unittest.TestCase):
     def test_returns_first_show_section(self):
@@ -506,6 +524,37 @@ class PlexClientGetAllShowsTests(unittest.TestCase):
         with patch.object(client._session, "get",
                           return_value=_mock_response(empty_sections_xml)):
             self.assertEqual(client.get_all_shows(), [])
+
+
+class PlexClientGetShowDetailsTests(unittest.TestCase):
+    def test_returns_show_with_external_guids(self):
+        client = _make_client()
+        xml = (
+            '<MediaContainer>'
+            '<Directory title="Белгравия" originalTitle="Belgravia" year="2020" '
+            'ratingKey="2223" guid="plex://show/abc">'
+            '<Guid id="imdb://tt9642982"/>'
+            '<Guid id="tmdb://85862"/>'
+            '<Guid id="tvdb://362204"/>'
+            '</Directory>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)) as mock_get:
+            show = client.get_show_details("2223")
+
+        self.assertIsNotNone(show)
+        self.assertEqual(show.title, "Белгравия")
+        self.assertEqual(show.original_title, "Belgravia")
+        self.assertEqual(show.external_guids, [
+            "imdb://tt9642982",
+            "tmdb://85862",
+            "tvdb://362204",
+        ])
+        self.assertEqual(mock_get.call_args.kwargs["params"], {"includeGuids": 1})
+
+    def test_returns_none_for_empty_rating_key(self):
+        client = _make_client()
+        self.assertIsNone(client.get_show_details(""))
 
 
 class PlexClientGetShowSeasonsTests(unittest.TestCase):

@@ -115,6 +115,8 @@ class PlexShow:
     rating_key: str
     seasons: dict[int, PlexSeason] = field(default_factory=dict)
     guid: str = ""         # "plex://show/...", "kp://N", "local://..." (unmatched)
+    original_title: str = ""
+    external_guids: list[str] = field(default_factory=list)  # e.g. imdb://..., tmdb://..., tvdb://...
 
 
 @dataclass
@@ -306,6 +308,27 @@ class PlexClient:
         root = self._get(f"/library/sections/{section}/all", type=2)
         return [_parse_show(d) for d in root.findall("Directory")]
 
+    def get_show_details(self, show_rating_key: str) -> PlexShow | None:
+        """Fetch detailed show metadata, including external Guid children.
+
+        Plex Series agent usually exposes a ``plex://show/...`` primary guid and
+        separate ``Guid`` children such as ``imdb://...``, ``tmdb://...`` and
+        ``tvdb://...`` when called with ``includeGuids=1``.
+        """
+        if not show_rating_key:
+            return None
+        try:
+            root = self._get(f"/library/metadata/{show_rating_key}", includeGuids=1)
+        except Exception as exc:
+            logger.debug("Plex get_show_details failed for %s: %s", show_rating_key, exc)
+            return None
+        directory = root.find("Directory")
+        if directory is None:
+            directory = root.find(".//Directory")
+        if directory is None:
+            return None
+        return _parse_show(directory)
+
     def get_show_seasons(self, show_rating_key: str) -> dict[int, PlexSeason]:
         """Fetch all seasons of a show plus the file paths of their episodes.
 
@@ -447,6 +470,12 @@ def _parse_show(directory: ElementTree.Element) -> PlexShow:
         rating_key=directory.get("ratingKey", ""),
         seasons={},  # populated lazily by get_show_seasons
         guid=directory.get("guid", ""),
+        original_title=directory.get("originalTitle", ""),
+        external_guids=[
+            guid.get("id", "")
+            for guid in directory.findall("Guid")
+            if guid.get("id")
+        ],
     )
 
 
