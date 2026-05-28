@@ -690,11 +690,11 @@ UI:
   - Коммит: `33d9ee0`
   - Тесты: `tests/test_series_continue.py`, полный `python -m pytest tests/ -v`
   - Хвосты: detector принимает известный total как готовый input; вычисление confidence/причины, external metadata и проверка обновления topic остаются следующими пунктами.
-- [ ] Коммит 3. Completeness resolver
-  - Статус: `todo`
-  - Коммит: -
-  - Тесты: -
-  - Хвосты: -
+- [x] Коммит 3. Completeness resolver
+  - Статус: `done`
+  - Коммит: `2014a83`
+  - Тесты: `tests/test_series_continue.py`, полный `python -m pytest tests/ -v`
+  - Хвосты: resolver объясняет `gap`/`exact_total`/`history_partial`/`unknown`, но не ходит за external metadata и не проверяет живую тему трекера.
 - [ ] Коммит 4. Проверка той же темы и lazy enrichment
   - Статус: `todo`
   - Коммит: -
