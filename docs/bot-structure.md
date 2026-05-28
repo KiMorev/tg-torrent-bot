@@ -53,6 +53,7 @@
 | Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> тот же поиск через `_run_search`. |
 | Скачивание из результата | `search_download_pick` или `search_direct_download` -> Plex pre-check -> `_download_and_add` -> Download Station. |
 | План недостающих сезонов | `search_download_pick` -> `search_series_bulk_plan` показывает профиль -> `search_series_bulk_profile_callback` меняет профиль -> `search_series_bulk_build_plan` запускает wide/targeted tracker search неблокирующим handler'ом; при fetch-limit широкий поиск расширяет targeted-pass до всех нужных сезонов; ожидательный экран использует search animation, обновляет этапы сборки и при долгой работе добавляет мягкий статус; `ConversationHandler.WAITING` принимает `srch:cancel`, выставляет cancel-token, сборка останавливается между сетевыми этапами; далее `series_bulk_planner.py` -> `series_bulk_jobs.json` job -> `search_series_bulk_confirm` -> `search_series_bulk_run` для уверенных сезонов; временные ошибки добавления уходят в `pending_downloads.json` с `series_bulk`-ссылкой и фоновый retry обновляет job; `/bulk` -> `series_bulk_command` -> `search_series_bulk_open` восстанавливает сохранённую job в search-context после рестарта; `search_series_bulk_pack_list` -> `search_series_bulk_pack_confirm` -> `search_series_bulk_pack_run` вручную добавляет выбранный pack и помечает покрытые сезоны в job; `search_series_bulk_rebuild` возвращает готовый план к профилю для новой сборки; `search_series_bulk_review` разбирает `missing`/`needs_decision`/`partial` и постоянные ошибки добавления, `search_series_bulk_soft_search` мягко добирает кандидатов для текущего сезона, `search_series_bulk_retry` повторяет failed-сезон, результат пишется в job. |
+| Докачивание сезона из Plex | `/continue` -> `series_continue_command` -> `_series_continue_build_state` собирает Plex-сериалы с сезонами и `download_history.jsonl`; `series_continue_callback` листает режимы `Моё` / `Всё`, открывает карточку сезона и возвращает к списку. |
 | Magnet или `.torrent` файлом | `text_message_entry` или `handle_doc` -> `_process_magnet_uri` / `_do_process_torrent` -> Download Station. |
 | Подписка на сериал | `search_subscribe_pick` -> `search_subscribe_preset` или advanced callbacks -> запись в `topic_subscriptions.json`; `/subs` -> `sub:settings:*` меняет `notify_policy`/`download_policy`. |
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
@@ -72,6 +73,7 @@
 | `access:*` | `keyboards.py` | `access_callback` |
 | `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
 | `new:*` | `bot.py`, `keyboards.py` | `movie_new_*` callbacks, часть внутри search conversation |
+| `cont:*` | `bot.py` | `series_continue_callback`: список `/continue`, переключение `Моё` / `Всё`, refresh и карточка сезона |
 | `plex:*` | `keyboards.py` | `plex_confirm_download`, `plex_upgrade_download`, `plex_cancel_download`, standalone callbacks |
 
 ## Модули

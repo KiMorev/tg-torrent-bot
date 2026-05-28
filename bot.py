@@ -136,6 +136,11 @@ from series_bulk_planner import (
     release_profile_from_title,
     season_pack_range_from_title,
 )
+from series_continue import (
+    SeriesCatchUpCandidate,
+    build_series_catch_up_candidates,
+    resolve_series_completeness,
+)
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from plex import (
     PlexMovie,
@@ -337,6 +342,7 @@ SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate war
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
+    BotCommand("continue", "Докачать сезон"),
     BotCommand("bulk", "Планы сезонов"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
@@ -348,6 +354,9 @@ DOWNLOAD_PANEL_MESSAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_PAGES: dict[int, int] = {}
 DOWNLOAD_PANEL_SCOPES: dict[int, str] = {}
 DOWNLOAD_PANEL_HAD_ACTIVE: dict[int, bool] = {}
+CONTINUE_CALLBACK_PREFIX = "cont"
+CONTINUE_PAGE_SIZE = 10
+CONTINUE_STATE_KEY = "continue_state"
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
@@ -8564,6 +8573,318 @@ async def _get_plex_seasons_for_series(series_query: str) -> set[int]:
     return set(seasons.keys())
 
 
+def _series_continue_close_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+    ]])
+
+
+def _series_continue_progress_text() -> str:
+    return (
+        "📺 <b>Докачать сезон</b>\n\n"
+        "Собираю быстрый список из Plex и истории загрузок."
+    )
+
+
+async def _series_continue_plex_shows_with_seasons() -> list["PlexShow"]:
+    if not PLEX_ENABLED:
+        return []
+    if not _plex_shows_library and plex_client is not None:
+        await _refresh_plex_library()
+
+    shows: list[PlexShow] = []
+    seen_ids: set[int] = set()
+    for show in _plex_shows_library.values():
+        marker = id(show)
+        if marker in seen_ids:
+            continue
+        seen_ids.add(marker)
+        await _plex_ensure_show_seasons_lite(show, focus_season=None)
+        if show.seasons:
+            shows.append(show)
+    return shows
+
+
+async def _series_continue_build_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+) -> dict:
+    shows = await _series_continue_plex_shows_with_seasons()
+    load_history = getattr(state_store, "load_download_history", None)
+    history = load_history() if callable(load_history) else []
+    state = {
+        "mine": build_series_catch_up_candidates(
+            shows,
+            history,
+            chat_id=chat_id,
+            scope="mine",
+        ),
+        "all": build_series_catch_up_candidates(
+            shows,
+            history,
+            chat_id=chat_id,
+            scope="all",
+        ),
+        "scope": "mine",
+        "page": 0,
+    }
+    context.user_data[CONTINUE_STATE_KEY] = state
+    return state
+
+
+def _series_continue_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    state = context.user_data.get(CONTINUE_STATE_KEY)
+    return state if isinstance(state, dict) else {"mine": [], "all": [], "scope": "mine", "page": 0}
+
+
+def _series_continue_candidates(state: dict, scope: str) -> list[SeriesCatchUpCandidate]:
+    candidates = state.get(scope)
+    return candidates if isinstance(candidates, list) else []
+
+
+def _series_continue_candidate_title(candidate: SeriesCatchUpCandidate) -> str:
+    return (
+        candidate.identity.title
+        or candidate.identity.original_title
+        or candidate.identity.plex_guid
+        or candidate.identity.plex_rating_key
+        or "Без названия"
+    )
+
+
+def _series_continue_plex_line(candidate: SeriesCatchUpCandidate) -> str:
+    if candidate.known_total > 0:
+        return f"Plex: {candidate.present_count} из {candidate.known_total}"
+    return f"Plex: {candidate.present_count} сер."
+
+
+def _series_continue_profile_line(candidate: SeriesCatchUpCandidate) -> str:
+    parts = [part for part in (candidate.quality, candidate.tracker) if part]
+    if not parts:
+        return ""
+    return "Профиль: " + ", ".join(parts)
+
+
+def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidate) -> str:
+    title = html_module.escape(_series_continue_candidate_title(candidate))
+    lines = [
+        f"{index}. <b>{title}</b> — сезон {candidate.season_number}",
+        f"   {_series_continue_plex_line(candidate)}",
+    ]
+    profile = _series_continue_profile_line(candidate)
+    if profile:
+        lines.append(f"   {html_module.escape(profile)}")
+    if candidate.topic_id:
+        lines.append("   Есть прошлая тема раздачи")
+    elif candidate.source == "plex":
+        lines.append("   Прошлая раздача неизвестна")
+    return "\n".join(lines)
+
+
+def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
+    candidates = _series_continue_candidates(state, scope)
+    all_count = len(_series_continue_candidates(state, "all"))
+    mode = "🙋 Моё" if scope == "mine" else "🌐 Всё"
+    if not candidates:
+        if scope == "mine" and all_count:
+            return (
+                "📺 <b>Докачать сезон</b>\n\n"
+                "В ваших прошлых загрузках неполных сезонов не нашёл.\n"
+                "Но в общей медиатеке есть кандидаты. Можно переключиться на «Всё»."
+            )
+        return (
+            "📺 <b>Докачать сезон</b>\n\n"
+            "Пока не нашёл сезоны, которые можно уверенно продолжить."
+        )
+
+    total_pages = max(1, (len(candidates) + CONTINUE_PAGE_SIZE - 1) // CONTINUE_PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    start = page * CONTINUE_PAGE_SIZE
+    visible = candidates[start:start + CONTINUE_PAGE_SIZE]
+    lines = [
+        "📺 <b>Докачать сезон</b>",
+        "",
+        "Нашёл сезоны, где есть сигнал неполноты или прошлой раздачи.",
+        f"Режим: {mode}",
+        "",
+    ]
+    for offset, candidate in enumerate(visible, start=1):
+        lines.append(_series_continue_candidate_line(start + offset, candidate))
+        lines.append("")
+    if total_pages > 1:
+        lines.append(f"Страница {page + 1}/{total_pages}")
+    return "\n".join(lines).strip()
+
+
+def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> InlineKeyboardMarkup:
+    candidates = _series_continue_candidates(state, scope)
+    total_pages = max(1, (len(candidates) + CONTINUE_PAGE_SIZE - 1) // CONTINUE_PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    start = page * CONTINUE_PAGE_SIZE
+    visible = candidates[start:start + CONTINUE_PAGE_SIZE]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for offset, _candidate in enumerate(visible, start=1):
+        index = start + offset - 1
+        rows.append([
+            InlineKeyboardButton(
+                f"📺 {index + 1}",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:open:{scope}:{index}",
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton("🙋 Моё", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:mine:0"),
+        InlineKeyboardButton("🌐 Всё", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:all:0"),
+    ])
+    if total_pages > 1:
+        prev_page = max(0, page - 1)
+        next_page = min(total_pages - 1, page + 1)
+        rows.append([
+            InlineKeyboardButton("⬅️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{prev_page}"),
+            InlineKeyboardButton("➡️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{next_page}"),
+        ])
+    rows.append([
+        InlineKeyboardButton("🔄 Обновить", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:refresh:{scope}"),
+    ])
+    rows.append([
+        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_continue_detail_text(candidate: SeriesCatchUpCandidate) -> str:
+    title = html_module.escape(_series_continue_candidate_title(candidate))
+    completeness = resolve_series_completeness(candidate)
+    lines = [
+        f"📺 <b>{title}</b>",
+        f"Сезон: {candidate.season_number}",
+        _series_continue_plex_line(candidate),
+        "",
+        html_module.escape(completeness.reason_for_user),
+    ]
+    profile = _series_continue_profile_line(candidate)
+    if profile:
+        lines.extend(["", html_module.escape(profile)])
+    if candidate.topic_id:
+        lines.append(f"Тема: {html_module.escape(candidate.topic_id)}")
+    else:
+        lines.append("Прошлая раздача неизвестна.")
+    lines.extend([
+        "",
+        "Скачивание и подписка будут подключены следующим шагом.",
+    ])
+    return "\n".join(lines)
+
+
+def _series_continue_detail_keyboard(scope: str, index: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+    ])
+
+
+async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        logger.warning("Rejected /continue from chat_id=%s", _chat_id(update))
+        await _reply_access_pending(update, context)
+        return
+    if not PLEX_ENABLED:
+        await update.message.reply_text(
+            "📺 <b>Докачать сезон</b>\n\nPlex не настроен, поэтому список собрать нельзя.",
+            parse_mode="HTML",
+            reply_markup=_series_continue_close_keyboard(),
+        )
+        return
+
+    progress = await update.message.reply_text(
+        _series_continue_progress_text(),
+        parse_mode="HTML",
+        reply_markup=_series_continue_close_keyboard(),
+    )
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    state = await _series_continue_build_state(context, chat_id)
+    scope = "mine"
+    page = 0
+    state["scope"] = scope
+    state["page"] = page
+    await progress.edit_text(
+        _series_continue_list_text(state, scope, page),
+        parse_mode="HTML",
+        reply_markup=_series_continue_list_keyboard(state, scope, page),
+    )
+
+
+async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not _is_allowed(update):
+        logger.warning("Rejected continue callback from chat_id=%s", chat_id)
+        await query.edit_message_text("Доступ не разрешён.")
+        return
+
+    parts = (query.data or "").split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    state = _series_continue_state(context)
+
+    if action == "refresh":
+        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        state = await _series_continue_build_state(context, chat_id)
+        page = 0
+        state["scope"] = scope
+        state["page"] = page
+        await query.edit_message_text(
+            _series_continue_list_text(state, scope, page),
+            parse_mode="HTML",
+            reply_markup=_series_continue_list_keyboard(state, scope, page),
+        )
+        return
+
+    if action == "list":
+        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        try:
+            page = int(parts[3]) if len(parts) > 3 else 0
+        except ValueError:
+            page = 0
+        state["scope"] = scope
+        state["page"] = page
+        await query.edit_message_text(
+            _series_continue_list_text(state, scope, page),
+            parse_mode="HTML",
+            reply_markup=_series_continue_list_keyboard(state, scope, page),
+        )
+        return
+
+    if action == "open":
+        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        candidates = _series_continue_candidates(state, scope)
+        if index < 0 or index >= len(candidates):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        state["scope"] = scope
+        state["page"] = page
+        await query.edit_message_text(
+            _series_continue_detail_text(candidates[index]),
+            parse_mode="HTML",
+            reply_markup=_series_continue_detail_keyboard(scope, index, page),
+        )
+        return
+
+    await query.edit_message_text(
+        "Неизвестное действие.",
+        reply_markup=_series_continue_close_keyboard(),
+    )
+
+
 async def search_season_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User tapped a numbered season button."""
     query = update.callback_query
@@ -14829,6 +15150,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         main_bullets.append(
             "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
         )
+    if PLEX_ENABLED:
+        main_bullets.append("• 📺 /continue — найти сезоны, которые можно продолжить")
     main_bullets.append("• 📋 /status — текущие загрузки и недавняя история")
 
     auto_bullets: list[str] = ["• когда скачивание завершилось"]
@@ -14898,6 +15221,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
         )
         extras.append("• /bulk — открыть сохранённый план недостающих сезонов и продолжить после рестарта")
+    if PLEX_ENABLED:
+        extras.append("• /continue — найти в Plex сезоны, которые можно докачать по истории загрузок")
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
 
@@ -17500,11 +17825,13 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("new", movie_new_command))
     app.add_handler(CommandHandler("bulk", series_bulk_command))
+    app.add_handler(CommandHandler("continue", series_continue_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(access_callback, pattern=f"^{ACCESS_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
+    app.add_handler(CallbackQueryHandler(series_continue_callback, pattern=f"^{CONTINUE_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(movie_new_refresh_callback, pattern=r"^new:refresh$"))
     app.add_handler(CallbackQueryHandler(movie_new_close_callback, pattern=r"^new:close$"))

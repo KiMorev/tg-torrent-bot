@@ -14,6 +14,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -5280,6 +5281,125 @@ class SubscriptionAdvancedKeyboardTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# /continue command tests
+# ---------------------------------------------------------------------------
+
+
+class SeriesContinueCommandTests(unittest.TestCase):
+    def _candidate(self, index: int = 0):
+        from series_continue import PlexSeriesIdentity, SeriesCatchUpCandidate
+
+        title = "The Rookie" if index == 0 else f"The Rookie {index}"
+        return SeriesCatchUpCandidate(
+            identity=PlexSeriesIdentity(
+                plex_rating_key=str(1000 + index),
+                plex_guid=f"plex://show/{index}",
+                title=title,
+                original_title=title,
+                year=2024,
+            ),
+            season_number=8,
+            present_count=8,
+            known_total=18,
+            quality="1080p",
+            source="history",
+            topic_id="12345",
+            tracker="RuTracker",
+            history_chat_ids=(100,),
+            history_last_episode_end=8,
+        )
+
+    def _callbacks(self, keyboard) -> list[str]:
+        return [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+
+    @contextmanager
+    def _allowed_context(self):
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+        ):
+            yield
+
+    def test_continue_command_renders_mine_list(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        progress = MagicMock()
+        progress.edit_text = AsyncMock()
+        update.message.reply_text.return_value = progress
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "mine", "page": 0}
+        build_state = AsyncMock(return_value=state)
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "_series_continue_build_state", build_state),
+            ):
+                await bot.series_continue_command(update, context)
+
+        asyncio.run(run())
+
+        build_state.assert_awaited_once_with(context, 100)
+        text = progress.edit_text.await_args.args[0]
+        keyboard = progress.edit_text.await_args.kwargs["reply_markup"]
+        self.assertIn("The Rookie", text)
+        self.assertIn("Plex: 8 из 18", text)
+        self.assertIn("cont:open:mine:0", self._callbacks(keyboard))
+        self.assertIn("task:close:", self._callbacks(keyboard))
+
+    def test_continue_empty_mine_can_switch_to_all(self):
+        state = {"mine": [], "all": [self._candidate()], "scope": "mine", "page": 0}
+
+        text = bot._series_continue_list_text(state, "mine", 0)
+        keyboard = bot._series_continue_list_keyboard(state, "mine", 0)
+
+        self.assertIn("общей медиатеке", text)
+        self.assertIn("cont:list:all:0", self._callbacks(keyboard))
+        self.assertIn("task:close:", self._callbacks(keyboard))
+
+    def test_continue_list_paginates_by_ten(self):
+        candidates = [self._candidate(i) for i in range(11)]
+        state = {"mine": [], "all": candidates, "scope": "all", "page": 0}
+
+        first_keyboard = bot._series_continue_list_keyboard(state, "all", 0)
+        second_keyboard = bot._series_continue_list_keyboard(state, "all", 1)
+
+        first_callbacks = self._callbacks(first_keyboard)
+        second_callbacks = self._callbacks(second_keyboard)
+        self.assertEqual(len([cb for cb in first_callbacks if cb.startswith("cont:open:all:")]), 10)
+        self.assertIn("cont:list:all:1", first_callbacks)
+        self.assertIn("cont:open:all:10", second_callbacks)
+        self.assertIn("cont:list:all:0", second_callbacks)
+
+    def test_continue_callback_opens_candidate_detail(self):
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:open:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+
+        async def run():
+            with self._allowed_context():
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        update.callback_query.answer.assert_awaited_once()
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = self._callbacks(keyboard)
+        self.assertIn("The Rookie", text)
+        self.assertIn("Сезон: 8", text)
+        self.assertIn("cont:list:all:0", callbacks)
+        self.assertIn("task:close:", callbacks)
+
+
+# ---------------------------------------------------------------------------
 # status command tests
 # ---------------------------------------------------------------------------
 
@@ -5910,6 +6030,7 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
 
         public_commands = app.bot.set_my_commands.await_args_list[-1].args[0]
         self.assertIn("subs", [command.command for command in public_commands])
+        self.assertIn("continue", [command.command for command in public_commands])
         self.assertIn("_subscription_check_loop", created)
         self.assertIn("_jackett_warmup_loop", created)
         self.assertIn("_progress_update_loop", created)
