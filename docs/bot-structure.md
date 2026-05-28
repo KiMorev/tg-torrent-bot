@@ -88,7 +88,7 @@
 | `jackett_subscriptions.py` | Якорь подписки и выбор новой серии/раздачи из Jackett results. |
 | `subscription_policy.py` | Решение, уведомлять ли и скачивать ли по подписке. |
 | `series_bulk_planner.py` | Чистый планировщик массовой загрузки сезонов: scoring кандидатов и статусы сезонов. |
-| `series_continue.py` | Чистые модели будущего `/continue`: Plex identity и кандидат докачивания сезона. |
+| `series_continue.py` | Чистые модели `/continue`: Plex identity и быстрый Plex/history detector кандидатов. |
 | `kinopoisk.py` | KP API, извлечение id, поиск карточек и метаданных. |
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
 | `plex.py` | Plex API, фильмы, сериалы, сезоны, качество, unmatched detection. |
