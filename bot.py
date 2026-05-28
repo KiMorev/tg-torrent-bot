@@ -1664,17 +1664,32 @@ def _filter_tasks_for_scope(tasks: list[dict], chat_id: int | None, scope: str) 
     )
 
 
+def _task_owner_labels(owners: dict[str, int]) -> dict[int, str]:
+    if not owners:
+        return {}
+
+    approved_users = state_store.load_approved_users()
+    labels: dict[int, str] = {}
+    for owner_id in set(owners.values()):
+        info = approved_users.get(owner_id, {})
+        name = str(info.get("name", "")).strip() if isinstance(info, dict) else ""
+        labels[owner_id] = f"{name} ({owner_id})" if name else str(owner_id)
+    return labels
+
+
 def _format_tasks(
     tasks: list[dict],
     scope: str = TASK_LIST_SCOPE_ALL,
     total_count: int | None = None,
     page: int = 0,
 ) -> str:
+    owners = _load_task_owners() if scope == TASK_LIST_SCOPE_ALL else {}
     return _view_format_tasks(
         tasks,
         scope=scope,
         updated_at=_format_updated_at(),
-        owners=_load_task_owners() if scope == TASK_LIST_SCOPE_ALL else {},
+        owners=owners,
+        owner_labels=_task_owner_labels(owners),
         total_count=total_count,
         page=page,
         page_size=TASK_LIST_PAGE_SIZE,

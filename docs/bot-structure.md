@@ -58,7 +58,7 @@
 | `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`. |
 | Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
 | Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`. |
-| `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`. |
+| `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`; admin-view берёт владельцев из `task_owners.json` и подписи из `approved_users.json`. |
 | `/admin` | `admin_command` / `admin_callback` -> короткая диагностика и drill-down `admin:diag_*`, настройки `/new`, пользователи, подписки, сброс счётчиков. |
 
 ## Callback namespaces

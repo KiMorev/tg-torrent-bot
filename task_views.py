@@ -61,6 +61,7 @@ def format_tasks(
     scope: str,
     updated_at: str,
     owners: dict[str, int],
+    owner_labels: dict[int, str] | None = None,
     total_count: int | None = None,
     page: int = 0,
     page_size: int = 5,
@@ -104,7 +105,8 @@ def format_tasks(
             line += f"\n   ID: {task_id}"
             if scope == scope_all:
                 owner = owners.get(str(task_id))
-                line += f"\n   Владелец: {owner}" if owner else "\n   Владелец: неизвестно"
+                label = (owner_labels or {}).get(owner, str(owner)) if owner else ""
+                line += f"\n   Владелец: {label}" if label else "\n   Владелец: неизвестно"
         lines.append(line)
         if index - start < len(visible_tasks):
             lines.append("────────────")

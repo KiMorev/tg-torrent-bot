@@ -72,6 +72,7 @@ class TaskViewTests(unittest.TestCase):
             scope="all",
             updated_at="12:00:00",
             owners={"tid3": 100},
+            owner_labels={100: "Ivan (100)"},
             page=1,
             page_size=2,
             scope_all="all",
@@ -80,8 +81,19 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("Все задачи Download Station", text)
         self.assertIn("Обновлено: 12:00:00", text)
         self.assertIn("3. ⬇️ Movie 3", text)
-        self.assertIn("Владелец: 100", text)
+        self.assertIn("Владелец: Ivan (100)", text)
         self.assertIn("Страница 2 из 2", text)
+
+    def test_format_tasks_falls_back_to_owner_id_without_label(self) -> None:
+        text = format_tasks(
+            [{"id": "tid1", "title": "Movie", "status": "downloading", "size": 100}],
+            scope="all",
+            updated_at="12:00:00",
+            owners={"tid1": 100},
+            scope_all="all",
+        )
+
+        self.assertIn("Владелец: 100", text)
 
     def test_format_task_card_includes_core_fields(self) -> None:
         text = format_task_card(

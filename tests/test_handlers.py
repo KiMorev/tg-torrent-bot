@@ -843,6 +843,26 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Подписки", text)
         self.assertIn("Jackett", text)
 
+    def test_format_tasks_uses_approved_user_name_for_admin_owner_label(self):
+        task = {
+            "id": "tid1",
+            "title": "Movie",
+            "status": "downloading",
+            "size": 100,
+            "additional": {"transfer": {"size_downloaded": 0, "speed_download": 0}},
+        }
+        fake_store = MagicMock()
+        fake_store.load_task_owners.return_value = {"tid1": 100}
+        fake_store.load_approved_users.return_value = {100: {"name": "Ivan @ivan"}}
+
+        with (
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "_format_updated_at", MagicMock(return_value="12:00:00")),
+        ):
+            text = bot._format_tasks([task], scope="all")
+
+        self.assertIn("Владелец: Ivan @ivan (100)", text)
+
     def test_admin_subscription_mode_toggle_updates_policy_fields(self):
         from subscription_policy import (
             DOWNLOAD_NOTIFY_ONLY,
