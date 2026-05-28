@@ -5316,6 +5316,17 @@ class SeriesContinueCommandTests(unittest.TestCase):
             for button in row
         ]
 
+    def _rt_result(self, topic_id: str, title: str):
+        from rutracker import RutrackerResult
+
+        return RutrackerResult(
+            topic_id=topic_id,
+            title=title,
+            category="TV",
+            size="10 GB",
+            seeders=10,
+        )
+
     @contextmanager
     def _allowed_context(self):
         with (
@@ -5489,7 +5500,10 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         attempt_download.assert_not_awaited()
         text = update.callback_query.edit_message_text.await_args.args[0]
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
         self.assertIn("пока нет новых серий", text)
+        self.assertIn("cont:subscribe_topic:all:0", self._callbacks(keyboard))
+        self.assertIn("cont:search_alt:all:0", self._callbacks(keyboard))
 
     def test_continue_same_topic_skips_existing_active_task(self):
         candidate = self._candidate()
@@ -5512,6 +5526,104 @@ class SeriesContinueCommandTests(unittest.TestCase):
         attempt_download.assert_not_awaited()
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("уже есть активная задача", text)
+
+    def test_continue_subscribe_topic_saves_subscription_without_download(self):
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:subscribe_topic:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        rt_client = MagicMock()
+        rt_client.get_topic_title.return_value = "The Rookie S8E1-8 of 18 WEB-DL 1080p"
+        save_sub = MagicMock(return_value=("12345", {}))
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "rutracker_client", rt_client),
+                patch.object(bot, "_save_subscription_for_result", save_sub),
+                patch.object(bot, "_attempt_pending_download", AsyncMock()) as attempt_download,
+            ):
+                await bot.series_continue_callback(update, context)
+                return attempt_download
+
+        attempt_download = asyncio.run(run())
+
+        save_sub.assert_called_once()
+        attempt_download.assert_not_awaited()
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Подписка сохранена", text)
+
+    def test_continue_search_alternatives_renders_other_topics(self):
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:search_alt:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        rt_client = MagicMock()
+        rt_client.search.return_value = [
+            self._rt_result("12345", "The Rookie S8E1-12 of 18 WEB-DL 1080p"),
+            self._rt_result("999", "The Rookie S8E1-12 of 18 WEB-DL 1080p"),
+        ]
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "rutracker_client", rt_client),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        alternatives = context.user_data[bot.CONTINUE_STATE_KEY]["continue_state:alt:all:0"]
+        self.assertEqual([item["topic_id"] for item in alternatives], ["999"])
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        self.assertIn("Похожие раздачи", text)
+        self.assertIn("cont:alt_dl:all:0:0", self._callbacks(keyboard))
+
+    def test_continue_download_alternative_uses_updated_release_wording_and_subscription(self):
+        candidate = self._candidate()
+        alt = {
+            "source": "rutracker",
+            "topic_id": "999",
+            "title": "The Rookie S8E1-12 of 18 WEB-DL 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=999",
+            "tracker_name": "rutracker",
+            "quality": "1080p",
+        }
+        state = {
+            "mine": [candidate],
+            "all": [candidate],
+            "scope": "all",
+            "page": 0,
+            "continue_state:alt:all:0": [alt],
+        }
+        update = _make_callback_update(chat_id=100, callback_data="cont:alt_dl:all:0:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        attempt_download = AsyncMock(return_value=("dbid_9", "torrent-файл"))
+        save_sub = MagicMock(return_value=("999", {}))
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_series_continue_active_task", AsyncMock(return_value=None)),
+                patch.object(bot, "_attempt_pending_download", attempt_download),
+                patch.object(bot, "_save_subscription_for_result", save_sub),
+                patch.object(bot, "_remember_task_owner"),
+                patch.object(bot, "_remember_task_meta"),
+                patch.object(bot, "_record_download_added_history"),
+                patch.object(bot, "_register_task_card_from_query"),
+                patch.object(bot, "_start_task_card_refresh"),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        entry = attempt_download.await_args.args[0]
+        self.assertEqual(entry["topic_id"], "999")
+        self.assertTrue(entry["subscribe"])
+        save_sub.assert_called_once()
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Буду следить", text)
 
 
 # ---------------------------------------------------------------------------

@@ -8801,13 +8801,35 @@ def _series_continue_detail_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def _series_continue_action_keyboard(scope: str, index: int, page: int, *, retry: bool = False) -> InlineKeyboardMarkup:
+def _series_continue_action_keyboard(
+    scope: str,
+    index: int,
+    page: int,
+    *,
+    retry: bool = False,
+    subscribe: bool = False,
+    search_alt: bool = False,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if retry:
         rows.append([
             InlineKeyboardButton(
                 "🔄 Повторить",
                 callback_data=f"{CONTINUE_CALLBACK_PREFIX}:update_topic:{scope}:{index}",
+            )
+        ])
+    if subscribe:
+        rows.append([
+            InlineKeyboardButton(
+                "🔔 Следить за темой",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:subscribe_topic:{scope}:{index}",
+            )
+        ])
+    if search_alt:
+        rows.append([
+            InlineKeyboardButton(
+                "🔍 Искать похожие",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:search_alt:{scope}:{index}",
             )
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
@@ -8832,6 +8854,80 @@ def _series_continue_result_from_topic(
         "year": candidate.identity.year,
     }
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+
+def _series_continue_result_from_rutracker(result: RutrackerResult) -> dict:
+    episode_info = _parse_episode_info(result.title)
+    partial = bool(episode_info and episode_info[0] < episode_info[1])
+    return {
+        "source": "rutracker",
+        "topic_id": result.topic_id,
+        "title": result.title,
+        "url": _rutracker_topic_url(result.topic_id),
+        "category": result.category,
+        "size": result.size,
+        "seeders": result.seeders,
+        "partial": partial,
+        "series": _extract_series_base_query(result.title) is not None,
+        "ep_str": f"{episode_info[0]}/{episode_info[1]} эп." if episode_info else "",
+        "magnet_url": None,
+        "torrent_url": None,
+        "tracker_name": "rutracker",
+        "quality": _plex_quality_from_title(result.title),
+    }
+
+
+def _series_continue_search_query(candidate: SeriesCatchUpCandidate) -> str:
+    title = (
+        candidate.identity.original_title
+        or candidate.identity.title
+        or _series_continue_candidate_title(candidate)
+    )
+    quality_suffix = _quality_to_query_suffix(candidate.quality)
+    return _normalize_season_in_query(f"{title} Сезон {candidate.season_number}{quality_suffix}")
+
+
+def _series_continue_alt_key(scope: str, index: int) -> str:
+    return f"{CONTINUE_STATE_KEY}:alt:{scope}:{index}"
+
+
+def _series_continue_alternatives_text(results: list[dict], search_query: str) -> str:
+    lines = [
+        "🔍 <b>Похожие раздачи</b>",
+        "",
+        f"Запрос: {html_module.escape(search_query)}",
+        "Это уже другая тема, поэтому бот скачает её как обновлённую раздачу.",
+        "",
+    ]
+    for offset, result in enumerate(results, start=1):
+        title = html_module.escape(str(result.get("title") or "Без названия"))
+        lines.append(f"{offset}. <b>{title}</b>")
+        details = [str(result.get("size") or ""), f"{result.get('seeders', 0)} сидов"]
+        quality = result.get("quality")
+        if quality:
+            details.append(str(quality))
+        lines.append("   " + html_module.escape(" · ".join(part for part in details if part)))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _series_continue_alternatives_keyboard(
+    scope: str,
+    candidate_index: int,
+    page: int,
+    results: list[dict],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for offset, _result in enumerate(results, start=1):
+        rows.append([
+            InlineKeyboardButton(
+                f"⬇️ {offset}",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:alt_dl:{scope}:{candidate_index}:{offset - 1}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
+    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
 
 
 def _series_continue_task_matches_candidate(task: dict, candidate: SeriesCatchUpCandidate) -> bool:
@@ -8868,6 +8964,233 @@ async def _series_continue_active_task(candidate: SeriesCatchUpCandidate) -> dic
         if _series_continue_task_matches_candidate(task, candidate):
             return task
     return None
+
+
+async def _series_continue_add_download_result(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    result: dict,
+    *,
+    subscribe: bool,
+    scope: str,
+    index: int,
+    page: int,
+    success_subscription_text: str,
+) -> None:
+    chat_id = _chat_id_from_query(query)
+    notify_policy = NOTIFY_EACH_UPDATE
+    download_policy = DOWNLOAD_AUTO_EACH_UPDATE
+    try:
+        entry = _pending_download_entry_from_result(
+            result,
+            chat_id=chat_id,
+            subscribe=subscribe,
+            notify_policy=notify_policy,
+            download_policy=download_policy,
+            error="",
+        )
+        task_id, method = await _attempt_pending_download(entry)
+        if task_id:
+            _remember_task_owner(task_id, chat_id)
+            _remember_task_meta(task_id, _build_task_meta_from_result(result, source="continue"))
+        _record_download_added_history(
+            task_id,
+            chat_id,
+            result,
+            method=method,
+            meta_source="continue",
+            subscribe=subscribe,
+            notify_policy=notify_policy if subscribe else None,
+            download_policy=download_policy if subscribe else None,
+        )
+
+        subscription_saved = False
+        if subscribe:
+            try:
+                _save_subscription_for_result(
+                    context,
+                    result,
+                    chat_id=chat_id,
+                    notify_policy=notify_policy,
+                    download_policy=download_policy,
+                    seen_results=[result],
+                )
+                subscription_saved = True
+            except Exception:
+                logger.warning("Series continue: failed to save subscription", exc_info=True)
+
+        success_text = _task_added_message(method, title=str(result.get("title") or ""), task_id=task_id)
+        if subscribe and subscription_saved:
+            success_text += f"\n\n🔔 {success_subscription_text}"
+        elif subscribe:
+            success_text += "\n\n⚠️ Загрузка добавлена, но подписку не удалось сохранить."
+        await query.edit_message_text(success_text, reply_markup=_task_reply_markup(task_id))
+        _register_task_card_from_query(query, task_id)
+        if task_id:
+            card_chat_id = _chat_id_from_query(query)
+            card_msg_id = _message_id_from_message(query.message) if query.message else None
+            if card_chat_id and card_msg_id:
+                _start_task_card_refresh(context.application, card_chat_id, card_msg_id, task_id)
+    except (RutrackerError, JackettError, DownloadStationError, RuntimeError) as exc:
+        _record_download_history(
+            "download_failed",
+            chat_id=chat_id,
+            result=result,
+            meta=_build_task_meta_from_result(result, source="continue"),
+            error=_format_download_error(exc),
+        )
+        await query.edit_message_text(
+            _download_failure_text(exc, can_queue=False),
+            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+        )
+
+
+async def _series_continue_subscribe_same_topic(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    candidate: SeriesCatchUpCandidate,
+    *,
+    scope: str,
+    index: int,
+    page: int,
+) -> None:
+    title = html_module.escape(_series_continue_candidate_title(candidate))
+    if not candidate.topic_id or rutracker_client is None:
+        await query.edit_message_text(
+            f"📺 <b>{title}</b>\n\nНет сохранённой темы Rutracker для подписки.",
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(scope, index, page),
+        )
+        return
+    try:
+        topic_title = await asyncio.to_thread(rutracker_client.get_topic_title, candidate.topic_id)
+        result = _series_continue_result_from_topic(candidate, topic_title)
+        _save_subscription_for_result(
+            context,
+            result,
+            chat_id=_chat_id_from_query(query),
+            notify_policy=NOTIFY_EACH_UPDATE,
+            download_policy=DOWNLOAD_AUTO_EACH_UPDATE,
+            seen_results=[result],
+        )
+        await query.edit_message_text(
+            f"🔔 <b>Подписка сохранена</b>\n\nБуду следить за темой «{html_module.escape(topic_title)}».",
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(scope, index, page),
+        )
+    except (RutrackerError, RuntimeError) as exc:
+        await query.edit_message_text(
+            _friendly_error("rutracker", str(exc)),
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+        )
+
+
+async def _series_continue_search_alternatives(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    candidate: SeriesCatchUpCandidate,
+    *,
+    scope: str,
+    index: int,
+    page: int,
+) -> None:
+    title = html_module.escape(_series_continue_candidate_title(candidate))
+    if rutracker_client is None:
+        await query.edit_message_text(
+            f"📺 <b>{title}</b>\n\nRutracker не настроен, похожие раздачи искать негде.",
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(scope, index, page),
+        )
+        return
+    search_query = _series_continue_search_query(candidate)
+    await query.edit_message_text(
+        f"🔍 <b>Ищу похожие раздачи</b>\n\n{html_module.escape(search_query)}",
+        parse_mode="HTML",
+        reply_markup=_series_continue_action_keyboard(scope, index, page),
+    )
+    try:
+        raw_results = await asyncio.to_thread(rutracker_client.search, search_query)
+    except RutrackerError as exc:
+        await query.edit_message_text(
+            _friendly_error("rutracker", str(exc)),
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+        )
+        return
+
+    season_results = [
+        _series_continue_result_from_rutracker(result)
+        for result in raw_results
+        if result.topic_id != candidate.topic_id
+        and _extract_season_from_query(result.title) == candidate.season_number
+    ]
+    if candidate.quality:
+        quality_results = [
+            result for result in season_results
+            if str(result.get("quality") or "") == candidate.quality
+        ]
+    else:
+        quality_results = season_results
+    results = quality_results or season_results
+    results.sort(key=_score_result, reverse=True)
+    results = results[:5]
+    if not results:
+        await query.edit_message_text(
+            f"📺 <b>{title}</b>\n\nПохожих раздач для этого сезона не нашёл.",
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True, subscribe=True),
+        )
+        return
+
+    state = _series_continue_state(context)
+    state[_series_continue_alt_key(scope, index)] = results
+    await query.edit_message_text(
+        _series_continue_alternatives_text(results, search_query),
+        parse_mode="HTML",
+        reply_markup=_series_continue_alternatives_keyboard(scope, index, page, results),
+    )
+
+
+async def _series_continue_download_alternative(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    candidate: SeriesCatchUpCandidate,
+    *,
+    scope: str,
+    index: int,
+    page: int,
+    alt_index: int,
+) -> None:
+    state = _series_continue_state(context)
+    alternatives = state.get(_series_continue_alt_key(scope, index))
+    if not isinstance(alternatives, list) or alt_index < 0 or alt_index >= len(alternatives):
+        await query.edit_message_text(
+            "Список похожих раздач устарел. Запустите поиск похожих ещё раз.",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+        )
+        return
+    active_task = await _series_continue_active_task(candidate)
+    if active_task:
+        task_id = str(active_task.get("id") or "")
+        await query.edit_message_text(
+            "По этому сезону уже есть активная задача Download Station.",
+            reply_markup=_task_reply_markup(task_id),
+        )
+        return
+    result = alternatives[alt_index]
+    episode_info = _parse_episode_info(str(result.get("title") or ""))
+    subscribe = bool(episode_info and episode_info[0] < episode_info[1])
+    await _series_continue_add_download_result(
+        query,
+        context,
+        result,
+        subscribe=subscribe,
+        scope=scope,
+        index=index,
+        page=page,
+        success_subscription_text="Буду следить за новыми сериями в этой раздаче.",
+    )
 
 
 async def _series_continue_download_same_topic(
@@ -8917,15 +9240,20 @@ async def _series_continue_download_same_topic(
             reply_markup=_series_continue_action_keyboard(scope, index, page),
         )
 
-        chat_id = _chat_id_from_query(query)
-        result: dict | None = None
         topic_title = await asyncio.to_thread(rutracker_client.get_topic_title, candidate.topic_id)
         update_check = resolve_same_topic_update(candidate, topic_title)
         if update_check.action != "same_topic_update":
             await query.edit_message_text(
                 f"📺 <b>{title}</b>\n\n{html_module.escape(update_check.reason_for_user)}",
                 parse_mode="HTML",
-                reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+                reply_markup=_series_continue_action_keyboard(
+                    scope,
+                    index,
+                    page,
+                    retry=True,
+                    subscribe=True,
+                    search_alt=True,
+                ),
             )
             return
 
@@ -8934,75 +9262,26 @@ async def _series_continue_download_same_topic(
             update_check.topic_total > 0
             and update_check.topic_episode_end >= update_check.topic_total
         )
-        notify_policy = NOTIFY_EACH_UPDATE
-        download_policy = DOWNLOAD_AUTO_EACH_UPDATE
-        entry = _pending_download_entry_from_result(
+        await _series_continue_add_download_result(
+            query,
+            context,
             result,
-            chat_id=chat_id,
             subscribe=subscribe,
-            notify_policy=notify_policy,
-            download_policy=download_policy,
-            error="",
+            scope=scope,
+            index=index,
+            page=page,
+            success_subscription_text="Буду следить за новыми сериями в этой теме.",
         )
-        task_id, method = await _attempt_pending_download(entry)
-        if task_id:
-            _remember_task_owner(task_id, chat_id)
-            _remember_task_meta(task_id, _build_task_meta_from_result(result, source="continue"))
-        _record_download_added_history(
-            task_id,
-            chat_id,
-            result,
-            method=method,
-            meta_source="continue",
-            subscribe=subscribe,
-            notify_policy=notify_policy if subscribe else None,
-            download_policy=download_policy if subscribe else None,
-        )
-
-        subscription_saved = False
-        if subscribe:
-            try:
-                _save_subscription_for_result(
-                    context,
-                    result,
-                    chat_id=chat_id,
-                    notify_policy=notify_policy,
-                    download_policy=download_policy,
-                    seen_results=[result],
-                )
-                subscription_saved = True
-            except Exception:
-                logger.warning("Series continue: failed to save subscription", exc_info=True)
-
-        success_text = _task_added_message(method, title=topic_title, task_id=task_id)
-        if subscribe and subscription_saved:
-            success_text += "\n\n🔔 Буду следить за новыми сериями в этой теме."
-        elif subscribe:
-            success_text += "\n\n⚠️ Загрузка добавлена, но подписку не удалось сохранить."
-        await query.edit_message_text(success_text, reply_markup=_task_reply_markup(task_id))
-        _register_task_card_from_query(query, task_id)
-        if task_id:
-            card_chat_id = _chat_id_from_query(query)
-            card_msg_id = _message_id_from_message(query.message) if query.message else None
-            if card_chat_id and card_msg_id:
-                _start_task_card_refresh(context.application, card_chat_id, card_msg_id, task_id)
     except RutrackerTopicUnavailable as exc:
         await query.edit_message_text(
             f"📺 <b>{title}</b>\n\n{html_module.escape(str(exc))}",
             parse_mode="HTML",
             reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
         )
-    except (RutrackerError, JackettError, DownloadStationError, RuntimeError) as exc:
-        if result is not None:
-            _record_download_history(
-                "download_failed",
-                chat_id=chat_id,
-                result=result,
-                meta=_build_task_meta_from_result(result, source="continue"),
-                error=_format_download_error(exc),
-            )
+    except RutrackerError as exc:
         await query.edit_message_text(
-            _download_failure_text(exc, can_queue=False),
+            _friendly_error("rutracker", str(exc)),
+            parse_mode="HTML",
             reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
         )
     finally:
@@ -9127,6 +9406,57 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
             scope=scope,
             index=index,
             page=page,
+        )
+        return
+
+    if action in {"subscribe_topic", "search_alt", "alt_dl"}:
+        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        candidates = _series_continue_candidates(state, scope)
+        if index < 0 or index >= len(candidates):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        state["scope"] = scope
+        state["page"] = page
+        if action == "subscribe_topic":
+            await _series_continue_subscribe_same_topic(
+                query,
+                context,
+                candidates[index],
+                scope=scope,
+                index=index,
+                page=page,
+            )
+            return
+        if action == "search_alt":
+            await _series_continue_search_alternatives(
+                query,
+                context,
+                candidates[index],
+                scope=scope,
+                index=index,
+                page=page,
+            )
+            return
+        try:
+            alt_index = int(parts[4]) if len(parts) > 4 else -1
+        except ValueError:
+            alt_index = -1
+        await _series_continue_download_alternative(
+            query,
+            context,
+            candidates[index],
+            scope=scope,
+            index=index,
+            page=page,
+            alt_index=alt_index,
         )
         return
 
