@@ -1,4 +1,6 @@
 import unittest
+import threading
+import json
 
 import requests
 
@@ -44,8 +46,10 @@ class SequenceSession:
         self.responses = responses
         self.calls = 0
         self.headers = {}
+        self.requests = []
 
     def get(self, *args, **kwargs) -> FakeResponse:
+        self.requests.append((args, kwargs))
         response = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
         return response
@@ -123,6 +127,53 @@ class JackettStartupRetryTests(unittest.TestCase):
         message = str(cm.exception)
         self.assertNotIn("secret", message)
         self.assertIn("apikey=***", message)
+
+
+class WarmupTests(unittest.TestCase):
+    def test_warmup_returns_success_and_tracker_filter(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret")
+        payload = {
+            "Results": [{"Title": "Movie 1080p"}],
+            "Indexers": [
+                {"ID": "rutracker", "Name": "Rutracker", "Status": 0, "Results": 1, "Error": ""},
+            ],
+        }
+        session = SequenceSession([FakeResponse(text=json.dumps(payload))])
+        client._session = session
+
+        result = client.warmup("1080p", indexers=["rutracker", "kinozal"], timeout=(1, 2))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["results_count"], 1)
+        self.assertEqual(result["indexers"], ["rutracker", "kinozal"])
+        params = session.requests[0][1]["params"]
+        self.assertIn(("Tracker[]", "rutracker"), params)
+        self.assertIn(("Tracker[]", "kinozal"), params)
+        self.assertEqual(session.requests[0][1]["timeout"], (1, 2))
+
+    def test_warmup_skips_when_client_is_busy(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret")
+        client._lock = threading.Lock()
+        client._lock.acquire()
+        try:
+            result = client.warmup("1080p")
+        finally:
+            client._lock.release()
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "busy")
+
+    def test_get_indexers_if_idle_skips_when_client_is_busy(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret")
+        client._lock = threading.Lock()
+        client._lock.acquire()
+        try:
+            result = client.get_indexers_if_idle()
+        finally:
+            client._lock.release()
+
+        self.assertIsNone(result)
 
 
 class ParseJsonResultsTests(unittest.TestCase):

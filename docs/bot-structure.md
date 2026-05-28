@@ -28,7 +28,7 @@
 | Plex-проверки и уведомления | `bot.py`: `_plex_*`, `_run_task_notifications_once`; `plex.py`; `diagnostics.py`; `keyboards.py` | `tests/test_plex.py`, `tests/test_plex_series_context.py`, `tests/test_background.py`, `tests/test_keyboards.py` |
 | `/status`, карточки задач, автообновление | `bot.py`: `status`, `task_callback`, `_task_card_refresh_loop`; `task_views.py`; `task_policies.py`; `formatters.py` | `tests/test_task_views.py`, `tests/test_task_policies.py`, `tests/test_handlers.py` |
 | Админ-панель и диагностика | `bot.py`: `admin_command`, `admin_callback`; `diagnostics.py`; `keyboards.py`; `storage.py` | `tests/test_handlers.py`, `tests/test_diagnostics.py`, `tests/test_storage.py`, `tests/test_keyboards.py` |
-| Фоновые циклы | `bot.py`: `setup_bot_commands`, `_tracker_background_loop`, `_task_maintenance_loop`, `_subscription_check_loop`, `_movie_discovery_loop`, `_plex_cache_loop`; профильная логика в отдельных модулях | `tests/test_background.py`, профильные тесты блока |
+| Фоновые циклы | `bot.py`: `setup_bot_commands`, `_tracker_background_loop`, `_task_maintenance_loop`, `_subscription_check_loop`, `_movie_discovery_loop`, `_jackett_warmup_loop`, `_plex_cache_loop`; профильная логика в отдельных модулях | `tests/test_background.py`, профильные тесты блока |
 | Конфигурация и `.env` | `config.py`; `app_context.py`; `compose.yaml`; `README.md`; `install.sh`; `scripts/setup_wizard.py` | `tests/test_config.py`, `tests/test_setup_wizard.py` |
 | Установка на Synology | `install.sh`; `scripts/setup_wizard.py`; `compose.yaml`; `README.md` | `tests/test_setup_wizard.py`, `tests/test_config.py` |
 | Тестовое окружение | `tests/conftest.py`; профильные helper-функции в `tests/test_*.py` | полный `python -m pytest tests/ -v` |
@@ -56,6 +56,7 @@
 | Подписка на сериал | `search_subscribe_pick` -> `search_subscribe_preset` или advanced callbacks -> запись в `topic_subscriptions.json`; `/subs` -> `sub:settings:*` меняет `notify_policy`/`download_policy`. |
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
 | `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`. |
+| Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
 | Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`. |
 | `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`. |
 | `/admin` | `admin_command` / `admin_callback` -> диагностика, настройки `/new`, пользователи, подписки, сброс счётчиков. |
@@ -82,7 +83,7 @@
 | `app_context.py` | Общий runtime context и клиенты внешних сервисов. |
 | `download_station.py` | Synology Download Station API, ошибки, lock вокруг HTTP-сессии. |
 | `rutracker.py` | Прямой клиент Rutracker: login, search, download, unavailable topic. |
-| `jackett.py` | Jackett API: search, indexers, download proxy, magnet redirect. |
+| `jackett.py` | Jackett API: search, indexers, warmup probe, download proxy, magnet redirect. |
 | `jackett_subscriptions.py` | Якорь подписки и выбор новой серии/раздачи из Jackett results. |
 | `subscription_policy.py` | Решение, уведомлять ли и скачивать ли по подписке. |
 | `series_bulk_planner.py` | Чистый планировщик массовой загрузки сезонов: scoring кандидатов и статусы сезонов. |

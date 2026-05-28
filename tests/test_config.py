@@ -76,6 +76,11 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.rutracker_max_results, 50)
         self.assertEqual(settings.jackett_max_results, 20)
         self.assertEqual(settings.jackett_fetch_limit, 100)
+        self.assertTrue(settings.jackett_warmup_enabled)
+        self.assertEqual(settings.jackett_warmup_interval_seconds, 900)
+        self.assertEqual(settings.jackett_warmup_query, "1080p")
+        self.assertEqual(settings.jackett_warmup_indexers, "auto")
+        self.assertEqual(settings.jackett_warmup_batch_size, 3)
         self.assertTrue(settings.movie_discovery_enabled)
         self.assertEqual(settings.movie_discovery_interval_hours, 12)
         self.assertEqual(settings.movie_discovery_cache_file, Path("/tmp/tg_torrent_drop/movie_discovery.json"))
@@ -108,6 +113,11 @@ class ConfigParsingTests(unittest.TestCase):
             "RUTRACKER_MAX_RESULTS": "500",
             "JACKETT_MAX_RESULTS": "500",
             "JACKETT_FETCH_LIMIT": "500",
+            "JACKETT_WARMUP_ENABLED": "false",
+            "JACKETT_WARMUP_INTERVAL_SECONDS": "10",
+            "JACKETT_WARMUP_QUERY": " test ",
+            "JACKETT_WARMUP_INDEXERS": "rutracker,kinozal",
+            "JACKETT_WARMUP_BATCH_SIZE": "500",
             "MOVIE_DISCOVERY_ENABLED": "false",
             "MOVIE_DISCOVERY_INTERVAL_HOURS": "0",
             "MOVIE_DISCOVERY_CACHE_FILE": "/cache/new.json",
@@ -136,6 +146,11 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.rutracker_max_results, 50)
         self.assertEqual(settings.jackett_max_results, 50)
         self.assertEqual(settings.jackett_fetch_limit, 200)
+        self.assertFalse(settings.jackett_warmup_enabled)
+        self.assertEqual(settings.jackett_warmup_interval_seconds, 60)
+        self.assertEqual(settings.jackett_warmup_query, "test")
+        self.assertEqual(settings.jackett_warmup_indexers, "rutracker,kinozal")
+        self.assertEqual(settings.jackett_warmup_batch_size, 20)
         self.assertEqual(settings.task_owners_file, Path("/data/task_owners.json"))
         self.assertFalse(settings.movie_discovery_enabled)
         self.assertEqual(settings.movie_discovery_interval_hours, 1)

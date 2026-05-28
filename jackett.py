@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -239,6 +240,134 @@ class JackettClient:
             raise
         except requests.RequestException as e:
             raise JackettError(f"Ошибка получения индексеров: {_sanitize_error_text(e, self._api_key)}") from e
+
+    def get_indexers_if_idle(self) -> list[dict] | None:
+        """Return configured indexers only if no other Jackett request is active."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self.get_indexers()
+        finally:
+            self._lock.release()
+
+    def warmup(
+        self,
+        query: str,
+        indexers: list[str] | None = None,
+        *,
+        timeout: tuple[float, float] = (5.0, 10.0),
+        categories: str = "2000,5000,5070",
+    ) -> dict:
+        """Lightweight non-throwing search probe for background warmup.
+
+        The method never waits for the shared Jackett lock. If a user search or
+        download is already using the client, warmup is skipped so the probe
+        cannot block foreground flows.
+        """
+        if not self._lock.acquire(blocking=False):
+            return {"ok": False, "skipped": True, "reason": "busy"}
+
+        started = time.monotonic()
+        try:
+            params: list[tuple[str, str]] = [
+                ("apikey", self._api_key),
+                ("Query", query),
+            ]
+            if categories:
+                params.append(("Category[]", categories))
+            for tracker_id in indexers or []:
+                tracker_id = str(tracker_id).strip()
+                if tracker_id and tracker_id.lower() != "all":
+                    params.append(("Tracker[]", tracker_id))
+
+            resp = self._session.get(
+                f"{self._base_url}/api/v2.0/indexers/all/results",
+                params=params,
+                timeout=timeout,
+            )
+            elapsed = round(time.monotonic() - started, 3)
+            if resp.status_code == 401:
+                return {
+                    "ok": False,
+                    "skipped": False,
+                    "error_kind": "auth",
+                    "error": "Invalid Jackett API key",
+                    "http_status": resp.status_code,
+                    "elapsed_seconds": elapsed,
+                }
+            resp.raise_for_status()
+
+            html_kind = _classify_response(resp)
+            if html_kind in {"login", "loading"}:
+                return {
+                    "ok": False,
+                    "skipped": False,
+                    "error_kind": "auth" if html_kind == "login" else "startup",
+                    "error": html_kind,
+                    "http_status": resp.status_code,
+                    "elapsed_seconds": elapsed,
+                }
+
+            try:
+                data = __import__("json").loads(resp.text)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "skipped": False,
+                    "error_kind": "startup",
+                    "error": str(exc),
+                    "http_status": resp.status_code,
+                    "elapsed_seconds": elapsed,
+                }
+
+            results = data.get("Results") if isinstance(data, dict) else []
+            statuses = self.parse_indexer_statuses(resp.text)
+            self._last_indexer_statuses = statuses
+            return {
+                "ok": True,
+                "skipped": False,
+                "query": query,
+                "indexers": list(indexers or []),
+                "results_count": len(results) if isinstance(results, list) else 0,
+                "failed_indexers": [st.indexer_id for st in statuses if not st.is_ok],
+                "http_status": resp.status_code,
+                "elapsed_seconds": elapsed,
+            }
+        except requests.ConnectionError as exc:
+            self._reset_session()
+            return {
+                "ok": False,
+                "skipped": False,
+                "error_kind": "network",
+                "error": _sanitize_error_text(exc, self._api_key),
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            }
+        except requests.Timeout as exc:
+            return {
+                "ok": False,
+                "skipped": False,
+                "error_kind": "timeout",
+                "error": _sanitize_error_text(exc, self._api_key),
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            }
+        except requests.RequestException as exc:
+            return {
+                "ok": False,
+                "skipped": False,
+                "error_kind": "http",
+                "error": _sanitize_error_text(exc, self._api_key),
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            }
+        except Exception as exc:  # noqa: BLE001 - warmup must not break background loops.
+            return {
+                "ok": False,
+                "skipped": False,
+                "error_kind": "unexpected",
+                "error": _sanitize_error_text(exc, self._api_key),
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            }
+        finally:
+            self._lock.release()
 
     @_synchronized
     def search(

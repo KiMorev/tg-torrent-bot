@@ -134,6 +134,11 @@ class AppSettings:
     jackett_indexers: str
     jackett_max_results: int
     jackett_fetch_limit: int
+    jackett_warmup_enabled: bool
+    jackett_warmup_interval_seconds: int
+    jackett_warmup_query: str
+    jackett_warmup_indexers: str
+    jackett_warmup_batch_size: int
     movie_discovery_enabled: bool
     movie_discovery_interval_hours: int
     movie_discovery_cache_file: Path
@@ -253,6 +258,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         jackett_indexers=(env.get("JACKETT_INDEXERS", "all").strip() or "all"),
         jackett_max_results=max(1, min(50, env_int(env, "JACKETT_MAX_RESULTS", 20))),
         jackett_fetch_limit=max(10, min(200, env_int(env, "JACKETT_FETCH_LIMIT", 100))),
+        jackett_warmup_enabled=env_bool(env, "JACKETT_WARMUP_ENABLED", True),
+        jackett_warmup_interval_seconds=max(60, env_int(env, "JACKETT_WARMUP_INTERVAL_SECONDS", 900)),
+        jackett_warmup_query=(env.get("JACKETT_WARMUP_QUERY", "1080p").strip() or "1080p"),
+        jackett_warmup_indexers=(env.get("JACKETT_WARMUP_INDEXERS", "auto").strip() or "auto"),
+        jackett_warmup_batch_size=max(1, min(20, env_int(env, "JACKETT_WARMUP_BATCH_SIZE", 3))),
         movie_discovery_enabled=env_bool(env, "MOVIE_DISCOVERY_ENABLED", True),
         movie_discovery_interval_hours=max(1, env_int(env, "MOVIE_DISCOVERY_INTERVAL_HOURS", 12)),
         movie_discovery_cache_file=Path(

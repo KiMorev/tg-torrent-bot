@@ -101,6 +101,31 @@ def _jackett_error(raw: str) -> ServiceDiagnostic:
     return ServiceDiagnostic("Jackett", "error", _summary("error", "🌐", "Jackett", "недоступен"), [_raw_detail(raw)])
 
 
+def _jackett_warmup_details(warmup_status: dict | None) -> list[str]:
+    if not warmup_status:
+        return []
+    if not warmup_status.get("enabled"):
+        return ["   Warmup: disabled"]
+
+    state = str(warmup_status.get("last_state") or "waiting")
+    next_check = str(warmup_status.get("next_check") or "")
+    line = f"   Warmup: enabled · state={html.escape(state)}"
+    if warmup_status.get("last_ok"):
+        line += f" · last ok: {html.escape(str(warmup_status['last_ok']))}"
+    elif warmup_status.get("last_checked"):
+        line += f" · checked: {html.escape(str(warmup_status['last_checked']))}"
+    if next_check:
+        line += f" · next: {html.escape(next_check)}"
+
+    details = [line]
+    indexers = warmup_status.get("last_indexers") or []
+    if isinstance(indexers, list) and indexers:
+        details.append(f"   Warmup batch: {html.escape(', '.join(map(str, indexers)))}")
+    if warmup_status.get("last_error"):
+        details.append(f"   Warmup error: {html.escape(str(warmup_status['last_error']))}")
+    return details
+
+
 def _rutracker_diagnostic(rutracker_client) -> ServiceDiagnostic:
     if rutracker_client is None:
         return ServiceDiagnostic(
@@ -120,7 +145,7 @@ def _rutracker_diagnostic(rutracker_client) -> ServiceDiagnostic:
     return _rutracker_error(str(status.get("error", "Неизвестная ошибка")))
 
 
-def _jackett_diagnostic(jackett_client) -> ServiceDiagnostic:
+def _jackett_diagnostic(jackett_client, warmup_status: dict | None = None) -> ServiceDiagnostic:
     if jackett_client is None:
         return ServiceDiagnostic("Jackett", "disabled", _summary("disabled", "🌐", "Jackett", "не настроен"))
 
@@ -142,7 +167,7 @@ def _jackett_diagnostic(jackett_client) -> ServiceDiagnostic:
         "Jackett",
         "ok",
         _summary("ok", "🌐", "Jackett", "подключен"),
-        [f"   Индексеры: {html.escape(indexer_list)}"],
+        [f"   Индексеры: {html.escape(indexer_list)}", *_jackett_warmup_details(warmup_status)],
     )
 
 
@@ -624,6 +649,7 @@ def run_diagnostics(
     ds_client,
     tracker_service,
     display_timezone: tzinfo,
+    jackett_warmup_status: dict | None = None,
     plex_client=None,
     plex_cache_info: dict | None = None,
     plex_deeplink_base_url: str = "",
@@ -638,7 +664,7 @@ def run_diagnostics(
         [
             _download_station_diagnostic(ds_client),
             _rutracker_diagnostic(rutracker_client),
-            _jackett_diagnostic(jackett_client),
+            _jackett_diagnostic(jackett_client, jackett_warmup_status),
             _public_trackers_diagnostic(tracker_service, display_timezone),
             _plex_diagnostic(plex_client, plex_cache_info),
             _plex_deeplink_diagnostic(plex_deeplink_base_url),

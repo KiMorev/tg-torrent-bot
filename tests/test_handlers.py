@@ -462,6 +462,65 @@ class StartCommandTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class JackettWarmupTests(unittest.IsolatedAsyncioTestCase):
+    def test_next_batch_rotates_indexers(self):
+        with (
+            patch.object(bot, "_jackett_warmup_cursor", 0),
+            patch.object(bot, "JACKETT_WARMUP_BATCH_SIZE", 2),
+        ):
+            self.assertEqual(bot._jackett_warmup_next_batch(["rt", "kz", "nnm"]), ["rt", "kz"])
+            self.assertEqual(bot._jackett_warmup_next_batch(["rt", "kz", "nnm"]), ["nnm", "rt"])
+
+    async def test_run_once_warms_rotated_batch(self):
+        jackett = MagicMock()
+        jackett.get_indexers_if_idle.return_value = [
+            {"id": "rutracker"},
+            {"id": "kinozal"},
+            {"id": "nnmclub"},
+        ]
+        jackett.warmup.return_value = {
+            "ok": True,
+            "results_count": 4,
+            "elapsed_seconds": 0.2,
+            "failed_indexers": [],
+        }
+
+        with (
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "JACKETT_WARMUP_ENABLED", True),
+            patch.object(bot, "JACKETT_WARMUP_INDEXERS", "auto"),
+            patch.object(bot, "JACKETT_INDEXERS", "all"),
+            patch.object(bot, "JACKETT_WARMUP_QUERY", "1080p"),
+            patch.object(bot, "JACKETT_WARMUP_BATCH_SIZE", 2),
+            patch.object(bot, "_jackett_warmup_cursor", 0),
+            patch.object(bot, "_JACKETT_WARMUP_STATUS", {}),
+        ):
+            status = await bot._run_jackett_warmup_once()
+
+        jackett.warmup.assert_called_once()
+        self.assertEqual(jackett.warmup.call_args.args[0], "1080p")
+        self.assertEqual(jackett.warmup.call_args.kwargs["indexers"], ["rutracker", "kinozal"])
+        self.assertEqual(status["last_state"], "ok")
+        self.assertEqual(status["last_results_count"], 4)
+
+    async def test_run_once_skips_when_indexer_lookup_is_busy(self):
+        jackett = MagicMock()
+        jackett.get_indexers_if_idle.return_value = None
+
+        with (
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "JACKETT_WARMUP_ENABLED", True),
+            patch.object(bot, "JACKETT_WARMUP_INDEXERS", "auto"),
+            patch.object(bot, "JACKETT_INDEXERS", "all"),
+            patch.object(bot, "_JACKETT_WARMUP_STATUS", {}),
+        ):
+            status = await bot._run_jackett_warmup_once()
+
+        jackett.warmup.assert_not_called()
+        self.assertEqual(status["last_state"], "skipped")
+        self.assertEqual(status["last_error"], "busy")
+
+
 class AdminPanelTests(unittest.TestCase):
     def _assert_access_result_keyboard(self, markup):
         callbacks = {
@@ -5681,8 +5740,10 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
     def test_setup_starts_subscription_loop_for_jackett_only_mode(self):
         app = MagicMock()
         app.bot.set_my_commands = AsyncMock()
+        created: list[str] = []
 
         def close_task(coro):
+            created.append(coro.cr_code.co_name)
             coro.close()
             return MagicMock()
 
@@ -5706,7 +5767,9 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
 
         public_commands = app.bot.set_my_commands.await_args_list[-1].args[0]
         self.assertIn("subs", [command.command for command in public_commands])
-        self.assertEqual(app.create_task.call_count, 2)
+        self.assertIn("_subscription_check_loop", created)
+        self.assertIn("_jackett_warmup_loop", created)
+        self.assertIn("_progress_update_loop", created)
 
     def test_setup_starts_tracker_and_maintenance_loops_separately(self):
         app = MagicMock()

@@ -295,6 +295,11 @@ JACKETT_ENABLED = settings.jackett_enabled
 JACKETT_INDEXERS = settings.jackett_indexers
 JACKETT_MAX_RESULTS = settings.jackett_max_results
 JACKETT_FETCH_LIMIT = settings.jackett_fetch_limit
+JACKETT_WARMUP_ENABLED = settings.jackett_warmup_enabled
+JACKETT_WARMUP_INTERVAL_SECONDS = settings.jackett_warmup_interval_seconds
+JACKETT_WARMUP_QUERY = settings.jackett_warmup_query
+JACKETT_WARMUP_INDEXERS = settings.jackett_warmup_indexers
+JACKETT_WARMUP_BATCH_SIZE = settings.jackett_warmup_batch_size
 MOVIE_DISCOVERY_ENABLED = settings.movie_discovery_enabled
 MOVIE_DISCOVERY_INTERVAL_HOURS = settings.movie_discovery_interval_hours
 MOVIE_DISCOVERY_DEBUG_FILE = settings.movie_discovery_debug_file
@@ -348,6 +353,7 @@ TRACKER_BACKGROUND_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
+JACKETT_WARMUP_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # Seconds to wait after DS task creation before injecting public trackers.
 # DS may not have fully initialised the task metadata immediately after create_torrent_file /
@@ -364,6 +370,9 @@ MAX_TASK_NOTIFICATION_FAILURES = 3
 _next_subscription_check_at: float | None = None
 # Unix timestamp of next scheduled pending-downloads check (set by the loop)
 _next_pending_check_at: float | None = None
+_next_jackett_warmup_at: float | None = None
+_jackett_warmup_cursor: int = 0
+_JACKETT_WARMUP_STATUS: dict[str, object] = {}
 
 
 logging.basicConfig(
@@ -632,6 +641,149 @@ def _task_maintenance_enabled() -> bool:
 
 def _subscription_monitor_enabled() -> bool:
     return bool(rutracker_client or jackett_client)
+
+
+def _jackett_warmup_enabled() -> bool:
+    return JACKETT_WARMUP_ENABLED and jackett_client is not None
+
+
+def _split_indexer_ids(raw: str) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in (raw or "").split(","):
+        indexer_id = item.strip().lower()
+        if not indexer_id or indexer_id == "all" or indexer_id in seen:
+            continue
+        seen.add(indexer_id)
+        result.append(indexer_id)
+    return result
+
+
+def _jackett_warmup_configured_indexers() -> list[str] | None:
+    warmup_raw = (JACKETT_WARMUP_INDEXERS or "auto").strip().lower()
+    if warmup_raw and warmup_raw != "auto":
+        return _split_indexer_ids(warmup_raw)
+    if (JACKETT_INDEXERS or "all").strip().lower() != "all":
+        return _split_indexer_ids(JACKETT_INDEXERS)
+    return None
+
+
+def _jackett_warmup_next_batch(indexers: list[str], batch_size: int | None = None) -> list[str]:
+    global _jackett_warmup_cursor
+    pool = list(dict.fromkeys(i.strip().lower() for i in indexers if i and i.strip()))
+    if not pool:
+        return []
+    size = max(1, min(batch_size or JACKETT_WARMUP_BATCH_SIZE, len(pool)))
+    start = _jackett_warmup_cursor % len(pool)
+    batch = [pool[(start + offset) % len(pool)] for offset in range(size)]
+    _jackett_warmup_cursor = (start + size) % len(pool)
+    return batch
+
+
+def _format_warmup_dt(ts: float | None) -> str:
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(ts, DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _jackett_warmup_status_snapshot() -> dict:
+    status = dict(_JACKETT_WARMUP_STATUS)
+    status["enabled"] = _jackett_warmup_enabled()
+    status["interval_seconds"] = JACKETT_WARMUP_INTERVAL_SECONDS
+    status["query"] = JACKETT_WARMUP_QUERY
+    status["batch_size"] = JACKETT_WARMUP_BATCH_SIZE
+    status["next_check"] = _format_warmup_dt(_next_jackett_warmup_at)
+    return status
+
+
+async def _jackett_warmup_indexer_pool() -> tuple[list[str], str]:
+    configured = _jackett_warmup_configured_indexers()
+    if configured is not None:
+        return configured, ""
+    if jackett_client is None:
+        return [], "disabled"
+    try:
+        indexers = await asyncio.to_thread(jackett_client.get_indexers_if_idle)
+    except JackettError as exc:
+        return [], str(exc)
+    if indexers is None:
+        return [], "busy"
+    return [idx["id"] for idx in indexers if isinstance(idx, dict) and idx.get("id")], ""
+
+
+async def _run_jackett_warmup_once() -> dict:
+    now_ts = time.time()
+    if not _jackett_warmup_enabled():
+        _JACKETT_WARMUP_STATUS.update({
+            "enabled": False,
+            "last_state": "disabled",
+            "last_checked": _format_warmup_dt(now_ts),
+        })
+        return dict(_JACKETT_WARMUP_STATUS)
+
+    pool, pool_error = await _jackett_warmup_indexer_pool()
+    if pool_error:
+        state = "skipped" if pool_error == "busy" else "failed"
+        _JACKETT_WARMUP_STATUS.update({
+            "enabled": True,
+            "last_state": state,
+            "last_error": pool_error,
+            "last_checked": _format_warmup_dt(now_ts),
+        })
+        logger.info("jackett_warmup: %s before search reason=%s", state, pool_error)
+        return dict(_JACKETT_WARMUP_STATUS)
+
+    batch = _jackett_warmup_next_batch(pool)
+    if not batch:
+        _JACKETT_WARMUP_STATUS.update({
+            "enabled": True,
+            "last_state": "skipped",
+            "last_error": "no indexers",
+            "last_checked": _format_warmup_dt(now_ts),
+        })
+        logger.info("jackett_warmup: skipped no indexers")
+        return dict(_JACKETT_WARMUP_STATUS)
+
+    assert jackett_client is not None
+    result = await asyncio.to_thread(
+        jackett_client.warmup,
+        JACKETT_WARMUP_QUERY,
+        indexers=batch,
+        timeout=(5.0, 10.0),
+    )
+    checked_at = _format_warmup_dt(time.time())
+    if result.get("ok"):
+        _JACKETT_WARMUP_STATUS.update({
+            "enabled": True,
+            "last_state": "ok",
+            "last_ok": checked_at,
+            "last_checked": checked_at,
+            "last_error": "",
+            "last_indexers": batch,
+            "last_results_count": int(result.get("results_count") or 0),
+            "last_elapsed_seconds": result.get("elapsed_seconds"),
+            "failed_indexers": result.get("failed_indexers") or [],
+        })
+        logger.info(
+            "jackett_warmup: success indexers=%s results=%s elapsed=%ss",
+            ",".join(batch),
+            result.get("results_count"),
+            result.get("elapsed_seconds"),
+        )
+    else:
+        state = "skipped" if result.get("skipped") else "failed"
+        error = str(result.get("reason") or result.get("error") or result.get("error_kind") or "unknown")
+        _JACKETT_WARMUP_STATUS.update({
+            "enabled": True,
+            "last_state": state,
+            "last_checked": checked_at,
+            "last_error": error,
+            "last_error_kind": result.get("error_kind", ""),
+            "last_indexers": batch,
+            "last_elapsed_seconds": result.get("elapsed_seconds"),
+        })
+        logger.info("jackett_warmup: %s indexers=%s error=%s", state, ",".join(batch), error)
+    return dict(_JACKETT_WARMUP_STATUS)
 
 
 def _tracker_key(tracker: str) -> str:
@@ -2849,6 +3001,7 @@ async def _run_movie_discovery_notifications(
 # upstream every 30 minutes when it's clearly down for hours hurts more
 # than it helps.
 _MOVIE_DISCOVERY_RETRY_BACKOFF = {1: 180, 2: 600, 3: 1800}  # 3 min / 10 min / 30 min
+_JACKETT_WARMUP_RETRY_BACKOFF = {1: 60, 2: 180}
 
 
 async def _notify_admins(app: "Application", text: str) -> None:
@@ -2862,6 +3015,52 @@ async def _notify_admins(app: "Application", text: str) -> None:
             await app.bot.send_message(chat_id=admin_chat_id, text=text)
         except Exception:
             logger.warning("Failed to send admin notification to %s", admin_chat_id, exc_info=True)
+
+
+async def _jackett_warmup_loop(app: "Application") -> None:
+    if not _jackett_warmup_enabled():
+        logger.info("Jackett warmup disabled")
+        return
+
+    global _next_jackett_warmup_at
+    logger.info(
+        "jackett_warmup: loop started interval=%ss batch=%s query=%r",
+        JACKETT_WARMUP_INTERVAL_SECONDS,
+        JACKETT_WARMUP_BATCH_SIZE,
+        JACKETT_WARMUP_QUERY,
+    )
+    delay = 30
+    fail_streak = 0
+    try:
+        while True:
+            _next_jackett_warmup_at = time.time() + delay
+            _JACKETT_WARMUP_STATUS["next_check"] = _format_warmup_dt(_next_jackett_warmup_at)
+            await asyncio.sleep(delay)
+
+            try:
+                status = await _run_jackett_warmup_once()
+            except Exception as exc:  # noqa: BLE001 - keep the warmup loop alive.
+                logger.warning("jackett_warmup: unexpected failure", exc_info=True)
+                checked_at = _format_warmup_dt(time.time())
+                _JACKETT_WARMUP_STATUS.update({
+                    "enabled": True,
+                    "last_state": "failed",
+                    "last_checked": checked_at,
+                    "last_error": str(exc),
+                    "last_error_kind": "unexpected",
+                })
+                status = dict(_JACKETT_WARMUP_STATUS)
+            last_state = str(status.get("last_state") or "")
+            error_kind = str(status.get("last_error_kind") or "")
+            if last_state == "failed" and error_kind in {"startup", "timeout", "network", ""}:
+                fail_streak += 1
+                delay = _JACKETT_WARMUP_RETRY_BACKOFF.get(fail_streak, JACKETT_WARMUP_INTERVAL_SECONDS)
+            else:
+                fail_streak = 0
+                delay = JACKETT_WARMUP_INTERVAL_SECONDS
+    except asyncio.CancelledError:
+        logger.info("Jackett warmup loop stopped")
+        raise
 
 
 async def _movie_discovery_loop(app: "Application") -> None:
@@ -5815,6 +6014,7 @@ async def _build_diagnostics_text() -> str:
         run_diagnostics,
         rutracker_client=rutracker_client,
         jackett_client=jackett_client,
+        jackett_warmup_status=_jackett_warmup_status_snapshot(),
         ds_client=ds_client,
         tracker_service=_tracker_service(),
         display_timezone=DISPLAY_TIMEZONE,
@@ -16748,6 +16948,7 @@ def _run_polling(app: Application) -> None:
 
 async def setup_bot_commands(app: Application) -> None:
     global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK, MOVIE_DISCOVERY_TASK
+    global SUBSCRIPTION_MONITOR_TASK, JACKETT_WARMUP_TASK
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
@@ -16773,7 +16974,6 @@ async def setup_bot_commands(app: Application) -> None:
     logger.info("Progress update loop started, interval=%ss", PROGRESS_UPDATE_INTERVAL_SECONDS)
 
     if _subscription_monitor_enabled():
-        global SUBSCRIPTION_MONITOR_TASK
         SUBSCRIPTION_MONITOR_TASK = app.create_task(_subscription_check_loop(app))
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
 
@@ -16783,6 +16983,10 @@ async def setup_bot_commands(app: Application) -> None:
         # Note: separate pending-loop is no longer needed — the per-user 'seen'
         # diff is naturally self-healing: outside quiet hours we just skip the
         # push; next in-window refresh delivers everything still unseen.
+
+    if _jackett_warmup_enabled():
+        JACKETT_WARMUP_TASK = app.create_task(_jackett_warmup_loop(app))
+        logger.info("Jackett warmup loop started, interval=%ss", JACKETT_WARMUP_INTERVAL_SECONDS)
 
     if PLEX_ENABLED:
         app.create_task(_plex_cache_loop(app))

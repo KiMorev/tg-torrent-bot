@@ -90,6 +90,28 @@ class DiagnosticsTests(unittest.TestCase):
         # Plex disabled when plex_client=None (default)
         self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
 
+    def test_jackett_diagnostics_include_warmup_status(self) -> None:
+        report = run_diagnostics(
+            rutracker_client=FakeRutracker(),
+            jackett_client=FakeJackett(),
+            jackett_warmup_status={
+                "enabled": True,
+                "last_state": "ok",
+                "last_ok": "2026-05-28 12:00:00",
+                "next_check": "2026-05-28 12:15:00",
+                "last_indexers": ["rutracker", "kinozal"],
+            },
+            ds_client=FakeDownloadStation(),
+            tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc,
+        )
+
+        text = format_diagnostics(report)
+
+        self.assertIn("Warmup: enabled", text)
+        self.assertIn("last ok: 2026-05-28 12:00:00", text)
+        self.assertIn("Warmup batch: rutracker, kinozal", text)
+
     def test_run_diagnostics_reports_disabled_optional_services(self) -> None:
         report = run_diagnostics(
             rutracker_client=None,
