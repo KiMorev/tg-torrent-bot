@@ -695,11 +695,11 @@ UI:
   - Коммит: `2014a83`
   - Тесты: `tests/test_series_continue.py`, полный `python -m pytest tests/ -v`
   - Хвосты: resolver объясняет `gap`/`exact_total`/`history_partial`/`unknown`, но не ходит за external metadata и не проверяет живую тему трекера.
-- [ ] Коммит 4. Проверка той же темы и lazy enrichment
-  - Статус: `todo`
-  - Коммит: -
-  - Тесты: -
-  - Хвосты: -
+- [x] Коммит 4. Проверка той же темы и lazy enrichment
+  - Статус: `done`
+  - Коммит: `77a0cf0`
+  - Тесты: `tests/test_series_continue.py`, полный `python -m pytest tests/ -v`
+  - Хвосты: добавлен pure resolver по уже полученному title темы; фактический сетевой fetch темы будет подключён в UI/action-слое.
 - [ ] Коммит 5. UI `/continue`
   - Статус: `todo`
   - Коммит: -
