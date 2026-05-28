@@ -3,7 +3,7 @@ from datetime import timezone
 
 import requests
 
-from diagnostics import format_diagnostics, friendly_error, run_diagnostics
+from diagnostics import format_diagnostics, format_diagnostics_section, friendly_error, run_diagnostics
 from download_station import DownloadStationError
 
 
@@ -80,15 +80,19 @@ class DiagnosticsTests(unittest.TestCase):
         text = format_diagnostics(report)
 
         self.assertIn("✅ 🧲 <b>Download Station</b>: подключен", text)
-        self.assertIn("Задач: 2", text)
+        self.assertIn("задач: 2", text)
         self.assertIn("✅ 🔎 <b>Rutracker</b>: подключен", text)
-        self.assertIn("✅ 🌐 <b>Jackett</b>: подключен", text)
-        self.assertIn("Индексеры: Rutracker, NNMClub", text)
+        self.assertIn("✅ 🌐 <b>Jackett</b>: подключен · 2 индексера", text)
         self.assertIn("✅ ➕ <b>Public-трекеры</b>: кэш готов", text)
-        self.assertIn("Доступно: 2", text)
+        self.assertIn("доступно: 2", text)
         self.assertNotIn("Кинопоиск", text)
         # Plex disabled when plex_client=None (default)
         self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
+
+        jackett_text = format_diagnostics_section(report, "jackett")
+        trackers_text = format_diagnostics_section(report, "trackers")
+        self.assertIn("Индексеры: Rutracker, NNMClub", jackett_text)
+        self.assertIn("Доступно: 2", trackers_text)
 
     def test_jackett_diagnostics_include_warmup_status(self) -> None:
         report = run_diagnostics(
@@ -106,11 +110,11 @@ class DiagnosticsTests(unittest.TestCase):
             display_timezone=timezone.utc,
         )
 
-        text = format_diagnostics(report)
+        text = format_diagnostics_section(report, "jackett")
 
-        self.assertIn("Warmup: enabled", text)
-        self.assertIn("last ok: 2026-05-28 12:00:00", text)
-        self.assertIn("Warmup batch: rutracker, kinozal", text)
+        self.assertIn("Прогрев: работает", text)
+        self.assertIn("последний успешный: 28.05 12:00", text)
+        self.assertIn("Последняя пачка прогрева: rutracker, kinozal", text)
 
     def test_run_diagnostics_reports_disabled_optional_services(self) -> None:
         report = run_diagnostics(
@@ -141,9 +145,13 @@ class DiagnosticsTests(unittest.TestCase):
 
         text = format_diagnostics(report)
 
-        self.assertIn("✅ ➕ <b>Public-трекеры</b>: кэш доступен (устарел)", text)
-        self.assertIn("Доступно: 1", text)
+        self.assertIn("✅ ➕ <b>Public-трекеры</b>: кэш доступен", text)
+        self.assertIn("доступно: 1", text)
         self.assertNotIn("⚠️ ➕ <b>Public-трекеры</b>: кэш устарел", text)
+
+        details = format_diagnostics_section(report, "trackers")
+        self.assertIn("Доступно: 1", details)
+        self.assertIn("Кэш старый, но рабочий", details)
 
     def test_empty_tracker_cache_reports_warning(self) -> None:
         """An empty cache means trackers won't be added until first on-demand load — must show ⚠️."""
@@ -170,13 +178,15 @@ class DiagnosticsTests(unittest.TestCase):
         )
 
         text = format_diagnostics(report)
+        downloads_text = format_diagnostics_section(report, "downloads")
+        trackers_text = format_diagnostics_section(report, "trackers")
 
         self.assertIn("❌ 🧲 <b>Download Station</b>: недоступен", text)
-        self.assertIn("DSM API вернул ошибку 119", text)
+        self.assertIn("DSM API вернул ошибку 119", downloads_text)
         self.assertIn("⚠️ 🔎 <b>Rutracker</b>: требуется капча", text)
         self.assertIn("❌ 🌐 <b>Jackett</b>: неверный API-ключ", text)
         self.assertIn("❌ ➕ <b>Public-трекеры</b>: кэш недоступен", text)
-        self.assertIn("disk full", text)
+        self.assertIn("disk full", trackers_text)
 
     def test_friendly_error_escapes_raw_details(self) -> None:
         text = friendly_error("jackett", "boom <secret>")
@@ -207,9 +217,11 @@ class DiagnosticsTests(unittest.TestCase):
             plex_cache_info={"count": 42, "updated_at": "2026-05-14 22:00"},
         )
         text = format_diagnostics(report)
+        plex_text = format_diagnostics_section(report, "plex")
         self.assertIn("✅ 🎬 <b>Plex</b>: подключен", text)
-        self.assertIn("Фильмов в библиотеке: 42", text)
-        self.assertIn("Кэш обновлён: 2026-05-14 22:00", text)
+        self.assertIn("42 фильмов", text)
+        self.assertIn("Фильмов в библиотеке: 42", plex_text)
+        self.assertIn("Кэш обновлён: 2026-05-14 22:00", plex_text)
 
     def test_plex_error_when_unhealthy(self) -> None:
         from unittest.mock import MagicMock
@@ -311,8 +323,11 @@ class DiagnosticsTests(unittest.TestCase):
             },
         )
         text = format_diagnostics(report)
-        self.assertIn("Фильмов в библиотеке: 100", text)
-        self.assertIn("Сериалов: 25", text)
+        plex_text = format_diagnostics_section(report, "plex")
+        self.assertIn("100 фильмов", text)
+        self.assertIn("сериалов: 25", text)
+        self.assertIn("Фильмов в библиотеке: 100", plex_text)
+        self.assertIn("Сериалов: 25", plex_text)
 
     def test_plex_ok_shows_unmatched_line_when_any_unmatched(self) -> None:
         """When at least one Plex entry is unmatched, /admin renders a 'Не сматчено' line."""
@@ -331,9 +346,11 @@ class DiagnosticsTests(unittest.TestCase):
             },
         )
         text = format_diagnostics(report)
-        self.assertIn("Не сматчено", text)
-        self.assertIn("3 фильма", text)
-        self.assertIn("1 сериал", text)
+        plex_text = format_diagnostics_section(report, "plex")
+        self.assertIn("не сматчено", text)
+        self.assertIn("Не сматчено", plex_text)
+        self.assertIn("3 фильма", plex_text)
+        self.assertIn("1 сериал", plex_text)
 
     def test_plex_ok_hides_unmatched_line_when_all_matched(self) -> None:
         """Don't add noise when there's nothing to report — all matched."""

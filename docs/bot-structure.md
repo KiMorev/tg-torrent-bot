@@ -59,7 +59,7 @@
 | Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
 | Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`. |
 | `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`. |
-| `/admin` | `admin_command` / `admin_callback` -> диагностика, настройки `/new`, пользователи, подписки, сброс счётчиков. |
+| `/admin` | `admin_command` / `admin_callback` -> короткая диагностика и drill-down `admin:diag_*`, настройки `/new`, пользователи, подписки, сброс счётчиков. |
 
 ## Callback namespaces
 
@@ -67,7 +67,7 @@
 |---|---|---|
 | `srch:*` | `keyboards.py`, локально в search-блоке `bot.py` | `ConversationHandler` в `bot.py::main` |
 | `task:*` | `keyboards.py` | `task_callback` |
-| `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback` |
+| `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai` |
 | `access:*` | `keyboards.py` | `access_callback` |
 | `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
 | `new:*` | `bot.py`, `keyboards.py` | `movie_new_*` callbacks, часть внутри search conversation |
@@ -90,7 +90,7 @@
 | `kinopoisk.py` | KP API, извлечение id, поиск карточек и метаданных. |
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
 | `plex.py` | Plex API, фильмы, сериалы, сезоны, качество, unmatched detection. |
-| `diagnostics.py` | Сводная диагностика внешних сервисов для `/admin`. |
+| `diagnostics.py` | Короткая сводка и подробные разделы диагностики внешних сервисов для `/admin`. |
 | `state_store.py` | Atomic JSON load/save через `JsonStateStore`. |
 | `task_views.py` | Форматирование списка задач и карточки задачи. |
 | `task_policies.py` | Получатели уведомлений, дедуп статусов, текст финального push, автоудаление. |

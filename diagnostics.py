@@ -1,4 +1,5 @@
 import html
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 
@@ -28,6 +29,15 @@ STATUS_ICONS = {
 }
 
 
+DIAGNOSTICS_SECTIONS = {
+    "downloads": ("🧲 <b>Загрузки</b>", ("Download Station", "Rutracker")),
+    "jackett": ("🌐 <b>Jackett</b>", ("Jackett",)),
+    "trackers": ("➕ <b>Public-трекеры</b>", ("Public trackers",)),
+    "plex": ("🎬 <b>Plex</b>", ("Plex", "Plex deep-link")),
+    "ai": ("🤖 <b>GPT / Voice</b>", ("Голосовой поиск", "GPT chat")),
+}
+
+
 def _summary(status: str, service_icon: str, service_name: str, message: str) -> str:
     status_icon = STATUS_ICONS.get(status, "ℹ️")
     return f"{status_icon} {service_icon} <b>{service_name}</b>: {message}"
@@ -35,6 +45,37 @@ def _summary(status: str, service_icon: str, service_name: str, message: str) ->
 
 def _raw_detail(raw: str) -> str:
     return f"<blockquote expandable>{html.escape(raw)}</blockquote>"
+
+
+def _clean_detail(detail: str) -> str:
+    return detail.strip()
+
+
+def _short_datetime(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return html.escape(raw)
+    return dt.strftime("%d.%m %H:%M")
+
+
+def _indexer_count(label: str) -> int:
+    names = label.strip()
+    if not names or names == "нет":
+        return 0
+    extra = 0
+    match = re.search(r"\(\+(\d+)\)$", names)
+    if match:
+        extra = int(match.group(1))
+        names = names[: match.start()].rstrip()
+    return len([p for p in names.split(",") if p.strip()]) + extra
 
 
 def friendly_error(service: str, raw: str) -> str:
@@ -105,24 +146,30 @@ def _jackett_warmup_details(warmup_status: dict | None) -> list[str]:
     if not warmup_status:
         return []
     if not warmup_status.get("enabled"):
-        return ["   Warmup: disabled"]
+        return ["   Прогрев: выключен"]
 
     state = str(warmup_status.get("last_state") or "waiting")
-    next_check = str(warmup_status.get("next_check") or "")
-    line = f"   Warmup: enabled · state={html.escape(state)}"
+    state_label = {
+        "ok": "работает",
+        "waiting": "ждёт первого запуска",
+        "skipped": "пропущен: Jackett занят другим запросом",
+        "failed": "ошибка",
+    }.get(state, html.escape(state))
+    line = f"   Прогрев: {state_label}"
     if warmup_status.get("last_ok"):
-        line += f" · last ok: {html.escape(str(warmup_status['last_ok']))}"
+        line += f" · последний успешный: {_short_datetime(warmup_status['last_ok'])}"
     elif warmup_status.get("last_checked"):
-        line += f" · checked: {html.escape(str(warmup_status['last_checked']))}"
+        line += f" · последняя проверка: {_short_datetime(warmup_status['last_checked'])}"
+    next_check = _short_datetime(warmup_status.get("next_check"))
     if next_check:
-        line += f" · next: {html.escape(next_check)}"
+        line += f" · следующая: {next_check}"
 
     details = [line]
     indexers = warmup_status.get("last_indexers") or []
     if isinstance(indexers, list) and indexers:
-        details.append(f"   Warmup batch: {html.escape(', '.join(map(str, indexers)))}")
+        details.append(f"   Последняя пачка прогрева: {html.escape(', '.join(map(str, indexers)))}")
     if warmup_status.get("last_error"):
-        details.append(f"   Warmup error: {html.escape(str(warmup_status['last_error']))}")
+        details.append(f"   Ошибка прогрева: {html.escape(str(warmup_status['last_error']))}")
     return details
 
 
@@ -166,7 +213,7 @@ def _jackett_diagnostic(jackett_client, warmup_status: dict | None = None) -> Se
     return ServiceDiagnostic(
         "Jackett",
         "ok",
-        _summary("ok", "🌐", "Jackett", "подключен"),
+        _summary("ok", "🌐", "Jackett", f"подключен · {len(indexer_names)} {_plural_ru(len(indexer_names), 'индексер', 'индексера', 'индексеров')}"),
         [f"   Индексеры: {html.escape(indexer_list)}", *_jackett_warmup_details(warmup_status)],
     )
 
@@ -241,8 +288,8 @@ def _public_trackers_diagnostic(tracker_service, display_timezone: tzinfo) -> Se
         return ServiceDiagnostic(
             "Public trackers",
             "ok",
-            _summary("ok", "➕", "Public-трекеры", "кэш доступен (устарел)"),
-            details,
+            _summary("ok", "➕", "Public-трекеры", "кэш доступен"),
+            [*details, "   Кэш старый, но рабочий; обновится при следующей загрузке BT-торрента."],
         )
 
     return ServiceDiagnostic("Public trackers", "ok", _summary("ok", "➕", "Public-трекеры", "кэш готов"), details)
@@ -631,7 +678,7 @@ def _gpt_chat_diagnostic(
         if err_type in ("timeout", "network", "rate_limit", "server_error"):
             return ServiceDiagnostic(
                 name, "warn",
-                _summary("warn", icon, name, f"transient ошибка: {err_type}"),
+                _summary("warn", icon, name, f"временная ошибка: {err_type}"),
                 details,
             )
 
@@ -684,9 +731,67 @@ def run_diagnostics(
 
 
 def format_diagnostics(report: DiagnosticsReport) -> str:
-    lines = ["🔍 <b>Диагностика бота</b>"]
+    lines = ["🔍 <b>Диагностика</b>", ""]
+    issues = [s for s in report.services if s.status in {"warn", "error"}]
+    if issues:
+        lines.append(f"⚠️ Требует внимания: {len(issues)}")
+        for service in issues[:4]:
+            lines.append(f"• {service.summary}")
+        if len(issues) > 4:
+            lines.append(f"• …ещё {len(issues) - 4}")
+    else:
+        lines.append("✅ Критичных проблем не видно.")
+
+    lines.append("")
+    lines.append("<b>Сервисы</b>")
     for service in report.services:
+        lines.append(_format_service_line(service))
+    lines.append("")
+    lines.append("Подробности открываются кнопками ниже.")
+    return "\n".join(lines)
+
+
+def format_diagnostics_section(report: DiagnosticsReport, section: str) -> str:
+    title, service_names = DIAGNOSTICS_SECTIONS.get(section, DIAGNOSTICS_SECTIONS["downloads"])
+    services = [s for s in report.services if s.name in service_names]
+    lines = [title]
+    for service in services:
         lines.append("")
         lines.append(service.summary)
-        lines.extend(service.details)
+        if service.details:
+            lines.extend(service.details)
+        else:
+            lines.append("   Подробностей нет.")
     return "\n".join(lines)
+
+
+def _format_service_line(service: ServiceDiagnostic) -> str:
+    suffixes: list[str] = []
+    for detail in service.details:
+        text = _clean_detail(detail)
+        if text.startswith("<blockquote"):
+            continue
+        if text.startswith("Задач: "):
+            suffixes.append(f"задач: {text.removeprefix('Задач: ').strip()}")
+        elif text.startswith("Индексеры: "):
+            count = _indexer_count(text.removeprefix("Индексеры: "))
+            if "индексер" not in service.summary:
+                suffixes.append(f"{count} {_plural_ru(count, 'индексер', 'индексера', 'индексеров')}")
+        elif text.startswith("Прогрев: "):
+            state = text.removeprefix("Прогрев: ").split(" · ", 1)[0].strip()
+            suffixes.append(f"прогрев: {state}")
+        elif text.startswith("Доступно: "):
+            suffixes.append(f"доступно: {text.removeprefix('Доступно: ').strip()}")
+        elif text.startswith("Фильмов в библиотеке: "):
+            counts = text.removeprefix("Фильмов в библиотеке: ").strip()
+            if " · Сериалов: " in counts:
+                suffixes.append(counts.replace(" · Сериалов: ", " фильмов · сериалов: "))
+            else:
+                suffixes.append(f"{counts} фильмов")
+        elif text.startswith("Сериалов в библиотеке: "):
+            suffixes.append(f"сериалов: {text.removeprefix('Сериалов в библиотеке: ').strip()}")
+        elif text.startswith("Не сматчено: "):
+            suffixes.append(text.lower())
+    if not suffixes:
+        return service.summary
+    return f"{service.summary} · {' · '.join(suffixes[:2])}"

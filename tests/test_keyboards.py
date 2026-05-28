@@ -1,6 +1,7 @@
 import unittest
 
 from keyboards import (
+    _admin_diagnostics_detail_keyboard,
     _admin_diagnostics_keyboard,
     _admin_kp_cache_cleared_keyboard,
     _admin_kp_cache_confirm_keyboard,
@@ -137,6 +138,24 @@ class KeyboardTests(unittest.TestCase):
 
         self.assertEqual(buttons["🔄 Проверить снова"], "admin:diagnostics")
         self.assertEqual(buttons["⬅️ Админ-панель"], "admin:home")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
+        self.assertEqual(buttons["🧲 Загрузки"], "admin:diag_downloads")
+        self.assertEqual(buttons["🌐 Jackett"], "admin:diag_jackett")
+        self.assertEqual(buttons["➕ Трекеры"], "admin:diag_trackers")
+        self.assertEqual(buttons["🎬 Plex"], "admin:diag_plex")
+        self.assertEqual(buttons["🤖 GPT / Voice"], "admin:diag_ai")
+
+    def test_admin_diagnostics_detail_keyboard_has_back_and_close(self) -> None:
+        keyboard = _admin_diagnostics_detail_keyboard("jackett")
+
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["🔄 Проверить снова"], "admin:diag_jackett")
+        self.assertEqual(buttons["⬅️ Назад"], "admin:diagnostics")
         self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
 

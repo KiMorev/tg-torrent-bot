@@ -36,7 +36,7 @@ from access_control import (
 )
 from app_context import build_app_context
 from config import load_settings, parse_chat_ids
-from diagnostics import friendly_error as _friendly_error, format_diagnostics, run_diagnostics
+from diagnostics import friendly_error as _friendly_error, format_diagnostics, format_diagnostics_section, run_diagnostics
 from download_station import DownloadStationError
 from formatters import (
     _extract_season_from_query,
@@ -69,6 +69,7 @@ from keyboards import (
     TASK_LIST_SCOPE_MY,
     _SRCH_DEFAULT_SETTINGS,
     _SRCH_QUALITY_OPTIONS,
+    _admin_diagnostics_detail_keyboard,
     _admin_diagnostics_keyboard,
     _admin_kp_cache_cleared_keyboard,
     _admin_kp_cache_confirm_keyboard,
@@ -6009,8 +6010,8 @@ def _build_search_query(base: str, settings: dict) -> str:
     return " ".join(parts)
 
 
-async def _build_diagnostics_text() -> str:
-    report = await asyncio.to_thread(
+async def _build_diagnostics_report():
+    return await asyncio.to_thread(
         run_diagnostics,
         rutracker_client=rutracker_client,
         jackett_client=jackett_client,
@@ -6028,7 +6029,16 @@ async def _build_diagnostics_text() -> str:
         gpt_model=GPT_MODEL,
         gpt_usage=state_store.load_gpt_usage(),
     )
+
+
+async def _build_diagnostics_text() -> str:
+    report = await _build_diagnostics_report()
     return format_diagnostics(report)
+
+
+async def _build_diagnostics_section_text(section: str) -> str:
+    report = await _build_diagnostics_report()
+    return format_diagnostics_section(report, section)
 
 
 async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -14556,12 +14566,31 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if action == "diagnostics":
-        await _safe_edit_callback(query, "🧭 Проверяю сервисы…")
+        await _safe_edit_callback(
+            query,
+            "🧭 Проверяю сервисы…",
+            reply_markup=_admin_diagnostics_keyboard(),
+        )
         await _safe_edit_callback(
             query,
             await _build_diagnostics_text(),
             parse_mode="HTML",
             reply_markup=_admin_diagnostics_keyboard(),
+        )
+        return
+
+    if action.startswith("diag_"):
+        section = action.removeprefix("diag_")
+        await _safe_edit_callback(
+            query,
+            "🧭 Проверяю раздел…",
+            reply_markup=_admin_diagnostics_detail_keyboard(section),
+        )
+        await _safe_edit_callback(
+            query,
+            await _build_diagnostics_section_text(section),
+            parse_mode="HTML",
+            reply_markup=_admin_diagnostics_detail_keyboard(section),
         )
         return
 

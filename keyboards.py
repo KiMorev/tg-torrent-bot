@@ -246,10 +246,31 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
+                InlineKeyboardButton("🧲 Загрузки", callback_data=_admin_callback("diag_downloads")),
+                InlineKeyboardButton("🌐 Jackett", callback_data=_admin_callback("diag_jackett")),
+            ],
+            [
+                InlineKeyboardButton("➕ Трекеры", callback_data=_admin_callback("diag_trackers")),
+                InlineKeyboardButton("🎬 Plex", callback_data=_admin_callback("diag_plex")),
+            ],
+            [InlineKeyboardButton("🤖 GPT / Voice", callback_data=_admin_callback("diag_ai"))],
+            [
                 InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback("diagnostics")),
                 InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home")),
             ],
             [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
+        ]
+    )
+
+
+def _admin_diagnostics_detail_keyboard(section: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback(f"diag_{section}"))],
+            [
+                InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("diagnostics")),
+                InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
+            ],
         ]
     )
 

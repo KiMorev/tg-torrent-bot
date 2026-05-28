@@ -709,7 +709,24 @@ class AdminPanelTests(unittest.TestCase):
         update.callback_query.answer.assert_called_once()
         self.assertEqual(update.callback_query.edit_message_text.call_count, 2)
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[0].args[0], "🧭 Проверяю сервисы…")
+        self.assertIn("reply_markup", update.callback_query.edit_message_text.call_args_list[0].kwargs)
         self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "diag text")
+
+    def test_admin_diagnostics_detail_callback_uses_section_view(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:diag_jackett")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_build_diagnostics_section_text", AsyncMock(return_value="jackett detail")),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        self.assertEqual(update.callback_query.edit_message_text.call_count, 2)
+        self.assertEqual(update.callback_query.edit_message_text.call_args_list[0].args[0], "🧭 Проверяю раздел…")
+        self.assertIn("reply_markup", update.callback_query.edit_message_text.call_args_list[0].kwargs)
+        self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "jackett detail")
 
     def test_admin_subscriptions_callback_shows_all_owners(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:subscriptions")
