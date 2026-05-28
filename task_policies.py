@@ -32,18 +32,34 @@ def notification_status_key(status: str) -> str:
     return status
 
 
+def _has_specific_error_detail(value: object) -> bool:
+    if not value:
+        return False
+    if not isinstance(value, dict):
+        return True
+
+    error_detail = value.get("error_detail")
+    if error_detail is None:
+        return False
+    if isinstance(error_detail, str):
+        return error_detail.strip().lower() not in {"", "unknown"}
+
+    return True
+
+
 def is_complete_despite_error(task: dict) -> bool:
     status = (task.get("status") or "").lower()
     task_type = (task.get("type") or "").lower()
     if status != "error" or task_type != "bt":
         return False
 
+    if _has_specific_error_detail(task.get("status_extra")):
+        return False
+
     additional = task.get("additional", {})
     additional = additional if isinstance(additional, dict) else {}
     detail = additional.get("detail", {})
-    if isinstance(detail, dict) and detail.get("error_detail"):
-        return False
-    if detail and not isinstance(detail, dict):
+    if _has_specific_error_detail(detail):
         return False
 
     total = task.get("size")
@@ -74,6 +90,7 @@ def format_task_notification(
     auto_delete_enabled: bool,
     auto_delete_statuses: set[str],
     auto_delete_after_hours: float,
+    plex_polling_started: bool = False,
 ) -> str:
     title = task.get("title") or task.get("id") or "без названия"
     task_id = task.get("id") or "unknown"
@@ -108,6 +125,9 @@ def format_task_notification(
             "Download Station показывает ошибку, но файл скачан полностью. "
             "Скорее всего, всё в порядке."
         )
+
+    if complete_despite_error and plex_polling_started:
+        lines.append("Проверяем Plex: пришлём ссылку, когда файл появится в библиотеке.")
 
     notice = auto_delete_notice(
         status,

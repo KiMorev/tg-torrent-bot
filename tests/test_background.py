@@ -228,6 +228,7 @@ class NotificationDeduplicationTests(unittest.TestCase):
             "type": "bt",
             "title": "Movie",
             "size": 100,
+            "status_extra": {"error_detail": "unknown"},
             "additional": {"detail": {}, "transfer": {"size_downloaded": 100, "speed_download": 0}},
         }
         created_coroutines = []
@@ -260,6 +261,7 @@ class NotificationDeduplicationTests(unittest.TestCase):
             asyncio.run(_run_task_notifications_once(mock_app))
 
         first_text = mock_app.bot.send_message.await_args_list[0].kwargs["text"]
+        self.assertIn("Plex", first_text)
         self.assertIn("Скорее всего, всё в порядке", first_text)
         self.assertEqual(self._store.load_notified_tasks()["tid1"]["status"], "done")
         poll.assert_called_once()

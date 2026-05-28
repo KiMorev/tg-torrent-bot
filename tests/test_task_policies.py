@@ -80,6 +80,7 @@ class NotificationPolicyTests(unittest.TestCase):
             "status": "error",
             "type": "bt",
             "size": 1000,
+            "status_extra": {"error_detail": "unknown"},
             "additional": {"transfer": {"size_downloaded": 1000}, "detail": {}},
         }
         self.assertTrue(is_complete_despite_error(task))
@@ -93,6 +94,13 @@ class NotificationPolicyTests(unittest.TestCase):
             "additional": {"transfer": {"size_downloaded": 1000}, "detail": {"error_detail": "disk_full"}},
         }
         self.assertFalse(is_complete_despite_error(with_detail))
+        with_status_extra_detail = {**task, "status_extra": {"error_detail": "disk_full"}}
+        self.assertFalse(is_complete_despite_error(with_status_extra_detail))
+        with_legacy_unknown_detail = {
+            **task,
+            "additional": {"transfer": {"size_downloaded": 1000}, "detail": {"error_detail": "unknown"}},
+        }
+        self.assertTrue(is_complete_despite_error(with_legacy_unknown_detail))
 
     def test_auto_delete_notice_respects_enabled_and_statuses(self) -> None:
         self.assertEqual(
@@ -155,8 +163,10 @@ class NotificationPolicyTests(unittest.TestCase):
             auto_delete_enabled=True,
             auto_delete_statuses={"finished"},
             auto_delete_after_hours=24,
+            plex_polling_started=True,
         )
 
+        self.assertIn("Plex", text)
         self.assertIn("Загрузка дошла до 100%", text)
         self.assertIn("Скорее всего, всё в порядке", text)
         self.assertNotIn("Автоочистка", text)

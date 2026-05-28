@@ -4659,12 +4659,13 @@ def _auto_delete_notice(status: str) -> str:
     )
 
 
-def _format_task_notification(task: dict) -> str:
+def _format_task_notification(task: dict, *, plex_polling_started: bool = False) -> str:
     return _policy_format_task_notification(
         task,
         auto_delete_enabled=_auto_delete_finished_enabled(),
         auto_delete_statuses=AUTO_DELETE_FINISHED_STATUSES,
         auto_delete_after_hours=AUTO_DELETE_FINISHED_AFTER_HOURS,
+        plex_polling_started=plex_polling_started,
     )
 
 
@@ -5036,7 +5037,7 @@ async def _run_task_notifications_once(app: Application) -> None:
             try:
                 await app.bot.send_message(
                     chat_id=chat_id,
-                    text=_format_task_notification(task),
+                    text=_format_task_notification(task, plex_polling_started=plex_should_poll),
                     reply_markup=_notification_keyboard(task_id, notification_status, task.get("type", "")),
                 )
                 await _delete_task_card_messages(app, task_id, chat_id=chat_id)
