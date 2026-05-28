@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from formatters import _parse_episode_info
 from plex import PlexSeason, PlexShow
 
 
@@ -47,6 +48,16 @@ class SeriesCompleteness:
     reason_for_user: str
     missing_episode_numbers: tuple[int, ...] = field(default_factory=tuple)
     known_total: int = 0
+
+
+@dataclass(frozen=True)
+class SeriesTopicUpdateCheck:
+    action: str
+    reason_for_user: str
+    topic_episode_end: int = 0
+    topic_total: int = 0
+    baseline_episode_end: int = 0
+    topic_title: str = ""
 
 
 def external_guid_id(external_guids: list[str] | tuple[str, ...], scheme: str) -> str:
@@ -185,6 +196,57 @@ def resolve_series_completeness(
         confidence="unknown",
         reason_for_user="По быстрым данным нельзя уверенно понять, нужен ли сезон для докачки.",
         known_total=total,
+    )
+
+
+def resolve_same_topic_update(
+    candidate: SeriesCatchUpCandidate,
+    topic_title: str,
+    *,
+    topic_unavailable: bool = False,
+) -> SeriesTopicUpdateCheck:
+    if topic_unavailable:
+        return SeriesTopicUpdateCheck(
+            action="unknown",
+            reason_for_user="Тема раздачи сейчас недоступна.",
+        )
+    if not candidate.topic_id:
+        return SeriesTopicUpdateCheck(
+            action="unknown",
+            reason_for_user="Нет сохранённой темы прошлой раздачи.",
+        )
+
+    parsed = _parse_episode_info(topic_title or "")
+    baseline = max(
+        int(candidate.present_count or 0),
+        int(candidate.history_last_episode_end or 0),
+    )
+    if parsed is None:
+        return SeriesTopicUpdateCheck(
+            action="unknown",
+            reason_for_user="Не удалось понять диапазон серий в теме.",
+            baseline_episode_end=baseline,
+            topic_title=topic_title or "",
+        )
+
+    topic_end, topic_total = parsed
+    if topic_end > baseline:
+        return SeriesTopicUpdateCheck(
+            action="same_topic_update",
+            reason_for_user=f"В той же раздаче появились серии до {topic_end}.",
+            topic_episode_end=topic_end,
+            topic_total=topic_total,
+            baseline_episode_end=baseline,
+            topic_title=topic_title or "",
+        )
+
+    return SeriesTopicUpdateCheck(
+        action="no_update",
+        reason_for_user="В той же раздаче пока нет новых серий.",
+        topic_episode_end=topic_end,
+        topic_total=topic_total,
+        baseline_episode_end=baseline,
+        topic_title=topic_title or "",
     )
 
 

@@ -6,6 +6,7 @@ from series_continue import (
     build_series_catch_up_candidates,
     external_guid_id,
     identity_from_plex_show,
+    resolve_same_topic_update,
     resolve_series_completeness,
 )
 
@@ -276,6 +277,63 @@ class SeriesCompletenessResolverTests(unittest.TestCase):
         )
 
         self.assertEqual(watched, plain)
+
+
+class SeriesSameTopicUpdateTests(unittest.TestCase):
+    def _candidate(self, **overrides) -> SeriesCatchUpCandidate:
+        identity = identity_from_plex_show(
+            PlexShow(title="Show", year=2020, rating_key="show-1", seasons={})
+        )
+        payload = {
+            "identity": identity,
+            "season_number": 8,
+            "present_count": 8,
+            "topic_id": "12345",
+            "history_last_episode_end": 8,
+        }
+        payload.update(overrides)
+        return SeriesCatchUpCandidate(**payload)
+
+    def test_same_topic_update_when_episode_end_grows(self):
+        result = resolve_same_topic_update(
+            self._candidate(),
+            "The Rookie / S8E1-12 of 18 / 1080p",
+        )
+
+        self.assertEqual(result.action, "same_topic_update")
+        self.assertEqual(result.topic_episode_end, 12)
+        self.assertEqual(result.topic_total, 18)
+        self.assertEqual(result.baseline_episode_end, 8)
+
+    def test_no_update_when_episode_end_is_same(self):
+        result = resolve_same_topic_update(
+            self._candidate(),
+            "The Rookie / S8E1-8 of 18 / 1080p",
+        )
+
+        self.assertEqual(result.action, "no_update")
+        self.assertEqual(result.topic_episode_end, 8)
+        self.assertEqual(result.topic_total, 18)
+
+    def test_topic_unavailable_is_unknown(self):
+        result = resolve_same_topic_update(
+            self._candidate(),
+            "",
+            topic_unavailable=True,
+        )
+
+        self.assertEqual(result.action, "unknown")
+        self.assertEqual(result.topic_episode_end, 0)
+
+    def test_episode_range_without_total_is_parsed(self):
+        result = resolve_same_topic_update(
+            self._candidate(),
+            "The Rookie / S8E1-12 / WEB-DL",
+        )
+
+        self.assertEqual(result.action, "same_topic_update")
+        self.assertEqual(result.topic_episode_end, 12)
+        self.assertEqual(result.topic_total, 12)
 
 
 if __name__ == "__main__":
