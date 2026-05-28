@@ -23,6 +23,7 @@
 | Кнопки и callback-data | `keyboards.py`; регистрация обработчиков в `bot.py::main`; правила в `AGENTS.md` | `tests/test_keyboards.py`, `tests/test_handlers.py` |
 | Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
 | Скачивание и очередь | `bot.py`: `_download_and_add`, `search_direct_download`, `_do_process_magnet`, `_do_process_torrent`, `_run_pending_downloads_once`; `download_station.py`; `torrent_utils.py` | `tests/test_handlers.py`, `tests/test_background.py`, `tests/test_download_station_locking.py`, `tests/test_disk_space_guard.py`, `tests/test_torrent_utils.py` |
+| История загрузок | `bot.py`: `_record_download_history`, `_record_download_added_history`, `_record_task_notification_history`, `_plex_poll_after_finish`; `state_store.py`: `download_history.jsonl`; подробности в `docs/download-history.md` | `tests/test_state_store.py`, `tests/test_handlers.py`, `tests/test_background.py` |
 | Сериалы и подписки | `bot.py`: `search_subscribe_*`, `_check_subscriptions`, `_check_jackett_subscriptions`; `jackett_subscriptions.py`; `subscription_policy.py`; `series_bulk_planner.py`; `formatters.py` | `tests/test_subscription_policy.py`, `tests/test_subscription_picker_ui.py`, `tests/test_jackett_subscriptions.py`, `tests/test_series_bulk_planner.py`, `tests/test_background.py` |
 | `/new` и подбор новинок | `bot.py`: `_refresh_movie_discovery_cache*`, `_run_movie_discovery_notifications`, `movie_new_*`; `movie_discovery.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_movie_discovery.py`, `tests/test_handlers.py`, `tests/test_kinopoisk.py`, `tests/test_gpt_features.py` |
 | Plex-проверки и уведомления | `bot.py`: `_plex_*`, `_run_task_notifications_once`; `plex.py`; `diagnostics.py`; `keyboards.py` | `tests/test_plex.py`, `tests/test_plex_series_context.py`, `tests/test_background.py`, `tests/test_keyboards.py` |
@@ -57,7 +58,7 @@
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
 | `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`. |
 | Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
-| Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`; BT-задача `error` без конкретного `error_detail` (`unknown` считается неконкретным) и с прогрессом >=99.9% считается мягко завершённой для уведомлений/Plex polling. |
+| Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`; BT-задача `error` без конкретного `error_detail` (`unknown` считается неконкретным) и с прогрессом >=99.9% считается мягко завершённой для уведомлений/Plex polling; итоговые события пишутся в `download_history.jsonl`. |
 | `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`; admin-view берёт владельцев из `task_owners.json` и подписи из `approved_users.json`. |
 | `/admin` | `admin_command` / `admin_callback` -> короткая диагностика и drill-down `admin:diag_*`, настройки `/new`, пользователи, подписки, сброс счётчиков. |
 
@@ -91,7 +92,7 @@
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
 | `plex.py` | Plex API, фильмы, сериалы, сезоны, качество, unmatched detection. |
 | `diagnostics.py` | Короткая сводка и подробные разделы диагностики внешних сервисов для `/admin`. |
-| `state_store.py` | Atomic JSON load/save через `JsonStateStore`. |
+| `state_store.py` | Atomic JSON load/save через `JsonStateStore`, append-only JSONL для истории загрузок. |
 | `task_views.py` | Форматирование списка задач и карточки задачи. |
 | `task_policies.py` | Получатели уведомлений, дедуп статусов, текст финального push, автоудаление. |
 | `formatters.py` | Общие форматтеры, progress, качество, сериал/сезон, короткие названия. |
@@ -124,6 +125,7 @@
 | `movie_discovery_debug.json` | Debug snapshot последнего refresh `/new`. |
 | `pending_downloads.json` | Очередь отложенных скачиваний и retry-state; bulk-записи могут содержать `series_bulk: {job_id, season}`. |
 | `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам. |
+| `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки и результат Plex polling. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `gpt_usage.json` | Использование GPT-функций; `last_error` очищается успешным GPT-вызовом, transient-ошибки старше 24 ч не желтят диагностику. |

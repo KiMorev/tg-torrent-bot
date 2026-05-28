@@ -94,6 +94,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         notified_tasks_file=d / "notified.json",
         auto_delete_tasks_file=d / "auto_delete.json",
         topic_subscriptions_file=d / "subscriptions.json",
+        download_history_file=d / "download_history.jsonl",
     )
 
 
@@ -3866,6 +3867,7 @@ class PlexPollingTests(unittest.TestCase):
         )
         fake_app = MagicMock()
         fake_app.bot.send_message = AsyncMock()
+        store = MagicMock()
 
         with (
             patch.object(bot, "_plex_library", {("dune", 2021): movie}),
@@ -3873,6 +3875,7 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_plex_find_by_ds_title", return_value=movie),
             patch.object(bot, "_plex_machine_id", "abc123"),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "state_store", store),
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "task1", "Dune.2021.1080p", [100], max_attempts=1, interval_seconds=0
@@ -3885,6 +3888,11 @@ class PlexPollingTests(unittest.TestCase):
         # The notification now uses the canonical Plex title, not the raw torrent name.
         self.assertIn("Dune", call_kwargs["text"])
         labels = self._labels(call_kwargs["reply_markup"])
+        history_entry = store.append_download_history.call_args.args[0]
+        self.assertEqual(history_entry["event"], "plex_found")
+        self.assertEqual(history_entry["chat_id"], 100)
+        self.assertEqual(history_entry["task_id"], "task1")
+        self.assertEqual(history_entry["plex_rating_key"], "42")
         self.assertIn("▶️ Смотреть в Plex", labels)
         self.assertIn("✖️ Закрыть", labels)
         self.assertNotIn("📋 Показать задачу", labels)
@@ -4516,6 +4524,48 @@ class BuildTaskMetaTests(unittest.TestCase):
         self.assertEqual(meta["kind"], "movie")
         self.assertEqual(meta["year"], 0)
         self.assertEqual(meta["quality"], "")
+
+
+class DownloadHistoryTests(unittest.TestCase):
+    def test_added_history_sanitizes_magnet_and_jackett_proxy_urls(self):
+        result = {
+            "title": "Show S01 1080p",
+            "movie_title": "Show / Season: 1",
+            "url": "http://jackett:9117/dl/rutracker/?apikey=secret",
+            "topic_url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+            "magnet_url": "magnet:?xt=urn:btih:secret",
+            "torrent_url": "http://jackett:9117/dl/rutracker/?apikey=secret",
+            "tracker_name": "RuTracker.org",
+            "source": "jackett",
+            "parsed_meta": {
+                "quality": "1080p",
+                "source": "WEB-DL",
+                "audio": "AC3 5.1",
+                "langs": ["Rus", "Eng"],
+            },
+        }
+        store = MagicMock()
+
+        with patch.object(bot, "state_store", store):
+            bot._record_download_added_history(
+                "dbid_1",
+                100,
+                result,
+                method="torrent-file",
+                meta_source="search",
+            )
+
+        entry = store.append_download_history.call_args.args[0]
+        self.assertEqual(entry["event"], "download_added")
+        self.assertEqual(entry["chat_id"], 100)
+        self.assertEqual(entry["task_id"], "dbid_1")
+        self.assertEqual(entry["topic_id"], "12345")
+        self.assertEqual(entry["topic_url"], "https://rutracker.org/forum/viewtopic.php?t=12345")
+        self.assertNotIn("magnet_url", entry)
+        self.assertNotIn("torrent_url", entry)
+        self.assertNotIn("apikey", str(entry).lower())
+        self.assertNotIn("magnet:", str(entry).lower())
+        self.assertEqual(entry["release"]["langs"], ["Rus", "Eng"])
 
 
 class TaskMetaWrapperTests(unittest.TestCase):

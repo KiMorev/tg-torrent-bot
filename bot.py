@@ -4218,6 +4218,15 @@ async def _plex_poll_after_finish(
                 else:
                     keyboard = InlineKeyboardMarkup([[close_btn]])
                 await _delete_hint_messages()
+                _record_download_history(
+                    "plex_found",
+                    chat_ids=chat_ids,
+                    task_id=task_id,
+                    meta=meta,
+                    title=found_title,
+                    plex_rating_key=rating_key,
+                    plex_metadata_type=metadata_type,
+                )
                 for cid in chat_ids:
                     try:
                         await app.bot.send_message(
@@ -4251,6 +4260,15 @@ async def _plex_poll_after_finish(
             )
             log_reason = "Plex unreachable"
         await _delete_hint_messages()
+        _record_download_history(
+            "plex_not_found",
+            chat_ids=chat_ids,
+            task_id=task_id,
+            meta=meta,
+            title=task_title,
+            reason=log_reason,
+            timeout_minutes=timeout_min,
+        )
         keyboard = _final_notification_keyboard(task_id, show_plex=False)
         for cid in chat_ids:
             try:
@@ -4522,6 +4540,203 @@ def _build_task_meta_from_title(title: str, *, source: str) -> dict:
     }
 
 
+def _history_jsonable(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(k): _history_jsonable(v)
+            for k, v in value.items()
+            if v not in (None, "", [], {})
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_history_jsonable(v) for v in value if v not in (None, "", [], {})]
+    return str(value)
+
+
+def _history_safe_topic_url(url: object) -> str:
+    text = str(url or "").strip()
+    lowered = text.lower()
+    if not text or lowered.startswith("magnet:"):
+        return ""
+    if "apikey" in lowered or "api_key" in lowered or "/dl/" in lowered:
+        return ""
+    return text
+
+
+def _history_fields_from_result(result: dict | None) -> dict:
+    if not isinstance(result, dict):
+        return {}
+
+    topic_url = _history_safe_topic_url(result.get("url"))
+    if not topic_url:
+        topic_url = _history_safe_topic_url(result.get("topic_url"))
+    topic_id = str(result.get("topic_id") or "")
+    if not topic_id and topic_url:
+        topic_id = _extract_rutracker_topic_id(topic_url)
+
+    fields: dict = {
+        "title": result.get("title") or "",
+        "canonical_title": result.get("movie_title") or "",
+        "source": result.get("source") or "",
+        "tracker": result.get("tracker_name") or result.get("tracker") or result.get("category") or "",
+        "indexer": result.get("indexer") or result.get("tracker_name") or "",
+        "topic_id": topic_id,
+        "topic_url": topic_url,
+        "quality": result.get("quality") or _plex_quality_from_result(result),
+    }
+    for key in ("year", "size", "size_bytes", "seeders", "leechers"):
+        if result.get(key) not in (None, ""):
+            fields[key] = result.get(key)
+
+    parsed = result.get("parsed_meta")
+    if isinstance(parsed, dict):
+        release = {
+            key: parsed.get(key)
+            for key in ("quality", "source", "hdr", "audio", "langs", "release_group", "edition")
+            if parsed.get(key) not in (None, "", [], {})
+        }
+        if release:
+            fields["release"] = release
+            if not fields.get("quality") and release.get("quality"):
+                fields["quality"] = release["quality"]
+
+    return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {})}
+
+
+def _history_fields_from_meta(meta: dict | None) -> dict:
+    if not isinstance(meta, dict):
+        return {}
+    fields = {
+        "kind": meta.get("kind"),
+        "canonical_title": meta.get("title"),
+        "year": meta.get("year"),
+        "quality": meta.get("quality"),
+        "series_query": meta.get("series_query"),
+        "season": meta.get("season_num"),
+        "meta_source": meta.get("source"),
+    }
+    return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {}, -1)}
+
+
+def _history_fields_from_task(task: dict | None) -> dict:
+    if not isinstance(task, dict):
+        return {}
+    additional = task.get("additional") if isinstance(task.get("additional"), dict) else {}
+    transfer = additional.get("transfer") if isinstance(additional.get("transfer"), dict) else {}
+    downloaded = transfer.get("size_downloaded")
+    size = task.get("size")
+    fields = {
+        "title": task.get("title") or "",
+        "ds_status": task.get("status") or "",
+        "task_type": task.get("type") or "",
+        "size": size,
+        "downloaded": downloaded,
+        "progress_percent": _progress_percent(downloaded, size),
+    }
+    status_extra = task.get("status_extra") if isinstance(task.get("status_extra"), dict) else {}
+    error_detail = status_extra.get("error_detail")
+    if not error_detail:
+        detail = additional.get("detail") if isinstance(additional.get("detail"), dict) else {}
+        error_detail = detail.get("error_detail")
+    if error_detail:
+        fields["error_detail"] = error_detail
+    return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {})}
+
+
+def _record_download_history(
+    event: str,
+    *,
+    chat_id: int | None = None,
+    chat_ids: list[int] | set[int] | tuple[int, ...] | None = None,
+    task_id: str = "",
+    result: dict | None = None,
+    meta: dict | None = None,
+    task: dict | None = None,
+    **extra,
+) -> None:
+    entry: dict = {
+        "ts": datetime.now(DISPLAY_TIMEZONE).isoformat(timespec="seconds"),
+        "event": event,
+    }
+    if chat_id is not None:
+        try:
+            entry["chat_id"] = int(chat_id)
+        except (TypeError, ValueError):
+            pass
+    if chat_ids:
+        ids: list[int] = []
+        for raw_id in chat_ids:
+            try:
+                ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        if ids:
+            entry["chat_ids"] = sorted(set(ids))
+            if "chat_id" not in entry and len(set(ids)) == 1:
+                entry["chat_id"] = ids[0]
+    if task_id:
+        entry["task_id"] = str(task_id)
+
+    entry.update(_history_fields_from_result(result))
+    entry.update(_history_fields_from_meta(meta))
+    entry.update(_history_fields_from_task(task))
+    for key, value in extra.items():
+        if value not in (None, "", [], {}):
+            entry[key] = _history_jsonable(value)
+
+    append = getattr(state_store, "append_download_history", None)
+    if not callable(append):
+        return
+    try:
+        append(entry)
+    except Exception:
+        logger.warning("Failed to record download history event=%s", event, exc_info=True)
+
+
+def _record_download_added_history(
+    task_id: str,
+    chat_id: int | None,
+    result: dict | None,
+    *,
+    method: str,
+    meta_source: str,
+    subscribe: bool = False,
+    notify_policy: str | None = None,
+    download_policy: str | None = None,
+) -> None:
+    meta = _build_task_meta_from_result(result, source=meta_source) if isinstance(result, dict) else None
+    _record_download_history(
+        "download_added",
+        chat_id=chat_id,
+        task_id=task_id,
+        result=result,
+        meta=meta,
+        method=method,
+        subscribe=subscribe,
+        notify_policy=notify_policy,
+        download_policy=download_policy,
+    )
+
+
+def _record_download_added_from_title_history(
+    task_id: str,
+    chat_id: int | None,
+    title: str,
+    *,
+    method: str,
+    meta_source: str,
+) -> None:
+    _record_download_history(
+        "download_added",
+        chat_id=chat_id,
+        task_id=task_id,
+        meta=_build_task_meta_from_title(title, source=meta_source) if title else None,
+        title=title,
+        method=method,
+    )
+
+
 def _load_notified_tasks() -> dict[str, object]:
     return state_store.load_notified_tasks()
 
@@ -4648,6 +4863,50 @@ def _notification_status_key(status: str) -> str:
 
 def _is_complete_despite_error(task: dict) -> bool:
     return _policy_is_complete_despite_error(task)
+
+
+def _download_history_event_for_status(
+    status: str,
+    notification_status: str,
+    complete_despite_error: bool,
+) -> str:
+    if complete_despite_error:
+        return "download_soft_completed"
+    if notification_status in {"finished", "seeding"}:
+        return "download_completed"
+    if status == "error":
+        return "download_failed"
+    return ""
+
+
+def _record_task_notification_history(
+    task: dict,
+    *,
+    notification_status: str,
+    complete_despite_error: bool,
+    recipients: set[int],
+    plex_polling_started: bool,
+) -> None:
+    task_id = str(task.get("id") or "")
+    event = _download_history_event_for_status(
+        str(task.get("status") or "").lower(),
+        notification_status,
+        complete_despite_error,
+    )
+    if not task_id or not event:
+        return
+    owner_id = _task_owner(task_id)
+    _record_download_history(
+        event,
+        chat_id=owner_id,
+        chat_ids=recipients,
+        task_id=task_id,
+        task=task,
+        meta=_get_task_meta(task_id),
+        notification_status=notification_status,
+        soft_completed=complete_despite_error,
+        plex_polling_started=plex_polling_started,
+    )
 
 
 def _auto_delete_notice(status: str) -> str:
@@ -4957,12 +5216,28 @@ async def _run_task_notifications_once(app: Application) -> None:
                 notified[task_id] = _make_notification_delivery_state(
                     "error:torrent_duplicate", sent, {}
                 )
+                _record_download_history(
+                    "download_failed",
+                    chat_id=owner_id,
+                    task_id=task_id,
+                    task=task,
+                    meta=_get_task_meta(task_id),
+                    error_detail="torrent_duplicate",
+                )
                 changed = True
             continue
 
         notification_key = _notification_status_key(notification_status)
+        raw_notification_state = notified.get(task_id)
+        history_already_recorded = (
+            raw_notification_state == notification_key
+            or (
+                isinstance(raw_notification_state, dict)
+                and raw_notification_state.get("status") == notification_key
+            )
+        )
         sent_recipients, failed_recipients, legacy_done = _notification_delivery_state(
-            notified.get(task_id),
+            raw_notification_state,
             notification_key,
         )
         if legacy_done:
@@ -5085,6 +5360,14 @@ async def _run_task_notifications_once(app: Application) -> None:
                 failed_recipients,
                 notified.get(task_id),
             )
+            if not history_already_recorded:
+                _record_task_notification_history(
+                    task,
+                    notification_status=notification_status,
+                    complete_despite_error=complete_despite_error,
+                    recipients=recipients,
+                    plex_polling_started=plex_should_poll,
+                )
             # Persist after each task so a crash mid-cycle loses at most one
             # task's worth of state (instead of the whole cycle, which would
             # cause duplicate notifications on restart).
@@ -5291,9 +5574,18 @@ async def _notify_pending_success(
         logger.warning("Failed to notify pending-success for chat_id=%s", chat_id, exc_info=True)
     if task_id:
         _remember_task_owner(task_id, int(chat_id))
-        _remember_task_meta(task_id, _build_task_meta_from_result(
-            _pending_entry_to_search_result(entry), source="pending",
-        ))
+        result = _pending_entry_to_search_result(entry)
+        _remember_task_meta(task_id, _build_task_meta_from_result(result, source="pending"))
+        _record_download_added_history(
+            task_id,
+            int(chat_id),
+            result,
+            method=method,
+            meta_source="pending",
+            subscribe=bool(entry.get("subscribe")),
+            notify_policy=entry.get("notify_policy"),
+            download_policy=entry.get("download_policy"),
+        )
 
 
 async def _notify_pending_dropped(app: Application, entry: dict) -> None:
@@ -8962,6 +9254,16 @@ async def _download_and_add(
         if task_id:
             _remember_task_owner(task_id, chat_id)
             _remember_task_meta(task_id, _build_task_meta_from_result(result, source="search"))
+        _record_download_added_history(
+            task_id,
+            chat_id,
+            result,
+            method=download_method,
+            meta_source="search",
+            subscribe=subscribe,
+            notify_policy=notify_policy if subscribe else None,
+            download_policy=download_policy if subscribe else None,
+        )
 
         if task_id and temp_path.exists():
             if _torrent_file_is_private(temp_path):
@@ -9062,6 +9364,13 @@ async def _download_and_add(
             _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
     except (RutrackerError, JackettError, DownloadStationError) as e:
         logger.warning("Download failed for index=%s: %s", index, e, exc_info=True)
+        _record_download_history(
+            "download_failed",
+            chat_id=chat_id,
+            result=result,
+            meta=_build_task_meta_from_result(result, source="search") if isinstance(result, dict) else None,
+            error=_format_download_error(e),
+        )
         can_queue = _pending_downloads_enabled()
         error_text = _download_failure_text(e, can_queue=can_queue)
         # Remember the error so the pending-queue handler (if user clicks
@@ -11467,6 +11776,13 @@ async def _series_bulk_add_download(
     if task_id:
         _remember_task_owner(task_id, chat_id)
         _remember_task_meta(task_id, _build_task_meta_from_result(result, source=meta_source))
+        _record_download_added_history(
+            task_id,
+            chat_id,
+            result,
+            method=method,
+            meta_source=meta_source,
+        )
     return task_id, method
 
 
@@ -12185,6 +12501,13 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
                 if task_id:
                     _remember_task_owner(task_id, chat_id)
                     _remember_task_meta(task_id, _build_task_meta_from_result(result, source="series_bulk"))
+                    _record_download_added_history(
+                        task_id,
+                        chat_id,
+                        result,
+                        method=method,
+                        meta_source="series_bulk",
+                    )
                 successes.append({
                     "season": season.season,
                     "task_id": task_id or "-",
@@ -13766,6 +14089,13 @@ async def _check_jackett_sub_via_rutracker_direct(
                     task_id,
                     _build_task_meta_from_title(new_title or "", source="jackett_sub"),
                 )
+                _record_download_added_from_title_history(
+                    task_id,
+                    chat_id,
+                    new_title or "",
+                    method="torrent-файл",
+                    meta_source="jackett_sub",
+                )
         except (RutrackerError, DownloadStationError) as e:
             logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
         finally:
@@ -13920,6 +14250,13 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                 if chat_id and task_id:
                     _remember_task_owner(task_id, chat_id)
                     _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
+                    _record_download_added_from_title_history(
+                        task_id,
+                        chat_id,
+                        title,
+                        method="torrent-файл",
+                        meta_source="jackett_sub",
+                    )
                 # Add public trackers unless private torrent
                 if not _torrent_file_is_private(temp_path):
                     await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
@@ -13933,6 +14270,13 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                 if chat_id and task_id:
                     _remember_task_owner(task_id, chat_id)
                     _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
+                    _record_download_added_from_title_history(
+                        task_id,
+                        chat_id,
+                        title,
+                        method="magnet",
+                        meta_source="jackett_sub",
+                    )
                 return task_id
             except MissingTaskIdError:
                 raise
@@ -13944,6 +14288,13 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
             if chat_id and task_id:
                 _remember_task_owner(task_id, chat_id)
                 _remember_task_meta(task_id, _build_task_meta_from_title(title, source="jackett_sub"))
+                _record_download_added_from_title_history(
+                    task_id,
+                    chat_id,
+                    title,
+                    method="magnet",
+                    meta_source="jackett_sub",
+                )
             return task_id
 
         raise JackettError("Нет torrent_url и magnet_url у кандидата")
@@ -14379,6 +14730,13 @@ async def _check_subscriptions(app: Application) -> None:
                         _remember_task_meta(
                             task_id,
                             _build_task_meta_from_title(new_title or "", source="rutracker_sub"),
+                        )
+                        _record_download_added_from_title_history(
+                            task_id,
+                            chat_id,
+                            new_title or "",
+                            method="torrent-файл",
+                            meta_source="rutracker_sub",
                         )
                 except (RutrackerError, DownloadStationError) as e:
                     logger.warning("Failed to update subscription %s: %s", topic_id, e)
@@ -15791,6 +16149,13 @@ async def _do_process_magnet(
             dn = _extract_magnet_dn(magnet_uri)
             if dn:
                 _remember_task_meta(task_id, _build_task_meta_from_title(dn, source="magnet"))
+            _record_download_added_from_title_history(
+                task_id,
+                chat_id,
+                dn,
+                method="magnet-ссылка",
+                meta_source="magnet",
+            )
             await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
@@ -15852,6 +16217,13 @@ async def _do_process_torrent(
         meta_title = _normalize_torrent_filename_for_match(safe_name)
         if meta_title:
             _remember_task_meta(task_id, _build_task_meta_from_title(meta_title, source="torrent_file"))
+        _record_download_added_from_title_history(
+            task_id,
+            chat_id,
+            meta_title or safe_name,
+            method="torrent-файл",
+            meta_source="torrent_file",
+        )
         if _torrent_file_is_private(temp_path):
             tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
             _mark_tracker_processed_if_final(task_id, tracker_result)

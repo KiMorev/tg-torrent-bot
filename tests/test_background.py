@@ -37,6 +37,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         topic_subscriptions_file=d / "subscriptions.json",
         pending_downloads_file=d / "pending_downloads.json",
         series_bulk_jobs_file=d / "series_bulk_jobs.json",
+        download_history_file=d / "download_history.jsonl",
     )
 
 
@@ -268,6 +269,13 @@ class NotificationDeduplicationTests(unittest.TestCase):
         self.assertIn("сообщим, как только появится", hint_text)
         self.assertIn("Скорее всего, всё в порядке", first_text)
         self.assertEqual(self._store.load_notified_tasks()["tid1"]["status"], "done")
+        history = self._store.load_download_history(chat_id=999)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["event"], "download_soft_completed")
+        self.assertEqual(history[0]["task_id"], "tid1")
+        self.assertEqual(history[0]["chat_id"], 999)
+        self.assertTrue(history[0]["soft_completed"])
+        self.assertTrue(history[0]["plex_polling_started"])
         poll.assert_called_once()
         self.assertEqual(len(created_coroutines), 1)
 

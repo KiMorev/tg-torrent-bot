@@ -33,6 +33,7 @@ class JsonStateStore:
         voice_usage_file: Path | None = None,
         gpt_usage_file: Path | None = None,
         torrent_titles_cache_file: Path | None = None,
+        download_history_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -49,6 +50,7 @@ class JsonStateStore:
         self.voice_usage_file = voice_usage_file
         self.gpt_usage_file = gpt_usage_file
         self.torrent_titles_cache_file = torrent_titles_cache_file
+        self.download_history_file = download_history_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -80,6 +82,16 @@ class JsonStateStore:
                     except OSError:
                         pass
                 logger.warning("Failed to save %s", label, exc_info=True)
+
+    def append_jsonl_file(self, path: Path, payload: dict, label: str) -> None:
+        with self.lock:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except (OSError, TypeError, ValueError):
+                logger.warning("Failed to append %s", label, exc_info=True)
 
     def load_approved_users(self) -> dict[int, dict]:
         """Загружает одобренных пользователей с метаданными.
@@ -561,6 +573,81 @@ class JsonStateStore:
         if not self.gpt_usage_file:
             return
         self.save_json_file(self.gpt_usage_file, payload, "gpt usage")
+
+    # ---- Download history (append-only memory for future "same as last time") ----
+
+    def append_download_history(self, entry: dict) -> None:
+        if not self.download_history_file or not isinstance(entry, dict):
+            return
+        self.append_jsonl_file(self.download_history_file, entry, "download history")
+
+    def load_download_history(
+        self,
+        *,
+        chat_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        if not self.download_history_file:
+            return []
+        with self.lock:
+            try:
+                lines = self.download_history_file.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                return []
+            except OSError:
+                logger.warning("Failed to load download history", exc_info=True)
+                return []
+
+        entries: list[dict] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Malformed JSONL line in download history; skipping", exc_info=True)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if chat_id is not None:
+                chat_ids = entry.get("chat_ids")
+                if entry.get("chat_id") != chat_id and not (
+                    isinstance(chat_ids, list) and chat_id in chat_ids
+                ):
+                    continue
+            entries.append(entry)
+
+        if limit is not None and limit > 0:
+            return entries[-limit:]
+        return entries
+
+    def find_latest_download_history(
+        self,
+        chat_id: int,
+        *,
+        kind: str | None = None,
+        title: str | None = None,
+        series_query: str | None = None,
+    ) -> dict | None:
+        wanted_kind = (kind or "").strip().lower()
+        wanted_title = (title or "").strip().casefold()
+        wanted_series = (series_query or "").strip().casefold()
+
+        for entry in reversed(self.load_download_history(chat_id=chat_id)):
+            if wanted_kind and str(entry.get("kind") or "").lower() != wanted_kind:
+                continue
+            if wanted_series and str(entry.get("series_query") or "").strip().casefold() != wanted_series:
+                continue
+            if wanted_title:
+                candidates = [
+                    str(entry.get("title") or ""),
+                    str(entry.get("canonical_title") or ""),
+                ]
+                if wanted_title not in {candidate.strip().casefold() for candidate in candidates}:
+                    continue
+            return entry
+
+        return None
 
     # ---- Torrent-title parsed-metadata cache (PR3) ----
 

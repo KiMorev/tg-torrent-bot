@@ -18,6 +18,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         task_meta_file=d / "task_meta.json",
         pending_downloads_file=d / "pending_downloads.json",
         series_bulk_jobs_file=d / "series_bulk_jobs.json",
+        download_history_file=d / "download_history.jsonl",
     )
 
 
@@ -153,6 +154,58 @@ class StateStoreTests(unittest.TestCase):
         loaded = self.store.load_series_bulk_jobs()
 
         self.assertEqual(loaded, {"good": {"series_title": "Клиника"}})
+
+    def test_download_history_append_load_filter_and_limit(self) -> None:
+        self.store.append_download_history({"event": "download_added", "chat_id": 100, "title": "A"})
+        self.store.append_download_history({"event": "plex_found", "chat_ids": [200, 300], "title": "B"})
+        self.store.append_download_history({"event": "download_added", "chat_id": 100, "title": "C"})
+
+        self.assertEqual([e["title"] for e in self.store.load_download_history()], ["A", "B", "C"])
+        self.assertEqual([e["title"] for e in self.store.load_download_history(chat_id=200)], ["B"])
+        self.assertEqual([e["title"] for e in self.store.load_download_history(chat_id=100, limit=1)], ["C"])
+
+    def test_download_history_skips_malformed_lines(self) -> None:
+        self.store.append_download_history({"event": "download_added", "chat_id": 100, "title": "A"})
+        with self.store.download_history_file.open("a", encoding="utf-8") as f:
+            f.write("not-json\n")
+            f.write("[]\n")
+        self.store.append_download_history({"event": "download_completed", "chat_id": 100, "title": "B"})
+
+        with self.assertLogs("tg_torrent_drop", level="WARNING"):
+            loaded = self.store.load_download_history(chat_id=100)
+
+        self.assertEqual([e["title"] for e in loaded], ["A", "B"])
+
+    def test_find_latest_download_history_matches_user_and_series(self) -> None:
+        self.store.append_download_history({
+            "event": "download_added",
+            "chat_id": 100,
+            "kind": "series",
+            "series_query": "Show",
+            "title": "old",
+        })
+        self.store.append_download_history({
+            "event": "download_added",
+            "chat_id": 200,
+            "kind": "series",
+            "series_query": "Show",
+            "title": "other-user",
+        })
+        self.store.append_download_history({
+            "event": "download_added",
+            "chat_id": 100,
+            "kind": "series",
+            "series_query": "Show",
+            "title": "latest",
+        })
+
+        found = self.store.find_latest_download_history(
+            100,
+            kind="series",
+            series_query="show",
+        )
+
+        self.assertEqual(found["title"], "latest")
 
     def test_task_meta_roundtrip(self) -> None:
         self.store.remember_task_meta("tid1", {

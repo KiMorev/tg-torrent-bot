@@ -564,6 +564,8 @@ python -m pytest tests/ -v
 - HTTP: `requests`;
 - HTML parsing: `beautifulsoup4`.
 
+PlexLoader ведёт внутреннюю безопасную историю загрузок в `STATE_DIR/download_history.jsonl`: добавление задач, завершение, мягкое завершение Download Station после 100%, ошибки и результат Plex polling. Она привязана к `chat_id`, не сохраняет magnet-ссылки, Jackett `/dl` URL, API keys и содержимое `.torrent`. Подробности формата: [`docs/download-history.md`](docs/download-history.md).
+
 Основные файлы проекта:
 
 | Файл | Назначение |
@@ -590,6 +592,7 @@ python -m pytest tests/ -v
 | [`voice_transcription.py`](voice_transcription.py) | Whisper API для голосового поиска. |
 | [`gpt_client.py`](gpt_client.py), [`gpt_features.py`](gpt_features.py) | GPT-улучшения поиска и `/new`. |
 | [`diagnostics.py`](diagnostics.py) | Диагностика для `/admin`. |
+| [`docs/download-history.md`](docs/download-history.md) | Формат внутренней истории загрузок и правила безопасности payload. |
 | [`tests/`](tests) | Pytest-набор. |
 | [`tests/test_setup_wizard.py`](tests/test_setup_wizard.py) | Проверки генерации `.env`, Telegram `chat_id` parsing и Synology URL fallback установщика. |
 
