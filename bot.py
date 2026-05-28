@@ -5049,7 +5049,7 @@ async def _run_task_notifications_once(app: Application) -> None:
                     try:
                         hint = await app.bot.send_message(
                             chat_id=chat_id,
-                            text="🔄 Ищем файл в библиотеке Plex — пришлём ссылку как только появится.",
+                            text="🔄 Ищем файл в библиотеке Plex — сообщим, как только появится.",
                         )
                         plex_hint_msgs[chat_id] = hint.message_id
                     except Exception:

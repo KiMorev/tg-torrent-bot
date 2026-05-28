@@ -168,6 +168,9 @@ class NotificationPolicyTests(unittest.TestCase):
 
         self.assertIn("Plex", text)
         self.assertIn("Загрузка дошла до 100%", text)
+        self.assertIn("Статус: скачано полностью, DS показал ошибку", text)
+        self.assertNotIn("Статус: ошибка", text)
+        self.assertIn("сообщим, когда файл появится", text)
         self.assertIn("Скорее всего, всё в порядке", text)
         self.assertNotIn("Автоочистка", text)
 

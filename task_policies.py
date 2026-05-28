@@ -100,6 +100,7 @@ def format_task_notification(
     speed = _format_size(transfer.get("speed_download"))
 
     complete_despite_error = is_complete_despite_error(task)
+    status_label = "скачано полностью, DS показал ошибку" if complete_despite_error else _status_label(status)
 
     if complete_despite_error:
         header = "✅ Загрузка дошла до 100%"
@@ -116,7 +117,7 @@ def format_task_notification(
         header,
         f"Имя: {title}",
         f"ID: {task_id}",
-        f"Статус: {_status_label(status)}",
+        f"Статус: {status_label}",
         f"Скачано: {progress}",
         f"Скорость: {speed}/s",
     ]
@@ -127,7 +128,7 @@ def format_task_notification(
         )
 
     if complete_despite_error and plex_polling_started:
-        lines.append("Проверяем Plex: пришлём ссылку, когда файл появится в библиотеке.")
+        lines.append("Проверяем Plex: сообщим, когда файл появится в библиотеке.")
 
     notice = auto_delete_notice(
         status,
