@@ -1,4 +1,4 @@
-from formatters import _format_hours, _format_progress, _format_size, _status_icon, _status_label
+from formatters import _format_hours, _format_progress, _format_size, _progress_percent, _status_icon, _status_label
 
 
 def notification_recipients(
@@ -32,6 +32,27 @@ def notification_status_key(status: str) -> str:
     return status
 
 
+def is_complete_despite_error(task: dict) -> bool:
+    status = (task.get("status") or "").lower()
+    task_type = (task.get("type") or "").lower()
+    if status != "error" or task_type != "bt":
+        return False
+
+    additional = task.get("additional", {})
+    additional = additional if isinstance(additional, dict) else {}
+    detail = additional.get("detail", {})
+    if isinstance(detail, dict) and detail.get("error_detail"):
+        return False
+    if detail and not isinstance(detail, dict):
+        return False
+
+    total = task.get("size")
+    transfer = additional.get("transfer", {})
+    downloaded = transfer.get("size_downloaded") if isinstance(transfer, dict) else None
+    percent = _progress_percent(downloaded, total)
+    return percent is not None and percent >= 99.9
+
+
 def auto_delete_notice(
     status: str,
     *,
@@ -61,7 +82,11 @@ def format_task_notification(
     progress = _format_progress(transfer.get("size_downloaded"), task.get("size"))
     speed = _format_size(transfer.get("speed_download"))
 
-    if (status or "").lower() == "finished":
+    complete_despite_error = is_complete_despite_error(task)
+
+    if complete_despite_error:
+        header = "✅ Загрузка дошла до 100%"
+    elif (status or "").lower() == "finished":
         header = "✅ Загрузка завершена"
     elif (status or "").lower() == "seeding":
         header = "✅ Загрузка завершена, идет раздача"
@@ -78,6 +103,11 @@ def format_task_notification(
         f"Скачано: {progress}",
         f"Скорость: {speed}/s",
     ]
+    if complete_despite_error:
+        lines.append(
+            "Download Station показывает ошибку, но файл скачан полностью. "
+            "Скорее всего, всё в порядке."
+        )
 
     notice = auto_delete_notice(
         status,

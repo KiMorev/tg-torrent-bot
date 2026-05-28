@@ -3,6 +3,7 @@ import unittest
 from task_policies import (
     auto_delete_notice,
     format_task_notification,
+    is_complete_despite_error,
     is_auto_delete_candidate,
     notification_recipients,
     notification_status_key,
@@ -73,6 +74,26 @@ class NotificationPolicyTests(unittest.TestCase):
         self.assertEqual(notification_status_key("error"), "error")
         self.assertEqual(notification_status_key("paused"), "paused")
 
+    def test_complete_despite_error_requires_bt_and_full_progress_without_error_detail(self) -> None:
+        task = {
+            "id": "tid1",
+            "status": "error",
+            "type": "bt",
+            "size": 1000,
+            "additional": {"transfer": {"size_downloaded": 1000}, "detail": {}},
+        }
+        self.assertTrue(is_complete_despite_error(task))
+
+        self.assertFalse(is_complete_despite_error({**task, "type": "http"}))
+        self.assertFalse(is_complete_despite_error({**task, "status": "finished"}))
+        partial = {**task, "additional": {"transfer": {"size_downloaded": 998}, "detail": {}}}
+        self.assertFalse(is_complete_despite_error(partial))
+        with_detail = {
+            **task,
+            "additional": {"transfer": {"size_downloaded": 1000}, "detail": {"error_detail": "disk_full"}},
+        }
+        self.assertFalse(is_complete_despite_error(with_detail))
+
     def test_auto_delete_notice_respects_enabled_and_statuses(self) -> None:
         self.assertEqual(
             auto_delete_notice(
@@ -120,6 +141,25 @@ class NotificationPolicyTests(unittest.TestCase):
         self.assertIn("Имя: Movie", text)
         self.assertIn("ID: tid1", text)
         self.assertIn("Автоочистка: через 24 ч.", text)
+
+    def test_format_task_notification_softens_complete_error(self) -> None:
+        text = format_task_notification(
+            {
+                "id": "tid1",
+                "status": "error",
+                "type": "bt",
+                "title": "Movie",
+                "size": 10,
+                "additional": {"transfer": {"size_downloaded": 10, "speed_download": 0}, "detail": {}},
+            },
+            auto_delete_enabled=True,
+            auto_delete_statuses={"finished"},
+            auto_delete_after_hours=24,
+        )
+
+        self.assertIn("Загрузка дошла до 100%", text)
+        self.assertIn("Скорее всего, всё в порядке", text)
+        self.assertNotIn("Автоочистка", text)
 
     def test_is_auto_delete_candidate_requires_id_and_matching_status(self) -> None:
         self.assertTrue(is_auto_delete_candidate({"id": "tid1", "status": "finished"}, {"finished"}))

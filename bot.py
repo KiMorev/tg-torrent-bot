@@ -193,6 +193,7 @@ from rutracker import RutrackerError, RutrackerResult, RutrackerTopicUnavailable
 from task_policies import (
     auto_delete_notice as _policy_auto_delete_notice,
     format_task_notification as _policy_format_task_notification,
+    is_complete_despite_error as _policy_is_complete_despite_error,
     is_auto_delete_candidate as _policy_is_auto_delete_candidate,
     notification_recipients as _policy_notification_recipients,
     notification_status_key as _policy_notification_status_key,
@@ -4645,6 +4646,10 @@ def _notification_status_key(status: str) -> str:
     return _policy_notification_status_key(status)
 
 
+def _is_complete_despite_error(task: dict) -> bool:
+    return _policy_is_complete_despite_error(task)
+
+
 def _auto_delete_notice(status: str) -> str:
     return _policy_auto_delete_notice(
         status,
@@ -4928,7 +4933,12 @@ async def _run_task_notifications_once(app: Application) -> None:
     for task in tasks:
         task_id = task.get("id")
         status = (task.get("status") or "").lower()
-        if not task_id or status not in TASK_NOTIFICATION_STATUSES:
+        complete_despite_error = _is_complete_despite_error(task)
+        notification_status = "finished" if complete_despite_error else status
+        if not task_id or (
+            status not in TASK_NOTIFICATION_STATUSES
+            and notification_status not in TASK_NOTIFICATION_STATUSES
+        ):
             continue
 
         # Intercept torrent_duplicate errors before the normal notification flow.
@@ -4949,7 +4959,7 @@ async def _run_task_notifications_once(app: Application) -> None:
                 changed = True
             continue
 
-        notification_key = _notification_status_key(status)
+        notification_key = _notification_status_key(notification_status)
         sent_recipients, failed_recipients, legacy_done = _notification_delivery_state(
             notified.get(task_id),
             notification_key,
@@ -4965,7 +4975,7 @@ async def _run_task_notifications_once(app: Application) -> None:
         recipients = _notification_recipients(task_id)
 
         # Also notify any users who subscribed via "🔔 Уведомить когда готово".
-        if status in {"finished", "seeding"}:
+        if notification_status in {"finished", "seeding"}:
             raw_state = notified.get(task_id)
             if isinstance(raw_state, dict):
                 for sub_id_str in raw_state.get("subscribers", []):
@@ -4998,7 +5008,7 @@ async def _run_task_notifications_once(app: Application) -> None:
         # task_meta and handles both kinds.
         plex_should_poll = (
             PLEX_ENABLED
-            and status in {"finished", "seeding"}
+            and notification_status in {"finished", "seeding"}
             and task_id not in _PLEX_POLLING_TASKS
             and not _plex_poll_is_done(task_id, notified)
         )
@@ -5027,7 +5037,7 @@ async def _run_task_notifications_once(app: Application) -> None:
                 await app.bot.send_message(
                     chat_id=chat_id,
                     text=_format_task_notification(task),
-                    reply_markup=_notification_keyboard(task_id, status, task.get("type", "")),
+                    reply_markup=_notification_keyboard(task_id, notification_status, task.get("type", "")),
                 )
                 await _delete_task_card_messages(app, task_id, chat_id=chat_id)
                 sent_recipients.add(recipient_key)
