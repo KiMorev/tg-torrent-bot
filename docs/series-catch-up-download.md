@@ -685,11 +685,11 @@ UI:
   - Коммит: `2bc59a0`
   - Тесты: `tests/test_plex.py`, `tests/test_series_continue.py`, `tests/test_config.py::DockerfileCoverageTest`, полный `python -m pytest tests/ -v`
   - Хвосты: UI `/continue`, detector неполных сезонов, completeness resolver, topic update и скачивание остаются следующими пунктами.
-- [ ] Коммит 2. Быстрый Plex/history detector без watch-state
-  - Статус: `todo`
-  - Коммит: -
-  - Тесты: -
-  - Хвосты: -
+- [x] Коммит 2. Быстрый Plex/history detector без watch-state
+  - Статус: `done`
+  - Коммит: `33d9ee0`
+  - Тесты: `tests/test_series_continue.py`, полный `python -m pytest tests/ -v`
+  - Хвосты: detector принимает известный total как готовый input; вычисление confidence/причины, external metadata и проверка обновления topic остаются следующими пунктами.
 - [ ] Коммит 3. Completeness resolver
   - Статус: `todo`
   - Коммит: -
