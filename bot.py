@@ -68,8 +68,6 @@ from keyboards import (
     JACKETT_SELECT_PREFIX,
     SEARCH_CALLBACK_PREFIX,
     SEARCH_INTENT_SERIES_MASTER,
-    SEARCH_MODE_SERIES,
-    SEARCH_MODE_SINGLE,
     TASK_CALLBACK_PREFIX,
     TASK_LIST_PAGE_SIZE,
     TASK_LIST_SCOPE_ALL,
@@ -100,7 +98,6 @@ from keyboards import (
     _cluster_picker_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
-    _search_mode_picker_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
     tracker_selection_label,
@@ -8659,36 +8656,10 @@ async def search_choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     parts = (query.data or "").split(":")
     return_to = _search_mode_return_to(parts[2] if len(parts) > 2 else "options")
-    await query.edit_message_text(
-        "Что скачать?\n\n"
-        "Одна раздача — найти один выбранный релиз: фильм, сезон, серию или сборник.\n"
-        "Сериал целиком — выбрать эталонную раздачу и собрать план по сезонам.",
-        reply_markup=_search_mode_picker_keyboard(
-            current_intent=_search_intent(context),
-            return_to=return_to,
-        ),
-    )
-    return _search_mode_state(return_to)
-
-
-async def search_set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    parts = (query.data or "").split(":")
-    mode = parts[2] if len(parts) > 2 else SEARCH_MODE_SINGLE
-    return_to = _search_mode_return_to(parts[3] if len(parts) > 3 else "options")
-    if mode == SEARCH_MODE_SERIES:
-        context.user_data["srch_intent"] = SEARCH_INTENT_SERIES_MASTER
-    else:
+    if _search_is_series_master(context):
         _clear_search_intent(context)
-    return await _render_search_settings(query, context, return_to)
-
-
-async def search_mode_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    parts = (query.data or "").split(":")
-    return_to = _search_mode_return_to(parts[2] if len(parts) > 2 else "options")
+    else:
+        context.user_data["srch_intent"] = SEARCH_INTENT_SERIES_MASTER
     return await _render_search_settings(query, context, return_to)
 
 
@@ -18939,8 +18910,6 @@ def main() -> None:
                 SEARCH_OPTIONS: [
                     CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_choose_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode:(options|advanced)$"),
-                    CallbackQueryHandler(search_set_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_set:(single|series):(options|advanced)$"),
-                    CallbackQueryHandler(search_mode_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_back:(options|advanced)$"),
                     CallbackQueryHandler(search_quick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quick$"),
                     CallbackQueryHandler(search_show_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:adv$"),
                     CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
@@ -18953,8 +18922,6 @@ def main() -> None:
                 SEARCH_ADVANCED: [
                     CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_choose_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode:(options|advanced)$"),
-                    CallbackQueryHandler(search_set_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_set:(single|series):(options|advanced)$"),
-                    CallbackQueryHandler(search_mode_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_back:(options|advanced)$"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quality:"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:toggle:"),
                     CallbackQueryHandler(search_do, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:do_search$"),

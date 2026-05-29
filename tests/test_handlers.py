@@ -5110,11 +5110,11 @@ class SearchSeasonManualInputTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_set_series_mode_updates_intent_and_rerenders_options(self):
-        update = _make_callback_update(callback_data="srch:mode_set:series:options")
+    async def test_mode_click_toggles_to_series_and_rerenders_options(self):
+        update = _make_callback_update(callback_data="srch:mode:options")
         context = _make_context(user_data={"srch_query": "Клиника"})
 
-        result = await bot.search_set_mode(update, context)
+        result = await bot.search_choose_mode(update, context)
 
         self.assertEqual(result, bot.SEARCH_OPTIONS)
         self.assertEqual(context.user_data["srch_intent"], bot.SEARCH_INTENT_SERIES_MASTER)
@@ -5127,15 +5127,15 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(buttons["🎚 Что скачать: сериал целиком"], "srch:mode:options")
 
-    async def test_set_single_mode_clears_intent_without_losing_filters(self):
-        update = _make_callback_update(callback_data="srch:mode_set:single:advanced")
+    async def test_mode_click_toggles_to_single_without_losing_filters(self):
+        update = _make_callback_update(callback_data="srch:mode:advanced")
         context = _make_context(user_data={
             "srch_query": "Клиника",
             "srch_intent": bot.SEARCH_INTENT_SERIES_MASTER,
             "srch_settings": {"quality": "720p", "audio": True, "subs": False},
         })
 
-        result = await bot.search_set_mode(update, context)
+        result = await bot.search_choose_mode(update, context)
 
         self.assertEqual(result, bot.SEARCH_ADVANCED)
         self.assertNotIn("srch_intent", context.user_data)

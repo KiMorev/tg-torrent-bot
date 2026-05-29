@@ -47,8 +47,6 @@ _SRCH_QUALITY_OPTIONS: list[tuple[str, str]] = [
 ]
 _SRCH_DEFAULT_SETTINGS: dict = {"quality": "1080p", "audio": False, "subs": False}
 SEARCH_INTENT_SERIES_MASTER = "series_master"
-SEARCH_MODE_SINGLE = "single"
-SEARCH_MODE_SERIES = "series"
 
 # ---------------------------------------------------------------------------
 # Callback-data helpers
@@ -561,28 +559,6 @@ def _no_results_keyboard(
 
 def _search_mode_label(intent: str | None = None) -> str:
     return "сериал целиком" if intent == SEARCH_INTENT_SERIES_MASTER else "одна раздача"
-
-
-def _search_mode_picker_keyboard(
-    *,
-    current_intent: str | None = None,
-    return_to: str = "options",
-) -> InlineKeyboardMarkup:
-    is_series = current_intent == SEARCH_INTENT_SERIES_MASTER
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"{'' if is_series else '✅ '}Одна раздача",
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode_set:{SEARCH_MODE_SINGLE}:{return_to}",
-        )],
-        [InlineKeyboardButton(
-            f"{'✅ ' if is_series else ''}📚 Сериал целиком",
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode_set:{SEARCH_MODE_SERIES}:{return_to}",
-        )],
-        [InlineKeyboardButton(
-            BUTTON_BACK,
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode_back:{return_to}",
-        )],
-    ])
 
 
 def _cluster_picker_keyboard(clusters: list[dict], *, total_count: int | None = None) -> InlineKeyboardMarkup:
