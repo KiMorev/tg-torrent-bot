@@ -6058,12 +6058,19 @@ def _task_added_message(
 
     if title:
         lines.append("")
-        lines.append(f"Имя: {title}")
+        label = "Раздача" if task_id else "Имя"
+        lines.append(f"{label}: {title}")
     if task_id:
+        next_line = (
+            "статус будет обновляться автоматически. Когда загрузка завершится, "
+            "бот сообщит об этом, затем проверит Plex и сообщит, когда файл появится в библиотеке."
+            if PLEX_ENABLED
+            else "статус будет обновляться автоматически. Когда загрузка завершится, бот сообщит об этом."
+        )
         lines.extend([
             "",
-            "Статус обновится автоматически.",
-            "Можно открыть задачу сейчас.",
+            "Что дальше:",
+            next_line,
         ])
 
     tracker_lines = _download_added_tracker_lines(tracker_result)
@@ -9855,27 +9862,22 @@ def _format_download_error(exc: Exception) -> str:
 
 
 def _download_failure_text(exc: Exception, *, can_queue: bool) -> str:
-    detail = _format_download_error(exc)
     lines = [
         "⚠️ Не удалось добавить загрузку",
         "",
-        detail,
+        "Что произошло:",
+        "не получилось передать выбранную раздачу в очередь скачивания.",
         "",
     ]
-    if isinstance(exc, DownloadStationError):
-        lines.append("Раздача найдена, но Download Station не принял задачу.")
-    else:
-        lines.append("Раздача найдена, но torrent-файл сейчас не удалось получить.")
-
     if can_queue:
         lines.extend([
-            "",
-            "Можно повторить сейчас или поставить в очередь: бот попробует скачать автоматически позже.",
+            "Что можно сделать:",
+            "попробовать снова сейчас или поставить в очередь, чтобы бот повторил попытку позже.",
         ])
     else:
         lines.extend([
-            "",
-            "Можно повторить попытку сейчас. Если ошибка повторится, проверьте источник или Download Station.",
+            "Что можно сделать:",
+            "попробовать снова сейчас. Если ошибка повторится, проверьте доступность сервиса загрузок.",
         ])
     return "\n".join(lines)
 

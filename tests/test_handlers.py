@@ -3508,8 +3508,14 @@ class FormatDownloadErrorTests(unittest.TestCase):
         from jackett import JackettError
         text = bot._download_failure_text(JackettError("HTTP 404"), can_queue=True)
         self.assertIn("Не удалось добавить загрузку", text)
-        self.assertIn("Раздача найдена", text)
+        self.assertIn("не получилось передать выбранную раздачу", text)
         self.assertIn("поставить в очередь", text)
+
+    def test_download_failure_text_without_queue_mentions_download_service(self):
+        from jackett import JackettError
+        text = bot._download_failure_text(JackettError("HTTP 404"), can_queue=False)
+        self.assertIn("попробовать снова сейчас", text)
+        self.assertIn("сервиса загрузок", text)
 
     def test_unknown_error_truncated(self):
         exc = ValueError("X" * 500)
@@ -5919,11 +5925,21 @@ class TaskAddedMessageTests(unittest.TestCase):
         self.assertNotIn("Задача добавлена", text)
 
     def test_regular_task_keeps_added_intro(self):
-        text = bot._task_added_message("torrent-файл", task_id="task_123")
+        with patch.object(bot, "PLEX_ENABLED", True):
+            text = bot._task_added_message("torrent-файл", title="Movie 1080p", task_id="task_123")
 
         self.assertTrue(text.startswith("✅ Задача добавлена в очередь скачивания"))
+        self.assertIn("Раздача: Movie 1080p", text)
         self.assertNotIn("ID: task_123", text)
-        self.assertIn("Статус обновится автоматически", text)
+        self.assertIn("Что дальше:", text)
+        self.assertIn("бот сообщит об этом, затем проверит Plex", text)
+
+    def test_regular_task_without_plex_mentions_finish_only(self):
+        with patch.object(bot, "PLEX_ENABLED", False):
+            text = bot._task_added_message("torrent-файл", title="Movie 1080p", task_id="task_123")
+
+        self.assertIn("Когда загрузка завершится, бот сообщит об этом.", text)
+        self.assertNotIn("проверит Plex", text)
 
     def test_successful_tracker_result_is_hidden_from_added_message(self):
         result = bot.TrackerApplyResult(added_count=5, available_count=5)
