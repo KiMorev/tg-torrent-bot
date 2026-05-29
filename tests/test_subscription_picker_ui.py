@@ -299,8 +299,9 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
-        self.assertIn("▫️ Одна на все сезоны", labels)
-        self.assertIn("▫️ Выбрать вручную", labels)
+        self.assertIn("☑️ Любая из эталона", labels)
+        self.assertIn("⬜ Одна на все сезоны", labels)
+        self.assertIn("⬜ Выбрать вручную", labels)
 
         query.data = "srch:bulk_prof:voice_single"
         state = asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
@@ -315,7 +316,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
-        self.assertNotIn("▫️ Одна на все сезоны", labels)
+        self.assertNotIn("⬜ Одна на все сезоны", labels)
 
     def test_bulk_profile_manual_voice_selection_applies_two_voices(self):
         query = _make_query("srch:bulk_plan:0")

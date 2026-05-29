@@ -6726,7 +6726,7 @@ async def _show_jackett_selector(
     context.user_data["srch_picker_return_to"] = return_to
 
     selected = context.user_data["srch_jackett_selected"]
-    confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
+    confirm_label = "💾 Применить" if return_to in ("options", "advanced") else "🔍 Искать"
     show_back = return_to in ("options", "advanced")
 
     prompt = (header + "\n" if header else "") + "Выберите трекеры для поиска:"
@@ -8535,7 +8535,7 @@ async def search_jackett_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     indexers = context.user_data.get("srch_jackett_indexers", [])
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
     return_to = context.user_data.get("srch_picker_return_to", "results")
-    confirm_label = "✅ Применить" if return_to in ("options", "advanced") else "🔍 Искать"
+    confirm_label = "💾 Применить" if return_to in ("options", "advanced") else "🔍 Искать"
     show_back = return_to in ("options", "advanced")
     await query.edit_message_text(
         f"Поиск: {_format_search_query_label(search_query)}\nВыберите трекеры для поиска:",
@@ -8581,7 +8581,7 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer("Выберите хотя бы один трекер.", show_alert=True)
         indexers = context.user_data.get("srch_jackett_indexers", [])
         return_to_err = context.user_data.get("srch_picker_return_to", "results")
-        confirm_label = "✅ Применить" if return_to_err in ("options", "advanced") else "🔍 Искать"
+        confirm_label = "💾 Применить" if return_to_err in ("options", "advanced") else "🔍 Искать"
         show_back = return_to_err in ("options", "advanced")
         search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
         await query.edit_message_text(
@@ -12194,12 +12194,12 @@ def _series_bulk_profile_keyboard(
             ("Одна на все сезоны", "voice_single", VOICE_SINGLE_FROM_REFERENCE),
         ]
         for label, action, policy in voice_options:
-            prefix = "✅" if profile.voice_policy == policy else "▫️"
+            prefix = "☑️" if profile.voice_policy == policy else "⬜"
             rows.append([InlineKeyboardButton(
                 f"{prefix} {label}",
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:{action}",
             )])
-        selected_prefix = "✅" if profile.voice_policy == VOICE_REQUIRE_SELECTED else "▫️"
+        selected_prefix = "☑️" if profile.voice_policy == VOICE_REQUIRE_SELECTED else "⬜"
         rows.append([InlineKeyboardButton(
             f"{selected_prefix} Выбрать вручную",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_manual",

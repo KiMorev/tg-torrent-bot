@@ -919,7 +919,7 @@ def _jackett_select_keyboard(
     """Keyboard for choosing which Jackett indexers to search.
 
     confirm_label: text for the confirm button ("🔍 Искать" when searching immediately,
-                   "✅ Применить" when returning to the options/advanced screen).
+                   "💾 Применить" when returning to the options/advanced screen).
     show_back:     show a «← Назад» button (used when opened from options/advanced).
     """
     rows: list[list[InlineKeyboardButton]] = []
@@ -929,7 +929,7 @@ def _jackett_select_keyboard(
         id_ = idx.get("id", "")
         if not id_:
             continue
-        check = "✅ " if id_ in selected_ids else ""
+        check = "☑️ " if id_ in selected_ids else "⬜ "
         abbr = _tracker_abbr(id_)
         row.append(
             InlineKeyboardButton(
@@ -998,7 +998,7 @@ def movie_trackers_keyboard(
         id_ = idx.get("id", "")
         name = idx.get("name", id_)
         is_on = enabled_ids is None or id_ in enabled_ids
-        check = "✅ " if is_on else "☐ "
+        check = "☑️ " if is_on else "⬜ "
         rows.append([InlineKeyboardButton(
             f"{check}{name}",
             callback_data=_admin_callback(f"tracker_toggle:{id_}"),
@@ -1007,6 +1007,6 @@ def movie_trackers_keyboard(
         idx.get("id", "") not in enabled_ids for idx in all_trackers
     )
     if some_disabled:
-        rows.append([InlineKeyboardButton("✅ Включить все", callback_data=_admin_callback("tracker_enable_all"))])
+        rows.append([InlineKeyboardButton("➕ Включить все", callback_data=_admin_callback("tracker_enable_all"))])
     rows.append([InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home"))])
     return InlineKeyboardMarkup(rows)

@@ -500,12 +500,12 @@ class JackettSelectKeyboardTests(unittest.TestCase):
         keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"})
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
         self.assertIn("🔍 Искать", labels)
-        self.assertNotIn("✅ Применить", labels)
+        self.assertNotIn("💾 Применить", labels)
 
     def test_apply_confirm_label(self) -> None:
-        keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"}, confirm_label="✅ Применить")
+        keyboard = _jackett_select_keyboard(self._indexers, {"rutracker"}, confirm_label="💾 Применить")
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
-        self.assertIn("✅ Применить", labels)
+        self.assertIn("💾 Применить", labels)
         self.assertNotIn("🔍 Искать", labels)
 
     def test_back_button_shown_when_requested(self) -> None:
@@ -789,41 +789,41 @@ class MovieTrackersKeyboardTests(unittest.TestCase):
     def test_all_enabled_when_none(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
         buttons = self._buttons(kb)
-        self.assertIn("✅ Kinozal", buttons)
-        self.assertIn("✅ Rutracker", buttons)
-        self.assertIn("✅ Torrenty", buttons)
+        self.assertIn("☑️ Kinozal", buttons)
+        self.assertIn("☑️ Rutracker", buttons)
+        self.assertIn("☑️ Torrenty", buttons)
 
     def test_disabled_trackers_show_unchecked(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"kinozal"})
         buttons = self._buttons(kb)
-        self.assertIn("✅ Kinozal", buttons)
-        self.assertIn("☐ Rutracker", buttons)
-        self.assertIn("☐ Torrenty", buttons)
+        self.assertIn("☑️ Kinozal", buttons)
+        self.assertIn("⬜ Rutracker", buttons)
+        self.assertIn("⬜ Torrenty", buttons)
 
     def test_toggle_callback_data(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
         buttons = self._buttons(kb)
-        self.assertEqual(buttons["✅ Kinozal"], "admin:tracker_toggle:kinozal")
-        self.assertEqual(buttons["✅ Rutracker"], "admin:tracker_toggle:rutracker")
+        self.assertEqual(buttons["☑️ Kinozal"], "admin:tracker_toggle:kinozal")
+        self.assertEqual(buttons["☑️ Rutracker"], "admin:tracker_toggle:rutracker")
 
     def test_enable_all_button_present_when_some_disabled(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"kinozal"})
         buttons = self._buttons(kb)
-        self.assertIn("✅ Включить все", buttons)
-        self.assertEqual(buttons["✅ Включить все"], "admin:tracker_enable_all")
+        self.assertIn("➕ Включить все", buttons)
+        self.assertEqual(buttons["➕ Включить все"], "admin:tracker_enable_all")
 
     def test_enable_all_button_hidden_when_all_enabled(self) -> None:
         """When enabled_ids is None (= all enabled), «Включить все» must not appear."""
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
         buttons = self._buttons(kb)
-        self.assertNotIn("✅ Включить все", buttons)
+        self.assertNotIn("➕ Включить все", buttons)
 
     def test_enable_all_button_hidden_when_all_explicitly_enabled(self) -> None:
         """When all trackers are explicitly in enabled_ids, button must not appear."""
         all_ids = {t["id"] for t in self._trackers()}
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=all_ids)
         buttons = self._buttons(kb)
-        self.assertNotIn("✅ Включить все", buttons)
+        self.assertNotIn("➕ Включить все", buttons)
 
     def test_back_button_goes_to_admin_home(self) -> None:
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids=None)
@@ -835,7 +835,7 @@ class MovieTrackersKeyboardTests(unittest.TestCase):
         kb = movie_trackers_keyboard(self._trackers(), enabled_ids={"torrenty"})
         rows = kb.inline_keyboard[:-2]  # Exclude enable-all and back buttons
         first_label = rows[0][0].text
-        self.assertTrue(first_label.startswith("✅"), f"Expected enabled tracker first, got {first_label!r}")
+        self.assertTrue(first_label.startswith("☑️"), f"Expected enabled tracker first, got {first_label!r}")
 
 
 class AdminPanelKeyboardMovieTrackersTests(unittest.TestCase):
