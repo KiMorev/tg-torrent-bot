@@ -351,7 +351,6 @@ BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
     BotCommand("continue", "Докачать сезон"),
-    BotCommand("bulk", "Планы сезонов"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
@@ -11189,12 +11188,34 @@ def _series_bulk_decision_seasons(
     return seasons
 
 
+def _series_bulk_terminal_no_action_plan(
+    plan,
+    resolved: dict[int, str] | None = None,
+    failed: dict[int, str] | None = None,
+) -> bool:
+    seasons = tuple(getattr(plan, "seasons", ()) or ())
+    if not seasons:
+        return False
+    if _series_bulk_ready_seasons(plan, resolved, failed):
+        return False
+    if _series_bulk_decision_seasons(plan, resolved, failed):
+        return False
+    return all(
+        season.status in {STATUS_ALREADY_IN_PLEX, STATUS_ALREADY_DOWNLOADING}
+        for season in seasons
+    )
+
+
 def _series_bulk_plan_keyboard(
     plan=None,
     resolved: dict[int, str] | None = None,
     failed: dict[int, str] | None = None,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if plan is not None and _series_bulk_terminal_no_action_plan(plan, resolved, failed):
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
+        ]])
     ready_count = len(_series_bulk_ready_seasons(plan, resolved, failed)) if plan is not None else 0
     decision_count = len(_series_bulk_decision_seasons(plan, resolved, failed)) if plan is not None else 0
     pack_count = len(_series_bulk_pack_candidates(plan)) if plan is not None else 0
@@ -12692,6 +12713,40 @@ def _series_bulk_plan_text(
     return "\n".join(lines)
 
 
+def _series_bulk_no_action_text(
+    plan,
+    *,
+    result_count: int,
+    warnings: tuple[str, ...] = (),
+) -> str:
+    has_plex = any(season.status == STATUS_ALREADY_IN_PLEX for season in plan.seasons)
+    has_downloading = any(season.status == STATUS_ALREADY_DOWNLOADING for season in plan.seasons)
+    if has_plex and has_downloading:
+        summary = "Все сезоны уже есть в Plex или уже стоят в загрузке."
+    elif has_downloading:
+        summary = "Все сезоны уже стоят в загрузке."
+    else:
+        summary = "Все сезоны уже есть в Plex."
+
+    lines = [
+        f"📚 Скачать недостающие сезоны: {plan.series_title}",
+        "",
+        summary,
+        "Скачивать или разбирать нечего, поэтому план не сохраняю.",
+        "",
+        f"Проверено раздач: {result_count}",
+        "",
+    ]
+    lines.extend(_series_bulk_status_line(season, None, None) for season in plan.seasons)
+    if warnings:
+        lines.extend([
+            "",
+            "⚠️ Во время проверки были предупреждения:",
+            *[f"• {warning}" for warning in dict.fromkeys(warnings)],
+        ])
+    return "\n".join(lines)
+
+
 _SERIES_BULK_LARGE_TASK_COUNT = 20
 
 
@@ -14103,6 +14158,16 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         context.user_data["srch_series_bulk_failed_candidates"] = {}
         context.user_data.pop("srch_series_bulk_review_season", None)
         context.user_data.pop("srch_series_bulk_job_id", None)
+        if _series_bulk_terminal_no_action_plan(plan):
+            await query.edit_message_text(
+                _series_bulk_no_action_text(
+                    plan,
+                    result_count=len(combined_results),
+                    warnings=tuple(search_warnings),
+                ),
+                reply_markup=_series_bulk_done_keyboard(False),
+            )
+            return ConversationHandler.END
         _series_bulk_create_job(
             context,
             plan=plan,
@@ -16261,7 +16326,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         extras.append(
             "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
         )
-        extras.append("• /bulk — открыть сохранённый план недостающих сезонов и продолжить после рестарта")
     if PLEX_ENABLED:
         extras.append("• /continue — найти в Plex сезоны, которые можно докачать по истории загрузок")
     if MOVIE_DISCOVERY_ENABLED and search_enabled:

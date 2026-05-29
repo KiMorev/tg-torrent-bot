@@ -465,6 +465,51 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["seasons"]["2"]["plan_status"], bot.STATUS_EXACT)
         self.assertEqual(job["seasons"]["2"]["runtime_status"], "pending")
 
+    def test_bulk_build_all_seasons_in_plex_finishes_without_saved_job(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+                "partial": False,
+                "series": True,
+                "size": "10 GB",
+                "seeders": 20,
+                "source": "jackett",
+                "tracker_name": "rutracker",
+            },
+        ]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        fake_store, saved_jobs = _fake_series_bulk_store()
+
+        with (
+            patch.object(bot, "kinopoisk_client", MagicMock(search_series_seasons=MagicMock(return_value=2))),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value={1, 2})),
+            patch.object(bot, "_series_bulk_downloading_seasons", AsyncMock(return_value=set())),
+            patch.object(bot, "_series_bulk_search_once", AsyncMock(return_value=([], []))),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = self._open_profile_and_build(update, ctx)
+
+        self.assertEqual(state, bot.ConversationHandler.END)
+        self.assertNotIn("srch_series_bulk_job_id", ctx.user_data)
+        self.assertEqual(saved_jobs, {})
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Все сезоны уже есть в Plex.", final_text)
+        self.assertIn("план не сохраняю", final_text)
+        self.assertIn("Сезон 1 - уже есть в Plex", final_text)
+        self.assertIn("Сезон 2 - уже есть в Plex", final_text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertEqual(labels, [bot.BUTTON_CLOSE])
+
     def test_bulk_build_cancel_after_season_lookup_stops_without_job(self):
         query = _make_query("srch:bulk_plan:0")
         query.message = MagicMock()
