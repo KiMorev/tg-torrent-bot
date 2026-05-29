@@ -118,9 +118,10 @@ def _magnet_wait_bar(step: int, width: int = 8) -> str:
 
 def _magnet_wait_text(step: int, attempts: int) -> str:
     return (
-        "Добавляю magnet-ссылку в Download Station.\n"
-        f"Получаю ID задачи: {_magnet_wait_bar(step)}\n"
-        f"Проверка {min(step + 1, attempts)}/{attempts}."
+        "⏳ Добавляю magnet-ссылку\n\n"
+        "Ищу созданную задачу в списке загрузок.\n"
+        "Обычно это занимает до 10-15 секунд.\n\n"
+        f"Попытка {min(step + 1, attempts)} из {attempts}: {_magnet_wait_bar(step)}"
     )
 
 

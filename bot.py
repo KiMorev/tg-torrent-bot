@@ -2362,8 +2362,24 @@ def _movie_discovery_refresh_busy_mode() -> str:
 
 def _movie_discovery_refresh_wait_text(mode: str) -> str:
     if mode == "kp_full":
-        return "🎬 Идёт глубокое обновление новинок. Дождусь его и покажу свежий список."
-    return "🎬 Новинки уже обновляются. Дождусь текущего обновления и покажу свежий список."
+        return (
+            "🎬 Идёт глубокое обновление новинок\n\n"
+            "Проверяю трекеры, рейтинг и Plex-метки. Это может занять пару минут.\n"
+            "Дождусь текущего обновления и покажу свежий список."
+        )
+    return (
+        "🎬 Новинки уже обновляются\n\n"
+        "Проверяю трекеры, рейтинг и Plex-метки. Это может занять пару минут.\n"
+        "Дождусь текущего обновления и покажу свежий список."
+    )
+
+
+def _movie_discovery_refresh_start_text() -> str:
+    return (
+        "🎬 Обновляю новинки\n\n"
+        "Проверяю трекеры, рейтинг и Plex-метки.\n"
+        "Это может занять пару минут."
+    )
 
 
 def _movie_discovery_admin_refresh_wait_note(refresh_kind: str) -> str:
@@ -8608,8 +8624,9 @@ def _series_continue_close_keyboard() -> InlineKeyboardMarkup:
 
 def _series_continue_progress_text() -> str:
     return (
-        "📺 <b>Докачать сезон</b>\n\n"
-        "Собираю быстрый список из Plex и истории загрузок."
+        "📺 <b>Ищу сезоны для докачки</b>\n\n"
+        "Сверяю неполные сезоны в Plex с историей загрузок.\n"
+        "Покажу только варианты, которые можно уверенно продолжить."
     )
 
 
@@ -16304,7 +16321,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         progress_text = (
             _movie_discovery_refresh_wait_text(busy_mode)
             if busy_mode
-            else "🎬 Собираю новинки…"
+            else _movie_discovery_refresh_start_text()
         )
         progress = await update.message.reply_text(progress_text)
         cache = await _refresh_movie_discovery_cache()
@@ -16352,7 +16369,7 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
     progress_text = (
         _movie_discovery_refresh_wait_text(busy_mode)
         if busy_mode
-        else "🎬 Обновляю новинки…"
+        else _movie_discovery_refresh_start_text()
     )
     await _safe_edit_callback(query, progress_text)
     logger.info("movie_discovery: /new render path=refresh_callback chat=%s — refreshing now", chat_id)

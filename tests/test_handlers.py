@@ -1559,6 +1559,13 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertIn("Почему может быть пусто", text)
         self.assertIn("нажать «Обновить»", text)
 
+    def test_movie_discovery_refresh_start_text_explains_wait(self):
+        text = bot._movie_discovery_refresh_start_text()
+        self.assertIn("Обновляю новинки", text)
+        self.assertIn("трекеры", text)
+        self.assertIn("Plex-метки", text)
+        self.assertIn("пару минут", text)
+
     def test_movie_discovery_close_deletes_message(self):
         update = _make_callback_update(chat_id=100, callback_data="new:close")
         context = _make_context()
@@ -1876,6 +1883,8 @@ class MovieDiscoveryRefreshSingleFlightTests(unittest.IsolatedAsyncioTestCase):
 
         first_text = update.callback_query.edit_message_text.call_args_list[0].args[0]
         self.assertIn("Новинки уже обновляются", first_text)
+        self.assertIn("Plex-метки", first_text)
+        self.assertIn("пару минут", first_text)
         refresh_mock.assert_awaited_once()
 
 
@@ -4344,6 +4353,14 @@ class SeriesHelpersTests(unittest.TestCase):
         ]
         self.assertEqual(_seasons_available_in_results(results), [1, 2, 3])
 
+    def test_magnet_wait_text_uses_user_friendly_attempt_counter(self):
+        from formatters import _magnet_wait_text
+        text = _magnet_wait_text(2, 8)
+        self.assertIn("Добавляю magnet-ссылку", text)
+        self.assertIn("Ищу созданную задачу", text)
+        self.assertIn("10-15 секунд", text)
+        self.assertIn("Попытка 3 из 8", text)
+
 
 class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
     """Regression: regexps that detect/extract season numbers must all agree on
@@ -5381,6 +5398,13 @@ class SeriesContinueCommandTests(unittest.TestCase):
             patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
         ):
             yield
+
+    def test_continue_progress_text_explains_sources_and_confidence(self):
+        text = bot._series_continue_progress_text()
+        self.assertIn("Ищу сезоны для докачки", text)
+        self.assertIn("неполные сезоны", text)
+        self.assertIn("историей загрузок", text)
+        self.assertIn("уверенно продолжить", text)
 
     def test_continue_command_renders_mine_list(self):
         update = _make_message_update(chat_id=100)
