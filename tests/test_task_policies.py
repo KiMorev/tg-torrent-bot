@@ -7,6 +7,8 @@ from task_policies import (
     is_auto_delete_candidate,
     notification_recipients,
     notification_status_key,
+    user_task_status_icon,
+    user_task_status_label,
 )
 
 
@@ -102,6 +104,22 @@ class NotificationPolicyTests(unittest.TestCase):
         }
         self.assertTrue(is_complete_despite_error(with_legacy_unknown_detail))
 
+    def test_user_task_status_softens_complete_error(self) -> None:
+        task = {
+            "id": "tid1",
+            "status": "error",
+            "type": "bt",
+            "size": 1000,
+            "additional": {"transfer": {"size_downloaded": 1000}, "detail": {}},
+        }
+
+        self.assertEqual(user_task_status_icon(task), "✅")
+        self.assertEqual(user_task_status_label(task), "скачано полностью")
+        self.assertEqual(
+            user_task_status_label(task, plex_polling_started=True),
+            "скачано полностью, проверяем Plex",
+        )
+
     def test_auto_delete_notice_respects_enabled_and_statuses(self) -> None:
         self.assertEqual(
             auto_delete_notice(
@@ -168,10 +186,9 @@ class NotificationPolicyTests(unittest.TestCase):
 
         self.assertIn("Plex", text)
         self.assertIn("Загрузка дошла до 100%", text)
-        self.assertIn("Статус: скачано полностью, DS показал ошибку", text)
+        self.assertIn("Статус: скачано полностью, проверяем Plex", text)
         self.assertNotIn("Статус: ошибка", text)
-        self.assertIn("сообщим, когда файл появится", text)
-        self.assertIn("Скорее всего, всё в порядке", text)
+        self.assertIn("Проверяем Plex и сообщим, когда он появится", text)
         self.assertNotIn("Автоочистка", text)
 
     def test_is_auto_delete_candidate_requires_id_and_matching_status(self) -> None:

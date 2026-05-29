@@ -112,6 +112,31 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("Статус: ✅ завершено", text)
         self.assertIn("Скачано: 100.0 B из 100.0 B (100.0%)", text)
 
+    def test_complete_error_is_shown_as_downloaded_in_list_and_card(self) -> None:
+        task = {
+            "id": "tid1",
+            "title": "Movie",
+            "status": "error",
+            "type": "bt",
+            "size": 100,
+            "additional": {"transfer": {"size_downloaded": 100, "speed_download": 0}, "detail": {}},
+        }
+
+        list_text = format_tasks(
+            [task],
+            scope="my",
+            updated_at="12:00:00",
+            owners={"tid1": 100},
+            scope_all="all",
+        )
+        card_text = format_task_card(task)
+
+        self.assertIn("1. ✅ Movie", list_text)
+        self.assertIn("Статус: скачано полностью", list_text)
+        self.assertNotIn("Статус: ошибка", list_text)
+        self.assertIn("Статус: ✅ скачано полностью", card_text)
+        self.assertIn("Download Station показывает ошибку, но файл скачан полностью.", card_text)
+
     def test_has_active_tasks_checks_transfer_statuses(self) -> None:
         self.assertTrue(has_active_tasks([{"status": "waiting"}]))
         self.assertTrue(has_active_tasks([{"status": "DOWNLOADING"}]))

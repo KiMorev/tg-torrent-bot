@@ -5,10 +5,9 @@ from formatters import (
     _progress_bar,
     _progress_meter,
     _progress_percent,
-    _status_icon,
-    _status_label,
     _task_remaining_bytes,
 )
+from task_policies import is_complete_despite_error, user_task_status_icon, user_task_status_label
 
 
 ACTIVE_STATUSES = {"downloading", "waiting", "finishing", "hash_checking"}
@@ -83,7 +82,6 @@ def format_tasks(
 
     for index, task in enumerate(visible_tasks, start=start + 1):
         title = task.get("title") or task.get("id") or "без названия"
-        status = task.get("status", "unknown")
         transfer = task.get("additional", {}).get("transfer", {})
         downloaded = transfer.get("size_downloaded")
         total = task.get("size")
@@ -93,10 +91,12 @@ def format_tasks(
         speed = _format_size(speed_bytes)
         eta = _format_eta(_task_remaining_bytes(task, transfer), speed_bytes)
         task_id = task.get("id")
+        status_icon = user_task_status_icon(task)
+        status_label = user_task_status_label(task)
 
         line = (
-            f"{index}. {_status_icon(status)} {title}\n"
-            f"   Статус: {_status_label(status)}\n"
+            f"{index}. {status_icon} {title}\n"
+            f"   Статус: {status_label}\n"
             f"   Прогресс: {_progress_meter(percent)}\n"
             f"   Скачано: {progress}\n"
             f"   Скорость: {speed}/s | Осталось: {eta}"
@@ -128,7 +128,6 @@ def find_task(tasks: list[dict], task_id: str) -> dict | None:
 def format_task_card(task: dict) -> str:
     title = task.get("title") or "без названия"
     task_id = task.get("id") or "unknown"
-    status = task.get("status", "unknown")
     transfer = task.get("additional", {}).get("transfer", {})
     downloaded = transfer.get("size_downloaded")
     total = task.get("size")
@@ -137,17 +136,20 @@ def format_task_card(task: dict) -> str:
     speed_bytes = transfer.get("speed_download")
     speed = _format_size(speed_bytes)
     eta = _format_eta(_task_remaining_bytes(task, transfer), speed_bytes)
+    complete_despite_error = is_complete_despite_error(task)
 
     lines = [
         "Задача Download Station",
         f"Имя: {title}",
         f"ID: {task_id}",
-        f"Статус: {_status_icon(status)} {_status_label(status)}",
+        f"Статус: {user_task_status_icon(task)} {user_task_status_label(task)}",
         f"Прогресс: {_progress_bar(percent)}",
         f"Скачано: {progress}",
         f"Скорость: {speed}/s",
         f"Осталось: {eta}",
     ]
+    if complete_despite_error:
+        lines.append("Download Station показывает ошибку, но файл скачан полностью.")
 
     return "\n".join(lines)
 

@@ -69,6 +69,22 @@ def is_complete_despite_error(task: dict) -> bool:
     return percent is not None and percent >= 99.9
 
 
+def user_task_status_icon(task: dict) -> str:
+    if is_complete_despite_error(task):
+        return "✅"
+
+    return _status_icon(task.get("status"))
+
+
+def user_task_status_label(task: dict, *, plex_polling_started: bool = False) -> str:
+    if is_complete_despite_error(task):
+        if plex_polling_started:
+            return "скачано полностью, проверяем Plex"
+        return "скачано полностью"
+
+    return _status_label(task.get("status"))
+
+
 def auto_delete_notice(
     status: str,
     *,
@@ -100,7 +116,7 @@ def format_task_notification(
     speed = _format_size(transfer.get("speed_download"))
 
     complete_despite_error = is_complete_despite_error(task)
-    status_label = "скачано полностью, DS показал ошибку" if complete_despite_error else _status_label(status)
+    status_label = user_task_status_label(task, plex_polling_started=plex_polling_started)
 
     if complete_despite_error:
         header = "✅ Загрузка дошла до 100%"
@@ -121,14 +137,16 @@ def format_task_notification(
         f"Скачано: {progress}",
         f"Скорость: {speed}/s",
     ]
-    if complete_despite_error:
+    if complete_despite_error and plex_polling_started:
+        lines.append(
+            "Download Station показывает ошибку, но файл скачан полностью. "
+            "Проверяем Plex и сообщим, когда он появится в библиотеке."
+        )
+    elif complete_despite_error:
         lines.append(
             "Download Station показывает ошибку, но файл скачан полностью. "
             "Скорее всего, всё в порядке."
         )
-
-    if complete_despite_error and plex_polling_started:
-        lines.append("Проверяем Plex: сообщим, когда файл появится в библиотеке.")
 
     notice = auto_delete_notice(
         status,

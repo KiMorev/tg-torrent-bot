@@ -264,10 +264,9 @@ class NotificationDeduplicationTests(unittest.TestCase):
         first_text = mock_app.bot.send_message.await_args_list[0].kwargs["text"]
         hint_text = mock_app.bot.send_message.await_args_list[1].kwargs["text"]
         self.assertIn("Plex", first_text)
-        self.assertIn("Статус: скачано полностью, DS показал ошибку", first_text)
-        self.assertIn("сообщим, когда файл появится", first_text)
+        self.assertIn("Статус: скачано полностью, проверяем Plex", first_text)
+        self.assertIn("сообщим, когда он появится", first_text)
         self.assertIn("сообщим, как только появится", hint_text)
-        self.assertIn("Скорее всего, всё в порядке", first_text)
         self.assertEqual(self._store.load_notified_tasks()["tid1"]["status"], "done")
         history = self._store.load_download_history(chat_id=999)
         self.assertEqual(len(history), 1)
