@@ -8229,7 +8229,10 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     parts = (query.data or "").split(":", 2)
     if len(parts) < 3:
-        await query.edit_message_text("Не удалось разобрать выбор кластера.")
+        await query.edit_message_text(
+            "Не удалось разобрать выбор кластера.",
+            reply_markup=_search_error_keyboard(),
+        )
         return SEARCH_RESULTS
     pick = parts[2]
 
@@ -8250,13 +8253,19 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             cluster_idx = int(pick)
         except ValueError:
-            await query.edit_message_text("Неверный индекс кластера.")
+            await query.edit_message_text(
+                "Неверный индекс кластера.",
+                reply_markup=_search_error_keyboard(),
+            )
             return SEARCH_RESULTS
         # Use the exact visible cluster list rendered by _run_search. Fallback
         # to the old >=2 rule for stale sessions created before this state key.
         visible = picker_clusters or [c for c in clusters if c["count"] >= 2]
         if cluster_idx < 0 or cluster_idx >= len(visible):
-            await query.edit_message_text("Кластер не найден.")
+            await query.edit_message_text(
+                "Кластер не найден.",
+                reply_markup=_search_error_keyboard(),
+            )
             return SEARCH_RESULTS
         chosen = visible[cluster_idx]
         indices = set(chosen.get("indices") or [])
@@ -8359,7 +8368,10 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if 0 <= idx < len(stored):
             suggestion = str(stored[idx]).strip()
     if not suggestion:
-        await query.edit_message_text("Подсказка потеряна. Начните поиск заново.")
+        await query.edit_message_text(
+            "Подсказка потеряна. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
     full_query = _build_current_mode_search_query(context, suggestion, settings)
@@ -8374,7 +8386,10 @@ async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     base = context.user_data.get("srch_query", "").strip()
     if not base:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     return await _execute_search(query, context, _search_base_for_current_mode(context, base))
 
@@ -8391,12 +8406,18 @@ async def search_expand_all_trackers(update: Update, context: ContextTypes.DEFAU
     indexers = context.user_data.get("srch_jackett_indexers") or []
     all_ids = {i["id"] for i in indexers}
     if not all_ids:
-        await query.edit_message_text("Jackett-индексеры неизвестны. Начните поиск заново.")
+        await query.edit_message_text(
+            "Jackett-индексеры неизвестны. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     context.user_data["srch_jackett_selected"] = all_ids
     sq = context.user_data.get("srch_search_query") or context.user_data.get("srch_query", "")
     if not sq:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     return await _execute_search(query, context, sq)
 
@@ -8411,7 +8432,10 @@ async def search_no_quality_all_trackers(update: Update, context: ContextTypes.D
         context.user_data["srch_jackett_selected"] = all_ids
     base = context.user_data.get("srch_query", "").strip()
     if not base:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     return await _execute_search(query, context, _search_base_for_current_mode(context, base))
 
@@ -8428,7 +8452,10 @@ async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     # Restore subscribe-intent saved by the original _download_and_add call —
     # without this, retrying «⬇️📺 Серии» / «⬇️🎯 Сезон» after a failure would
@@ -8453,16 +8480,25 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     if not _pending_downloads_enabled():
-        await query.edit_message_text("Очередь отложенных загрузок отключена.")
+        await query.edit_message_text(
+            "Очередь отложенных загрузок отключена.",
+            reply_markup=_task_error_keyboard(),
+        )
         return ConversationHandler.END
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Запрос потерян.")
+        await query.edit_message_text(
+            "Запрос потерян.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     result = results[index]
     chat_id = query.message.chat.id if query.message else None
@@ -8725,7 +8761,10 @@ async def search_series_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     series_query = context.user_data.pop("srch_series_query", "")
     if not series_query:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     context.user_data["srch_base_title"] = series_query
@@ -9711,7 +9750,10 @@ async def search_season_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     base = context.user_data.get("srch_base_title", "")
     if not base:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
@@ -9726,7 +9768,10 @@ async def search_season_skip(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     base = context.user_data.get("srch_base_title", "")
     if not base:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     quality_suffix = _quality_to_query_suffix(context.user_data.get("srch_picked_quality", ""))
@@ -9745,7 +9790,10 @@ async def search_season_back_to_picker(update: Update, context: ContextTypes.DEF
 
     base = context.user_data.get("srch_base_title", "")
     if not base:
-        await query.edit_message_text("Запрос потерян. Начните поиск заново.")
+        await query.edit_message_text(
+            "Запрос потерян. Начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     total_seasons = context.user_data.get("srch_total_seasons")
@@ -10149,7 +10197,10 @@ async def _download_and_add(
     """
     results = context.user_data.get("srch_results", [])
     if index < 0 or index >= len(results):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     notify_policy, download_policy = _coerce_subscription_policies(
@@ -10543,7 +10594,10 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     # User committed to a result — any in-flight did-you-mean prefetch is now
     # irrelevant. Cancel to free the asyncio.Task.
@@ -10668,7 +10722,10 @@ async def _create_subscription_only(
 ) -> int:
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     result = results[index]
@@ -11316,13 +11373,19 @@ def _series_bulk_pack_confirm_keyboard(index: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _series_bulk_done_keyboard(has_downloads: bool, has_failures: bool = False) -> InlineKeyboardMarkup:
+def _series_bulk_done_keyboard(
+    has_downloads: bool,
+    has_failures: bool = False,
+    remaining_decisions: int = 0,
+) -> InlineKeyboardMarkup:
     rows = []
-    if has_failures:
+    if remaining_decisions:
+        label = "⚙️ Разобрать ошибки" if has_failures and remaining_decisions == 1 else "⚙️ Разобрать оставшиеся"
         rows.append([InlineKeyboardButton(
-            "⚙️ Разобрать ошибки",
+            label,
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_review",
         )])
+        rows.append([InlineKeyboardButton("⬅️ К плану", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_back_plan")])
     if has_downloads:
         rows.append([InlineKeyboardButton(
             BUTTON_DOWNLOAD_LIST,
@@ -11851,11 +11914,41 @@ _SERIES_BULK_JOB_STATUS_LABELS = {
     "planned": "план собран",
     "batch_running": "скачивание идёт",
     "batch_completed": "часть задач добавлена",
+    "batch_completed_with_decisions": "есть спорные сезоны",
     "batch_completed_with_pending": "есть очередь повтора",
     "batch_completed_with_errors": "есть ошибки",
     "batch_failed": "добавление не удалось",
     "pack_downloaded": "пак добавлен",
+    "cancelled": "отменён",
+    "replaced": "пересобран",
 }
+
+_SERIES_BULK_HIDDEN_JOB_STATUSES = {"cancelled", "replaced"}
+
+
+def _series_bulk_int_map(values: dict) -> dict[int, str]:
+    normalized: dict[int, str] = {}
+    for key, value in values.items():
+        try:
+            normalized[int(key)] = str(value)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _series_bulk_job_is_actionable(job: dict) -> bool:
+    if str(job.get("status") or "") in _SERIES_BULK_HIDDEN_JOB_STATUSES:
+        return False
+    plan = _series_bulk_plan_from_job(job)
+    if plan is None:
+        return False
+    resolved_raw, failed_raw, _failed_candidates = _series_bulk_context_maps_from_job(job)
+    resolved = _series_bulk_int_map(resolved_raw)
+    failed = _series_bulk_int_map(failed_raw)
+    return bool(
+        _series_bulk_ready_seasons(plan, resolved, failed)
+        or _series_bulk_decision_seasons(plan, resolved, failed)
+    )
 
 
 def _series_bulk_job_matches_chat(job: dict, chat_id: int | None) -> bool:
@@ -11883,6 +11976,8 @@ def _series_bulk_jobs_for_chat(chat_id: int | None, *, limit: int = 10) -> list[
         if not _series_bulk_job_matches_chat(job, chat_id):
             continue
         if not isinstance(job.get("seasons"), dict):
+            continue
+        if not _series_bulk_job_is_actionable(job):
             continue
         items.append((str(job_id), job))
 
@@ -12790,6 +12885,7 @@ def _series_bulk_done_text(
     successes: list[dict],
     failures: list[dict],
     pending_retries: list[dict] | None = None,
+    remaining_decisions: int = 0,
 ) -> str:
     pending_retries = pending_retries or []
     lines = ["✅ План обработан", ""]
@@ -12812,6 +12908,12 @@ def _series_bulk_done_text(
             lines.append(f"❌ Сезон {item['season']} - {item['error']}")
     if failures:
         lines.extend(["", "Можно открыть загрузки или разобрать ошибки в плане."])
+    elif remaining_decisions:
+        lines.extend([
+            "",
+            f"Осталось разобрать сезонов: {remaining_decisions}.",
+            "Уверенные задачи добавлены, а спорные или ненайденные сезоны я не буду выбирать наугад.",
+        ])
     elif successes or pending_retries:
         lines.extend(["", "Можно открыть список загрузок."])
     return "\n".join(lines)
@@ -13821,6 +13923,7 @@ async def search_series_bulk_back_plan(update: Update, context: ContextTypes.DEF
 async def search_series_bulk_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    _series_bulk_set_job_status(context, "replaced")
     profile = context.user_data.get("srch_series_bulk_profile")
     if not isinstance(profile, SeriesBulkProfile):
         profile = _series_bulk_profile_from_context(context)
@@ -13987,19 +14090,28 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
                     result=result,
                 )
 
+        final_resolved = _series_bulk_resolved(context)
+        final_failed = _series_bulk_failed(context)
+        remaining_decisions = len(_series_bulk_decision_seasons(plan, final_resolved, final_failed))
         if failures and (successes or pending_retries):
             _series_bulk_set_job_status(context, "batch_completed_with_errors")
         elif pending_retries:
             _series_bulk_set_job_status(context, "batch_completed_with_pending")
         elif failures:
             _series_bulk_set_job_status(context, "batch_failed")
+        elif remaining_decisions:
+            _series_bulk_set_job_status(context, "batch_completed_with_decisions")
         else:
             _series_bulk_set_job_status(context, "batch_completed")
         await query.edit_message_text(
-            _series_bulk_done_text(successes, failures, pending_retries),
-            reply_markup=_series_bulk_done_keyboard(bool(successes or pending_retries), bool(failures)),
+            _series_bulk_done_text(successes, failures, pending_retries, remaining_decisions),
+            reply_markup=_series_bulk_done_keyboard(
+                bool(successes or pending_retries),
+                bool(failures),
+                remaining_decisions,
+            ),
         )
-        return SEARCH_RESULTS if failures else ConversationHandler.END
+        return SEARCH_RESULTS if remaining_decisions else ConversationHandler.END
     finally:
         _series_bulk_finish_action(context, "batch")
 
@@ -14010,12 +14122,18 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     result = results[index]
@@ -14044,13 +14162,19 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         index = int(context.user_data.get("srch_series_bulk_index"))
     except (TypeError, ValueError):
         _series_bulk_finish_build(context, build_token)
-        await query.edit_message_text("План потерян. Вернитесь к результатам и откройте его заново.")
+        await query.edit_message_text(
+            "План потерян. Вернитесь к результатам и откройте его заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return SEARCH_RESULTS
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
         _series_bulk_finish_build(context, build_token)
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     result = results[index]
@@ -14234,12 +14358,18 @@ async def search_download_pick(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     result = results[index]
@@ -14262,12 +14392,18 @@ async def search_subscribe_pick(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     context.user_data["srch_sub_index"] = index
@@ -14287,12 +14423,18 @@ async def search_subscribe_preset(update: Update, context: ContextTypes.DEFAULT_
         _prefix, _action, idx_str, code = query.data.rsplit(":", 3)
         index = int(idx_str)
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     pair = _SUB_PRESETS.get(code)
     if pair is None:
-        await query.edit_message_text("Неизвестный пресет подписки.")
+        await query.edit_message_text(
+            "Неизвестный пресет подписки.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     notify_policy, download_policy, download_current_now = pair
     if not download_current_now:
@@ -14376,12 +14518,18 @@ async def search_subscribe_advanced(update: Update, context: ContextTypes.DEFAUL
     try:
         index = int(query.data.split(":")[-1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     context.user_data["srch_sub_index"] = index
@@ -14401,15 +14549,24 @@ async def search_subscribe_set_notify(update: Update, context: ContextTypes.DEFA
         _prefix, _action, idx_str, notify_policy = query.data.rsplit(":", 3)
         index = int(idx_str)
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     if notify_policy not in VALID_NOTIFY_POLICIES:
-        await query.edit_message_text("Неизвестный режим уведомлений.")
+        await query.edit_message_text(
+            "Неизвестный режим уведомлений.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     results = context.user_data.get("srch_results", [])
     if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
+        await query.edit_message_text(
+            "Результат недоступен.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     # Stash the step-1 choice so step 2 can combine them on commit.
@@ -14430,10 +14587,16 @@ async def search_subscribe_set_download(update: Update, context: ContextTypes.DE
         _prefix, _action, idx_str, download_policy = query.data.rsplit(":", 3)
         index = int(idx_str)
     except (ValueError, IndexError):
-        await query.edit_message_text("Ошибка при разборе запроса.")
+        await query.edit_message_text(
+            "Ошибка при разборе запроса.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     if download_policy not in VALID_DOWNLOAD_POLICIES:
-        await query.edit_message_text("Неизвестный режим загрузки.")
+        await query.edit_message_text(
+            "Неизвестный режим загрузки.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     notify_policy = str(
@@ -14450,7 +14613,10 @@ async def search_subscribe_set_download(update: Update, context: ContextTypes.DE
                 parse_mode="HTML",
             )
             return SEARCH_RESULTS
-        await query.edit_message_text("Такой режим ничего не делает: уведомления выключены и загрузка тоже.")
+        await query.edit_message_text(
+            "Такой режим ничего не делает: уведомления выключены и загрузка тоже.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
     return await _download_and_add(
         query, context, index,
@@ -14468,7 +14634,10 @@ async def search_subscribe_back_to_results(
     await query.answer()
     results = context.user_data.get("srch_results", [])
     if not results:
-        await query.edit_message_text("Результаты потеряны — начните поиск заново.")
+        await query.edit_message_text(
+            "Результаты потеряны — начните поиск заново.",
+            reply_markup=_search_error_keyboard(),
+        )
         return ConversationHandler.END
 
     page = int(context.user_data.get("srch_results_page", 0))
@@ -14519,7 +14688,10 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
 
     pending = context.user_data.pop("plex_pending", None)
     if not pending:
-        await query.edit_message_text("Данные потеряны — начните загрузку заново.")
+        await query.edit_message_text(
+            "Данные потеряны — начните загрузку заново.",
+            reply_markup=_task_error_keyboard(),
+        )
         return ConversationHandler.END
 
     if pending["type"] == "search":
@@ -14532,7 +14704,7 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     # magnet / torrent — handled via global plex_confirm_standalone below
-    await query.edit_message_text("Неизвестный тип ожидания.")
+    await query.edit_message_text("Неизвестный тип ожидания.", reply_markup=_task_error_keyboard())
     return ConversationHandler.END
 
 
@@ -14551,7 +14723,10 @@ async def plex_upgrade_download(update: Update, context: ContextTypes.DEFAULT_TY
 
     pending = context.user_data.pop("plex_pending", None)
     if not pending:
-        await query.edit_message_text("Данные потеряны — начните загрузку заново.")
+        await query.edit_message_text(
+            "Данные потеряны — начните загрузку заново.",
+            reply_markup=_task_error_keyboard(),
+        )
         return ConversationHandler.END
 
     old_key = pending.get("plex_old_season_key")
@@ -14571,7 +14746,7 @@ async def plex_upgrade_download(update: Update, context: ContextTypes.DEFAULT_TY
             _skip_plex_check=True,
         )
 
-    await query.edit_message_text("Неизвестный тип ожидания.")
+    await query.edit_message_text("Неизвестный тип ожидания.", reply_markup=_task_error_keyboard())
     return ConversationHandler.END
 
 
@@ -14597,7 +14772,10 @@ async def plex_confirm_standalone(update: Update, context: ContextTypes.DEFAULT_
 
     pending = context.user_data.pop("plex_pending", None)
     if not pending:
-        await query.edit_message_text("Данные потеряны — пришлите файл или ссылку заново.")
+        await query.edit_message_text(
+            "Данные потеряны — пришлите файл или ссылку заново.",
+            reply_markup=_task_error_keyboard(),
+        )
         return
 
     chat_id = query.message.chat.id if query.message else None
@@ -14605,7 +14783,10 @@ async def plex_confirm_standalone(update: Update, context: ContextTypes.DEFAULT_
     if pending["type"] == "magnet":
         magnet_uri = pending.get("magnet_uri", "")
         if not magnet_uri:
-            await query.edit_message_text("Магнет-ссылка потеряна — пришлите её заново.")
+            await query.edit_message_text(
+                "Магнет-ссылка потеряна — пришлите её заново.",
+                reply_markup=_task_error_keyboard(),
+            )
             return
         await _do_process_magnet(query.message, context, magnet_uri, chat_id=chat_id)
 
@@ -14614,12 +14795,15 @@ async def plex_confirm_standalone(update: Update, context: ContextTypes.DEFAULT_
         safe_name = pending.get("safe_name", "download.torrent")
         temp_path = Path(temp_path_str)
         if not temp_path_str or not temp_path.exists():
-            await query.edit_message_text("Torrent-файл не найден — пришлите его заново.")
+            await query.edit_message_text(
+                "Torrent-файл не найден — пришлите его заново.",
+                reply_markup=_task_error_keyboard(),
+            )
             return
         await _do_process_torrent(query.message, context, temp_path, safe_name, chat_id=chat_id)
 
     else:
-        await query.edit_message_text("Неизвестный тип ожидания.")
+        await query.edit_message_text("Неизвестный тип ожидания.", reply_markup=_task_error_keyboard())
 
 
 async def plex_cancel_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -14648,6 +14832,7 @@ async def plex_cancel_standalone(update: Update, context: ContextTypes.DEFAULT_T
 
 async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _series_bulk_mark_build_cancelled(context)
+    _series_bulk_set_job_status(context, "cancelled")
     has_photo = context.user_data.pop("srch_confirm_has_photo", False)
     photo_msg_id = context.user_data.pop("srch_confirm_message_id", None)
     photo_chat_id = context.user_data.pop("srch_confirm_chat_id", None)
@@ -14681,6 +14866,17 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
+        "srch_series_bulk_action_running", "srch_series_bulk_base_quality",
+        "srch_series_bulk_build_token", "srch_series_bulk_cancelled_token",
+        "srch_series_bulk_failed", "srch_series_bulk_failed_candidates",
+        "srch_series_bulk_index", "srch_series_bulk_job_id",
+        "srch_series_bulk_long_notice", "srch_series_bulk_plan",
+        "srch_series_bulk_profile", "srch_series_bulk_profile_draft",
+        "srch_series_bulk_profile_screen", "srch_series_bulk_resolved",
+        "srch_series_bulk_result_count", "srch_series_bulk_results",
+        "srch_series_bulk_review_season", "srch_series_bulk_voice_expanded",
+        "srch_series_bulk_voice_manual", "srch_series_bulk_wait_stage",
+        "srch_series_bulk_warnings",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
         "srch_results_full", "srch_clusters", "srch_picker_clusters",
@@ -14741,6 +14937,17 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_ui_msg_id", "srch_ui_chat_id", "srch_banner",
         "srch_jackett_indexers", "srch_jackett_selected", "srch_source",
         "srch_picker_return_to", "srch_jackett_mode",
+        "srch_series_bulk_action_running", "srch_series_bulk_base_quality",
+        "srch_series_bulk_build_token", "srch_series_bulk_cancelled_token",
+        "srch_series_bulk_failed", "srch_series_bulk_failed_candidates",
+        "srch_series_bulk_index", "srch_series_bulk_job_id",
+        "srch_series_bulk_long_notice", "srch_series_bulk_plan",
+        "srch_series_bulk_profile", "srch_series_bulk_profile_draft",
+        "srch_series_bulk_profile_screen", "srch_series_bulk_resolved",
+        "srch_series_bulk_result_count", "srch_series_bulk_results",
+        "srch_series_bulk_review_season", "srch_series_bulk_voice_expanded",
+        "srch_series_bulk_voice_manual", "srch_series_bulk_wait_stage",
+        "srch_series_bulk_warnings",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
         "srch_results_full", "srch_clusters", "srch_picker_clusters",
@@ -14786,18 +14993,24 @@ async def search_jackett_check_entry(update: Update, context: ContextTypes.DEFAU
     subs = state_store.load_topic_subscriptions()
     sub = subs.get(sub_key)
     if not sub or sub.get("type") != "jackett":
-        await query.edit_message_text("Подписка не найдена.")
+        await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
         return ConversationHandler.END
 
     chat_id = query.message.chat.id if query.message else None
     if not _can_manage_subscription(chat_id, sub):
-        await query.edit_message_text("Эта подписка не относится к вашему чату.")
+        await query.edit_message_text(
+            "Эта подписка не относится к вашему чату.",
+            reply_markup=_subscription_back_keyboard(),
+        )
         return ConversationHandler.END
 
     _clear_search_intent(context)
     search_query = sub.get("query", "")
     if not search_query or jackett_client is None:
-        await query.edit_message_text("Подписка или Jackett недоступны.")
+        await query.edit_message_text(
+            "Подписка или Jackett недоступны.",
+            reply_markup=_subscription_back_keyboard(),
+        )
         return ConversationHandler.END
 
     context.user_data["srch_query"] = search_query
@@ -15183,7 +15396,8 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if action == "new_unsub":
         if chat_id:
             _set_movie_subscription(chat_id, False)
-        await query.edit_message_reply_markup(reply_markup=None)
+        text, keyboard = _build_subscriptions_view(chat_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "🔕 Уведомления о новинках отключены"))
         return
 
@@ -15199,7 +15413,10 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(topic_id)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         if not sub:
             await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
@@ -15221,7 +15438,10 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(topic_id)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         if not sub:
             await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
@@ -15243,7 +15463,10 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(topic_id)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         if not sub:
             await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
@@ -15270,7 +15493,10 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(sub_key)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         if not sub:
             await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
@@ -15320,7 +15546,10 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(sub_key)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         if not sub:
             await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
@@ -15360,40 +15589,55 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(topic_id)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         sub = subs.pop(topic_id, None)
         state_store.save_topic_subscriptions(subs)
         if sub:
             short = _format_sub_title(sub.get("title", ""))
-            await query.edit_message_text(f"🔕 Подписка отменена:\n{short}")
+            await query.edit_message_text(
+                f"🔕 Подписка отменена:\n{short}",
+                reply_markup=_subscription_back_keyboard(),
+            )
         else:
-            await query.edit_message_text("Подписка не найдена.")
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
 
     elif action == "jackett_unsub":
         key = topic_id
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(key)
         if sub and not _can_manage_subscription(chat_id, sub):
-            await query.edit_message_text("Эта подписка не относится к вашему чату.")
+            await query.edit_message_text(
+                "Эта подписка не относится к вашему чату.",
+                reply_markup=_subscription_back_keyboard(),
+            )
             return
         sub = subs.pop(key, None)
         state_store.save_topic_subscriptions(subs)
         if sub:
-            await query.edit_message_text(f"🔕 Подписка отменена:\n{sub.get('query', key)}")
+            await query.edit_message_text(
+                f"🔕 Подписка отменена:\n{sub.get('query', key)}",
+                reply_markup=_subscription_back_keyboard(),
+            )
         else:
-            await query.edit_message_text("Подписка не найдена.")
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_subscription_back_keyboard())
 
     elif action in {"admin_unsub", "admin_jackett_unsub"}:
         if not _is_admin_chat(chat_id):
-            await query.edit_message_text("Только администратор может управлять всеми подписками.")
+            await query.edit_message_text(
+                "Только администратор может управлять всеми подписками.",
+                reply_markup=_task_error_keyboard(),
+            )
             return
 
         subs = state_store.load_topic_subscriptions()
         sub = subs.pop(topic_id, None)
         state_store.save_topic_subscriptions(subs)
         if not sub:
-            await query.edit_message_text("Подписка не найдена.")
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_task_error_keyboard())
             return
 
         text, keyboard = _build_admin_subscriptions_view()
@@ -15403,13 +15647,16 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Toggle the notification axis of an existing subscription. Works for
         # both Rutracker and Jackett; download_policy is deliberately preserved.
         if not _is_admin_chat(chat_id):
-            await query.edit_message_text("Только администратор может управлять всеми подписками.")
+            await query.edit_message_text(
+                "Только администратор может управлять всеми подписками.",
+                reply_markup=_task_error_keyboard(),
+            )
             return
 
         subs = state_store.load_topic_subscriptions()
         sub = subs.get(topic_id)
         if not sub:
-            await query.edit_message_text("Подписка не найдена.")
+            await query.edit_message_text("Подписка не найдена.", reply_markup=_task_error_keyboard())
             return
         current, new_policy = _toggle_subscription_notify_policy(sub)
         state_store.save_topic_subscriptions(subs)
@@ -16967,19 +17214,22 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    cache = _load_movie_discovery_cache()
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     try:
         parts = (query.data or "").split(":")
         index = int(parts[2])
         token = parts[3] if len(parts) > 3 else ""
     except (TypeError, ValueError):
-        await query.edit_message_text("Не удалось открыть новинку.")
+        await query.edit_message_text(
+            "Не удалось открыть новинку. Обновите список и выберите фильм ещё раз.",
+            reply_markup=_movie_discovery_keyboard(cards, chat_id=chat_id),
+        )
         return ConversationHandler.END
 
-    cache = _load_movie_discovery_cache()
-    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     card = _find_movie_discovery_card(cards, index, token)
     if card is None:
-        chat_id = query.message.chat.id if query.message else None
         await query.edit_message_text(
             "Новинка изменилась после обновления кэша. Обновите список и выберите фильм ещё раз.",
             reply_markup=_movie_discovery_keyboard(cards, chat_id=chat_id),
@@ -16989,7 +17239,10 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
     releases = [_movie_release_to_search_result(release) for release in card.get("releases", [])]
     releases = sorted(releases, key=_score_result, reverse=True)
     if not releases:
-        await query.edit_message_text("По этой новинке пока нет подходящих раздач.")
+        await query.edit_message_text(
+            "По этой новинке пока нет подходящих раздач. Можно вернуться к списку и выбрать другой фильм.",
+            reply_markup=_movie_discovery_keyboard(cards, chat_id=chat_id),
+        )
         return ConversationHandler.END
 
     search_query = f"{card.get('title', '')} {card.get('year', '')}".strip()

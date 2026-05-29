@@ -1238,6 +1238,10 @@ class AdminPanelTests(unittest.TestCase):
 
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("не относится", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["⬅️ К подпискам"], "sub:list")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
     def test_subs_command_renders_new_subscription_without_download_policy(self):
         update = _make_message_update(chat_id=100)
@@ -1348,6 +1352,35 @@ class AdminPanelTests(unittest.TestCase):
 
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("не относится", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["⬅️ К подпискам"], "sub:list")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_unsubscribe_subscription_keeps_navigation_buttons(self):
+        update = _make_callback_update(chat_id=100, callback_data="sub:unsub:123")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({
+                "123": {"chat_id": 100, "title": "Клиника", "last_episode_end": 1, "total_episodes": 2},
+            })
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+            self.assertNotIn("123", store.load_topic_subscriptions())
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Подписка отменена", text)
+        keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["⬅️ К подпискам"], "sub:list")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
     def test_access_approve_sends_post_approval_welcome(self):
         update = _make_callback_update(chat_id=300, callback_data="access:approve:200")
@@ -1527,6 +1560,34 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertNotIn("srch_results", context.user_data)
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Обновите список", text)
+
+    def test_movie_new_show_without_releases_keeps_new_navigation(self):
+        card = {
+            "key": "2026:empty",
+            "title": "Empty",
+            "year": 2026,
+            "releases": [],
+        }
+        token = bot._movie_discovery_card_token(card)
+        update = _make_callback_update(chat_id=100, callback_data=f"new:show:0:{token}")
+        context = _make_context()
+        cache = {"cards": [card]}
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=cache),
+        ):
+            result = asyncio.run(bot.movie_new_show_releases(update, context))
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("нет подходящих раздач", text)
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🔄 Обновить"], "new:refresh")
+        self.assertEqual(buttons["✖️ Закрыть"], "new:close")
 
     def test_movie_discovery_text_lists_unique_tracker_abbreviations(self):
         text = _format_movie_discovery_cache({

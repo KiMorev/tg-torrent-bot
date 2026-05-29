@@ -838,6 +838,45 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(buttons["📚 1. Клиника"], "srch:bulk_open:bulk_test")
         self.assertIn("✖️ Закрыть", buttons)
 
+    def test_bulk_command_hides_cancelled_and_replaced_plans(self):
+        update = _make_message_update(chat_id=100)
+        ctx = _make_context()
+        fake_store, _saved_jobs = _fake_series_bulk_store({
+            "bulk_active": _series_bulk_job(job_id="bulk_active", chat_id=100),
+            "bulk_cancelled": _series_bulk_job(job_id="bulk_cancelled", chat_id=100, status="cancelled"),
+            "bulk_replaced": _series_bulk_job(job_id="bulk_replaced", chat_id=100, status="replaced"),
+        })
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            asyncio.run(bot.series_bulk_command(update, ctx))
+
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Клиника", text)
+        kb = update.message.reply_text.await_args.kwargs["reply_markup"]
+        buttons = {b.callback_data for row in kb.inline_keyboard for b in row}
+        self.assertEqual(buttons, {"srch:bulk_open:bulk_active", "task:close:"})
+
+    def test_search_cancel_marks_active_bulk_job_cancelled(self):
+        query = _make_query("srch:cancel")
+        query.message = None
+        update = MagicMock(callback_query=query)
+        ctx = _make_context()
+        ctx.user_data["srch_series_bulk_job_id"] = "bulk_test"
+        fake_store, saved_jobs = _fake_series_bulk_store({
+            "bulk_test": _series_bulk_job(job_id="bulk_test", chat_id=100),
+        })
+
+        with patch.object(bot, "state_store", fake_store):
+            state = asyncio.run(bot.search_cancel(update, ctx))
+
+        self.assertEqual(state, bot.ConversationHandler.END)
+        self.assertEqual(saved_jobs["bulk_test"]["status"], "cancelled")
+        self.assertNotIn("srch_series_bulk_job_id", ctx.user_data)
+
     def test_bulk_open_restores_saved_job_context_and_plan_actions(self):
         job = _series_bulk_job()
         query = _make_query("srch:bulk_open:bulk_test")
@@ -974,7 +1013,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ):
             state = asyncio.run(bot.search_series_bulk_run(update, ctx))
 
-        self.assertEqual(state, bot.ConversationHandler.END)
+        self.assertEqual(state, bot.SEARCH_RESULTS)
         dl.assert_awaited_once()
         entry = dl.await_args.args[0]
         self.assertEqual(entry["title"], result["title"])
@@ -985,15 +1024,17 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("Добавлено задач: 1", final_text)
         self.assertIn("task_1", final_text)
         self.assertIn("Сезон 1", final_text)
-        self.assertNotIn("Сезон 2", final_text)
+        self.assertIn("Осталось разобрать сезонов: 1", final_text)
         labels = [
             b.text
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
+        self.assertIn("⚙️ Разобрать оставшиеся", labels)
+        self.assertIn("⬅️ К плану", labels)
         self.assertIn("📚 К списку загрузок", labels)
         job = saved_jobs["bulk_test"]
-        self.assertEqual(job["status"], "batch_completed")
+        self.assertEqual(job["status"], "batch_completed_with_decisions")
         self.assertEqual(job["seasons"]["1"]["runtime_status"], "downloaded")
         self.assertEqual(job["seasons"]["1"]["task_id"], "task_1")
         self.assertEqual(job["seasons"]["1"]["method"], "torrent-файл")
