@@ -68,7 +68,19 @@ def format_tasks(
 ) -> str:
     heading = "Все задачи Download Station" if scope == scope_all else "Мои загрузки"
     if not tasks:
-        empty_text = "В Download Station нет задач." if scope == scope_all else "В ваших загрузках нет задач."
+        if scope == scope_all:
+            empty_text = (
+                "Задач сейчас нет.\n\n"
+                "Здесь появятся загрузки, которые бот отправил в очередь скачивания, "
+                "и задачи из Download Station.\n"
+                "Если задача только что добавлена, нажмите «Обновить»."
+            )
+        else:
+            empty_text = (
+                "В ваших загрузках сейчас пусто.\n\n"
+                "Здесь отображаются задачи, которые вы запустили через бот.\n"
+                "Если загрузка только что добавлена, нажмите «Обновить»."
+            )
         return f"{heading}\nОбновлено: {updated_at}\n{empty_text}"
 
     lines = [heading, f"Обновлено: {updated_at}"]

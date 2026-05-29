@@ -95,6 +95,28 @@ class TaskViewTests(unittest.TestCase):
 
         self.assertIn("Владелец: 100", text)
 
+    def test_format_tasks_empty_state_explains_next_step(self) -> None:
+        my_text = format_tasks(
+            [],
+            scope="my",
+            updated_at="12:00:00",
+            owners={},
+            scope_all="all",
+        )
+        all_text = format_tasks(
+            [],
+            scope="all",
+            updated_at="12:00:00",
+            owners={},
+            scope_all="all",
+        )
+
+        self.assertIn("В ваших загрузках сейчас пусто", my_text)
+        self.assertIn("задачи, которые вы запустили через бот", my_text)
+        self.assertIn("нажмите «Обновить»", my_text)
+        self.assertIn("Задач сейчас нет", all_text)
+        self.assertIn("задачи из Download Station", all_text)
+
     def test_format_task_card_includes_core_fields(self) -> None:
         text = format_task_card(
             {

@@ -1271,6 +1271,34 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(callbacks["🔕 Отписаться от /new"], "sub:new_unsub")
         self.assertEqual(callbacks["✖️ Закрыть"], "task:close:")
 
+    def test_subs_command_empty_state_explains_how_to_add_subscription(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({})
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_is_movie_subscribed", return_value=False),
+            ):
+                asyncio.run(subs_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("Подписок пока нет", text)
+        self.assertIn("следит за новыми сериями", text)
+        self.assertIn("Как добавить подписку", text)
+
+        keyboard = update.message.reply_text.call_args.kwargs["reply_markup"]
+        callbacks = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(callbacks["✖️ Закрыть"], "task:close:")
+
     def test_subs_command_marks_unavailable_subscription(self):
         update = _make_message_update(chat_id=100)
         context = _make_context()
@@ -1519,6 +1547,17 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         })
 
         self.assertIn("Раздач: 3 · RT, NNM", text)
+
+    def test_movie_discovery_empty_state_explains_filters_and_refresh(self):
+        text = _format_movie_discovery_cache({
+            "updated_at": "2026-05-12 13:00",
+            "cards": [],
+        })
+
+        self.assertIn("Пока нет подходящих новинок", text)
+        self.assertIn("фильтрам выше", text)
+        self.assertIn("Почему может быть пусто", text)
+        self.assertIn("нажать «Обновить»", text)
 
     def test_movie_discovery_close_deletes_message(self):
         update = _make_callback_update(chat_id=100, callback_data="new:close")
@@ -5372,6 +5411,19 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         self.assertIn("общей медиатеке", text)
         self.assertIn("cont:list:all:0", self._callbacks(keyboard))
+        self.assertIn("task:close:", self._callbacks(keyboard))
+
+    def test_continue_empty_all_explains_confidence_boundary(self):
+        state = {"mine": [], "all": [], "scope": "mine", "page": 0}
+
+        text = bot._series_continue_list_text(state, "mine", 0)
+        keyboard = bot._series_continue_list_keyboard(state, "mine", 0)
+
+        self.assertIn("Пока не нашёл сезоны", text)
+        self.assertIn("Что проверяю", text)
+        self.assertIn("Почему может быть пусто", text)
+        self.assertIn("только уверенные варианты", text)
+        self.assertIn("cont:refresh:mine", self._callbacks(keyboard))
         self.assertIn("task:close:", self._callbacks(keyboard))
 
     def test_continue_list_paginates_by_ten(self):
