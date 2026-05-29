@@ -138,6 +138,7 @@ from series_bulk_planner import (
     VOICE_ANY_FROM_REFERENCE,
     VOICE_ORIGINAL_ONLY,
     VOICE_REQUIRE_SELECTED,
+    VOICE_SINGLE_FROM_REFERENCE,
     SeriesBulkProfile,
     SeriesBulkPlan,
     SeasonPlan,
@@ -12149,69 +12150,164 @@ def _series_bulk_soft_profile(profile: SeriesBulkProfile | None) -> SeriesBulkPr
 
 
 def _series_bulk_profile_voice_label(profile: SeriesBulkProfile) -> str:
+    voices = " / ".join(profile.voices[:3])
+    if profile.voice_policy == VOICE_SINGLE_FROM_REFERENCE:
+        return "одна на все сезоны"
     if profile.voice_policy == VOICE_ANY_RUSSIAN:
         return "любая русская"
     if profile.voice_policy == VOICE_REQUIRE_SELECTED:
-        voices = " / ".join(profile.voices[:3]) if profile.voices else "выбранные студии"
-        return f"только {voices}"
+        return f"выбрано: {voices}" if voices else "выбранные студии"
     if profile.voice_policy == VOICE_ORIGINAL_ONLY:
         return "только Original"
-    return "как в выбранной раздаче"
+    return f"любая из эталона — {voices}" if voices else "любая из эталона"
+
+
+def _series_bulk_profile_voice_button_label(profile: SeriesBulkProfile) -> str:
+    if profile.voice_policy == VOICE_SINGLE_FROM_REFERENCE:
+        return "одна на все сезоны"
+    if profile.voice_policy == VOICE_REQUIRE_SELECTED:
+        voices = " / ".join(profile.voices[:2])
+        return voices or "вручную"
+    if profile.voice_policy == VOICE_ANY_RUSSIAN:
+        return "любая русская"
+    if profile.voice_policy == VOICE_ORIGINAL_ONLY:
+        return "только Original"
+    return "любая из эталона"
+
+
+def _series_bulk_reference_voices(result: dict) -> tuple[str, ...]:
+    release = release_profile_from_title(
+        str(result.get("title") or ""),
+        size=str(result.get("size") or ""),
+    )
+    return release.voices
 
 
 def _series_bulk_profile_text(result: dict, profile: SeriesBulkProfile) -> str:
     title = str(result.get("title") or "")[:120]
     quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
-    voices = " / ".join(profile.voices[:3]) if profile.voices else "не найдены"
     return "\n".join([
         "📚 Скачать недостающие сезоны",
         "",
+        "Эталон:",
         title,
         "",
-        "Что важно сохранить при подборе сезонов?",
+        "Что сохраню при подборе:",
         "",
         f"• Качество: {quality}",
-        f"• Original: {'нужен' if profile.require_original else 'не важно'}",
-        f"• Субтитры: {'нужны' if profile.require_subs else 'не важно'}",
+        f"• Original: {'нужен' if profile.require_original else 'не обязательно'}",
+        f"• Субтитры: {'нужны' if profile.require_subs else 'не обязательно'}",
         f"• Озвучка: {_series_bulk_profile_voice_label(profile)}",
-        f"• Студии в выбранной раздаче: {voices}",
     ])
 
 
 def _series_bulk_profile_keyboard(
     index: int,
     profile: SeriesBulkProfile,
+    *,
+    voice_expanded: bool = False,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            "✅ Собрать план",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_build",
+        )],
+        [InlineKeyboardButton(
+            f"🎙 Озвучка: {_series_bulk_profile_voice_button_label(profile)}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_toggle",
+        )],
+    ]
+    if voice_expanded:
+        voice_options = [
+            ("Любая из эталона", "voice_ref", VOICE_ANY_FROM_REFERENCE),
+            ("Одна на все сезоны", "voice_single", VOICE_SINGLE_FROM_REFERENCE),
+        ]
+        for label, action, policy in voice_options:
+            prefix = "✅" if profile.voice_policy == policy else "▫️"
+            rows.append([InlineKeyboardButton(
+                f"{prefix} {label}",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:{action}",
+            )])
+        selected_prefix = "✅" if profile.voice_policy == VOICE_REQUIRE_SELECTED else "▫️"
+        rows.append([InlineKeyboardButton(
+            f"{selected_prefix} Выбрать вручную",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_manual",
+        )])
+    rows.extend([
+        [InlineKeyboardButton("⚙️ Остальные настройки", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:settings")],
+        [InlineKeyboardButton("⬅️ К выбору", callback_data=f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{index}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_bulk_profile_settings_text(result: dict, profile: SeriesBulkProfile) -> str:
+    title = str(result.get("title") or "")[:120]
+    quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
+    return "\n".join([
+        "⚙️ Настроить подбор",
+        "",
+        "Эталон:",
+        title,
+        "",
+        f"• Качество: {quality}",
+        f"• Original: {'нужен' if profile.require_original else 'не обязательно'}",
+        f"• Субтитры: {'нужны' if profile.require_subs else 'не обязательно'}",
+    ])
+
+
+def _series_bulk_profile_settings_keyboard(
+    index: int,
+    profile: SeriesBulkProfile,
 ) -> InlineKeyboardMarkup:
     quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
-    voice_options = [
-        ("Как в раздаче", "voice_ref", VOICE_ANY_FROM_REFERENCE),
-        ("Любая русская", "voice_any_ru", VOICE_ANY_RUSSIAN),
-        ("Только эти студии", "voice_selected", VOICE_REQUIRE_SELECTED),
-        ("Только Original", "voice_original", VOICE_ORIGINAL_ONLY),
-    ]
-    rows: list[list[InlineKeyboardButton]] = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             f"🎞 Качество: {quality}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:quality",
         )],
         [InlineKeyboardButton(
-            f"🎧 Original: {'нужен' if profile.require_original else 'не важно'}",
+            f"🎧 Original: {'нужен' if profile.require_original else 'не обязательно'}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:original",
         )],
         [InlineKeyboardButton(
-            f"💬 Субтитры: {'нужны' if profile.require_subs else 'не важно'}",
+            f"💬 Субтитры: {'нужны' if profile.require_subs else 'не обязательно'}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:subs",
         )],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:settings_back")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
+    ])
+
+
+def _series_bulk_voice_manual_text(result: dict, selected: set[str]) -> str:
+    voices = _series_bulk_reference_voices(result)
+    lines = [
+        "🎙 Озвучка",
+        "",
+        "Выберите одну или две озвучки из эталонной раздачи.",
+        "",
     ]
-    for label, action, policy in voice_options:
-        prefix = "✅" if profile.voice_policy == policy else "🎙"
+    if voices:
+        for voice in voices:
+            mark = "✅" if voice in selected else "⬜"
+            lines.append(f"{mark} {voice}")
+    else:
+        lines.append("В эталоне не распознал конкретные студии озвучки.")
+    return "\n".join(lines)
+
+
+def _series_bulk_voice_manual_keyboard(result: dict, selected: set[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, voice in enumerate(_series_bulk_reference_voices(result)):
+        mark = "✅" if voice in selected else "⬜"
         rows.append([InlineKeyboardButton(
-            f"{prefix} {label}",
-            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:{action}",
+            f"{mark} {voice}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_pick_{index}",
         )])
+    if selected:
+        rows.append([InlineKeyboardButton("✅ Готово", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_done")])
     rows.extend([
-        [InlineKeyboardButton("✅ Собрать план", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_build")],
-        [InlineKeyboardButton("⬅️ К выбору", callback_data=f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{index}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_back")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
     ])
     return InlineKeyboardMarkup(rows)
@@ -12224,40 +12320,79 @@ def _series_bulk_profile_from_context(
     return profile if isinstance(profile, SeriesBulkProfile) else None
 
 
+def _series_bulk_current_index_and_result(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[int, dict] | None:
+    try:
+        index = int(context.user_data.get("srch_series_bulk_index"))
+    except (TypeError, ValueError):
+        return None
+
+    results = context.user_data.get("srch_results", [])
+    if not (0 <= index < len(results)):
+        return None
+    result = results[index]
+    return index, result if isinstance(result, dict) else {}
+
+
 async def _series_bulk_show_profile(
     query,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-    try:
-        index = int(context.user_data.get("srch_series_bulk_index"))
-    except (TypeError, ValueError):
+    current = _series_bulk_current_index_and_result(context)
+    if current is None:
         await query.edit_message_text("План потерян. Вернитесь к результатам и откройте его заново.")
         return SEARCH_RESULTS
-
-    results = context.user_data.get("srch_results", [])
-    if not (0 <= index < len(results)):
-        await query.edit_message_text("Результат недоступен.")
-        return ConversationHandler.END
+    index, result = current
 
     profile = _series_bulk_profile_from_context(context)
     if profile is None:
-        profile = _series_bulk_profile_from_result(context, results[index])
+        profile = _series_bulk_profile_from_result(context, result)
         context.user_data["srch_series_bulk_profile_draft"] = profile
+    if context.user_data.get("srch_series_bulk_profile_screen") == "settings":
+        await query.edit_message_text(
+            _series_bulk_profile_settings_text(result, profile),
+            reply_markup=_series_bulk_profile_settings_keyboard(index, profile),
+        )
+        return SEARCH_RESULTS
     await query.edit_message_text(
-        _series_bulk_profile_text(results[index], profile),
-        reply_markup=_series_bulk_profile_keyboard(index, profile),
+        _series_bulk_profile_text(result, profile),
+        reply_markup=_series_bulk_profile_keyboard(
+            index,
+            profile,
+            voice_expanded=bool(context.user_data.get("srch_series_bulk_voice_expanded")),
+        ),
+    )
+    return SEARCH_RESULTS
+
+
+async def _series_bulk_show_voice_manual(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    current = _series_bulk_current_index_and_result(context)
+    if current is None:
+        await query.edit_message_text("План потерян. Вернитесь к результатам и откройте его заново.")
+        return SEARCH_RESULTS
+    _index, result = current
+    selected = context.user_data.get("srch_series_bulk_voice_manual")
+    selected_set = set(selected) if isinstance(selected, (set, list, tuple)) else set()
+    await query.edit_message_text(
+        _series_bulk_voice_manual_text(result, selected_set),
+        reply_markup=_series_bulk_voice_manual_keyboard(result, selected_set),
     )
     return SEARCH_RESULTS
 
 
 async def search_series_bulk_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer()
     profile = _series_bulk_profile_from_context(context)
     if profile is None:
+        await query.answer()
         return await _series_bulk_show_profile(query, context)
 
     action = query.data.rsplit(":", 1)[-1]
+    answer_text: str | None = None
     if action == "quality":
         base_quality = str(context.user_data.get("srch_series_bulk_base_quality") or "1080p")
         profile = _series_bulk_profile_copy(
@@ -12268,8 +12403,32 @@ async def search_series_bulk_profile_callback(update: Update, context: ContextTy
         profile = _series_bulk_profile_copy(profile, require_original=not profile.require_original)
     elif action == "subs":
         profile = _series_bulk_profile_copy(profile, require_subs=not profile.require_subs)
+    elif action == "settings":
+        context.user_data["srch_series_bulk_profile_screen"] = "settings"
+    elif action == "settings_back":
+        context.user_data.pop("srch_series_bulk_profile_screen", None)
+    elif action == "voice_toggle":
+        context.user_data.pop("srch_series_bulk_profile_screen", None)
+        expanded = bool(context.user_data.get("srch_series_bulk_voice_expanded"))
+        context.user_data["srch_series_bulk_voice_expanded"] = not expanded
     elif action == "voice_ref":
-        profile = _series_bulk_profile_copy(profile, voice_policy=VOICE_ANY_FROM_REFERENCE)
+        current = _series_bulk_current_index_and_result(context)
+        voices = _series_bulk_reference_voices(current[1]) if current else profile.voices
+        profile = _series_bulk_profile_copy(
+            profile,
+            voice_policy=VOICE_ANY_FROM_REFERENCE,
+            voices=voices,
+        )
+        context.user_data["srch_series_bulk_voice_expanded"] = False
+    elif action == "voice_single":
+        current = _series_bulk_current_index_and_result(context)
+        voices = _series_bulk_reference_voices(current[1]) if current else profile.voices
+        profile = _series_bulk_profile_copy(
+            profile,
+            voice_policy=VOICE_SINGLE_FROM_REFERENCE,
+            voices=voices,
+        )
+        context.user_data["srch_series_bulk_voice_expanded"] = False
     elif action == "voice_any_ru":
         profile = _series_bulk_profile_copy(profile, voice_policy=VOICE_ANY_RUSSIAN)
     elif action == "voice_selected":
@@ -12280,7 +12439,54 @@ async def search_series_bulk_profile_callback(update: Update, context: ContextTy
             voice_policy=VOICE_ORIGINAL_ONLY,
             require_original=True,
         )
+    elif action == "voice_manual":
+        selected = profile.voices if profile.voice_policy == VOICE_REQUIRE_SELECTED else ()
+        context.user_data["srch_series_bulk_voice_manual"] = set(selected)
+        await query.answer()
+        return await _series_bulk_show_voice_manual(query, context)
+    elif action.startswith("voice_pick_"):
+        current = _series_bulk_current_index_and_result(context)
+        voices = _series_bulk_reference_voices(current[1]) if current else ()
+        try:
+            voice_index = int(action.removeprefix("voice_pick_"))
+        except ValueError:
+            voice_index = -1
+        if not (0 <= voice_index < len(voices)):
+            answer_text = "Озвучка недоступна"
+        else:
+            selected = context.user_data.get("srch_series_bulk_voice_manual")
+            selected_set = set(selected) if isinstance(selected, (set, list, tuple)) else set()
+            voice = voices[voice_index]
+            if voice in selected_set:
+                selected_set.remove(voice)
+            elif len(selected_set) >= 2:
+                answer_text = "Можно выбрать до двух озвучек"
+            else:
+                selected_set.add(voice)
+            context.user_data["srch_series_bulk_voice_manual"] = selected_set
+        await query.answer(answer_text)
+        return await _series_bulk_show_voice_manual(query, context)
+    elif action == "voice_done":
+        selected = context.user_data.get("srch_series_bulk_voice_manual")
+        selected_set = set(selected) if isinstance(selected, (set, list, tuple)) else set()
+        current = _series_bulk_current_index_and_result(context)
+        reference_voices = _series_bulk_reference_voices(current[1]) if current else ()
+        selected_tuple = tuple(voice for voice in reference_voices if voice in selected_set)
+        if not selected_tuple:
+            await query.answer("Выберите одну или две озвучки")
+            return await _series_bulk_show_voice_manual(query, context)
+        profile = _series_bulk_profile_copy(
+            profile,
+            voice_policy=VOICE_REQUIRE_SELECTED,
+            voices=selected_tuple,
+        )
+        context.user_data.pop("srch_series_bulk_voice_manual", None)
+        context.user_data["srch_series_bulk_voice_expanded"] = False
+    elif action == "voice_back":
+        context.user_data.pop("srch_series_bulk_voice_manual", None)
+        context.user_data["srch_series_bulk_voice_expanded"] = True
     context.user_data["srch_series_bulk_profile_draft"] = profile
+    await query.answer(answer_text)
     return await _series_bulk_show_profile(query, context)
 
 
@@ -18763,7 +18969,7 @@ def main() -> None:
                     CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),
-                    CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z_]+$"),
+                    CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z0-9_]+$"),
                     CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$", block=False),
                     CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
                     CallbackQueryHandler(search_series_bulk_pack_list, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_packs$"),

@@ -11,6 +11,7 @@ from series_bulk_planner import (
     STATUS_PARTIAL,
     VOICE_ANY_FROM_REFERENCE,
     VOICE_REQUIRE_SELECTED,
+    VOICE_SINGLE_FROM_REFERENCE,
     SeriesBulkProfile,
     build_series_bulk_plan,
     release_profile_from_title,
@@ -84,6 +85,29 @@ class SeriesBulkPlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.seasons[0].status, STATUS_EXACT)
         self.assertIsNotNone(plan.seasons[0].selected)
+
+    def test_single_from_reference_chooses_one_voice_across_seasons(self) -> None:
+        plan = build_series_bulk_plan(
+            series_title="Клиника",
+            seasons=[1, 2],
+            profile=_base_profile(
+                voice_policy=VOICE_SINGLE_FROM_REFERENCE,
+                voices=("LostFilm", "NewStudio"),
+            ),
+            results=[
+                _result("Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / LostFilm / Original"),
+                _result("Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / NewStudio / Original"),
+                _result("Клиника / Scrubs / Сезон: 2 / WEB-DL 1080p / LostFilm / Original"),
+            ],
+        )
+
+        selected_titles = [
+            season.selected.result["title"]
+            for season in plan.seasons
+            if season.selected is not None
+        ]
+        self.assertEqual(len(selected_titles), 2)
+        self.assertTrue(all("LostFilm" in title for title in selected_titles))
 
     def test_require_selected_voice_blocks_auto_selection_when_voice_is_missing(self) -> None:
         plan = build_series_bulk_plan(

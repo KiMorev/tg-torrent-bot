@@ -309,27 +309,22 @@ srch_intent = "series_master"
 Вместо этого открыть текущий bulk-profile:
 
 ```text
-📚 Профиль подбора
+📚 Скачать недостающие сезоны
 
 Эталон:
 Клиника / Scrubs / Сезон 3 / 1080p WEB-DL
 
-Из поиска:
-1080p
-Оригинальная дорожка: нет
-Субтитры: нет
-
-Из раздачи:
-WEB-DL
-Озвучки: LostFilm, NewStudio
-
-Что важно по озвучке?
+Что сохраню при подборе:
+• Качество: 1080p
+• Original: не обязательно
+• Субтитры: не обязательно
+• Озвучка: любая из эталона — LostFilm / NewStudio
 ```
 
 Дальше использовать существующий путь:
 
 ```text
-profile -> build_series_bulk_plan -> plan screen -> confirm ready -> review disputed
+profile -> voice/settings if needed -> build_series_bulk_plan -> plan screen -> confirm ready -> review disputed
 ```
 
 ## Не-MVP
@@ -479,6 +474,8 @@ _series_bulk_prepare_from_reference_result(context, result)
 - [x] В режиме `Сериал целиком` показывать результаты как выбор эталона, без
   прямой скачки.
 - [x] Перевести выбранный эталон в существующий bulk-profile.
+- [x] Упростить bulk-profile: главный экран с `Собрать план`, раскрываемой
+  озвучкой и отдельными остальными настройками.
 - [x] Обновить README и карту структуры бота.
 
 ### Технический план
@@ -492,6 +489,9 @@ _series_bulk_prepare_from_reference_result(context, result)
 - [x] В `_run_search` при `series_master` фильтровать результаты до сериалов.
 - [x] Для `series_master` менять кнопки результатов на `🎯 Выбрать эталон`.
 - [x] Подключить выбор эталона к существующему `search_series_bulk_plan`.
+- [x] Добавить callback-ветки `bulk_prof:voice_toggle`,
+  `bulk_prof:voice_pick_N`, `bulk_prof:voice_done`, `bulk_prof:settings`.
+- [x] Добавить planner-политику `single_from_reference`.
 - [x] Покрыть keyboard callbacks тестами.
 - [x] Покрыть reset/preserve `srch_intent` тестами.
 - [x] Покрыть `series_master` фильтр и отсутствие прямой скачки тестами.
@@ -505,6 +505,9 @@ _series_bulk_prepare_from_reference_result(context, result)
   `⬇️ N` на `🎯 N -> srch:bulk_plan:N`.
 - 2026-05-29: текст/voice/KP сбрасывают режим в `Одна раздача`, внутренние
   повторы поиска сохраняют выбранный режим.
+- 2026-05-29: bulk-profile упрощён до основного экрана с `✅ Собрать план`,
+  раскрываемой озвучкой и отдельными `⚙️ Остальными настройками`; добавлена
+  политика `single_from_reference` для режима `Одна на все сезоны`.
 - 2026-05-29: обновлены README, карта структуры и тесты.
 
 ## Тесты

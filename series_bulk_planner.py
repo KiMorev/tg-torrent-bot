@@ -15,6 +15,7 @@ from movie_discovery import detect_quality, parse_size_gb
 
 
 VOICE_ANY_FROM_REFERENCE = "any_from_reference"
+VOICE_SINGLE_FROM_REFERENCE = "single_from_reference"
 VOICE_ANY_RUSSIAN = "any_russian"
 VOICE_REQUIRE_SELECTED = "require_selected"
 VOICE_ORIGINAL_ONLY = "original_only"
@@ -163,6 +164,13 @@ def build_series_bulk_plan(
     downloading_set = {int(s) for s in downloading_seasons if int(s) > 0}
 
     result_list = [r for r in results if isinstance(r, dict)]
+    profile = _profile_for_single_reference_voice(
+        series_title=series_title,
+        seasons=wanted_seasons,
+        results=result_list,
+        profile=profile,
+        skipped_seasons=plex_set | downloading_set,
+    )
     pack_candidates = tuple(
         r for r in result_list
         if _title_matches_series(series_title, _result_title(r))
@@ -250,6 +258,73 @@ def _evaluate_season_candidates(
         ))
 
     return tuple(sorted(evaluations, key=lambda item: item.score, reverse=True))
+
+
+def _profile_for_single_reference_voice(
+    *,
+    series_title: str,
+    seasons: tuple[int, ...],
+    results: list[dict],
+    profile: SeriesBulkProfile,
+    skipped_seasons: set[int],
+) -> SeriesBulkProfile:
+    if profile.voice_policy != VOICE_SINGLE_FROM_REFERENCE or not profile.voices:
+        return profile
+
+    best_voice = ""
+    best_ready_count = -1
+    best_score = -1.0
+    for voice in profile.voices:
+        trial = _profile_copy(
+            profile,
+            voice_policy=VOICE_REQUIRE_SELECTED,
+            voices=(voice,),
+        )
+        ready_count = 0
+        score = 0.0
+        for season in seasons:
+            if season in skipped_seasons:
+                continue
+            plan = _choose_season_plan(
+                season,
+                _evaluate_season_candidates(
+                    series_title=series_title,
+                    season=season,
+                    results=results,
+                    profile=trial,
+                ),
+            )
+            if plan.status in {STATUS_EXACT, STATUS_GOOD} and plan.selected is not None:
+                ready_count += 1
+                score += plan.selected.score
+        if (ready_count, score) > (best_ready_count, best_score):
+            best_voice = voice
+            best_ready_count = ready_count
+            best_score = score
+
+    if not best_voice:
+        return profile
+    return _profile_copy(
+        profile,
+        voice_policy=VOICE_REQUIRE_SELECTED,
+        voices=(best_voice,),
+    )
+
+
+def _profile_copy(profile: SeriesBulkProfile, **updates) -> SeriesBulkProfile:
+    data = {
+        "quality": profile.quality,
+        "require_original": profile.require_original,
+        "require_subs": profile.require_subs,
+        "voice_policy": profile.voice_policy,
+        "voices": profile.voices,
+        "release_type": profile.release_type,
+        "release_group": profile.release_group,
+        "tracker": profile.tracker,
+        "source": profile.source,
+    }
+    data.update(updates)
+    return SeriesBulkProfile(**data)
 
 
 def _choose_season_plan(season: int, evaluations: tuple[CandidateEvaluation, ...]) -> SeasonPlan:

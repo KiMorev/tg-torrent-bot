@@ -260,7 +260,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Что важно сохранить при подборе сезонов", text)
+        self.assertIn("Что сохраню при подборе", text)
         self.assertIn("Качество: 1080p", text)
         self.assertIn("Original: нужен", text)
         self.assertIn("Субтитры: нужны", text)
@@ -270,14 +270,15 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for b in row
         ]
         self.assertIn("✅ Собрать план", labels)
+        self.assertIn("⚙️ Остальные настройки", labels)
         self.assertIn("⬅️ К выбору", labels)
-        self.assertTrue(any("Как в раздаче" in label for label in labels))
+        self.assertTrue(any("Озвучка: любая из эталона" in label for label in labels))
 
-    def test_bulk_profile_voice_toggle_updates_draft(self):
+    def test_bulk_profile_voice_accordion_updates_draft(self):
         query = _make_query("srch:bulk_plan:0")
         update = MagicMock(callback_query=query)
         results = [{
-            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm / NewStudio",
             "partial": False,
             "series": True,
             "size": "10 GB",
@@ -289,20 +290,63 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
         asyncio.run(bot.search_series_bulk_plan(update, ctx))
 
-        query.data = "srch:bulk_prof:voice_any_ru"
+        query.data = "srch:bulk_prof:voice_toggle"
         state = asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
-        profile = ctx.user_data["srch_series_bulk_profile_draft"]
-        self.assertEqual(profile.voice_policy, bot.VOICE_ANY_RUSSIAN)
-        text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Озвучка: любая русская", text)
         labels = [
             b.text
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
-        self.assertIn("✅ Любая русская", labels)
+        self.assertIn("▫️ Одна на все сезоны", labels)
+        self.assertIn("▫️ Выбрать вручную", labels)
+
+        query.data = "srch:bulk_prof:voice_single"
+        state = asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        profile = ctx.user_data["srch_series_bulk_profile_draft"]
+        self.assertEqual(profile.voice_policy, bot.VOICE_SINGLE_FROM_REFERENCE)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Озвучка: одна на все сезоны", text)
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertNotIn("▫️ Одна на все сезоны", labels)
+
+    def test_bulk_profile_manual_voice_selection_applies_two_voices(self):
+        query = _make_query("srch:bulk_plan:0")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm / NewStudio / AlexFilm",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        query.data = "srch:bulk_prof:voice_manual"
+        asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+        query.data = "srch:bulk_prof:voice_pick_0"
+        asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+        query.data = "srch:bulk_prof:voice_pick_1"
+        asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+        query.data = "srch:bulk_prof:voice_done"
+        state = asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        profile = ctx.user_data["srch_series_bulk_profile_draft"]
+        self.assertEqual(profile.voice_policy, bot.VOICE_REQUIRE_SELECTED)
+        self.assertEqual(profile.voices, ("LostFilm", "NewStudio"))
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Озвучка: выбрано: LostFilm / NewStudio", text)
 
     def test_bulk_rebuild_returns_to_profile_with_current_settings(self):
         query = _make_query("srch:bulk_rebuild")
@@ -339,7 +383,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Что важно сохранить при подборе сезонов", text)
+        self.assertIn("Что сохраню при подборе", text)
         self.assertIn("Качество: любое", text)
         self.assertIn("Озвучка: любая русская", text)
         self.assertNotIn("srch_series_bulk_plan", ctx.user_data)
