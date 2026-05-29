@@ -381,11 +381,11 @@ PLEX_TOKEN=replace_me</code></pre>
     <section class="section">
       <h2>Plex redirect для телефона</h2>
       <p>Файл <code>plex.html</code> нужен для кнопки <code>Смотреть в Plex</code>. Если бот откроет его с параметрами <code>key</code> и <code>server</code>, страница попробует открыть приложение Plex и оставит fallback в Plex Web.</p>
-      <p>Если сайт <code>plex.morplex.ru</code> уже смотрит в папку <code>/web/plex-redirect</code>, положите файлы так:</p>
+      <p>Если сайт <code>plex.example.com</code> уже смотрит в папку <code>/web/plex-redirect</code>, положите файлы так:</p>
       <pre><code>/web/plex-redirect/plex.html
 /web/plex-redirect/index.html</code></pre>
       <p>В <code>.env</code> укажите базовый адрес без параметров:</p>
-      <pre><code>PLEX_DEEPLINK_BASE_URL=https://plex.morplex.ru/plex.html</code></pre>
+      <pre><code>PLEX_DEEPLINK_BASE_URL=https://plex.example.com/plex.html</code></pre>
       <p class="note">Параметры <code>key</code> и <code>server</code> бот добавляет сам, когда Plex нашёл конкретный фильм или сезон.</p>
     </section>
 

@@ -112,7 +112,7 @@ graph TB
         State[(📋 /volume1/docker/.../state<br/>JSON state files)]
 
         CM --> Bot[tg-torrent-bot<br/>container]
-        WS --> Portal1[Portal: plex.morplex.ru<br/>HTTP:80<br/>document root: /web/plex-redirect]
+        WS --> Portal1[Portal: plex.example.com<br/>HTTP:80<br/>document root: /web/plex-redirect]
         WS --> Portal2[Portal: morplex.sknt.ru<br/>HTTP:80<br/>legacy]
 
         Bot --> State
@@ -146,7 +146,7 @@ graph TB
 | Сервис | Назначение | Доступ |
 |---|---|---|
 | **Telegram Bot API** | Long-polling + sendMessage | HTTPS / Bot Token |
-| **Cloudflare** | DNS zone `morplex.ru`, Proxied (HTTPS+TLS+anti-DDoS) | API Token (Zone:DNS:Edit) |
+| **Cloudflare** | DNS zone `example.com`, Proxied (HTTPS+TLS+anti-DDoS) | API Token (Zone:DNS:Edit) |
 | **Jackett** | Единая точка для трекеров (RT, NNM, BFG, RuTor…) | HTTP / API Key |
 | **Rutracker.org** | Прямой клиент `rutracker_client` как fallback для Jackett-proxy 404 | Login/password сессия |
 | **Kinopoisk API** | Обогащение `/new` (рейтинг, постер, год, жанры) | kinopoiskapiunofficial.tech / API Key |
@@ -338,7 +338,7 @@ sequenceDiagram
     participant App as Plex iOS app
 
     U->>T: tap «▶️ Смотреть в Plex»
-    T->>U: launches https://plex.morplex.ru/plex.html?key=...&server=...
+    T->>U: launches https://plex.example.com/plex.html?key=...&server=...
     U->>C: HTTPS GET (CF cert)
     Note over C: TLS termination<br/>resolve A record → 203.0.113.42
     C->>R: HTTP GET 203.0.113.42:80
@@ -382,7 +382,7 @@ sequenceDiagram
         I->>I: cache := 203.0.113.99
     end
 
-    Note over DNS: ~30s propagation<br/>clients access same hostname<br/>plex.morplex.ru
+    Note over DNS: ~30s propagation<br/>clients access same hostname<br/>plex.example.com
 ```
 
 ### 6.5. Pending download queue
@@ -488,8 +488,8 @@ sequenceDiagram
 
     rect rgba(245, 158, 11, 0.15)
         Note over U, N: Запрос на страницу
-        U->>CF: GET https://plex.morplex.ru/plex.html?key=...
-        Note over CF: TLS termination<br/>cert: *.morplex.ru<br/>DNS A: 203.0.113.42
+        U->>CF: GET https://plex.example.com/plex.html?key=...
+        Note over CF: TLS termination<br/>cert: *.example.com<br/>DNS A: 203.0.113.42
         CF->>R: HTTP GET 203.0.113.42:80 (Flexible mode)
         R->>N: NAT 80 → 192.168.1.X:80
         N-->>R: 200 OK plex.html
@@ -516,7 +516,7 @@ sequenceDiagram
 
 | Уровень | Что делает |
 |---|---|
-| **TLS** | Сертификат `*.morplex.ru` выдан Cloudflare автоматически (Universal SSL). Клиент видит HTTPS зелёный замок. |
+| **TLS** | Сертификат `*.example.com` выдан Cloudflare автоматически (Universal SSL). Клиент видит HTTPS зелёный замок. |
 | **Origin protocol** | SSL/TLS mode `Flexible` — CF идёт к origin по HTTP. Не нужен LE на NAS. |
 | **WAN IP скрытие** | Клиент видит только CF IP, не наш реальный. Защита от direct attack. |
 | **Anti-DDoS** | Бесплатный basic от CF, фильтрует bot traffic. |

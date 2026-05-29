@@ -111,7 +111,7 @@ function addTitle(slide, title, subtitle) {
     {
       x: 4.7, y: 2.2, w: 4.0, color: "2563EB",
       title: "🌐 Edge & DNS",
-      body: "Cloudflare Free Plan\n\n• Zone morplex.ru\n• A-запись plex (Proxied)\n• HTTPS termination (CF cert)\n• anti-DDoS, скрытие WAN IP",
+      body: "Cloudflare Free Plan\n\n• Zone example.com\n• A-запись plex (Proxied)\n• HTTPS termination (CF cert)\n• anti-DDoS, скрытие WAN IP",
     },
     {
       x: 8.9, y: 2.2, w: 4.0, color: "059669",
@@ -174,7 +174,7 @@ function addTitle(slide, title, subtitle) {
 
   const nasItems = [
     ["📦 Container Manager", "Запускает Docker-контейнер tg-torrent-bot, mount state-папки"],
-    ["🌐 Web Station", "Portal plex.morplex.ru:80 → отдаёт plex.html (deeplink redirect)"],
+    ["🌐 Web Station", "Portal plex.example.com:80 → отдаёт plex.html (deeplink redirect)"],
     ["💾 Download Station", "Принимает .torrent/magnet через API; долгая загрузка"],
     ["🎬 Plex Media Server", "Индексирует /volume1/video, отдаёт metadata API"],
     ["📁 /volume1/video/", "Shared folder: DS пишет, Plex читает"],
@@ -499,7 +499,7 @@ addFlowSlide(8,
   "Что происходит при тапе кнопки «▶️ Смотреть в Plex»",
   [
     { from: 0, to: 1, label: "tap «▶️ Смотреть в Plex»" },
-    { from: 1, to: 2, label: "HTTPS GET plex.morplex.ru" },
+    { from: 1, to: 2, label: "HTTPS GET plex.example.com" },
     { from: 2, to: 3, label: "HTTP origin :80", note: "Flexible mode, CF cert" },
     { from: 3, to: 4, label: "NAT 80 → NAS:80" },
     { from: 4, to: 3, label: "plex.html", color: ACCENT_DEEP },
@@ -630,7 +630,7 @@ addFlowSlide(9,
     fontSize: 14, bold: true, color: ACCENT, fontFace: FONT_HEAD,
   });
   const reqSteps = [
-    { x: 0.7, label: "Browser", desc: "GET https://plex.morplex.ru/plex.html" },
+    { x: 0.7, label: "Browser", desc: "GET https://plex.example.com/plex.html" },
     { x: 3.0, label: "CF Edge", desc: "TLS termination (CF cert)" },
     { x: 5.3, label: "Origin lookup", desc: "DNS A → 203.0.113.42" },
     { x: 7.6, label: "Router NAT", desc: "80 → NAS:80" },
