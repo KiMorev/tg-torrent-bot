@@ -443,41 +443,7 @@ https://app.plex.tv/desktop/#!/server/{machineId}/details?key=/library/metadata/
 PLEX_DEEPLINK_BASE_URL=https://nas.example.com/plex.html
 ```
 
-Минимальная страница:
-
-```html
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Open Plex</title>
-</head>
-<body>
-  <script>
-    const params = new URLSearchParams(location.search);
-    const key = params.get("key") || "";
-    const server = params.get("server") || "";
-    const encodedKey = encodeURIComponent(key);
-    const webUrl = server && key
-      ? `https://app.plex.tv/desktop/#!/server/${server}/details?key=${encodedKey}`
-      : "https://app.plex.tv/desktop";
-    const appUrl = server && key
-      ? `plex://preplay/?metadataKey=${encodedKey}&server=${encodeURIComponent(server)}`
-      : "plex://";
-
-    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-    if (isMobile) {
-      location.href = appUrl;
-      setTimeout(() => { location.href = webUrl; }, 1200);
-    } else {
-      location.href = webUrl;
-    }
-  </script>
-  <p>Открываю Plex...</p>
-</body>
-</html>
-```
+Готовый файл лежит в [`web/plex.html`](web/plex.html). Если открыть его с параметрами `key` и `server`, он попробует открыть нативное приложение Plex и оставит fallback в Plex Web. Если открыть без параметров, он покажет служебный экран и ссылку на [`web/index.html`](web/index.html) — компактную страницу установки PlexLoader для новичка.
 
 Важно: открытие самого приложения через `plex://` работает только через промежуточную HTTPS-страницу. Переход точно в нужную карточку зависит от версии Plex-приложения, авторизации и доступа к серверу; поэтому fallback в Plex Web оставлен намеренно.
 

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PlexLoader - установка</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #5b6675;
+      --line: #dfe4ec;
+      --accent: #1769aa;
+      --accent-soft: #e8f3fb;
+      --code: #101820;
+      --code-text: #edf5ff;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111418;
+        --panel: #181d23;
+        --text: #f3f6fa;
+        --muted: #b7c0ca;
+        --line: #303842;
+        --accent: #71b7ff;
+        --accent-soft: #172637;
+        --code: #080b0f;
+        --code-text: #e6f0ff;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(960px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 40px 0 56px;
+    }
+
+    header {
+      padding: 28px 0 20px;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(34px, 6vw, 58px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .lead {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 19px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .button.primary {
+      border-color: transparent;
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin: 24px 0 18px;
+    }
+
+    .card,
+    .section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .card {
+      padding: 18px;
+    }
+
+    .section {
+      margin-top: 18px;
+      padding: 24px;
+    }
+
+    .tag {
+      display: inline-block;
+      margin-bottom: 10px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    ul,
+    ol {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    li + li {
+      margin-top: 7px;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 12px 0 0;
+      padding: 16px;
+      border-radius: 8px;
+      background: var(--code);
+      color: var(--code-text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    .note {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 780px) {
+      main {
+        width: min(100% - 24px, 960px);
+        padding-top: 18px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .section {
+        padding: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>PlexLoader</h1>
+      <p class="lead">Telegram-бот для домашнего медиасервера на Synology + Plex: ищет раздачи, добавляет их в Download Station, следит за загрузкой и сообщает, когда контент появился в Plex.</p>
+      <div class="actions">
+        <a class="button primary" href="#install">Установить на Synology</a>
+        <a class="button" href="https://github.com/KiMorev/tg-torrent-bot">GitHub</a>
+        <a class="button" href="plex.html">Проверить Plex redirect</a>
+      </div>
+    </header>
+
+    <section class="grid" aria-label="Главные возможности">
+      <article class="card">
+        <span class="tag">Поиск</span>
+        <p>Пишите название фильма или сериала, отправляйте magnet, torrent-файл, ссылку Кинопоиска или голосовое сообщение.</p>
+      </article>
+      <article class="card">
+        <span class="tag">Plex</span>
+        <p>Бот проверяет дубли, ждёт появления контента в библиотеке и даёт кнопку открытия в Plex.</p>
+      </article>
+      <article class="card">
+        <span class="tag">Сериалы</span>
+        <p>Можно следить за новыми сериями, ждать финал сезона или собрать план скачивания недостающих сезонов.</p>
+      </article>
+    </section>
+
+    <section class="section" id="install">
+      <h2>Установка одной командой</h2>
+      <p>Подключитесь к Synology по SSH пользователем, который может запускать Docker, и выполните:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code></pre>
+      <p class="note">Если на NAS нет <code>curl</code>, используйте <code>wget -qO- https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code>.</p>
+    </section>
+
+    <section class="section">
+      <h2>Что подготовить</h2>
+      <ol>
+        <li>Synology с установленным Container Manager или Docker.</li>
+        <li>Telegram-бот из <a href="https://t.me/BotFather">@BotFather</a>: нужен только token.</li>
+        <li>DSM-пользователь для PlexLoader с доступом к Download Station и папке загрузки.</li>
+      </ol>
+      <p class="note">Rutracker, Jackett, Plex, подборка <code>/new</code> и OpenAI подключаются после базовой установки через <code>.env</code>.</p>
+    </section>
+
+    <section class="section">
+      <h2>Что сделает установщик</h2>
+      <ul>
+        <li>Проверит Docker и Docker Compose.</li>
+        <li>Создаст папку <code>/volume1/docker/plexloader</code>.</li>
+        <li>Скачает <code>compose.yaml</code> и мастер настройки.</li>
+        <li>Проведёт по Telegram token, chat_id, DSM URL, логину, паролю и папке назначения.</li>
+        <li>Создаст <code>.env</code>, запустит контейнер и покажет последние логи, если запуск не удался.</li>
+      </ul>
+    </section>
+
+    <section class="section">
+      <h2>Проверка после запуска</h2>
+      <ul>
+        <li><code>/ping</code> должен ответить <code>pong</code>.</li>
+        <li><code>/status</code> должен показать задачи Download Station.</li>
+        <li><code>/admin</code> должен открыть панель диагностики.</li>
+        <li><code>/help</code> покажет доступные функции с учётом включённых интеграций.</li>
+      </ul>
+    </section>
+
+    <section class="section">
+      <h2>Plex redirect</h2>
+      <p>Файл <code>plex.html</code> нужен для кнопки <code>Смотреть в Plex</code> на телефоне. Если открыть его без параметров, он покажет служебный экран. Если бот откроет его с параметрами <code>key</code> и <code>server</code>, страница попробует открыть приложение Plex и оставит fallback в Plex Web.</p>
+      <pre><code>PLEX_DEEPLINK_BASE_URL=https://your-domain.example/plex.html</code></pre>
+    </section>
+
+    <section class="section">
+      <h2>Обновление</h2>
+      <p>Если включён Watchtower из стандартного <code>compose.yaml</code>, PlexLoader обновляется автоматически после успешного CI и публикации нового Docker-образа.</p>
+      <p>Для ручного обновления из папки установки:</p>
+      <pre><code>docker compose pull
+docker compose up -d</code></pre>
+    </section>
+
+    <p class="note">Не размещайте на публичной странице токены, пароли, <code>.env</code>, chat_id, внутренние адреса NAS или Plex token. Подробная документация: <a href="https://github.com/KiMorev/tg-torrent-bot#readme">README на GitHub</a>.</p>
+  </main>
+</body>
+</html>
