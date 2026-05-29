@@ -12260,7 +12260,7 @@ def _series_bulk_voice_manual_text(result: dict, selected: set[str]) -> str:
     ]
     if voices:
         for voice in voices:
-            mark = "✅" if voice in selected else "⬜"
+            mark = "☑️" if voice in selected else "⬜"
             lines.append(f"{mark} {voice}")
     else:
         lines.append("В эталоне не распознал конкретные студии озвучки.")
@@ -12270,13 +12270,16 @@ def _series_bulk_voice_manual_text(result: dict, selected: set[str]) -> str:
 def _series_bulk_voice_manual_keyboard(result: dict, selected: set[str]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, voice in enumerate(_series_bulk_reference_voices(result)):
-        mark = "✅" if voice in selected else "⬜"
+        mark = "☑️" if voice in selected else "⬜"
         rows.append([InlineKeyboardButton(
             f"{mark} {voice}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_pick_{index}",
         )])
     if selected:
-        rows.append([InlineKeyboardButton("✅ Готово", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_done")])
+        rows.append([InlineKeyboardButton(
+            "💾 Сохранить выбор",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_done",
+        )])
     rows.extend([
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_prof:voice_back")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],

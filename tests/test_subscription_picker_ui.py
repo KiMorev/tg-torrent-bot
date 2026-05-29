@@ -338,6 +338,14 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
         query.data = "srch:bulk_prof:voice_pick_1"
         asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
+        labels = [
+            b.text
+            for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("☑️ LostFilm", labels)
+        self.assertIn("☑️ NewStudio", labels)
+        self.assertIn("💾 Сохранить выбор", labels)
         query.data = "srch:bulk_prof:voice_done"
         state = asyncio.run(bot.search_series_bulk_profile_callback(update, ctx))
 
