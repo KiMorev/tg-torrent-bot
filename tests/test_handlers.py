@@ -3436,7 +3436,8 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         remember_meta.assert_not_called()
         final_call = update.callback_query.edit_message_text.await_args
         final_text = final_call.args[0]
-        self.assertIn("Задача может появиться в списке загрузок", final_text)
+        self.assertIn("бот пока не видит созданную задачу", final_text)
+        self.assertIn("через минуту откройте список загрузок", final_text)
         self.assertIn("трекеры не добавляю", final_text)
         markup = final_call.kwargs.get("reply_markup")
         labels = [button.text for row in markup.inline_keyboard for button in row]
