@@ -60,6 +60,11 @@ from formatters import (
 from keyboards import (
     ACCESS_CALLBACK_PREFIX,
     ADMIN_CALLBACK_PREFIX,
+    BUTTON_CLOSE,
+    BUTTON_DOWNLOAD_LIST,
+    BUTTON_REFRESH,
+    BUTTON_RETRY,
+    BUTTON_SHOW_TASK,
     JACKETT_SELECT_PREFIX,
     SEARCH_CALLBACK_PREFIX,
     TASK_CALLBACK_PREFIX,
@@ -1115,10 +1120,10 @@ def _admin_subscriptions_keyboard(subs: dict[str, dict]) -> InlineKeyboardMarkup
             ])
 
     rows.append([
-        InlineKeyboardButton("🔄 Обновить", callback_data=f"{ADMIN_CALLBACK_PREFIX}:subscriptions"),
+        InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{ADMIN_CALLBACK_PREFIX}:subscriptions"),
         InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
     ])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=f"{ADMIN_CALLBACK_PREFIX}:close")])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=f"{ADMIN_CALLBACK_PREFIX}:close")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2078,8 +2083,8 @@ def _movie_discovery_keyboard(cards: list[dict], chat_id: int | None = None) -> 
     sub_cb = "new:unsubscribe" if is_subscribed else "new:subscribe"
     rows.append([InlineKeyboardButton(sub_label, callback_data=sub_cb)])
     rows.append([
-        InlineKeyboardButton("🔄 Обновить", callback_data="new:refresh"),
-        InlineKeyboardButton("✖️ Закрыть", callback_data="new:close"),
+        InlineKeyboardButton(BUTTON_REFRESH, callback_data="new:refresh"),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data="new:close"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -2873,7 +2878,7 @@ def _movie_notification_keyboard() -> "InlineKeyboardMarkup":
             InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
         ],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
 
@@ -4225,7 +4230,7 @@ async def _plex_poll_after_finish(
 
                 text = f"✅ <b>{html_module.escape(found_title)}</b> добавлен в Plex."
                 close_btn = InlineKeyboardButton(
-                    "✖️ Закрыть", callback_data=_task_callback("close", ""),
+                    BUTTON_CLOSE, callback_data=_task_callback("close", ""),
                 )
                 if deep_link:
                     keyboard = InlineKeyboardMarkup([
@@ -5078,8 +5083,8 @@ async def _handle_duplicate_task(
             if meta_line:
                 text += f"\n{meta_line}"
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", orig_id))],
-                [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+                [InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", orig_id))],
+                [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
             ])
 
         elif orig_status in {"downloading", "waiting", "finishing", "hash_checking"}:
@@ -5099,10 +5104,10 @@ async def _handle_duplicate_task(
                 text += f"\n{meta_line}"
             kb = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", orig_id)),
+                    InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", orig_id)),
                     InlineKeyboardButton("🔔 Уведомить когда готово", callback_data=_task_callback("sub_notify", orig_id)),
                 ],
-                [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+                [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
             ])
 
         else:
@@ -5117,10 +5122,10 @@ async def _handle_duplicate_task(
                 text += f"\n{meta_line}"
             kb = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", orig_id)),
+                    InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", orig_id)),
                     InlineKeyboardButton("▶️ Запустить", callback_data=_task_callback("resume", orig_id)),
                 ],
-                [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+                [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
             ])
     else:
         # Original not found — it may have been deleted already.
@@ -5129,7 +5134,7 @@ async def _handle_duplicate_task(
             f"🎬 {dup_title}"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+            [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
         ])
 
     try:
@@ -8312,7 +8317,7 @@ async def search_queue_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Попробую скачать снова через ~{interval_min} мин.\n"
         f"Если за {PENDING_DOWNLOADS_TTL_HOURS:g}ч не получится — пришлю уведомление об отказе.",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+            InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
         ]]),
     )
     return ConversationHandler.END
@@ -8583,7 +8588,7 @@ async def _get_plex_seasons_for_series(series_query: str) -> set[int]:
 
 def _series_continue_close_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
     ]])
 
 
@@ -8760,10 +8765,10 @@ def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> Inline
             InlineKeyboardButton("➡️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{next_page}"),
         ])
     rows.append([
-        InlineKeyboardButton("🔄 Обновить", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:refresh:{scope}"),
+        InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{CONTINUE_CALLBACK_PREFIX}:refresh:{scope}"),
     ])
     rows.append([
-        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -8811,7 +8816,7 @@ def _series_continue_detail_keyboard(
             )
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -8847,7 +8852,7 @@ def _series_continue_action_keyboard(
             )
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -8940,7 +8945,7 @@ def _series_continue_alternatives_keyboard(
             )
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -10375,7 +10380,7 @@ def _subscription_policy_pair_does_nothing(notify_policy: str, download_policy: 
 
 def _subscription_done_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
     ]])
 
 
@@ -11080,10 +11085,10 @@ def _series_bulk_done_keyboard(has_downloads: bool, has_failures: bool = False) 
         )])
     if has_downloads:
         rows.append([InlineKeyboardButton(
-            "📚 К списку загрузок",
+            BUTTON_DOWNLOAD_LIST,
             callback_data=_task_callback("list", TASK_LIST_SCOPE_MY),
         )])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -11096,7 +11101,7 @@ def _series_bulk_review_keyboard(
     if failed_error:
         if season_plan.selected is not None or season_plan.candidates:
             rows.append([InlineKeyboardButton(
-                "🔄 Попробовать снова",
+                BUTTON_RETRY,
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_retry",
             )])
         failed_candidate = None
@@ -11160,7 +11165,7 @@ def _series_bulk_review_keyboard(
 
 def _series_bulk_error_keyboard(index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_plan:{index}")],
+        [InlineKeyboardButton(BUTTON_RETRY, callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_plan:{index}")],
         [InlineKeyboardButton("⬅️ К результатам", callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_back_results:0")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"{SEARCH_CALLBACK_PREFIX}:cancel")],
     ])
@@ -11701,7 +11706,7 @@ def _series_bulk_jobs_keyboard(jobs: list[tuple[str, dict]]) -> InlineKeyboardMa
             f"📚 {index}. {_series_bulk_short_text(job.get('series_title'), limit=30)}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_open:{job_id}",
         )])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -14430,7 +14435,7 @@ def _build_subscriptions_view(chat_id: int | None) -> tuple[str, InlineKeyboardM
             "Как добавить подписку: выберите «следить» или «скачать и следить» "
             "при работе с сериалом, либо подпишитесь на /new.",
             InlineKeyboardMarkup([[
-                InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+                InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
             ]]),
         )
 
@@ -14500,14 +14505,14 @@ def _build_subscriptions_view(chat_id: int | None) -> tuple[str, InlineKeyboardM
             )
         ])
 
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _subscription_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ К подпискам", callback_data=f"{SUB_CALLBACK_PREFIX}:list")],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
 
@@ -14516,7 +14521,7 @@ def _subscription_settings_keyboard(sub_key: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔔 Уведомления", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_notify:{sub_key}")],
         [InlineKeyboardButton("⬇️ Скачивание", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_download:{sub_key}")],
         [InlineKeyboardButton("⬅️ К подпискам", callback_data=f"{SUB_CALLBACK_PREFIX}:list")],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
 
@@ -14573,7 +14578,7 @@ def _subscription_notify_keyboard(sub_key: str, sub: dict) -> InlineKeyboardMark
         for policy, text in choices
     ]
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{sub_key}")])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -14597,7 +14602,7 @@ def _subscription_download_keyboard(sub_key: str, sub: dict) -> InlineKeyboardMa
         for policy, text in choices
     ]
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{sub_key}")])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -14642,7 +14647,7 @@ def _subscription_noop_policy_keyboard(sub_key: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔔 Настроить уведомления", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_notify:{sub_key}")],
         [InlineKeyboardButton("⬇️ Настроить скачивание", callback_data=f"{SUB_CALLBACK_PREFIX}:settings_download:{sub_key}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"{SUB_CALLBACK_PREFIX}:settings:{sub_key}")],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
 
@@ -15071,7 +15076,7 @@ async def _check_jackett_sub_via_rutracker_direct(
             "Торрент обновлён в Download Station. Подписка снята."
         )
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id)),
+            InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", task_id)),
         ]])
     elif task_id:
         text = (
@@ -15079,7 +15084,7 @@ async def _check_jackett_sub_via_rutracker_direct(
             f"\n🔎 {new_title}{progress}"
         )
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", task_id)),
+            InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id)),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
     elif not wants_download and is_complete:
@@ -15091,7 +15096,7 @@ async def _check_jackett_sub_via_rutracker_direct(
         rows = []
         if topic_url:
             rows.append([InlineKeyboardButton("🔍 Открыть раздачу", url=topic_url)])
-        rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+        rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
         kb = InlineKeyboardMarkup(rows)
     elif not wants_download:
         # Notify-only mode (download_policy=notify_only) — we intentionally
@@ -15347,10 +15352,10 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 )
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
-                        "📋 Открыть задачу",
+                        BUTTON_SHOW_TASK,
                         callback_data=_task_callback("info", task_id),
                     ),
-                    InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+                    InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
                 ]])
             elif task_id:
                 text = (
@@ -15361,7 +15366,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 )
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
-                        "📋 Открыть задачу",
+                        BUTTON_SHOW_TASK,
                         callback_data=_task_callback("info", task_id),
                     ),
                     InlineKeyboardButton(
@@ -15381,7 +15386,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 topic_url = str(getattr(candidate, "topic_url", "") or "")
                 if topic_url:
                     rows.append([InlineKeyboardButton("🔍 Открыть раздачу", url=topic_url)])
-                rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+                rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
                 kb = InlineKeyboardMarkup(rows)
             elif not wants_download:
                 # Notify-only mode — we intentionally didn't download.
@@ -15556,7 +15561,7 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
         "Торрент обновлён в Download Station."
     )
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id)),
+        InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", task_id)),
         InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
     ]])
     return text, keyboard
@@ -15866,7 +15871,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\n\n".join(sections),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("✖️ Закрыть", callback_data="help:close")]]
+            [[InlineKeyboardButton(BUTTON_CLOSE, callback_data="help:close")]]
         ),
     )
 
@@ -15978,7 +15983,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             query, text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Назад", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
-                InlineKeyboardButton("✖️ Закрыть", callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
+                InlineKeyboardButton(BUTTON_CLOSE, callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
             ]]),
         )
         return
@@ -16579,7 +16584,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def _access_result_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
-        InlineKeyboardButton("✖️ Закрыть", callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
     ]])
 
 
@@ -16901,8 +16906,8 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             if query.message:
                 new_kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📋 Открыть задачу", callback_data=_task_callback("info", task_id))],
-                    [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+                    [InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id))],
+                    [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
                 ])
                 await query.edit_message_reply_markup(reply_markup=new_kb)
         except Exception:
@@ -16940,11 +16945,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     f"🗑 Задача удалена.\nID: {task_id}",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton(
-                            "📋 К списку загрузок",
+                            BUTTON_DOWNLOAD_LIST,
                             callback_data=_task_callback("list", scope),
                         )
                     ], [
-                        InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", "")),
+                        InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
                     ]]),
                 )
                 if del_chat_id and del_msg_id:

@@ -5964,7 +5964,7 @@ class TaskCallbackErrorKeyboardTests(unittest.TestCase):
         self.assertIn("Не удалось получить задачу", call.args[0])
         buttons = self._buttons(call.kwargs["reply_markup"])
         self.assertEqual(buttons["🔄 Попробовать снова"], "task:info:task_123")
-        self.assertEqual(buttons["📋 К списку загрузок"], "task:list:mine")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:mine")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
 

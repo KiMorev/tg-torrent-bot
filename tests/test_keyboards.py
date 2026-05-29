@@ -715,7 +715,7 @@ class TasksKeyboardCloseTests(unittest.TestCase):
             list_scope="mine",
         ))
         self.assertEqual(buttons["🔄 Попробовать снова"], "task:info:task_123")
-        self.assertEqual(buttons["📋 К списку загрузок"], "task:list:mine")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:mine")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
 

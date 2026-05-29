@@ -27,6 +27,14 @@ TASK_LIST_SCOPE_MY = "mine"
 TASK_LIST_SCOPE_DEFAULT = "default"
 TASK_LIST_PAGE_SIZE = 10
 
+BUTTON_CLOSE = "✖️ Закрыть"
+BUTTON_CANCEL = "❌ Отмена"
+BUTTON_BACK = "⬅️ Назад"
+BUTTON_REFRESH = "🔄 Обновить"
+BUTTON_RETRY = "🔄 Попробовать снова"
+BUTTON_SHOW_TASK = "📋 Показать задачу"
+BUTTON_DOWNLOAD_LIST = "📚 К списку загрузок"
+
 # ---------------------------------------------------------------------------
 # Search-specific constants
 # ---------------------------------------------------------------------------
@@ -88,8 +96,8 @@ def _access_approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 def _download_list_keyboard(scope: str = TASK_LIST_SCOPE_DEFAULT) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", scope))],
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+            [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", scope))],
+            [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
         ]
     )
 
@@ -102,15 +110,15 @@ def _task_error_keyboard(
     """Keyboard for task-flow error screens so they never become dead ends."""
     rows: list[list[InlineKeyboardButton]] = []
     if retry_callback:
-        rows.append([InlineKeyboardButton("🔄 Попробовать снова", callback_data=retry_callback)])
+        rows.append([InlineKeyboardButton(BUTTON_RETRY, callback_data=retry_callback)])
     if list_scope:
         rows.append([
             InlineKeyboardButton(
-                "📋 К списку загрузок",
+                BUTTON_DOWNLOAD_LIST,
                 callback_data=_task_callback("list", list_scope),
             )
         ])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -133,7 +141,7 @@ def _admin_panel_keyboard(
     """
     rows = [
         [
-            InlineKeyboardButton("🔄 Обновить", callback_data=_admin_callback("home")),
+            InlineKeyboardButton(BUTTON_REFRESH, callback_data=_admin_callback("home")),
             InlineKeyboardButton("🧭 Диагностика", callback_data=_admin_callback("diagnostics")),
         ],
         [
@@ -171,7 +179,7 @@ def _admin_panel_keyboard(
             callback_data=_admin_callback("reset_notify_failures"),
         )])
 
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -190,8 +198,8 @@ def _admin_movie_status_keyboard(*, show_kp_buttons: bool) -> InlineKeyboardMark
             InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
         ])
     rows.append([
-        InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home")),
-        InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
+        InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home")),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close")),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -202,9 +210,9 @@ def _admin_kp_cache_confirm_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("✅ Да, очистить", callback_data=_admin_callback("confirm_clear_kp_cache")),
-                InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home")),
+                InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home")),
             ],
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
+            [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))],
         ]
     )
 
@@ -214,7 +222,7 @@ def _admin_kp_cache_cleared_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home"))],
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
+            [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))],
         ]
     )
 
@@ -236,8 +244,8 @@ def _admin_kp_force_refresh_keyboard(can_full: bool) -> InlineKeyboardMarkup:
         )
     ])
     rows.append([
-        InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home")),
-        InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
+        InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home")),
+        InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close")),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -258,7 +266,7 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback("diagnostics")),
                 InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home")),
             ],
-            [InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close"))],
+            [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))],
         ]
     )
 
@@ -268,8 +276,8 @@ def _admin_diagnostics_detail_keyboard(section: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback(f"diag_refresh:{section}"))],
             [
-                InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("diagnostics_back")),
-                InlineKeyboardButton("✖️ Закрыть", callback_data=_admin_callback("close")),
+                InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("diagnostics_back")),
+                InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close")),
             ],
         ]
     )
@@ -281,7 +289,7 @@ def _tasks_keyboard(
     is_admin: bool = False,
     page: int = 0,
 ) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("🔄 Обновить", callback_data=_task_callback("list", scope))]]
+    rows = [[InlineKeyboardButton(BUTTON_REFRESH, callback_data=_task_callback("list", scope))]]
     if is_admin:
         if scope == TASK_LIST_SCOPE_ALL:
             rows[0].append(
@@ -342,7 +350,7 @@ def _tasks_keyboard(
             ]
         )
 
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -374,10 +382,10 @@ def _task_keyboard(
         [InlineKeyboardButton("🗑️ Удалить", callback_data=_task_callback("delete_ask", task_id))]
     )
     rows.append(
-        [InlineKeyboardButton("📋 К списку загрузок", callback_data=_task_callback("list", task_id))]
+        [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", task_id))]
     )
     rows.append(
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))]
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))]
     )
 
     return InlineKeyboardMarkup(rows)
@@ -430,8 +438,8 @@ def _final_notification_keyboard(
     if show_plex:
         rows.append([InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)])
     else:
-        rows.append([InlineKeyboardButton("📋 Показать задачу", callback_data=_task_callback("info", task_id))])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+        rows.append([InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -448,14 +456,14 @@ def _download_added_keyboard(
         )])
     if task_id:
         rows.append([InlineKeyboardButton(
-            "📋 Показать задачу",
+            BUTTON_SHOW_TASK,
             callback_data=_task_callback("info", task_id),
         )])
     rows.append([InlineKeyboardButton(
-        "📚 К списку загрузок",
+        BUTTON_DOWNLOAD_LIST,
         callback_data=_task_callback("list", task_id or TASK_LIST_SCOPE_DEFAULT),
     )])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -585,8 +593,8 @@ def _search_error_keyboard() -> InlineKeyboardMarkup:
     Gives the user a way to retry the same query or close the message.
     """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry")],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))],
+        [InlineKeyboardButton(BUTTON_RETRY, callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry")],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
 
@@ -618,7 +626,7 @@ def _download_error_keyboard(
             "⏳ Поставить в очередь",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:queue_dl:{index}",
         )])
-    rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -941,11 +949,11 @@ def users_keyboard(
         )]
         for uid, info in approved_users.items()
     ]
-    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
+    rows.append([InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
     if back_to_admin:
         rows.append([InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home")])
     else:
-        rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data=_task_callback("close", ""))])
+        rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -973,5 +981,5 @@ def movie_trackers_keyboard(
     )
     if some_disabled:
         rows.append([InlineKeyboardButton("✅ Включить все", callback_data=_admin_callback("tracker_enable_all"))])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=_admin_callback("home"))])
+    rows.append([InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home"))])
     return InlineKeyboardMarkup(rows)
