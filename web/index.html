@@ -66,6 +66,12 @@
       letter-spacing: 0;
     }
 
+    h3 {
+      margin: 0 0 10px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
     p {
       margin: 0 0 14px;
     }
@@ -113,6 +119,12 @@
       grid-template-columns: repeat(3, 1fr);
       gap: 14px;
       margin: 24px 0 18px;
+    }
+
+    .two {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
     }
 
     .card,
@@ -173,6 +185,43 @@
       font-size: 14px;
     }
 
+    .steps {
+      counter-reset: step;
+      list-style: none;
+      padding-left: 0;
+    }
+
+    .steps > li {
+      counter-increment: step;
+      position: relative;
+      padding-left: 40px;
+    }
+
+    .steps > li::before {
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      color: var(--accent);
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      font-size: 14px;
+    }
+
+    .kbd {
+      display: inline-block;
+      padding: 1px 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      font-size: 0.92em;
+    }
+
     @media (max-width: 780px) {
       main {
         width: min(100% - 24px, 960px);
@@ -180,6 +229,10 @@
       }
 
       .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .two {
         grid-template-columns: 1fr;
       }
 
@@ -195,7 +248,8 @@
       <h1>PlexLoader</h1>
       <p class="lead">Telegram-бот для домашнего медиасервера на Synology + Plex: ищет раздачи, добавляет их в Download Station, следит за загрузкой и сообщает, когда контент появился в Plex.</p>
       <div class="actions">
-        <a class="button primary" href="#install">Установить на Synology</a>
+        <a class="button primary" href="#start">Начать установку</a>
+        <a class="button" href="#after">Подключить интеграции</a>
         <a class="button" href="https://github.com/KiMorev/tg-torrent-bot">GitHub</a>
         <a class="button" href="plex.html">Проверить Plex redirect</a>
       </div>
@@ -216,59 +270,135 @@
       </article>
     </section>
 
-    <section class="section" id="install">
-      <h2>Установка одной командой</h2>
-      <p>Подключитесь к Synology по SSH пользователем, который может запускать Docker, и выполните:</p>
-      <pre><code>curl -fsSL https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code></pre>
-      <p class="note">Если на NAS нет <code>curl</code>, используйте <code>wget -qO- https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code>.</p>
+    <section class="section" id="start">
+      <h2>Перед установкой</h2>
+      <p>PlexLoader ставится в Docker на Synology. Базовый мастер настраивает Telegram-бота и Synology Download Station. Rutracker, Jackett, Plex, <code>/new</code> и OpenAI подключаются после первого запуска через <code>.env</code>.</p>
+      <div class="two">
+        <article>
+          <h3>На Synology</h3>
+          <ol>
+            <li>Откройте DSM → <span class="kbd">Package Center</span> и установите <span class="kbd">Container Manager</span>.</li>
+            <li>Убедитесь, что установлен и запущен <span class="kbd">Download Station</span>.</li>
+            <li>Включите SSH: DSM → <span class="kbd">Панель управления</span> → <span class="kbd">Терминал и SNMP</span> → <span class="kbd">Включить SSH</span>.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>Доступы</h3>
+          <ol>
+            <li>Создайте Telegram-бота в <a href="https://t.me/BotFather">@BotFather</a>.</li>
+            <li>Подготовьте DSM-пользователя для PlexLoader, например <code>tg_bot_ds</code>.</li>
+            <li>Дайте этому пользователю доступ к Download Station и папке загрузки, например <code>video</code>.</li>
+          </ol>
+        </article>
+      </div>
     </section>
 
     <section class="section">
-      <h2>Что подготовить</h2>
-      <ol>
-        <li>Synology с установленным Container Manager или Docker.</li>
-        <li>Telegram-бот из <a href="https://t.me/BotFather">@BotFather</a>: нужен только token.</li>
-        <li>DSM-пользователь для PlexLoader с доступом к Download Station и папке загрузки.</li>
+      <h2>1. Получить Telegram token</h2>
+      <ol class="steps">
+        <li>Откройте <a href="https://t.me/BotFather">@BotFather</a> в Telegram.</li>
+        <li>Отправьте команду <code>/newbot</code>.</li>
+        <li>Введите имя бота, например <code>PlexLoader Home</code>.</li>
+        <li>Введите username, который заканчивается на <code>bot</code>, например <code>my_plexloader_bot</code>.</li>
+        <li>Скопируйте token вида <code>123456789:AA...</code>. Его попросит мастер установки.</li>
       </ol>
-      <p class="note">Rutracker, Jackett, Plex, подборка <code>/new</code> и OpenAI подключаются после базовой установки через <code>.env</code>.</p>
+      <p class="note">Token нельзя публиковать. Если token утёк, в BotFather используйте <code>/revoke</code>.</p>
     </section>
 
     <section class="section">
-      <h2>Что сделает установщик</h2>
-      <ul>
-        <li>Проверит Docker и Docker Compose.</li>
-        <li>Создаст папку <code>/volume1/docker/plexloader</code>.</li>
-        <li>Скачает <code>compose.yaml</code> и мастер настройки.</li>
-        <li>Проведёт по Telegram token, chat_id, DSM URL, логину, паролю и папке назначения.</li>
-        <li>Создаст <code>.env</code>, запустит контейнер и покажет последние логи, если запуск не удался.</li>
-      </ul>
+      <h2>2. Подключиться к NAS</h2>
+      <p>На компьютере откройте терминал и подключитесь к Synology по SSH:</p>
+      <pre><code>ssh your_user@192.168.1.10</code></pre>
+      <p class="note">Замените <code>your_user</code> и IP-адрес на свои. Пользователь должен иметь право запускать Docker.</p>
+    </section>
+
+    <section class="section" id="install">
+      <h2>3. Запустить установщик</h2>
+      <p>В SSH-сессии выполните:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code></pre>
+      <p>Если на NAS нет <code>curl</code>, используйте:</p>
+      <pre><code>wget -qO- https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code></pre>
+      <p class="note">Установщик создаст папку <code>/volume1/docker/plexloader</code>, скачает <code>compose.yaml</code> и мастер настройки, создаст <code>.env</code>, запустит контейнер и покажет логи при ошибке.</p>
     </section>
 
     <section class="section">
-      <h2>Проверка после запуска</h2>
+      <h2>4. Что спросит мастер</h2>
+      <ol class="steps">
+        <li><strong>BOT_TOKEN.</strong> Вставьте token из BotFather.</li>
+        <li><strong>Telegram chat_id.</strong> Мастер попросит написать <code>/start</code> вашему боту и попробует сам найти chat_id. Ручной ввод нужен только если Telegram не отдаст update.</li>
+        <li><strong>DSM URL.</strong> Обычно можно оставить <code>https://host.docker.internal:5001</code>. Это адрес DSM из контейнера.</li>
+        <li><strong>DSM account/password.</strong> Введите пользователя Synology, которого подготовили для PlexLoader.</li>
+        <li><strong>Папка назначения.</strong> Обычно <code>video</code> или другая папка, настроенная в Download Station.</li>
+      </ol>
+      <p class="note">Если DSM использует самоподписанный сертификат, мастер сам попробует безопасный fallback <code>DS_VERIFY_SSL=false</code>. Если Download Station не проходит проверку, мастер покажет причину и предложит ввести данные заново.</p>
+    </section>
+
+    <section class="section">
+      <h2>5. Проверить запуск</h2>
+      <p>После завершения установки откройте своего Telegram-бота:</p>
       <ul>
         <li><code>/ping</code> должен ответить <code>pong</code>.</li>
         <li><code>/status</code> должен показать задачи Download Station.</li>
         <li><code>/admin</code> должен открыть панель диагностики.</li>
         <li><code>/help</code> покажет доступные функции с учётом включённых интеграций.</li>
       </ul>
+      <p>Если бот не отвечает, посмотрите логи на NAS:</p>
+      <pre><code>cd /volume1/docker/plexloader
+docker compose logs --tail=100 tg_torrent_drop</code></pre>
+    </section>
+
+    <section class="section" id="after">
+      <h2>Что подключить после базовой установки</h2>
+      <p>Откройте файл <code>/volume1/docker/plexloader/.env</code> и добавьте только те интеграции, которые нужны. После изменения <code>.env</code> примените настройки командой <code>docker compose up -d</code> из папки установки.</p>
+      <div class="two">
+        <article>
+          <h3>Rutracker</h3>
+          <p>Нужны логин и пароль аккаунта Rutracker.</p>
+          <pre><code>RUTRACKER_USERNAME=login
+RUTRACKER_PASSWORD=password</code></pre>
+        </article>
+        <article>
+          <h3>Jackett</h3>
+          <p>В Jackett откройте главную страницу и скопируйте API Key. URL обычно выглядит как <code>http://host:9117</code>.</p>
+          <pre><code>JACKETT_URL=http://192.168.1.10:9117
+JACKETT_API_KEY=replace_me</code></pre>
+        </article>
+        <article>
+          <h3>Plex</h3>
+          <p>Укажите URL Plex Media Server и token. Без Plex бот всё равно скачивает, но не проверяет дубли и не присылает кнопку просмотра.</p>
+          <pre><code>PLEX_URL=http://192.168.1.10:32400
+PLEX_TOKEN=replace_me</code></pre>
+        </article>
+        <article>
+          <h3>OpenAI</h3>
+          <p>Нужен API key из личного кабинета OpenAI. Он включает голосовой поиск и GPT-подсказки.</p>
+          <pre><code>OPENAI_API_KEY=sk-...</code></pre>
+        </article>
+      </div>
+      <p class="note">Подробный список переменных и сценариев — в <a href="https://github.com/KiMorev/tg-torrent-bot#readme">README на GitHub</a>.</p>
     </section>
 
     <section class="section">
-      <h2>Plex redirect</h2>
-      <p>Файл <code>plex.html</code> нужен для кнопки <code>Смотреть в Plex</code> на телефоне. Если открыть его без параметров, он покажет служебный экран. Если бот откроет его с параметрами <code>key</code> и <code>server</code>, страница попробует открыть приложение Plex и оставит fallback в Plex Web.</p>
-      <pre><code>PLEX_DEEPLINK_BASE_URL=https://your-domain.example/plex.html</code></pre>
+      <h2>Plex redirect для телефона</h2>
+      <p>Файл <code>plex.html</code> нужен для кнопки <code>Смотреть в Plex</code>. Если бот откроет его с параметрами <code>key</code> и <code>server</code>, страница попробует открыть приложение Plex и оставит fallback в Plex Web.</p>
+      <p>Если сайт <code>plex.morplex.ru</code> уже смотрит в папку <code>/web/plex-redirect</code>, положите файлы так:</p>
+      <pre><code>/web/plex-redirect/plex.html
+/web/plex-redirect/index.html</code></pre>
+      <p>В <code>.env</code> укажите базовый адрес без параметров:</p>
+      <pre><code>PLEX_DEEPLINK_BASE_URL=https://plex.morplex.ru/plex.html</code></pre>
+      <p class="note">Параметры <code>key</code> и <code>server</code> бот добавляет сам, когда Plex нашёл конкретный фильм или сезон.</p>
     </section>
 
     <section class="section">
       <h2>Обновление</h2>
-      <p>Если включён Watchtower из стандартного <code>compose.yaml</code>, PlexLoader обновляется автоматически после успешного CI и публикации нового Docker-образа.</p>
-      <p>Для ручного обновления из папки установки:</p>
-      <pre><code>docker compose pull
+      <p>Если используется стандартный <code>compose.yaml</code>, Watchtower проверяет новый образ и обновляет PlexLoader автоматически. Для ручного обновления:</p>
+      <pre><code>cd /volume1/docker/plexloader
+docker compose pull
 docker compose up -d</code></pre>
+      <p class="note">Если менялись только файлы <code>index.html</code> или <code>plex.html</code> на Web Station, контейнер бота перезапускать не нужно.</p>
     </section>
 
-    <p class="note">Не размещайте на публичной странице токены, пароли, <code>.env</code>, chat_id, внутренние адреса NAS или Plex token. Подробная документация: <a href="https://github.com/KiMorev/tg-torrent-bot#readme">README на GitHub</a>.</p>
+    <p class="note">Не размещайте на публичной странице токены, пароли, <code>.env</code>, chat_id, внутренние адреса NAS или Plex token. Эта страница содержит только общую инструкцию.</p>
   </main>
 </body>
 </html>
