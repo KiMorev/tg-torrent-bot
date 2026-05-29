@@ -7356,9 +7356,13 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         filter_parts.append("оригинальная дорожка")
     if subs_required:
         filter_parts.append("субтитры")
-    loading_text = f"🔎 Ищем «{base_query}»…"
+    loading_text = (
+        f"🔎 Ищу раздачи: «{base_query}»\n\n"
+        "Это может занять до минуты.\n"
+        "Проверяю выбранные трекеры."
+    )
     if filter_parts:
-        loading_text += f"\n⚙️ {' · '.join(filter_parts)}"
+        loading_text += f"\n⚙️ Фильтры: {' · '.join(filter_parts)}"
 
     loading_msg = await send_fn(loading_text)
     if loading_msg is not None:
@@ -10029,7 +10033,10 @@ async def _download_and_add(
         context.user_data["srch_disk_warn"] = msg
         logger.info("Disk-space warning before download: %s", msg)
 
-    await query.edit_message_text("⏳ Скачиваю torrent-файл…")
+    await query.edit_message_text(
+        "⏳ Добавляю загрузку\n\n"
+        "Сейчас получаю torrent-файл и передаю задачу в очередь скачивания."
+    )
 
     title = result["title"]
     safe_name = _safe_filename(f"{title}.torrent")
@@ -10092,7 +10099,10 @@ async def _download_and_add(
                             "Jackett download failed (%s), trying rutracker_client direct: topic_id=%s",
                             torrent_err, topic_id_from_url,
                         )
-                        await query.edit_message_text("⏳ Пробую скачать напрямую с Rutracker…")
+                        await query.edit_message_text(
+                            "⏳ Пробую запасной путь\n\n"
+                            "Jackett не отдал torrent-файл. Получаю раздачу напрямую с Rutracker."
+                        )
                         torrent_bytes = await asyncio.to_thread(
                             rutracker_client.download_torrent, topic_id_from_url
                         )
@@ -10109,7 +10119,10 @@ async def _download_and_add(
                     pass  # task_id is set; skip the re-search/magnet block
                 else:
                     logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
-                    await query.edit_message_text("⏳ Обновляю раздачи, повторяю попытку…")
+                    await query.edit_message_text(
+                        "⏳ Повторяю попытку\n\n"
+                        "Обновляю данные раздачи и пробую передать её в очередь скачивания."
+                    )
                     fresh_url = await _refresh_jackett_torrent_url(jackett_client, result, context)
                     if fresh_url:
                         try:

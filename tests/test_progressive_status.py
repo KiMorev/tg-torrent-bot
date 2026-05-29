@@ -53,14 +53,14 @@ class StartTests(unittest.IsolatedAsyncioTestCase):
 
         p = ProgressiveStatus(
             bot, chat_id=100,
-            initial_text="🔎 Ищем «X»…", stages=[],
+            initial_text="Старт", stages=[],
             gif_path=None,
         )
         msg = await p.start()
         self.assertIsNotNone(msg)
         bot.send_message.assert_awaited_once()
         kwargs = bot.send_message.await_args.kwargs
-        self.assertEqual(kwargs["text"], "🔎 Ищем «X»…")
+        self.assertEqual(kwargs["text"], "Старт")
         self.assertEqual(kwargs["chat_id"], 100)
         # No gif path → send_animation not called.
         bot.send_animation.assert_not_called()
@@ -250,8 +250,10 @@ class StageConfigTests(unittest.TestCase):
         # First escalation at t=10s, second at t=25s.
         self.assertEqual(stages[0][0], 10.0)
         self.assertEqual(stages[1][0], 25.0)
-        # Text must mention activity (so user sees the bot is still working).
-        self.assertIn("ищем", stages[0][1].lower())
+        # Text must mention activity and tell the user not to repeat-tap.
+        self.assertIn("ищу", stages[0][1].lower())
+        self.assertIn("повторно нажимать не нужно", stages[0][1].lower())
+        self.assertIn("покажу понятную ошибку", stages[1][1].lower())
 
     def test_voice_stages_has_one_escalation(self):
         stages = voice_stages()
