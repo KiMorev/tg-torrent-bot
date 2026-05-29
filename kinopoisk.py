@@ -88,6 +88,8 @@ class KinopoiskMovieMatch:
     rating: float | None
     genres: list[str]
     votes: int | None = None
+    poster_url: str = ""
+    poster_preview_url: str = ""
 
     @property
     def title(self) -> str:
@@ -337,6 +339,8 @@ class KinopoiskClient:
                 rating=rating,
                 genres=genres,
                 votes=votes,
+                poster_url=str(item.get("posterUrl") or "").strip(),
+                poster_preview_url=str(item.get("posterUrlPreview") or "").strip(),
             )
             if not (candidate.kp_id and candidate.title):
                 continue

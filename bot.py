@@ -2899,16 +2899,44 @@ def _movie_notification_keyboard() -> "InlineKeyboardMarkup":
     ])
 
 
+def _movie_notification_poster_url(cards: list) -> str:
+    """Return the best poster URL for the top /new notification card."""
+    if not cards:
+        return ""
+    card = cards[0] if isinstance(cards[0], dict) else {}
+    url = str(card.get("poster_preview_url") or card.get("poster_url") or "").strip()
+    if not (url.startswith("https://") or url.startswith("http://")):
+        return ""
+    return url
+
+
 async def _send_movie_notification_push_to_user(
     cards: list, chat_id: int, app: "Application",
 ) -> bool:
     """Send a /new notification to a specific subscriber. Returns True on success."""
+    text = _format_movie_notification_text(cards)
+    keyboard = _movie_notification_keyboard()
+    poster_url = _movie_notification_poster_url(cards)
+    if poster_url:
+        try:
+            await app.bot.send_photo(
+                chat_id=chat_id,
+                photo=poster_url,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            logger.info("Sent /new photo notification to chat_id=%s (%d films)", chat_id, len(cards))
+            return True
+        except Exception as exc:
+            logger.warning("Failed to send /new poster to %s, falling back to text: %s", chat_id, exc)
+
     try:
         await app.bot.send_message(
             chat_id=chat_id,
-            text=_format_movie_notification_text(cards),
+            text=text,
             parse_mode="HTML",
-            reply_markup=_movie_notification_keyboard(),
+            reply_markup=keyboard,
         )
         logger.info("Sent /new notification to chat_id=%s (%d films)", chat_id, len(cards))
         return True

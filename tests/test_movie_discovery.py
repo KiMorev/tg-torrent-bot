@@ -623,6 +623,8 @@ class BuildCardsKpCacheTests(unittest.TestCase):
                 "rating": 7.8,
                 "genres": ["драма"],
                 "url": "https://www.kinopoisk.ru/film/99/",
+                "poster_url": "https://img.example/poster.jpg",
+                "poster_preview_url": "https://img.example/poster-preview.jpg",
                 "cached_at": "2026-05-12T11:00:00+00:00",
             }
         }
@@ -640,6 +642,8 @@ class BuildCardsKpCacheTests(unittest.TestCase):
         self.assertEqual(call_count["n"], 0, "search_movie must not be called on cache hit")
         self.assertEqual(result["cards"][0]["kp_id"], 99)
         self.assertAlmostEqual(result["cards"][0]["rating"], 7.8)
+        self.assertEqual(result["cards"][0]["poster_url"], "https://img.example/poster.jpg")
+        self.assertEqual(result["cards"][0]["poster_preview_url"], "https://img.example/poster-preview.jpg")
 
     def test_cache_miss_calls_api_and_stores_result(self) -> None:
         """On a cache miss the API is called and the result is stored in the returned cache."""
@@ -662,6 +666,37 @@ class BuildCardsKpCacheTests(unittest.TestCase):
             any(isinstance(e, dict) and e.get("kp_id") == 42 for e in returned.values()),
             "API result must be persisted in kp_cache",
         )
+
+    def test_cache_miss_stores_poster_urls_on_card_and_cache(self) -> None:
+        releases = [self._make_release()]
+        match = SimpleNamespace(
+            kp_id=42,
+            title="Тест",
+            url="",
+            year=2026,
+            rating=8.0,
+            genres=[],
+            votes=None,
+            poster_url="https://img.example/poster.jpg",
+            poster_preview_url="https://img.example/poster-preview.jpg",
+        )
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=0.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda title, year, **kw: match),
+            kp_cache={},
+        )
+
+        card = result["cards"][0]
+        entry = next(iter(result["kp_cache"].values()))
+        self.assertEqual(card["poster_url"], "https://img.example/poster.jpg")
+        self.assertEqual(card["poster_preview_url"], "https://img.example/poster-preview.jpg")
+        self.assertEqual(entry["poster_url"], "https://img.example/poster.jpg")
+        self.assertEqual(entry["poster_preview_url"], "https://img.example/poster-preview.jpg")
 
     def test_cached_miss_skips_api_call(self) -> None:
         """A cached 'not found' entry (kp_id=None) must suppress further API calls."""

@@ -2224,10 +2224,18 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             _bot_module._load_movie_discovery_settings = self._orig_load
             _bot_module._save_movie_discovery_settings = self._orig_save
 
-    def _make_card(self, title: str, kp_id: int | None = None, year: int = 2026) -> dict:
+    def _make_card(
+        self,
+        title: str,
+        kp_id: int | None = None,
+        year: int = 2026,
+        poster_preview_url: str = "",
+    ) -> dict:
         card = {"title": title, "year": year, "rating": 7.5}
         if kp_id is not None:
             card["kp_id"] = kp_id
+        if poster_preview_url:
+            card["poster_preview_url"] = poster_preview_url
         return card
 
     async def test_sends_notification_only_for_unseen_films(self):
@@ -2344,6 +2352,49 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         buttons = {btn.text: btn.callback_data for row in keyboard.inline_keyboard for btn in row}
         self.assertEqual(buttons["🎬 Открыть /new"], "new:open")
         self.assertTrue(buttons["🔕 Отписаться"].endswith(":new_unsub"))
+
+    async def test_notification_uses_top_card_poster_when_available(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        app.bot.send_photo = AsyncMock()
+        app.bot.send_message = AsyncMock()
+        cache = {"cards": [
+            self._make_card("Постерный", kp_id=1, poster_preview_url="https://img.example/poster.jpg"),
+            self._make_card("Второй", kp_id=2),
+        ]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        app.bot.send_photo.assert_awaited_once()
+        app.bot.send_message.assert_not_called()
+        kwargs = app.bot.send_photo.call_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 100)
+        self.assertEqual(kwargs["photo"], "https://img.example/poster.jpg")
+        self.assertIn("Постерный", kwargs["caption"])
+        self.assertIn("Второй", kwargs["caption"])
+
+    async def test_notification_falls_back_to_text_when_poster_send_fails(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        app.bot.send_photo = AsyncMock(side_effect=RuntimeError("photo failed"))
+        app.bot.send_message = AsyncMock()
+        cache = {"cards": [
+            self._make_card("Постерный", kp_id=1, poster_preview_url="https://img.example/poster.jpg"),
+        ]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        app.bot.send_photo.assert_awaited_once()
+        app.bot.send_message.assert_awaited_once()
+        self.assertIn("Постерный", app.bot.send_message.call_args.kwargs["text"])
 
     async def test_different_users_have_independent_seen_sets(self):
         """User A has seen film X (no push); user B hasn't (gets push for X)."""

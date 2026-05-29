@@ -228,6 +228,23 @@ class SearchMovieAltTitleTests(unittest.TestCase):
         self.assertEqual(result.kp_id, 99)
         self.assertEqual(result.year, 2025)
 
+    @patch("kinopoisk.time.sleep")
+    def test_search_movie_keeps_poster_urls(self, _sleep) -> None:
+        """KP search results include poster URLs used by /new notifications."""
+
+        def fake_get(url, params=None, timeout=None):
+            payload = self._film_response()
+            payload["films"][0]["posterUrl"] = "https://img.example/poster.jpg"
+            payload["films"][0]["posterUrlPreview"] = "https://img.example/poster-preview.jpg"
+            return FakeResponse(payload)
+
+        client = self._make_client(fake_get)
+        result = client.search_movie("Фильм", year=2026)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.poster_url, "https://img.example/poster.jpg")
+        self.assertEqual(result.poster_preview_url, "https://img.example/poster-preview.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()

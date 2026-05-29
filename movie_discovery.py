@@ -470,7 +470,7 @@ def _merge_duplicate_cards(cards: list[dict], known_fingerprints: set[str]) -> l
         existing["releases"].extend(card["releases"])
         existing["first_seen_at"] = min(str(existing.get("first_seen_at") or ""), str(card.get("first_seen_at") or ""))
         if not existing.get("kp_id") and card.get("kp_id"):
-            for field in ("kp_id", "kp_url", "rating", "genres", "title"):
+            for field in ("kp_id", "kp_url", "rating", "kp_votes", "genres", "title", "poster_url", "poster_preview_url"):
                 existing[field] = card.get(field)
         if not existing.get("alt_title") and card.get("alt_title"):
             existing["alt_title"] = card["alt_title"]
@@ -551,6 +551,8 @@ def _kp_cache_store(
             "votes": match.votes,
             "genres": match.genres,
             "url": match.url,
+            "poster_url": getattr(match, "poster_url", "") or "",
+            "poster_preview_url": getattr(match, "poster_preview_url", "") or "",
             "cached_at": now_iso,
             # Jitter spreads expiry over a window to prevent thundering-herd re-queries
             "ttl_days": _KP_CACHE_TTL_FOUND_DAYS + random.randint(0, _KP_CACHE_TTL_JITTER_MAX_DAYS),
@@ -692,6 +694,8 @@ def build_cards(
                     card["kp_votes"] = cached.get("votes")
                     card["genres"] = cached.get("genres", [])
                     card["title"] = cached.get("title") or search_title
+                    card["poster_url"] = cached.get("poster_url", "")
+                    card["poster_preview_url"] = cached.get("poster_preview_url", "")
                     logger.debug("KP cache hit for %r → kp_id=%s", search_title, cached["kp_id"])
                 # cached with kp_id=None means previously not found — skip API call
             elif cached is not None:
@@ -721,6 +725,8 @@ def build_cards(
                             card["kp_votes"] = match.votes
                             card["genres"] = match.genres
                             card["title"] = match.title
+                            card["poster_url"] = getattr(match, "poster_url", "") or ""
+                            card["poster_preview_url"] = getattr(match, "poster_preview_url", "") or ""
                 else:
                     # Per-run cap exhausted — use stale data silently (no user-visible degradation)
                     logger.debug("KP stale cap hit, using stale data for %r", search_title)
@@ -731,6 +737,8 @@ def build_cards(
                         card["kp_votes"] = cached.get("votes")
                         card["genres"] = cached.get("genres", [])
                         card["title"] = cached.get("title") or search_title
+                        card["poster_url"] = cached.get("poster_url", "")
+                        card["poster_preview_url"] = cached.get("poster_preview_url", "")
                     # cached with kp_id=None: silently skip
             else:
                 # Not in cache at all — must query API
@@ -754,6 +762,8 @@ def build_cards(
                         card["kp_votes"] = match.votes
                         card["genres"] = match.genres
                         card["title"] = match.title
+                        card["poster_url"] = getattr(match, "poster_url", "") or ""
+                        card["poster_preview_url"] = getattr(match, "poster_preview_url", "") or ""
 
             # Apply rating filter: reject if rating is below threshold,
             # or if no KP data at all when filter is active (sports, shows, etc.)
