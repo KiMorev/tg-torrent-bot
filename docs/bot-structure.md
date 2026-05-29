@@ -49,9 +49,11 @@
 
 | Флоу | Основной путь в коде |
 |---|---|
-| Текстовый поиск | `text_message_entry` -> `search_got_query` -> `_run_search` -> `SEARCH_RESULTS`. |
-| Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> тот же поиск через `_run_search`. |
+| Текстовый поиск | `text_message_entry` -> `search_got_query` -> `SEARCH_OPTIONS` с настройкой `Что скачать` -> `_run_search` -> `SEARCH_RESULTS`. Новый текстовый ввод всегда сбрасывает `srch_intent` в обычный режим `Одна раздача`. |
+| Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> тот же `SEARCH_OPTIONS` / `_run_search`; новый voice-ввод тоже сбрасывает `srch_intent`. |
+| Поиск по ссылке Кинопоиска | `text_message_entry` -> `kp_link_entry` -> `SEARCH_OPTIONS`; KP-ссылка стартует в обычном режиме `Одна раздача`, дальше можно выбрать `Что скачать: сериал целиком`. |
 | Скачивание из результата | `search_download_pick` или `search_direct_download` -> Plex pre-check -> `_download_and_add` -> Download Station. |
+| Скачать сериал целиком из поиска | `search_choose_mode` / `search_set_mode` ставит `srch_intent=series_master`; `search_quick` / `search_do` запускает `_run_search` с базовым названием без маркера сезона; `_run_search` фильтрует выдачу до сериалов и `_search_results_keyboard(..., series_master=True)` ведёт кнопки `🎯 N` в `search_series_bulk_plan`, а не в прямую загрузку. GPT did-you-mean, retry, снятие качества, все трекеры, tracker picker, clusters и pagination сохраняют текущий `srch_intent`. |
 | План недостающих сезонов | `search_download_pick` -> `search_series_bulk_plan` показывает профиль -> `search_series_bulk_profile_callback` меняет профиль -> `search_series_bulk_build_plan` запускает wide/targeted tracker search неблокирующим handler'ом; при fetch-limit широкий поиск расширяет targeted-pass до всех нужных сезонов; ожидательный экран использует search animation, обновляет этапы сборки и при долгой работе добавляет мягкий статус; `ConversationHandler.WAITING` принимает `srch:cancel`, выставляет cancel-token, сборка останавливается между сетевыми этапами; далее `series_bulk_planner.py` -> `series_bulk_jobs.json` job -> `search_series_bulk_confirm` -> `search_series_bulk_run` для уверенных сезонов; временные ошибки добавления уходят в `pending_downloads.json` с `series_bulk`-ссылкой и фоновый retry обновляет job; `/bulk` -> `series_bulk_command` -> `search_series_bulk_open` восстанавливает сохранённую job в search-context после рестарта; `search_series_bulk_pack_list` -> `search_series_bulk_pack_confirm` -> `search_series_bulk_pack_run` вручную добавляет выбранный pack и помечает покрытые сезоны в job; `search_series_bulk_rebuild` возвращает готовый план к профилю для новой сборки; `search_series_bulk_review` разбирает `missing`/`needs_decision`/`partial` и постоянные ошибки добавления, `search_series_bulk_soft_search` мягко добирает кандидатов для текущего сезона, `search_series_bulk_retry` повторяет failed-сезон, результат пишется в job. |
 | Докачивание сезона из Plex | `/continue` -> `series_continue_command` -> `_series_continue_build_state` собирает Plex-сериалы с сезонами и `download_history.jsonl`; `series_continue_callback` листает режимы `Моё` / `Всё`, открывает карточку сезона; `cont:update_topic:*` проверяет текущий title той же Rutracker-темы, не создаёт дубль при активной задаче, добавляет обновлённый torrent и при неполном сезоне сохраняет подписку; если тема не обновилась, `cont:subscribe_topic:*` создаёт подписку без скачивания, а `cont:search_alt:*` показывает похожие Rutracker-кандидаты как обновлённые раздачи. |
 | Magnet или `.torrent` файлом | `text_message_entry` или `handle_doc` -> `_process_magnet_uri` / `_do_process_torrent` -> Download Station. |
@@ -67,7 +69,7 @@
 
 | Namespace | Где формируется | Где обрабатывается |
 |---|---|---|
-| `srch:*` | `keyboards.py`, локально в search-блоке `bot.py` | `ConversationHandler` в `bot.py::main` |
+| `srch:*` | `keyboards.py`, локально в search-блоке `bot.py`; `srch:mode:*` и `srch:mode_set:*` управляют настройкой `Что скачать` | `ConversationHandler` в `bot.py::main` |
 | `task:*` | `keyboards.py` | `task_callback` |
 | `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
 | `access:*` | `keyboards.py` | `access_callback` |

@@ -67,6 +67,9 @@ from keyboards import (
     BUTTON_SHOW_TASK,
     JACKETT_SELECT_PREFIX,
     SEARCH_CALLBACK_PREFIX,
+    SEARCH_INTENT_SERIES_MASTER,
+    SEARCH_MODE_SERIES,
+    SEARCH_MODE_SINGLE,
     TASK_CALLBACK_PREFIX,
     TASK_LIST_PAGE_SIZE,
     TASK_LIST_SCOPE_ALL,
@@ -97,6 +100,7 @@ from keyboards import (
     _cluster_picker_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
+    _search_mode_picker_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
     tracker_selection_label,
@@ -6451,6 +6455,7 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await _reply_access_pending(update, context)
         return ConversationHandler.END
 
+    _clear_search_intent(context)
     text = (update.message.text or "").strip()
     kp_id = extract_kp_id(text)
     if not kp_id:
@@ -6482,11 +6487,15 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if info.director:
         lines.append(f"🎬 Режиссёр: {info.director}")
     lines.append(f"\n🔍 Запрос для поиска: «{info.search_base}»")
+    lines.append("\nЧто скачать: одна раздача")
 
     await msg.edit_text(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
+        reply_markup=_search_options_keyboard(
+            _tracker_label_from_context(context),
+            _search_intent(context),
+        ),
     )
     return SEARCH_OPTIONS
 
@@ -6506,6 +6515,84 @@ def _tracker_label_from_context(context: ContextTypes.DEFAULT_TYPE) -> str:
     return tracker_selection_label(indexers, selected)
 
 
+def _search_intent(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    return context.user_data.get("srch_intent")
+
+
+def _search_is_series_master(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return _search_intent(context) == SEARCH_INTENT_SERIES_MASTER
+
+
+def _clear_search_intent(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("srch_intent", None)
+
+
+def _strip_season_marker_from_query(base: str) -> str:
+    normalized = _normalize_season_in_query(base)
+    stripped = re.sub(r"\bСезон:\s*\d+\b", "", normalized, flags=re.IGNORECASE)
+    stripped = re.sub(r"\bS\d{1,2}(?:E\d{1,3})?\b", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s{2,}", " ", stripped)
+    return stripped.strip(" -–—:;/")
+
+
+def _search_base_for_current_mode(context: ContextTypes.DEFAULT_TYPE, base: str) -> str:
+    if not _search_is_series_master(context):
+        return base
+    normalized = _normalize_season_in_query(base)
+    if "/" in normalized:
+        extracted = _extract_series_base_query(normalized)
+        if extracted:
+            return extracted
+    return _strip_season_marker_from_query(normalized) or normalized
+
+
+def _build_current_mode_search_query(
+    context: ContextTypes.DEFAULT_TYPE,
+    base: str,
+    settings: dict,
+) -> str:
+    return _build_search_query(_search_base_for_current_mode(context, base), settings)
+
+
+def _search_options_text(
+    base: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    escape_html: bool = False,
+) -> str:
+    shown_base = html_module.escape(base) if escape_html else base
+    if _search_is_series_master(context):
+        return (
+            "📚 Скачать сериал целиком\n\n"
+            f"Запрос: «{shown_base}»\n\n"
+            "Настройте поиск эталонной раздачи. Эти параметры потом перейдут в план сезонов.\n"
+            "Предпочитаемую озвучку можно будет выбрать после эталонной раздачи: "
+            "я покажу варианты, которые реально нашёл в выбранном релизе."
+        )
+
+    text = (
+        "🔍 Поиск\n\n"
+        f"Запрос: «{shown_base}»\n\n"
+        "Что скачать: одна раздача"
+    )
+    if _extract_season_from_query(base) is not None:
+        text += (
+            "\n\nПохоже, вы ищете сезон сериала. Можно найти одну раздачу "
+            "или собрать план по всем сезонам."
+        )
+    return text
+
+
+def _search_advanced_text(base: str, context: ContextTypes.DEFAULT_TYPE) -> str:
+    if _search_is_series_master(context):
+        return _search_options_text(base, context)
+    return (
+        "🔍 Поиск\n\n"
+        f"Запрос: «{base}»\n\n"
+        "Настройте параметры поиска."
+    )
+
+
 async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query_text = (update.message.text or "").strip()
     if not query_text:
@@ -6516,8 +6603,11 @@ async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query_text = _normalize_season_in_query(query_text)
     context.user_data["srch_query"] = query_text
     msg = await update.message.reply_text(
-        f"Запрос: «{query_text}»",
-        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
+        _search_options_text(query_text, context),
+        reply_markup=_search_options_keyboard(
+            _tracker_label_from_context(context),
+            _search_intent(context),
+        ),
     )
     context.user_data["srch_ui_msg_id"] = msg.message_id
     context.user_data["srch_ui_chat_id"] = update.effective_chat.id
@@ -6685,6 +6775,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("Запрос потерян. Начните поиск заново.", show_alert=True)
         return ConversationHandler.END
     base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
+    series_master = _search_is_series_master(context)
     await query.edit_message_text(f"🔍 Ищу {_format_search_query_label(search_query)} напрямую в Rutracker…")
     try:
         rt_results = await asyncio.to_thread(rutracker_client.search, base_query)
@@ -6734,12 +6825,29 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         else:
             other_stats = _format_quality_stats(buckets)
             quality_banner = f"⚠️ В {preferred_quality} ничего не найдено. Показаны все качества: {other_stats}."
+    series_master_banner = ""
+    if series_master:
+        before = len(results_data)
+        results_data = [
+            r for r in results_data
+            if r.get("series") or _extract_series_base_query(str(r.get("title") or ""))
+        ]
+        if before != len(results_data):
+            filter_banner_parts.append(f"📚 Оставлены сериальные раздачи: {len(results_data)}/{before}.")
+        series_master_banner = (
+            "📚 Эталонная раздача для сериала\n"
+            "Выберите раздачу, по которой я пойму качество, тип релиза и возможные озвучки. "
+            "Скачивание начнётся только после плана и подтверждения."
+        )
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
         suggestions = _remember_didmean_suggestions(context, suggestions)
         # Direct Rutracker path — Jackett expansion is irrelevant here.
-        text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено в Rutracker."
+        if series_master:
+            text = "Не нашёл сериальных раздач в Rutracker."
+        else:
+            text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено в Rutracker."
         if suggestions:
             text += (
                 "\n\n🤖 Возможно вы имели в виду — попробуйте вариант ниже "
@@ -6756,7 +6864,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         return SEARCH_RESULTS
     results_data.sort(key=_score_result, reverse=True)
     results_data[0]["recommended"] = True
-    banner = "\n".join(b for b in ("🔗 Прямой поиск Rutracker", *filter_banner_parts, quality_banner) if b)
+    banner = "\n".join(b for b in (series_master_banner, "🔗 Прямой поиск Rutracker", *filter_banner_parts, quality_banner) if b)
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
     # R.2 pre-warm: kick off background Plex season fetch for the first
@@ -6774,6 +6882,7 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             show_switch_trackers=False,
             show_retry_jackett=bool(jackett_client),  # offer back to Jackett
             show_direct_rutracker=False,              # already on direct RT
+            series_master=series_master,
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -7361,6 +7470,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # applied as post-filters on the raw results.
     base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
     context.user_data["srch_preferred_quality"] = preferred_quality
+    series_master = _search_is_series_master(context)
 
     # Loading message: show the user a clean «what we're looking for» rather
     # than the technical query with appended tokens. Reflects the structure
@@ -7372,8 +7482,9 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         filter_parts.append("оригинальная дорожка")
     if subs_required:
         filter_parts.append("субтитры")
+    loading_kind = "эталонную раздачу" if series_master else "раздачи"
     loading_text = (
-        f"🔎 Ищу раздачи: «{base_query}»\n\n"
+        f"🔎 Ищу {loading_kind}: «{base_query}»\n\n"
         "Это может занять до минуты.\n"
         "Проверяю выбранные трекеры."
     )
@@ -7881,6 +7992,32 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 preferred_quality, len(results_data), base_query,
             )
 
+    series_master_banner = ""
+    if series_master:
+        before = len(results_data)
+        results_data = [
+            r for r in results_data
+            if r.get("series") or _extract_series_base_query(str(r.get("title") or ""))
+        ]
+        if not results_data:
+            has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+            await edit_fn(
+                "Не нашёл сериальных раздач.\n\n"
+                "Попробуйте другое название или уберите часть фильтров.",
+                reply_markup=_no_results_keyboard(
+                    has_quality=has_quality,
+                    jackett_can_expand=jackett_can_expand,
+                ),
+            )
+            return SEARCH_RESULTS
+        if before != len(results_data):
+            filter_banner_parts.append(f"📚 Оставлены сериальные раздачи: {len(results_data)}/{before}.")
+        series_master_banner = (
+            "📚 Эталонная раздача для сериала\n"
+            "Выберите раздачу, по которой я пойму качество, тип релиза и возможные озвучки. "
+            "Скачивание начнётся только после плана и подтверждения."
+        )
+
     # --- Cluster picker (Proposal #1): when the same query returns ≥2
     # distinct (title, year) films with ≥2 releases each, show a picker
     # «Какую Дюну вы ищете?» so the user can narrow to one film in one tap.
@@ -7910,7 +8047,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             # combined_banner isn't computed until after season filter further
             # down, so we build it inline here for the picker case.
             picker_banner = "\n".join(
-                b for b in (banner, *filter_banner_parts, quality_banner) if b
+                b for b in (series_master_banner, banner, *filter_banner_parts, quality_banner) if b
             )
             context.user_data["srch_banner"] = picker_banner
             await edit_fn(
@@ -8001,7 +8138,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # Combine all banners (in display order): source-fallback message,
     # audio/subs filter stats, quality filter stats. Any may be empty.
     combined_banner = "\n".join(
-        b for b in (banner, *filter_banner_parts, quality_banner) if b
+        b for b in (series_master_banner, banner, *filter_banner_parts, quality_banner) if b
     )
 
     context.user_data["srch_results"] = results_data
@@ -8023,6 +8160,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
             show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
+            series_master=series_master,
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -8059,6 +8197,7 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
             show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
             show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
+            series_master=_search_is_series_master(context),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -8076,7 +8215,7 @@ async def search_quick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     base = context.user_data.get("srch_query", "")
     settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
-    return await _execute_search(query, context, _build_search_query(base, settings))
+    return await _execute_search(query, context, _build_current_mode_search_query(context, base, settings))
 
 
 async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8161,6 +8300,7 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
             show_retry_jackett=bool(jackett_client and source == "rutracker"),
             show_direct_rutracker=bool(rutracker_client and source == "jackett"),
             show_back_to_cluster_picker=True,
+            series_master=_search_is_series_master(context),
         ),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -8225,7 +8365,7 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Подсказка потеряна. Начните поиск заново.")
         return ConversationHandler.END
     settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
-    full_query = _build_search_query(suggestion, settings)
+    full_query = _build_current_mode_search_query(context, suggestion, settings)
     context.user_data["srch_query"] = suggestion
     context.user_data["srch_search_query"] = full_query
     return await _execute_search(query, context, full_query)
@@ -8239,7 +8379,7 @@ async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not base:
         await query.edit_message_text("Запрос потерян. Начните поиск заново.")
         return ConversationHandler.END
-    return await _execute_search(query, context, base)
+    return await _execute_search(query, context, _search_base_for_current_mode(context, base))
 
 
 async def search_expand_all_trackers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8276,7 +8416,7 @@ async def search_no_quality_all_trackers(update: Update, context: ContextTypes.D
     if not base:
         await query.edit_message_text("Запрос потерян. Начните поиск заново.")
         return ConversationHandler.END
-    return await _execute_search(query, context, base)
+    return await _execute_search(query, context, _search_base_for_current_mode(context, base))
 
 
 async def search_retry_dl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -8365,14 +8505,14 @@ async def search_jackett_back(update: Update, context: ContextTypes.DEFAULT_TYPE
     if return_to == "advanced":
         settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
         await query.edit_message_text(
-            f"Запрос: «{base}»\nНастройте параметры поиска:",
-            reply_markup=_search_advanced_keyboard(settings, tracker_label),
+            _search_advanced_text(base, context),
+            reply_markup=_search_advanced_keyboard(settings, tracker_label, _search_intent(context)),
         )
         return SEARCH_ADVANCED
 
     await query.edit_message_text(
-        f"Запрос: «{base}»",
-        reply_markup=_search_options_keyboard(tracker_label),
+        _search_options_text(base, context),
+        reply_markup=_search_options_keyboard(tracker_label, _search_intent(context)),
     )
     return SEARCH_OPTIONS
 
@@ -8464,14 +8604,14 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if return_to == "advanced":
             settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
             await query.edit_message_text(
-                f"Запрос: «{base}»\nНастройте параметры поиска:",
-                reply_markup=_search_advanced_keyboard(settings, tracker_label),
+                _search_advanced_text(base, context),
+                reply_markup=_search_advanced_keyboard(settings, tracker_label, _search_intent(context)),
             )
             return SEARCH_ADVANCED
         else:
             await query.edit_message_text(
-                f"Запрос: «{base}»",
-                reply_markup=_search_options_keyboard(tracker_label),
+                _search_options_text(base, context),
+                reply_markup=_search_options_keyboard(tracker_label, _search_intent(context)),
             )
             return SEARCH_OPTIONS
 
@@ -8487,6 +8627,70 @@ async def search_jackett_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return await _execute_search(query, context, search_query)
 
 
+def _search_mode_return_to(value: str | None) -> str:
+    return "advanced" if value == "advanced" else "options"
+
+
+def _search_mode_state(return_to: str) -> int:
+    return SEARCH_ADVANCED if return_to == "advanced" else SEARCH_OPTIONS
+
+
+async def _render_search_settings(query, context: ContextTypes.DEFAULT_TYPE, return_to: str) -> int:
+    return_to = _search_mode_return_to(return_to)
+    base = context.user_data.get("srch_query", "")
+    tracker_label = _tracker_label_from_context(context)
+    if return_to == "advanced":
+        settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+        await query.edit_message_text(
+            _search_advanced_text(base, context),
+            reply_markup=_search_advanced_keyboard(settings, tracker_label, _search_intent(context)),
+        )
+    else:
+        await query.edit_message_text(
+            _search_options_text(base, context),
+            reply_markup=_search_options_keyboard(tracker_label, _search_intent(context)),
+        )
+    return _search_mode_state(return_to)
+
+
+async def search_choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":")
+    return_to = _search_mode_return_to(parts[2] if len(parts) > 2 else "options")
+    await query.edit_message_text(
+        "Что скачать?\n\n"
+        "Одна раздача — найти один выбранный релиз: фильм, сезон, серию или сборник.\n"
+        "Сериал целиком — выбрать эталонную раздачу и собрать план по сезонам.",
+        reply_markup=_search_mode_picker_keyboard(
+            current_intent=_search_intent(context),
+            return_to=return_to,
+        ),
+    )
+    return _search_mode_state(return_to)
+
+
+async def search_set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":")
+    mode = parts[2] if len(parts) > 2 else SEARCH_MODE_SINGLE
+    return_to = _search_mode_return_to(parts[3] if len(parts) > 3 else "options")
+    if mode == SEARCH_MODE_SERIES:
+        context.user_data["srch_intent"] = SEARCH_INTENT_SERIES_MASTER
+    else:
+        _clear_search_intent(context)
+    return await _render_search_settings(query, context, return_to)
+
+
+async def search_mode_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":")
+    return_to = _search_mode_return_to(parts[2] if len(parts) > 2 else "options")
+    return await _render_search_settings(query, context, return_to)
+
+
 async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Показать расширенные настройки поиска."""
     query = update.callback_query
@@ -8495,8 +8699,12 @@ async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["srch_settings"] = settings
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
-        f"Запрос: «{base}»\nНастройте параметры поиска:",
-        reply_markup=_search_advanced_keyboard(settings, _tracker_label_from_context(context)),
+        _search_advanced_text(base, context),
+        reply_markup=_search_advanced_keyboard(
+            settings,
+            _tracker_label_from_context(context),
+            _search_intent(context),
+        ),
     )
     return SEARCH_ADVANCED
 
@@ -8520,8 +8728,12 @@ async def search_toggle_setting(update: Update, context: ContextTypes.DEFAULT_TY
 
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
-        f"Запрос: «{base}»\nНастройте параметры поиска:",
-        reply_markup=_search_advanced_keyboard(settings, _tracker_label_from_context(context)),
+        _search_advanced_text(base, context),
+        reply_markup=_search_advanced_keyboard(
+            settings,
+            _tracker_label_from_context(context),
+            _search_intent(context),
+        ),
     )
     return SEARCH_ADVANCED
 
@@ -8532,7 +8744,7 @@ async def search_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     base = context.user_data.get("srch_query", "")
     settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
-    return await _execute_search(query, context, _build_search_query(base, settings))
+    return await _execute_search(query, context, _build_current_mode_search_query(context, base, settings))
 
 
 async def search_series_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -13582,6 +13794,7 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
 
     profile = _series_bulk_profile_from_result(context, result)
     base_quality = profile.quality if profile.quality and profile.quality != "any" else "1080p"
+    _clear_search_intent(context)
     context.user_data["srch_series_bulk_index"] = index
     context.user_data["srch_series_bulk_profile_draft"] = profile
     context.user_data["srch_series_bulk_base_quality"] = base_quality
@@ -14039,6 +14252,7 @@ async def search_subscribe_back_to_results(
             or source == "movie_discovery"
         ),
         show_back_to_cluster_picker=bool(context.user_data.get("srch_cluster_picker_return")),
+        series_master=_search_is_series_master(context),
     )
     try:
         await query.edit_message_text(
@@ -14214,6 +14428,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     for key in (
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
+        "srch_intent",
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
@@ -14273,6 +14488,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     for key in (
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
+        "srch_intent",
         "srch_picked", "srch_kp_info", "srch_results_page",
         "srch_base_title", "srch_total_seasons", "srch_series_query",
         "srch_picked_quality", "srch_series_success_text", "srch_series_success_task_id",
@@ -14333,6 +14549,7 @@ async def search_jackett_check_entry(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("Эта подписка не относится к вашему чату.")
         return ConversationHandler.END
 
+    _clear_search_intent(context)
     search_query = sub.get("query", "")
     if not search_query or jackett_client is None:
         await query.edit_message_text("Подписка или Jackett недоступны.")
@@ -18005,6 +18222,8 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     if voice is None:
         return ConversationHandler.END
 
+    _clear_search_intent(context)
+
     if not VOICE_SEARCH_ENABLED:
         await update.message.reply_text(
             "🎙 Голосовой поиск не настроен. Пришлите текстовое сообщение."
@@ -18172,8 +18391,12 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["srch_query"] = query_text
     await _safe_edit_message(
         status,
-        f"🎙 Услышал: «{html_module.escape(query_text)}»\n\nЗапрос: «{html_module.escape(query_text)}»",
-        reply_markup=_search_options_keyboard(_tracker_label_from_context(context)),
+        f"🎙 Услышал: «{html_module.escape(query_text)}»\n\n"
+        + _search_options_text(query_text, context, escape_html=True),
+        reply_markup=_search_options_keyboard(
+            _tracker_label_from_context(context),
+            _search_intent(context),
+        ),
         parse_mode="HTML",
     )
     context.user_data["srch_ui_msg_id"] = status.message_id
@@ -18194,6 +18417,7 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     text = (update.message.text or "").strip()
+    _clear_search_intent(context)
 
     # If a Plex confirm dialog is still pending from a previous interaction and
     # the user moved on (sent a new search/magnet/link), clean up the abandoned
@@ -18508,6 +18732,9 @@ def main() -> None:
             states={
                 SEARCH_OPTIONS: [
                     CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
+                    CallbackQueryHandler(search_choose_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode:(options|advanced)$"),
+                    CallbackQueryHandler(search_set_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_set:(single|series):(options|advanced)$"),
+                    CallbackQueryHandler(search_mode_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_back:(options|advanced)$"),
                     CallbackQueryHandler(search_quick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quick$"),
                     CallbackQueryHandler(search_show_advanced, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:adv$"),
                     CallbackQueryHandler(search_pick_tracker, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:pick_tracker:"),
@@ -18519,6 +18746,9 @@ def main() -> None:
                 ],
                 SEARCH_ADVANCED: [
                     CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
+                    CallbackQueryHandler(search_choose_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode:(options|advanced)$"),
+                    CallbackQueryHandler(search_set_mode, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_set:(single|series):(options|advanced)$"),
+                    CallbackQueryHandler(search_mode_back, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:mode_back:(options|advanced)$"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:quality:"),
                     CallbackQueryHandler(search_toggle_setting, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:toggle:"),
                     CallbackQueryHandler(search_do, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:do_search$"),

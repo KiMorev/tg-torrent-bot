@@ -46,6 +46,9 @@ _SRCH_QUALITY_OPTIONS: list[tuple[str, str]] = [
     ("🔍 Любое", "any"),
 ]
 _SRCH_DEFAULT_SETTINGS: dict = {"quality": "1080p", "audio": False, "subs": False}
+SEARCH_INTENT_SERIES_MASTER = "series_master"
+SEARCH_MODE_SINGLE = "single"
+SEARCH_MODE_SERIES = "series"
 
 # ---------------------------------------------------------------------------
 # Callback-data helpers
@@ -556,6 +559,32 @@ def _no_results_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _search_mode_label(intent: str | None = None) -> str:
+    return "сериал целиком" if intent == SEARCH_INTENT_SERIES_MASTER else "одна раздача"
+
+
+def _search_mode_picker_keyboard(
+    *,
+    current_intent: str | None = None,
+    return_to: str = "options",
+) -> InlineKeyboardMarkup:
+    is_series = current_intent == SEARCH_INTENT_SERIES_MASTER
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'' if is_series else '✅ '}Одна раздача",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode_set:{SEARCH_MODE_SINGLE}:{return_to}",
+        )],
+        [InlineKeyboardButton(
+            f"{'✅ ' if is_series else ''}📚 Сериал целиком",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode_set:{SEARCH_MODE_SERIES}:{return_to}",
+        )],
+        [InlineKeyboardButton(
+            BUTTON_BACK,
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode_back:{return_to}",
+        )],
+    ])
+
+
 def _cluster_picker_keyboard(clusters: list[dict], *, total_count: int | None = None) -> InlineKeyboardMarkup:
     """Keyboard for the «which title?» picker shown when one search query
     returned releases spanning multiple distinct (title, year) tuples.
@@ -647,8 +676,12 @@ def tracker_selection_label(indexers: list[dict], selected_ids: set[str]) -> str
     return f"{names[0]} +{len(names) - 1}"
 
 
-def _search_options_keyboard(tracker_label: str = "") -> InlineKeyboardMarkup:
+def _search_options_keyboard(tracker_label: str = "", intent: str | None = None) -> InlineKeyboardMarkup:
     rows = [
+        [InlineKeyboardButton(
+            f"🎚 Что скачать: {_search_mode_label(intent)}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode:options",
+        )],
         [InlineKeyboardButton("🔍 Искать", callback_data=f"{SEARCH_CALLBACK_PREFIX}:quick", style="success")],
         [InlineKeyboardButton("⚙️ Доп. параметры", callback_data=f"{SEARCH_CALLBACK_PREFIX}:adv")],
     ]
@@ -661,7 +694,11 @@ def _search_options_keyboard(tracker_label: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _search_advanced_keyboard(settings: dict, tracker_label: str = "") -> InlineKeyboardMarkup:
+def _search_advanced_keyboard(
+    settings: dict,
+    tracker_label: str = "",
+    intent: str | None = None,
+) -> InlineKeyboardMarkup:
     quality = settings.get("quality", "1080p")
     audio = settings.get("audio", False)
     subs = settings.get("subs", False)
@@ -679,6 +716,10 @@ def _search_advanced_keyboard(settings: dict, tracker_label: str = "") -> Inline
         )
 
     rows = [
+        [InlineKeyboardButton(
+            f"🎚 Что скачать: {_search_mode_label(intent)}",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:mode:advanced",
+        )],
         [q_btn(label, val) for label, val in _SRCH_QUALITY_OPTIONS],
         [toggle_btn("🎵 Оригинальная дорожка", "audio", audio)],
         [toggle_btn("💬 Субтитры", "subs", subs)],
@@ -710,6 +751,7 @@ def _search_results_keyboard(
     show_direct_rutracker: bool = False,  # source=jackett  → "🔗 Rutracker напрямую"
     show_back_to_discovery: bool = False,
     show_back_to_cluster_picker: bool = False,
+    series_master: bool = False,
 ) -> InlineKeyboardMarkup:
     total = len(results)
     total_pages = max(1, (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
@@ -721,21 +763,30 @@ def _search_results_keyboard(
 
     # Partial series need one extra choice before downloading: just this
     # torrent, this torrent + updates, or wait for the full season.
-    dl_row = [
-        InlineKeyboardButton(
-            f"⬇️ {start + i + 1}",
-            callback_data=(
-                f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{start + i}"
-                if _search_result_has_download_picker(result)
-                else f"{SEARCH_CALLBACK_PREFIX}:dl:{start + i}"
-            ),
-        )
-        for i, result in enumerate(visible)
-    ]
+    if series_master:
+        dl_row = [
+            InlineKeyboardButton(
+                f"🎯 {start + i + 1}",
+                callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_plan:{start + i}",
+            )
+            for i, _result in enumerate(visible)
+        ]
+    else:
+        dl_row = [
+            InlineKeyboardButton(
+                f"⬇️ {start + i + 1}",
+                callback_data=(
+                    f"{SEARCH_CALLBACK_PREFIX}:dl_pick:{start + i}"
+                    if _search_result_has_download_picker(result)
+                    else f"{SEARCH_CALLBACK_PREFIX}:dl:{start + i}"
+                ),
+            )
+            for i, result in enumerate(visible)
+        ]
     rows.append(dl_row)
 
     # Notification-only choices for partial results.
-    sub_row = [
+    sub_row = [] if series_master else [
         InlineKeyboardButton(
             f"🔔 {start + i + 1}",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:sub_pick:{start + i}",

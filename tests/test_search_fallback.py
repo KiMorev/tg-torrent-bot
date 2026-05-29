@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("BOT_TOKEN", "111:testtoken")
@@ -112,6 +113,54 @@ class JackettEmptyDoesNotFallbackToRutrackerTests(unittest.TestCase):
             context.user_data["srch_didmean_suggestions"],
             ["правильный запрос", "alt query"],
         )
+
+
+class SeriesMasterSearchTests(unittest.TestCase):
+    def test_series_master_filters_movies_and_uses_reference_buttons(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            SimpleNamespace(
+                title="Драйв / Drive (2011) WEB-DL 1080p",
+                topic_url="https://rutracker.org/forum/viewtopic.php?t=1",
+                tracker="rutracker",
+                size="5 GB",
+                seeders=50,
+                magnet_url=None,
+                torrent_url=None,
+            ),
+            SimpleNamespace(
+                title="Клиника / Scrubs / Сезон: 3 / WEB-DL 1080p",
+                topic_url="https://rutracker.org/forum/viewtopic.php?t=2",
+                tracker="rutracker",
+                size="20 GB",
+                seeders=80,
+                magnet_url=None,
+                torrent_url=None,
+            ),
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+        context.user_data["srch_intent"] = bot.SEARCH_INTENT_SERIES_MASTER
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_enrich_top_results_with_metadata", new=AsyncMock(return_value=None)),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Клиника 1080p"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Эталонная раздача", text)
+        self.assertIn("Клиника", text)
+        self.assertNotIn("Драйв", text)
+        buttons = {
+            button.text: button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🎯 1"], "srch:bulk_plan:0")
+        self.assertNotIn("⬇️ 1", buttons)
 
 
 class JackettErrorFallsBackToRutrackerTests(unittest.TestCase):

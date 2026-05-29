@@ -19,6 +19,7 @@ from keyboards import (
     _download_error_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
+    _search_mode_picker_keyboard,
     _search_options_keyboard,
     _search_results_keyboard,
     _season_back_to_picker_keyboard,
@@ -30,6 +31,7 @@ from keyboards import (
     tracker_selection_label,
     users_keyboard,
     movie_trackers_keyboard,
+    SEARCH_INTENT_SERIES_MASTER,
 )
 
 
@@ -421,6 +423,14 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
         self.assertEqual(buttons["⬇️ 1"], "srch:dl:0")
 
+    def test_series_master_results_pick_reference_instead_of_download(self) -> None:
+        results = [{"title": "Клиника / Scrubs / Сезон: 3 / WEB-DL 1080p", "partial": True}]
+        keyboard = _search_results_keyboard(results, series_master=True)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🎯 1"], "srch:bulk_plan:0")
+        self.assertNotIn("⬇️ 1", buttons)
+        self.assertNotIn("🔔 1", buttons)
+
     def test_neither_button_shown_by_default(self) -> None:
         keyboard = _search_results_keyboard([])
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
@@ -445,6 +455,16 @@ class SearchOptionsKeyboardTests(unittest.TestCase):
         self.assertIn("🔍 Искать", labels)
         self.assertIn("⚙️ Доп. параметры", labels)
 
+    def test_download_mode_setting_shown_by_default(self) -> None:
+        keyboard = _search_options_keyboard()
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🎚 Что скачать: одна раздача"], "srch:mode:options")
+
+    def test_download_mode_setting_shows_series_label(self) -> None:
+        keyboard = _search_options_keyboard(intent=SEARCH_INTENT_SERIES_MASTER)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🎚 Что скачать: сериал целиком"], "srch:mode:options")
+
     def test_search_button_has_success_style(self) -> None:
         keyboard = _search_options_keyboard()
         buttons = {b.text: b for row in keyboard.inline_keyboard for b in row}
@@ -464,6 +484,29 @@ class SearchAdvancedKeyboardTests(unittest.TestCase):
         buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
         self.assertIn("🌐 Трекер: NNMClub", buttons)
         self.assertEqual(buttons["🌐 Трекер: NNMClub"], "srch:pick_tracker:advanced")
+
+    def test_download_mode_setting_uses_advanced_return_target(self) -> None:
+        keyboard = _search_advanced_keyboard(self._settings, intent=SEARCH_INTENT_SERIES_MASTER)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["🎚 Что скачать: сериал целиком"], "srch:mode:advanced")
+
+
+class SearchModePickerKeyboardTests(unittest.TestCase):
+    def test_picker_sets_single_or_series_and_returns_back(self) -> None:
+        keyboard = _search_mode_picker_keyboard(return_to="advanced")
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["✅ Одна раздача"], "srch:mode_set:single:advanced")
+        self.assertEqual(buttons["📚 Сериал целиком"], "srch:mode_set:series:advanced")
+        self.assertEqual(buttons["⬅️ Назад"], "srch:mode_back:advanced")
+
+    def test_picker_marks_series_when_active(self) -> None:
+        keyboard = _search_mode_picker_keyboard(
+            current_intent=SEARCH_INTENT_SERIES_MASTER,
+            return_to="options",
+        )
+        labels = [b.text for row in keyboard.inline_keyboard for b in row]
+        self.assertIn("Одна раздача", labels)
+        self.assertIn("✅ 📚 Сериал целиком", labels)
 
 
 class JackettSelectKeyboardTests(unittest.TestCase):

@@ -5109,6 +5109,82 @@ class SearchSeasonManualInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_search.await_args.args[2], "Клиника Сезон: 7 1080p")
 
 
+class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_set_series_mode_updates_intent_and_rerenders_options(self):
+        update = _make_callback_update(callback_data="srch:mode_set:series:options")
+        context = _make_context(user_data={"srch_query": "Клиника"})
+
+        result = await bot.search_set_mode(update, context)
+
+        self.assertEqual(result, bot.SEARCH_OPTIONS)
+        self.assertEqual(context.user_data["srch_intent"], bot.SEARCH_INTENT_SERIES_MASTER)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Скачать сериал целиком", text)
+        buttons = {
+            button.text: button.callback_data
+            for row in update.callback_query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🎚 Что скачать: сериал целиком"], "srch:mode:options")
+
+    async def test_set_single_mode_clears_intent_without_losing_filters(self):
+        update = _make_callback_update(callback_data="srch:mode_set:single:advanced")
+        context = _make_context(user_data={
+            "srch_query": "Клиника",
+            "srch_intent": bot.SEARCH_INTENT_SERIES_MASTER,
+            "srch_settings": {"quality": "720p", "audio": True, "subs": False},
+        })
+
+        result = await bot.search_set_mode(update, context)
+
+        self.assertEqual(result, bot.SEARCH_ADVANCED)
+        self.assertNotIn("srch_intent", context.user_data)
+        self.assertEqual(context.user_data["srch_settings"]["quality"], "720p")
+        buttons = {
+            button.text: button.callback_data
+            for row in update.callback_query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🎚 Что скачать: одна раздача"], "srch:mode:advanced")
+
+    async def test_new_text_query_resets_series_mode(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "Дюна"
+        reply = MagicMock()
+        reply.message_id = 77
+        update.message.reply_text.return_value = reply
+        context = _make_context(user_data={"srch_intent": bot.SEARCH_INTENT_SERIES_MASTER})
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "jackett_client", None),
+        ):
+            result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.SEARCH_OPTIONS)
+        self.assertNotIn("srch_intent", context.user_data)
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Что скачать: одна раздача", text)
+
+    async def test_didmean_preserves_series_mode_and_strips_season_from_query(self):
+        update = _make_callback_update(callback_data="srch:didmean:0")
+        context = _make_context(user_data={
+            "srch_intent": bot.SEARCH_INTENT_SERIES_MASTER,
+            "srch_didmean_suggestions": ["Клиника сезон 3"],
+            "srch_settings": {"quality": "1080p", "audio": False, "subs": False},
+        })
+
+        with patch.object(bot, "_run_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as run_search:
+            result = await bot.search_didmean(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        self.assertEqual(context.user_data["srch_intent"], bot.SEARCH_INTENT_SERIES_MASTER)
+        self.assertEqual(run_search.await_args.args[2], "Клиника 1080p")
+
+
 class SearchSeasonBackToPickerHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tests for search_season_back_to_picker — '⬅️ К выбору сезона' on 0-results screen."""
 
