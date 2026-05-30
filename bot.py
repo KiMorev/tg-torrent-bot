@@ -5680,7 +5680,7 @@ async def _notify_pending_dropped(app: Application, entry: dict) -> None:
         return
     title = entry.get("title") or "загрузка"
     attempts = int(entry.get("attempts") or 0)
-    last_error = entry.get("last_error") or "неизвестно"
+    last_error = _stored_error_user_text(entry.get("last_error"))
     ttl_h = PENDING_DOWNLOADS_TTL_HOURS
     text = (
         f"⌛ Не удалось скачать «{title}» за {ttl_h:g}ч ({attempts} попыток).\n"
@@ -5691,6 +5691,30 @@ async def _notify_pending_dropped(app: Application, entry: dict) -> None:
         await app.bot.send_message(chat_id=int(chat_id), text=text)
     except Exception:
         logger.warning("Failed to notify pending-dropped for chat_id=%s", chat_id, exc_info=True)
+
+
+def _stored_error_user_text(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "не получилось добавить загрузку"
+    lower = text.lower()
+    if "no space" in lower or "not enough space" in lower:
+        return "на диске недостаточно места"
+    technical_markers = (
+        "http ",
+        "url:",
+        "path=",
+        "traceback",
+        "exception",
+        "stack trace",
+        "client error",
+        "server error",
+        "dsm api",
+        "errno",
+    )
+    if any(marker in lower for marker in technical_markers):
+        return "сервис загрузки или трекер временно не отдал файл"
+    return text
 
 
 def _pending_series_bulk_meta(entry: dict) -> tuple[str, int] | None:
@@ -5803,7 +5827,7 @@ async def _run_pending_downloads_once(app: Application) -> None:
             _series_bulk_record_pending_retry_result(
                 entry,
                 "pending_failed",
-                error=str(entry.get("last_error") or "истёк срок отложенных попыток"),
+                error=_stored_error_user_text(entry.get("last_error") or "истёк срок отложенных попыток"),
                 summary="отложенный повтор не сработал",
             )
             del pending[entry_id]
@@ -6489,6 +6513,38 @@ async def _build_diagnostics_section_text(
     return format_diagnostics_section(report, section)
 
 
+def _kinopoisk_lookup_error_text() -> str:
+    return (
+        "⚠️ Не удалось получить данные из Кинопоиска\n\n"
+        "Кинопоиск сейчас не ответил. Попробуйте ещё раз позже или введите название вручную."
+    )
+
+
+def _download_station_user_error_text(action: str, *, task_id: str = "") -> str:
+    lines = [f"⚠️ {action}"]
+    if task_id:
+        lines.append(f"ID: {task_id}")
+    lines.extend([
+        "",
+        "Download Station сейчас не ответил или отклонил команду.",
+        "Попробуйте снова через минуту. Если проблема повторяется, администратору стоит проверить /admin.",
+    ])
+    return "\n".join(lines)
+
+
+def _torrent_file_user_error_text() -> str:
+    return (
+        "⚠️ Не удалось обработать .torrent\n\n"
+        "Файл не получилось добавить в Download Station. Попробуйте ещё раз или выберите другую раздачу."
+    )
+
+
+def _subscription_save_user_error_text(*, downloaded: bool) -> str:
+    if downloaded:
+        return "доступные серии добавлены, но подписку не создал"
+    return "подписку не удалось создать для этого варианта"
+
+
 async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """ConversationHandler entry point: user sent a Kinopoisk URL.
 
@@ -6508,8 +6564,9 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     msg = await update.message.reply_text("🎬 Получаю информацию из Кинопоиска…")
     try:
         info: KinopoiskInfo = await asyncio.to_thread(kinopoisk_client.get_film_info, kp_id)
-    except KinopoiskError as e:
-        await msg.edit_text(f"Не удалось получить данные из Кинопоиска:\n{e}")
+    except KinopoiskError:
+        logger.info("Kinopoisk lookup failed for kp_id=%s", kp_id, exc_info=True)
+        await msg.edit_text(_kinopoisk_lookup_error_text())
         return ConversationHandler.END
 
     context.user_data["srch_query"] = info.search_base
@@ -6755,7 +6812,11 @@ async def _show_jackett_selector(
         indexers = await asyncio.to_thread(jackett_client.get_indexers)
     except JackettError as e:
         logger.error("Jackett get_indexers failed: %s", e)
-        await edit_fn(_friendly_error("jackett", str(e)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+        await edit_fn(
+            _friendly_error("jackett", str(e), include_detail=False),
+            reply_markup=_search_error_keyboard(),
+            parse_mode="HTML",
+        )
         return ConversationHandler.END
 
     if not indexers:
@@ -6824,7 +6885,11 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     try:
         rt_results = await asyncio.to_thread(rutracker_client.search, base_query)
     except RutrackerError as rt_err:
-        await query.edit_message_text(_friendly_error("rutracker", str(rt_err)), reply_markup=_search_error_keyboard(), parse_mode="HTML")
+        await query.edit_message_text(
+            _friendly_error("rutracker", str(rt_err), include_detail=False),
+            reply_markup=_search_error_keyboard(),
+            parse_mode="HTML",
+        )
         return ConversationHandler.END
     results_data = []
     for r in rt_results:
@@ -7201,7 +7266,7 @@ def _search_empty_text(
 def _search_source_error_text(service: str, raw: str) -> str:
     return (
         "⚠️ Поиск сейчас не получился\n\n"
-        f"{_friendly_error(service, raw)}\n\n"
+        f"{_friendly_error(service, raw, include_detail=False)}\n\n"
         "Что можно сделать: повторить поиск после паузы или проверить статус сервисов в /admin."
     )
 
@@ -7734,7 +7799,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 jackett_errored = True
                 jackett_err_msg = raw_err
                 if rutracker_client:
-                    banner = f"⚠️ Jackett: {raw_err[:80]}. Ищу в Rutracker напрямую…"
+                    banner = "⚠️ Jackett временно недоступен, ищу напрямую в Rutracker"
                     # fall through to Rutracker path
                 else:
                     await edit_fn(
@@ -9453,7 +9518,7 @@ async def _series_continue_subscribe_same_topic(
         )
     except (RutrackerError, RuntimeError) as exc:
         await query.edit_message_text(
-            _friendly_error("rutracker", str(exc)),
+            _friendly_error("rutracker", str(exc), include_detail=False),
             parse_mode="HTML",
             reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
         )
@@ -9486,7 +9551,7 @@ async def _series_continue_search_alternatives(
         raw_results = await asyncio.to_thread(rutracker_client.search, search_query)
     except RutrackerError as exc:
         await query.edit_message_text(
-            _friendly_error("rutracker", str(exc)),
+            _friendly_error("rutracker", str(exc), include_detail=False),
             parse_mode="HTML",
             reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
         )
@@ -9646,14 +9711,15 @@ async def _series_continue_download_same_topic(
             success_subscription_text="Буду следить за новыми сериями в этой теме.",
         )
     except RutrackerTopicUnavailable as exc:
+        logger.info("Series continue topic unavailable: %s", exc)
         await query.edit_message_text(
-            f"📺 <b>{title}</b>\n\n{html_module.escape(str(exc))}",
+            f"📺 <b>{title}</b>\n\nТема Rutracker больше недоступна или удалена.",
             parse_mode="HTML",
             reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
         )
     except RutrackerError as exc:
         await query.edit_message_text(
-            _friendly_error("rutracker", str(exc)),
+            _friendly_error("rutracker", str(exc), include_detail=False),
             parse_mode="HTML",
             reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
         )
@@ -10184,34 +10250,40 @@ def _is_pending_retryable_download_error(exc: Exception) -> bool:
 def _format_download_error(exc: Exception) -> str:
     """Human-readable short description of a torrent download failure.
 
-    Replaces raw exception text (which on Jackett HTTP 404 contains a huge URL
-    with base64 path and URL-encoded filename — see ``jackett.py:303``) with a
-    one-line summary suitable for the chat UI. Keeps the head of the message
-    for unfamiliar errors so we don't drop diagnostic info.
+    Keeps raw exception details out of chat UI; logs still receive the original
+    exception at the call site.
     """
     msg = str(exc)
+    lower = msg.lower()
     if isinstance(exc, JackettError):
-        if "HTTP 404" in msg:
-            return (
-                "❌ Не удалось скачать torrent через Jackett (HTTP 404). "
-                "Возможно, трекер временно недоступен."
-            )
-        if "HTTP 5" in msg:
-            return (
-                "❌ Jackett вернул ошибку сервера (5xx). "
-                "Возможно, трекер временно недоступен."
-            )
-        lower = msg.lower()
+        if "404" in msg or "not found" in lower:
+            return "❌ Jackett не отдал torrent-файл. Раздача могла временно пропасть с трекера."
+        if any(marker in lower for marker in ("http 5", "500", "502", "503", "504")):
+            return "❌ Jackett или трекер временно недоступен."
         if "timeout" in lower or "timed out" in lower:
             return "❌ Превышено время ожидания от Jackett."
-        # Fallback: keep the head of the message, drop any URL/path tail.
-        head = msg.split(" — ", 1)[0]
-        return f"❌ Ошибка Jackett: {head[:200]}"
+        if "api" in lower or "ключ" in lower:
+            return "❌ Jackett не принял API-ключ. Проверьте настройки."
+        return "❌ Jackett сейчас не смог отдать torrent-файл."
     if isinstance(exc, RutrackerError):
-        return f"❌ Не удалось скачать torrent с Rutracker: {msg[:200]}"
+        if "captcha" in lower or "капч" in lower:
+            return "❌ Rutracker просит капчу. После её прохождения попробуйте ещё раз."
+        if "авториза" in lower or "username" in lower or "password" in lower:
+            return "❌ Rutracker не принял логин или пароль. Проверьте настройки."
+        if "недоступ" in lower or "удален" in lower or "удалена" in lower:
+            return "❌ Раздача на Rutracker больше недоступна."
+        if "timeout" in lower or "timed out" in lower:
+            return "❌ Rutracker не ответил вовремя."
+        return "❌ Rutracker сейчас не смог отдать torrent-файл."
     if isinstance(exc, DownloadStationError):
-        return f"❌ Не удалось добавить задачу в Download Station: {msg[:200]}"
-    return f"❌ Ошибка: {msg[:200]}"
+        if "достигнут лимит задач" in lower:
+            return "❌ В Download Station достигнут лимит задач."
+        if "auth" in lower or "авториза" in lower or "логин" in lower or "парол" in lower:
+            return "❌ Download Station не принял логин или пароль. Проверьте настройки."
+        if "недоступ" in lower or "timeout" in lower or "timed out" in lower or "connection" in lower:
+            return "❌ Download Station сейчас недоступен."
+        return "❌ Download Station не принял задачу."
+    return "❌ Не удалось добавить загрузку."
 
 
 def _download_failure_text(exc: Exception, *, can_queue: bool) -> str:
@@ -10843,8 +10915,9 @@ async def _create_subscription_only(
             download_policy=download_policy,
         )
     except RuntimeError as exc:
+        logger.info("Subscription save failed: %s", exc)
         await query.edit_message_text(
-            str(exc),
+            f"⚠️ {_subscription_save_user_error_text(downloaded=False)}.",
             reply_markup=_subscription_done_keyboard(),
         )
         return ConversationHandler.END
@@ -12187,6 +12260,12 @@ async def _series_bulk_selected_indexers(context: ContextTypes.DEFAULT_TYPE) -> 
 _SERIES_BULK_FETCH_LIMIT_WARNING_PREFIX = "Jackett: выдача достигла лимита"
 
 
+def _series_bulk_source_warning(source: str, *, timeout: bool = False) -> str:
+    if timeout:
+        return f"{source}: не ответил вовремя, часть раздач могла не попасть в план."
+    return f"{source}: временно недоступен, часть раздач могла не попасть в план."
+
+
 async def _series_bulk_search_once(
     context: ContextTypes.DEFAULT_TYPE,
     search_query: str,
@@ -12214,7 +12293,7 @@ async def _series_bulk_search_once(
                 )
             return [_series_bulk_result_from_jackett(item) for item in raw], warnings
         except (JackettError, asyncio.TimeoutError) as exc:
-            warnings.append(f"Jackett: {str(exc)[:80]}")
+            warnings.append(_series_bulk_source_warning("Jackett", timeout=isinstance(exc, asyncio.TimeoutError)))
             logger.info("Series bulk plan: Jackett search failed for %r: %s", base_query, exc)
 
     if rutracker_client:
@@ -12225,10 +12304,10 @@ async def _series_bulk_search_once(
             )
             results.extend(_series_bulk_result_from_rutracker(item) for item in raw)
         except asyncio.TimeoutError:
-            warnings.append("Rutracker: таймаут поиска 45 сек")
+            warnings.append(_series_bulk_source_warning("Rutracker", timeout=True))
             logger.info("Series bulk plan: Rutracker search timed out for %r", base_query)
         except RutrackerError as exc:
-            warnings.append(f"Rutracker: {str(exc)[:80]}")
+            warnings.append(_series_bulk_source_warning("Rutracker"))
             logger.info("Series bulk plan: Rutracker search failed for %r: %s", base_query, exc)
 
     return results, warnings
@@ -14011,8 +14090,10 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
             ),
         )
     except RuntimeError as exc:
+        user_error = _subscription_save_user_error_text(downloaded=bool(task_id))
+        logger.info("Series bulk subscription save failed: %s", exc)
         if task_id:
-            summary = "доступные серии добавлены, подписка не создана"
+            summary = user_error
             _series_bulk_mark_resolved(
                 context,
                 season_plan.season,
@@ -14025,26 +14106,26 @@ async def search_series_bulk_partial_action(update: Update, context: ContextType
                 "partial_downloaded_subscription_failed",
                 task_id=task_id,
                 method=method,
-                error=str(exc),
+                error=user_error,
                 summary=summary,
                 result=result,
             )
             return await _series_bulk_show_review_or_plan(
                 query,
                 context,
-                notice=f"⚠️ Сезон {season_plan.season}: доступные серии добавлены, но подписку не создал: {exc}",
+                notice=f"⚠️ Сезон {season_plan.season}: {user_error}.",
             )
         _series_bulk_record_job_season(
             context,
             season_plan.season,
             "failed",
-            error=str(exc),
+            error=user_error,
             result=result,
         )
         return await _series_bulk_show_review_or_plan(
             query,
             context,
-            notice=f"❌ Сезон {season_plan.season}: {exc}",
+            notice=f"❌ Сезон {season_plan.season}: {user_error}.",
         )
 
     summary = _series_bulk_partial_summary(action, saved_sub)
@@ -15893,7 +15974,7 @@ async def _check_jackett_sub_via_rutracker_direct(
         new_title = await asyncio.to_thread(rutracker_client.get_topic_title, topic_id)
     except RutrackerTopicUnavailable as e:
         sub["unavailable_at"] = now_text
-        sub["unavailable_reason"] = str(e)
+        sub["unavailable_reason"] = "тема больше недоступна или удалена"
         short = _format_sub_title(sub.get("title", "")) or topic_url
         if chat_id:
             try:
@@ -16426,7 +16507,7 @@ async def _mark_rutracker_subscription_unavailable(
             return False
 
     sub["unavailable_at"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
-    sub["unavailable_reason"] = str(error)
+    sub["unavailable_reason"] = "тема больше недоступна или удалена"
     logger.info("Rutracker subscription paused: topic=%s reason=%s", topic_id, error)
     return True
 
@@ -17185,7 +17266,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
         logger.exception("Failed to list Download Station tasks")
-        await _safe_edit_message(progress_message, f"Не удалось получить задачи: {e}")
+        await _safe_edit_message(
+            progress_message,
+            _download_station_user_error_text("Не удалось получить список загрузок."),
+        )
         return
 
     scope = _default_list_scope(chat.id)
@@ -17654,7 +17738,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
-                f"Не удалось получить задачи: {e}",
+                _download_station_user_error_text("Не удалось получить список загрузок."),
                 reply_markup=_task_error_keyboard(retry_callback=retry_callback),
             )
             return
@@ -17672,7 +17756,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
-                f"Не удалось получить задачи: {e}",
+                _download_station_user_error_text("Не удалось получить список загрузок."),
                 reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=scope),
             )
             return
@@ -17709,7 +17793,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
-                f"Не удалось получить задачи: {e}",
+                _download_station_user_error_text("Не удалось получить список загрузок."),
                 reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=scope),
             )
             return
@@ -17747,7 +17831,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             _forget_task_state(finished_ids)
         except DownloadStationError as e:
             await query.edit_message_text(
-                f"Не удалось удалить завершенные задачи: {e}",
+                _download_station_user_error_text("Не удалось удалить завершенные задачи."),
                 reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=scope),
             )
             return
@@ -17788,7 +17872,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
-                f"Не удалось получить задачу: {e}",
+                _download_station_user_error_text("Не удалось получить задачу.", task_id=task_id),
                 reply_markup=_task_error_keyboard(retry_callback=retry_callback, list_scope=_default_list_scope(chat_id)),
             )
             return
@@ -17903,7 +17987,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 return
         except DownloadStationError as e:
             await query.edit_message_text(
-                f"Не удалось выполнить действие: {e}",
+                _download_station_user_error_text("Не удалось выполнить действие с задачей.", task_id=task_id),
                 reply_markup=_task_error_keyboard(
                     retry_callback=retry_callback,
                     list_scope=_default_list_scope(chat_id),
@@ -17946,7 +18030,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
         await query.edit_message_text(
-            f"Не удалось получить задачу: {e}",
+            _download_station_user_error_text("Не удалось получить задачу.", task_id=task_id),
             reply_markup=_task_error_keyboard(
                 retry_callback=retry_callback,
                 list_scope=_default_list_scope(chat_id),
@@ -17994,7 +18078,10 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.to_thread(ds_client.resume_task, task_id)
     except DownloadStationError as e:
         logger.exception("Failed to resume Download Station task")
-        await _safe_edit_message(progress_message, f"Не удалось запустить задачу {task_id}: {e}")
+        await _safe_edit_message(
+            progress_message,
+            _download_station_user_error_text("Не удалось запустить задачу.", task_id=task_id),
+        )
         return
 
     await _safe_edit_message(progress_message, f"Команда запуска отправлена для {task_id}.")
@@ -18043,7 +18130,10 @@ async def _do_process_magnet(
             )
     except DownloadStationError as e:
         logger.exception("Failed to create Download Station task")
-        await _safe_edit_message(progress_message, f"Не удалось добавить magnet-ссылку: {e}")
+        await _safe_edit_message(
+            progress_message,
+            _download_station_user_error_text("Не удалось добавить magnet-ссылку."),
+        )
         return
 
     msg_text = _task_added_message(
@@ -18129,8 +18219,7 @@ async def _do_process_torrent(
                 _start_task_card_refresh(context.application, _hd_chat_id, _hd_msg_id, task_id)
     except Exception as e:
         logger.exception("Failed to process torrent")
-        error_text = f"Ошибка при обработке .torrent: {type(e).__name__}: {e}"
-        await _safe_edit_message(progress_message, error_text)
+        await _safe_edit_message(progress_message, _torrent_file_user_error_text())
     finally:
         try:
             if temp_path.exists():
@@ -19272,7 +19361,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.exception("Failed to process torrent")
 
         try:
-            error_text = f"Ошибка при обработке .torrent: {type(e).__name__}: {e}"
+            error_text = _torrent_file_user_error_text()
             if progress_message is not None:
                 await _safe_edit_message(progress_message, error_text)
             else:

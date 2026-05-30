@@ -3629,8 +3629,8 @@ class FormatDownloadErrorTests(unittest.TestCase):
             "***&path=Q2ZESjhQTTMtd2RZRZlVwUGlDOTF0SjVL... (огромный URL)"
         )
         text = bot._format_download_error(exc)
-        # Compact message, no URL leakage.
-        self.assertIn("HTTP 404", text)
+        self.assertIn("Jackett не отдал torrent-файл", text)
+        self.assertNotIn("HTTP 404", text)
         self.assertNotIn("path=", text)
         self.assertNotIn("jackett_apikey", text)
         self.assertLess(len(text), 200)
@@ -3639,7 +3639,8 @@ class FormatDownloadErrorTests(unittest.TestCase):
         from jackett import JackettError
         exc = JackettError("Не удалось скачать: HTTP 503 Service Unavailable")
         text = bot._format_download_error(exc)
-        self.assertIn("5xx", text)
+        self.assertIn("временно недоступен", text)
+        self.assertNotIn("HTTP 503", text)
 
     def test_jackett_timeout_text(self):
         from jackett import JackettError
@@ -3651,13 +3652,14 @@ class FormatDownloadErrorTests(unittest.TestCase):
         exc = RutrackerError("Капча на странице")
         text = bot._format_download_error(exc)
         self.assertIn("Rutracker", text)
-        self.assertIn("Капча", text)
+        self.assertIn("капчу", text)
 
     def test_download_station_error_text(self):
         from download_station import DownloadStationError
         exc = DownloadStationError("Auth failed")
         text = bot._format_download_error(exc)
         self.assertIn("Download Station", text)
+        self.assertNotIn("Auth failed", text)
 
     def test_download_failure_text_explains_queue_option(self):
         from jackett import JackettError
@@ -3676,6 +3678,7 @@ class FormatDownloadErrorTests(unittest.TestCase):
         exc = ValueError("X" * 500)
         text = bot._format_download_error(exc)
         self.assertLess(len(text), 250)
+        self.assertNotIn("XXXXX", text)
 
 
 class SearchRetryDlHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -6225,6 +6228,8 @@ class TaskCallbackErrorKeyboardTests(unittest.TestCase):
 
         call = update.callback_query.edit_message_text.await_args
         self.assertIn("Не удалось получить задачу", call.args[0])
+        self.assertNotIn("DS down", call.args[0])
+        self.assertIn("Download Station сейчас", call.args[0])
         buttons = self._buttons(call.kwargs["reply_markup"])
         self.assertEqual(buttons["🔄 Попробовать снова"], "task:info:task_123")
         self.assertEqual(buttons["📚 К списку загрузок"], "task:list:mine")

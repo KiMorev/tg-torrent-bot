@@ -194,6 +194,18 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("boom &lt;secret&gt;", text)
         self.assertNotIn("boom <secret>", text)
 
+    def test_friendly_error_can_hide_raw_details(self) -> None:
+        text = friendly_error("jackett", "boom <secret>", include_detail=False)
+
+        self.assertIn("Jackett", text)
+        self.assertNotIn("boom", text)
+
+    def test_friendly_error_hides_env_var_from_user_text(self) -> None:
+        text = friendly_error("jackett", "страницу входа не принят", include_detail=False)
+
+        self.assertIn("проверьте настройки", text)
+        self.assertNotIn("JACKETT_API_KEY", text)
+
     # --- Plex diagnostics ---
 
     def test_plex_disabled_when_client_is_none(self) -> None:

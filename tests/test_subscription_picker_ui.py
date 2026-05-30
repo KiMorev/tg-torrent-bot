@@ -1180,7 +1180,8 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(entry["title"], result["title"])
         self.assertEqual(entry["series_bulk"]["job_id"], "bulk_test")
         self.assertEqual(entry["series_bulk"]["season"], 1)
-        self.assertIn("404", entry["last_error"])
+        self.assertIn("Jackett не отдал torrent-файл", entry["last_error"])
+        self.assertNotIn("404", entry["last_error"])
         self.assertIn("в очереди", ctx.user_data["srch_series_bulk_resolved"]["1"])
         self.assertNotIn("1", ctx.user_data.get("srch_series_bulk_failed", {}))
         job = saved_jobs["bulk_test"]
@@ -1542,7 +1543,22 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             results, warnings = asyncio.run(bot._series_bulk_search_once(ctx, "Клиника"))
 
         self.assertEqual(results, [])
-        self.assertIn("Rutracker: таймаут поиска 45 сек", warnings)
+        self.assertIn("Rutracker: не ответил вовремя", warnings[0])
+
+    def test_bulk_search_warning_hides_raw_tracker_error(self):
+        ctx = _make_context(results=[])
+        rutracker = MagicMock()
+        rutracker.search.side_effect = bot.RutrackerError("HTTP 503 stack trace")
+
+        with (
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "rutracker_client", rutracker),
+        ):
+            results, warnings = asyncio.run(bot._series_bulk_search_once(ctx, "Клиника"))
+
+        self.assertEqual(results, [])
+        self.assertIn("Rutracker: временно недоступен", warnings[0])
+        self.assertNotIn("HTTP 503", warnings[0])
 
     def test_skip_manual_review_marks_season_resolved_and_returns_to_plan(self):
         results = [

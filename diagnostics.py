@@ -96,7 +96,7 @@ def _indexer_count(label: str) -> int:
     return len([p for p in names.split(",") if p.strip()]) + extra
 
 
-def friendly_error(service: str, raw: str) -> str:
+def friendly_error(service: str, raw: str, *, include_detail: bool = True) -> str:
     """Return an HTML-formatted user-friendly error string."""
     rl = raw.lower()
     if service == "rutracker":
@@ -119,6 +119,8 @@ def friendly_error(service: str, raw: str) -> str:
             head = f"{name}: 🔑 API ключ не принят — проверьте <code>JACKETT_API_KEY</code>"
         else:
             head = f"{name}: ❌ недоступен"
+    if not include_detail:
+        return head.replace(" — проверьте <code>JACKETT_API_KEY</code>", " — проверьте настройки")
     return f"{head}\n<blockquote expandable>{html.escape(raw)}</blockquote>"
 
 

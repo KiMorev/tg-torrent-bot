@@ -825,7 +825,8 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         season = job["seasons"]["1"]
         self.assertEqual(job["status"], "batch_failed")
         self.assertEqual(season["runtime_status"], "pending_failed")
-        self.assertIn("Jackett HTTP 404", season["error"])
+        self.assertIn("сервис загрузки или трекер", season["error"])
+        self.assertNotIn("HTTP 404", season["error"])
         self.assertNotIn("pending_entry_id", season)
 
     def test_attempt_pending_download_uses_magnet_from_jackett_redirect(self) -> None:
@@ -874,7 +875,8 @@ class PendingDownloadsLoopTests(unittest.TestCase):
         self.assertIn(entry_id, loaded)
         self.assertEqual(loaded[entry_id]["attempts"], 2)
         # Error is recorded as the compact form, not the raw exception text.
-        self.assertIn("404", loaded[entry_id]["last_error"])
+        self.assertIn("Jackett не отдал torrent-файл", loaded[entry_id]["last_error"])
+        self.assertNotIn("404", loaded[entry_id]["last_error"])
         self.assertIsNotNone(loaded[entry_id]["last_attempt_at"])
         # No success notification.
         mock_app.bot.send_message.assert_not_awaited()
@@ -1113,8 +1115,10 @@ class SubscriptionCheckTests(unittest.TestCase):
 
         updated = self._store.load_topic_subscriptions()["123"]
         self.assertIn("unavailable_at", updated)
-        self.assertEqual(updated["unavailable_reason"], "topic removed")
+        self.assertEqual(updated["unavailable_reason"], "тема больше недоступна или удалена")
         mock_app.bot.send_message.assert_awaited_once()
+        sent_text = mock_app.bot.send_message.await_args.kwargs.get("text", "")
+        self.assertNotIn("topic removed", sent_text)
 
     def test_unavailable_rutracker_topic_is_not_rechecked_after_pause(self) -> None:
         self._store.save_topic_subscriptions({
