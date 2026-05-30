@@ -622,6 +622,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
                 "year": 2026,
                 "rating": 7.8,
                 "genres": ["драма"],
+                "countries": ["USA", "Canada"],
                 "url": "https://www.kinopoisk.ru/film/99/",
                 "poster_url": "https://img.example/poster.jpg",
                 "poster_preview_url": "https://img.example/poster-preview.jpg",
@@ -642,6 +643,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
         self.assertEqual(call_count["n"], 0, "search_movie must not be called on cache hit")
         self.assertEqual(result["cards"][0]["kp_id"], 99)
         self.assertAlmostEqual(result["cards"][0]["rating"], 7.8)
+        self.assertEqual(result["cards"][0]["countries"], ["USA", "Canada"])
         self.assertEqual(result["cards"][0]["poster_url"], "https://img.example/poster.jpg")
         self.assertEqual(result["cards"][0]["poster_preview_url"], "https://img.example/poster-preview.jpg")
 
@@ -676,6 +678,7 @@ class BuildCardsKpCacheTests(unittest.TestCase):
             year=2026,
             rating=8.0,
             genres=[],
+            countries=["USA", "Canada"],
             votes=None,
             poster_url="https://img.example/poster.jpg",
             poster_preview_url="https://img.example/poster-preview.jpg",
@@ -693,6 +696,8 @@ class BuildCardsKpCacheTests(unittest.TestCase):
 
         card = result["cards"][0]
         entry = next(iter(result["kp_cache"].values()))
+        self.assertEqual(card["countries"], ["USA", "Canada"])
+        self.assertEqual(entry["countries"], ["USA", "Canada"])
         self.assertEqual(card["poster_url"], "https://img.example/poster.jpg")
         self.assertEqual(card["poster_preview_url"], "https://img.example/poster-preview.jpg")
         self.assertEqual(entry["poster_url"], "https://img.example/poster.jpg")

@@ -470,7 +470,7 @@ def _merge_duplicate_cards(cards: list[dict], known_fingerprints: set[str]) -> l
         existing["releases"].extend(card["releases"])
         existing["first_seen_at"] = min(str(existing.get("first_seen_at") or ""), str(card.get("first_seen_at") or ""))
         if not existing.get("kp_id") and card.get("kp_id"):
-            for field in ("kp_id", "kp_url", "rating", "kp_votes", "genres", "title", "poster_url", "poster_preview_url"):
+            for field in ("kp_id", "kp_url", "rating", "kp_votes", "genres", "countries", "title", "poster_url", "poster_preview_url"):
                 existing[field] = card.get(field)
         if not existing.get("alt_title") and card.get("alt_title"):
             existing["alt_title"] = card["alt_title"]
@@ -550,6 +550,7 @@ def _kp_cache_store(
             "rating": match.rating,
             "votes": match.votes,
             "genres": match.genres,
+            "countries": getattr(match, "countries", []) or [],
             "url": match.url,
             "poster_url": getattr(match, "poster_url", "") or "",
             "poster_preview_url": getattr(match, "poster_preview_url", "") or "",
@@ -693,6 +694,7 @@ def build_cards(
                     card["rating"] = cached.get("rating")
                     card["kp_votes"] = cached.get("votes")
                     card["genres"] = cached.get("genres", [])
+                    card["countries"] = cached.get("countries", [])
                     card["title"] = cached.get("title") or search_title
                     card["poster_url"] = cached.get("poster_url", "")
                     card["poster_preview_url"] = cached.get("poster_preview_url", "")
@@ -724,6 +726,7 @@ def build_cards(
                             card["rating"] = match.rating
                             card["kp_votes"] = match.votes
                             card["genres"] = match.genres
+                            card["countries"] = getattr(match, "countries", []) or []
                             card["title"] = match.title
                             card["poster_url"] = getattr(match, "poster_url", "") or ""
                             card["poster_preview_url"] = getattr(match, "poster_preview_url", "") or ""
@@ -736,6 +739,7 @@ def build_cards(
                         card["rating"] = cached.get("rating")
                         card["kp_votes"] = cached.get("votes")
                         card["genres"] = cached.get("genres", [])
+                        card["countries"] = cached.get("countries", [])
                         card["title"] = cached.get("title") or search_title
                         card["poster_url"] = cached.get("poster_url", "")
                         card["poster_preview_url"] = cached.get("poster_preview_url", "")
@@ -761,6 +765,7 @@ def build_cards(
                         card["rating"] = match.rating
                         card["kp_votes"] = match.votes
                         card["genres"] = match.genres
+                        card["countries"] = getattr(match, "countries", []) or []
                         card["title"] = match.title
                         card["poster_url"] = getattr(match, "poster_url", "") or ""
                         card["poster_preview_url"] = getattr(match, "poster_preview_url", "") or ""

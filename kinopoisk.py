@@ -9,7 +9,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -88,6 +88,7 @@ class KinopoiskMovieMatch:
     rating: float | None
     genres: list[str]
     votes: int | None = None
+    countries: list[str] = field(default_factory=list)
     poster_url: str = ""
     poster_preview_url: str = ""
 
@@ -318,6 +319,11 @@ class KinopoiskClient:
                 for g in item.get("genres", [])
                 if isinstance(g, dict) and g.get("genre")
             ][:3]
+            countries = [
+                str(c.get("country", "")).strip()
+                for c in item.get("countries", [])
+                if isinstance(c, dict) and c.get("country")
+            ][:2]
 
             try:
                 kp_id = int(item.get("filmId") or item.get("kinopoiskId") or 0)
@@ -339,6 +345,7 @@ class KinopoiskClient:
                 rating=rating,
                 genres=genres,
                 votes=votes,
+                countries=countries,
                 poster_url=str(item.get("posterUrl") or "").strip(),
                 poster_preview_url=str(item.get("posterUrlPreview") or "").strip(),
             )

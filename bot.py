@@ -2117,6 +2117,14 @@ def _format_kp_votes(votes: int | None) -> str:
     return str(votes)
 
 
+def _movie_countries_text(card: dict) -> str:
+    countries = card.get("countries")
+    if not isinstance(countries, list):
+        return ""
+    cleaned = [str(country).strip() for country in countries if str(country).strip()]
+    return ", ".join(cleaned[:2])
+
+
 def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> str:
     """Render the /new top-10 list.
 
@@ -2155,7 +2163,13 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
         rating = card.get("rating")
         votes_fmt = _format_kp_votes(card.get("kp_votes"))
         votes_text = f" ({votes_fmt})" if votes_fmt else ""
-        rating_text = f" · КП {rating:.1f}{votes_text}" if isinstance(rating, (int, float)) else ""
+        meta_parts = [year] if year else []
+        countries_text = _movie_countries_text(card)
+        if countries_text:
+            meta_parts.append(html_module.escape(countries_text))
+        if isinstance(rating, (int, float)):
+            meta_parts.append(f"КП {rating:.1f}{votes_text}")
+        meta_text = " · ".join(meta_parts)
         genres = ", ".join(card.get("genres") or [])
         genres_text = f"\n   Жанры: {html_module.escape(genres)}" if genres else ""
         kp_url = card.get("kp_url")
@@ -2180,7 +2194,7 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
             explanation_text = f"\n   💭 <i>{html_module.escape(str(explanation))}</i>"
         lines.append(
             f"\n{index}. <b>{title}</b>{plex_mark}{new_mark}\n"
-            f"   {year}{rating_text}\n"
+            f"   {meta_text}\n"
             f"   Лучшее: {html_module.escape(str(card.get('best_quality') or '?'))}, "
             f"{html_module.escape(str(card.get('best_size') or '?'))}, "
             f"сидов {html_module.escape(str(card.get('best_seeders') or 0))}\n"
@@ -2881,9 +2895,14 @@ def _format_movie_notification_text(cards: list) -> str:
         if alt:
             title_str = f"{title_str} / {_html.escape(str(alt))}"
         year = card.get("year") or ""
+        meta_parts = [str(year)] if year else []
+        countries_text = _movie_countries_text(card)
+        if countries_text:
+            meta_parts.append(countries_text)
+        meta_text = f" ({_html.escape(', '.join(meta_parts))})" if meta_parts else ""
         rating = card.get("rating")
         rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
-        lines.append(f"• {title_str} ({year}){rating_text}")
+        lines.append(f"• {title_str}{meta_text}{rating_text}")
     if len(cards) > 5:
         lines.append(f"и ещё {len(cards) - 5}…")
     return "\n".join(lines)

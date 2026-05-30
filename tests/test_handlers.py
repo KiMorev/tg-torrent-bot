@@ -2085,6 +2085,24 @@ class PlexEnrichmentTests(unittest.TestCase):
         text = _format_movie_discovery_cache(cache)
         self.assertIn("КП 7.8 (125K)", text)
 
+    def test_format_shows_countries_between_year_and_rating(self):
+        cache = {
+            "updated_at": "2026-05-14 12:00",
+            "cards": [{
+                "title": "Dune",
+                "year": 2021,
+                "countries": ["USA", "Canada"],
+                "rating": 7.8,
+                "best_quality": "1080p",
+                "best_size": "10 GB",
+                "best_seeders": 30,
+                "release_count": 1,
+            }],
+        }
+
+        text = _format_movie_discovery_cache(cache)
+        self.assertIn("2021 · USA, Canada · КП 7.8", text)
+
     def test_format_no_vote_count_when_votes_is_none(self):
         """When kp_votes is absent, only the rating appears without parentheses."""
         cache = {
@@ -2376,6 +2394,22 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["photo"], "https://img.example/poster.jpg")
         self.assertIn("Постерный", kwargs["caption"])
         self.assertIn("Второй", kwargs["caption"])
+
+    async def test_notification_includes_country_when_available(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        card = self._make_card("Country Film", kp_id=1)
+        card["countries"] = ["USA"]
+        cache = {"cards": [card]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        app.bot.send_message.assert_awaited_once()
+        self.assertIn("Country Film (2026, USA)", app.bot.send_message.call_args.kwargs["text"])
 
     async def test_notification_falls_back_to_text_when_poster_send_fails(self):
         settings = {

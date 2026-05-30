@@ -236,12 +236,14 @@ class SearchMovieAltTitleTests(unittest.TestCase):
             payload = self._film_response()
             payload["films"][0]["posterUrl"] = "https://img.example/poster.jpg"
             payload["films"][0]["posterUrlPreview"] = "https://img.example/poster-preview.jpg"
+            payload["films"][0]["countries"] = [{"country": "USA"}, {"country": "Canada"}, {"country": "Japan"}]
             return FakeResponse(payload)
 
         client = self._make_client(fake_get)
         result = client.search_movie("Фильм", year=2026)
 
         self.assertIsNotNone(result)
+        self.assertEqual(result.countries, ["USA", "Canada"])
         self.assertEqual(result.poster_url, "https://img.example/poster.jpg")
         self.assertEqual(result.poster_preview_url, "https://img.example/poster-preview.jpg")
 
