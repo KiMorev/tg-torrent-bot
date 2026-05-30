@@ -61,7 +61,7 @@
 | Magnet или `.torrent` файлом | `text_message_entry` или `handle_doc` -> `_process_magnet_uri` / `_do_process_torrent` -> Download Station. |
 | Подписка на сериал | `search_subscribe_pick` -> `search_subscribe_preset` или advanced callbacks -> запись в `topic_subscriptions.json`; `/subs` -> `sub:settings:*` меняет `notify_policy`/`download_policy`. |
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
-| `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`; карточки показывают KP-метаданные включая страну; push подписчикам делает `_run_movie_discovery_notifications` и может отправить постер топовой карточки через `send_photo` с fallback на текст. |
+| `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`; при деградации источников сохраняет прежний хороший кэш и не отправляет push; карточки показывают KP-метаданные включая страну; push подписчикам делает `_run_movie_discovery_notifications` и может отправить постер топовой карточки через `send_photo` с fallback на текст. |
 | Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
 | Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`; BT-задача `error` без конкретного `error_detail` (`unknown` считается неконкретным) и с прогрессом >=99.9% считается мягко завершённой для уведомлений/Plex polling; итоговые события пишутся в `download_history.jsonl`. |
 | `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`; admin-view берёт владельцев из `task_owners.json` и подписи из `approved_users.json`. |
@@ -129,7 +129,7 @@
 | `auto_delete_tasks.json` | Задачи-кандидаты на автоудаление и timestamp. |
 | `trackers_processed_v2.json` | Задачи, куда уже добавляли публичные трекеры. |
 | `topic_subscriptions.json` | Rutracker/Jackett подписки на новые серии. |
-| `movie_discovery.json` | Кэш карточек `/new`, KP cache, fingerprints. |
+| `movie_discovery.json` | Кэш карточек `/new`, KP cache, fingerprints, сигналы деградации последнего refresh. |
 | `movie_discovery_settings.json` | Настройки `/new`, подписчики, per-user seen/shown flags, Jackett trackers. |
 | `movie_discovery_debug.json` | Debug snapshot последнего refresh `/new`. |
 | `pending_downloads.json` | Очередь отложенных скачиваний и retry-state; bulk-записи могут содержать `series_bulk: {job_id, season}`. |

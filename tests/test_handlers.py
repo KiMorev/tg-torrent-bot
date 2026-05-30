@@ -2226,6 +2226,58 @@ class MovieSubscriptionKeyboardTests(unittest.TestCase):
         self.assertIn("🔔 Подписаться на /new", buttons)
 
 
+class MovieDiscoveryDegradedCacheGuardTests(unittest.TestCase):
+    def _cards(self, count: int) -> list[dict]:
+        return [{"title": f"Film {idx}", "kp_id": idx} for idx in range(count)]
+
+    def test_keeps_previous_cache_when_degraded_candidate_shrinks(self):
+        previous = {
+            "cards": self._cards(12),
+            "all_releases": [{"title": "old"}],
+            "updated_at": "2026-05-30 20:00",
+        }
+        candidate = {
+            "cards": self._cards(5),
+            "all_releases": [{"title": "new"}],
+            "kp_api_stats": {"date": "2026-05-30", "searches": 3},
+            "kp_cache": {"new|2026": {"kp_id": 100}},
+        }
+
+        result, rejected = bot._movie_discovery_guard_degraded_cache(
+            candidate,
+            previous,
+            failed_specs=[[2026, "1080p"]],
+            failed_enabled=[],
+            failed_disabled=[],
+            prev_top10_kp_ids=[1, 2, 3],
+        )
+
+        self.assertTrue(rejected)
+        self.assertEqual(result["cards"], previous["cards"])
+        self.assertEqual(result["all_releases"], previous["all_releases"])
+        self.assertEqual(result["kp_api_stats"], candidate["kp_api_stats"])
+        self.assertEqual(result["kp_cache"], candidate["kp_cache"])
+        self.assertEqual(result["last_failed_specs"], [[2026, "1080p"]])
+        self.assertTrue(result["last_degraded_refresh"]["rejected"])
+
+    def test_does_not_keep_previous_cache_for_info_only_failures(self):
+        previous = {"cards": self._cards(12)}
+        candidate = {"cards": self._cards(5)}
+
+        result, rejected = bot._movie_discovery_guard_degraded_cache(
+            candidate,
+            previous,
+            failed_specs=[],
+            failed_enabled=[],
+            failed_disabled=["noname-club"],
+            prev_top10_kp_ids=[1, 2, 3],
+        )
+
+        self.assertFalse(rejected)
+        self.assertEqual(result["cards"], candidate["cards"])
+        self.assertFalse(bot._movie_discovery_cache_has_gating_degradation(result))
+
+
 class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
     """Tests for _run_movie_discovery_notifications — per-user seen semantics."""
 
@@ -2497,6 +2549,36 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
             await _run_movie_discovery_notifications(cache, app, skip_push=True)
         app.bot.send_message.assert_not_called()
+
+    async def test_degraded_refresh_signal_suppresses_notification_entirely(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "cards": [self._make_card("Preserved", kp_id=42)],
+            "last_failed_specs": [[2026, "1080p"]],
+        }
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_not_called()
+
+    async def test_info_only_indexer_failure_does_not_suppress_notification(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "cards": [self._make_card("New", kp_id=42)],
+            "last_failed_indexer_ids_disabled": ["noname-club"],
+        }
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        app.bot.send_message.assert_called_once()
 
     # ---- False-push protection: B (regression guard) ----
 

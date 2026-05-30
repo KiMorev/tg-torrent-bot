@@ -347,6 +347,7 @@ GPT_MODEL = settings.gpt_model
 _KP_DAILY_LIMIT = 500
 # Max stale KP entries refreshed per discovery run (mirrors movie_discovery._KP_MAX_STALE_REFRESH_PER_RUN)
 _KP_MAX_STALE_REFRESH = 15
+_MOVIE_DISCOVERY_MIN_STABLE_CARDS = 10
 _MOVIE_DISCOVERY_REFRESH_COALESCE_SECONDS = 30.0
 _movie_discovery_refresh_lock: "asyncio.Lock | None" = None
 _movie_discovery_refresh_current_mode: str = ""
@@ -2414,6 +2415,77 @@ def _movie_discovery_admin_refresh_wait_note(refresh_kind: str) -> str:
     return "🔄 Идёт другое обновление. Постепенное обновление KP-кэша запустится сразу после него."
 
 
+def _movie_discovery_cache_has_gating_degradation(cache: dict) -> bool:
+    specs = cache.get("last_failed_specs")
+    enabled = cache.get("last_failed_indexer_ids")
+    return bool(specs if isinstance(specs, list) else []) or bool(
+        enabled if isinstance(enabled, list) else []
+    )
+
+
+def _movie_discovery_should_keep_previous_cache(
+    *,
+    degraded_for_rating: bool,
+    previous_cards_count: int,
+    new_cards_count: int,
+) -> bool:
+    min_stable_cards = min(_MOVIE_DISCOVERY_MIN_STABLE_CARDS, MOVIE_DISCOVERY_LIMIT)
+    return (
+        degraded_for_rating
+        and previous_cards_count > new_cards_count
+        and new_cards_count < min_stable_cards
+    )
+
+
+def _movie_discovery_guard_degraded_cache(
+    cache: dict,
+    previous: dict,
+    *,
+    failed_specs: list[list],
+    failed_enabled: list[str],
+    failed_disabled: list[str],
+    prev_top10_kp_ids: list,
+) -> tuple[dict, bool]:
+    cache["last_failed_specs"] = failed_specs
+    cache["last_failed_indexer_ids"] = failed_enabled
+    cache["last_failed_indexer_ids_disabled"] = failed_disabled
+    cache["prev_top10_kp_ids"] = prev_top10_kp_ids
+
+    previous_cards_count = len(previous.get("cards") or [])
+    new_cards_count = len(cache.get("cards") or [])
+    degraded_for_rating = bool(failed_specs or failed_enabled)
+    keep_previous = _movie_discovery_should_keep_previous_cache(
+        degraded_for_rating=degraded_for_rating,
+        previous_cards_count=previous_cards_count,
+        new_cards_count=new_cards_count,
+    )
+    if not keep_previous:
+        if degraded_for_rating:
+            cache["last_degraded_refresh"] = {
+                "rejected": False,
+                "prev_cards": previous_cards_count,
+                "new_cards": new_cards_count,
+            }
+        else:
+            cache.pop("last_degraded_refresh", None)
+        return cache, False
+
+    preserved = dict(previous)
+    preserved["last_failed_specs"] = failed_specs
+    preserved["last_failed_indexer_ids"] = failed_enabled
+    preserved["last_failed_indexer_ids_disabled"] = failed_disabled
+    preserved["prev_top10_kp_ids"] = prev_top10_kp_ids
+    for carried_key in ("kp_api_stats", "kp_cache"):
+        if carried_key in cache:
+            preserved[carried_key] = cache[carried_key]
+    preserved["last_degraded_refresh"] = {
+        "rejected": True,
+        "prev_cards": previous_cards_count,
+        "new_cards": new_cards_count,
+    }
+    return preserved, True
+
+
 async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None = _KP_MAX_STALE_REFRESH) -> dict:
     now = datetime.now(DISPLAY_TIMEZONE)
     now_text = now.strftime("%Y-%m-%d %H:%M")
@@ -2747,9 +2819,9 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
     else:
         failed_enabled = failed_indexer_ids & enabled_for_rating
         failed_disabled = failed_indexer_ids - enabled_for_rating
-    cache["last_failed_specs"] = [[year, quality] for (year, quality) in failed_query_specs]
-    cache["last_failed_indexer_ids"] = sorted(failed_enabled)  # gating signal
-    cache["last_failed_indexer_ids_disabled"] = sorted(failed_disabled)  # info-only
+    failed_specs_payload = [[year, quality] for (year, quality) in failed_query_specs]
+    failed_enabled_payload = sorted(failed_enabled)  # gating signal
+    failed_disabled_payload = sorted(failed_disabled)  # info-only
     if failed_disabled:
         logger.info(
             "movie_discovery: failed indexers not in rating (info-only, no retry): %s",
@@ -2760,7 +2832,24 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
     # _run_movie_discovery_notifications reads this to decide whether a kp_id
     # in the new top-10 is "confirmed" (was also in the previous top-10) or
     # "transient" (appeared just now — wait for next cycle to validate).
-    cache["prev_top10_kp_ids"] = _prev_top10_kp_ids
+    cache, degraded_cache_rejected = _movie_discovery_guard_degraded_cache(
+        cache,
+        previous,
+        failed_specs=failed_specs_payload,
+        failed_enabled=failed_enabled_payload,
+        failed_disabled=failed_disabled_payload,
+        prev_top10_kp_ids=_prev_top10_kp_ids,
+    )
+    if degraded_cache_rejected:
+        degraded_info = cache.get("last_degraded_refresh") or {}
+        logger.warning(
+            "movie_discovery: degraded cache rejected, keeping previous cache "
+            "prev_cards=%d new_cards=%d failed_specs=%s failed_enabled=%s",
+            degraded_info.get("prev_cards", 0),
+            degraded_info.get("new_cards", 0),
+            failed_specs_payload or "none",
+            failed_enabled_payload or "none",
+        )
 
     # PR2: enrich top-10 cards with GPT explanations + KP synopsis.
     # Runs synchronously but each call is bounded (~2-3 sec) and cached
@@ -2792,6 +2881,8 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
             "accepted_after_dedup": len(by_fingerprint),
             "cards": len(cache.get("cards", [])),
         },
+        "degraded_cache_rejected": degraded_cache_rejected,
+        "last_degraded_refresh": cache.get("last_degraded_refresh"),
         "decision_counts": dict(sorted(reason_counts.items())),
         "cards": [
             {
@@ -2992,19 +3083,22 @@ async def _run_movie_discovery_notifications(
     the window we DON'T mark anything as seen. The diff against seen-set self-heals
     on the next in-window refresh — no separate pending queue needed.
 
-    False-push protection (three layers, all motivated by the observed bug
+    False-push protection (four layers, all motivated by the observed bug
     where cold-Jackett-after-restart produced a transient top-10 containing a
     film that vanished on the next stable refresh):
 
-      A. ``skip_push=True`` — caller (the movie discovery loop) sets this on the
+      A. Degraded refresh signal: if a source/query used for rating failed,
+         skip push even when the cache still has cards from the previous state.
+
+      B. ``skip_push=True`` — caller (the movie discovery loop) sets this on the
          very first refresh after startup. Cold Jackett can't be trusted; we
          still write the cache so `/new` works, but don't notify anyone.
 
-      B. Regression guard — if removed_pct from the previous top-10 exceeds
+      C. Regression guard — if removed_pct from the previous top-10 exceeds
          60%, the refresh is "unstable" (likely the same Jackett warm-up
          scenario carrying over to a non-first cycle). Skip push entirely.
 
-      C. Consensus filter — only push kp_ids that appear in BOTH the current
+      D. Consensus filter — only push kp_ids that appear in BOTH the current
          top-10 AND the previous top-10 (stored in ``cache.prev_top10_kp_ids``).
          A genuinely-new film waits one cycle for confirmation; a transient
          dies before reaching the user.
@@ -3014,8 +3108,12 @@ async def _run_movie_discovery_notifications(
         logger.info("movie_discovery: notify skipped — no cards in cache")
         return
 
+    if _movie_discovery_cache_has_gating_degradation(cache):
+        logger.info("movie_discovery: notify skipped — degraded refresh")
+        return
+
     if skip_push:
-        # Layer A: first refresh after startup. The cache is now updated and
+        # Layer B: first refresh after startup. The cache is now updated and
         # available via /new, but we don't push — the next regular refresh
         # will reconfirm what's actually stable.
         logger.info("movie_discovery: notify skipped — first refresh after startup")
@@ -3032,7 +3130,7 @@ async def _run_movie_discovery_notifications(
         logger.info("movie_discovery: notify skipped — out of notification window")
         return
 
-    # Layer B: regression guard. If most of the previous top-10 has disappeared,
+    # Layer C: regression guard. If most of the previous top-10 has disappeared,
     # this refresh is unstable — likely cold-Jackett aftermath, or a transient
     # outage of one of the sources. Skip the whole push cycle.
     prev_top10_kp_ids: list[int] = list(cache.get("prev_top10_kp_ids") or [])
@@ -3066,7 +3164,7 @@ async def _run_movie_discovery_notifications(
         #   - notified_at: bot has already pushed it once → avoid duplicate push
         #   - shown_at: user has already opened /new and seen the film → push
         #     would be redundant
-        # Plus Layer C: only push kp_ids confirmed by appearing in the previous
+        # Plus Layer D: only push kp_ids confirmed by appearing in the previous
         # top-10. A film entering the top-10 for the first time has to survive
         # one more cycle before its push is allowed.
         new_for_user = [
@@ -3192,7 +3290,7 @@ async def _movie_discovery_loop(app: "Application") -> None:
         if is_first:
             logger.info("movie_discovery: first refresh after startup BEGIN")
         cache = await _refresh_movie_discovery_cache()
-        # Layer A of false-push protection: the very first refresh after
+        # Layer B of false-push protection: the very first refresh after
         # startup runs against a cold Jackett (its indexer cache hasn't
         # warmed up yet), so the resulting top-10 may contain transients.
         # We update the cache so /new works, but suppress the push.

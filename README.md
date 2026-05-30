@@ -156,6 +156,8 @@ flowchart TD
 - `🔄 Обновить`;
 - `✖️ Закрыть`.
 
+Если при обновлении `/new` один из источников временно упал, бот не заменяет хороший кэш подозрительно коротким списком и не отправляет push по деградированному refresh.
+
 ### Plex
 
 Plex-интеграция опциональна, но именно она делает PlexLoader цельным:
@@ -529,7 +531,7 @@ docker logs tg_torrent_drop
 
 Самые полезные маркеры:
 
-- `movie_discovery:` — всё, что связано с `/new`;
+- `movie_discovery:` — всё, что связано с `/new`; особенно полезны `degraded cache rejected` и `notify skipped — degraded refresh`;
 - `Plex polling started` / `Plex polling: found` — ожидание появления в Plex;
 - `Pending download queued` / `Pending download succeeded` — отложенная очередь, включая фоновые повторы bulk-сезонов;
 - `Task notification failed` / `Task notification deferred` — доставка Telegram-уведомлений;
