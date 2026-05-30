@@ -12978,6 +12978,12 @@ def _series_bulk_profile_from_result(
 ) -> SeriesBulkProfile:
     title = str(result.get("title") or "")
     release = release_profile_from_title(title, size=str(result.get("size") or ""))
+    preferred_voices = tuple(
+        voice
+        for voice in _normalise_preferred_voices(context.user_data.get("srch_voice_hints"))
+        if voice in release.voices
+    )
+    voice_policy = VOICE_REQUIRE_SELECTED if preferred_voices else VOICE_ANY_FROM_REFERENCE
     search_query = str(
         context.user_data.get("srch_search_query")
         or context.user_data.get("srch_query")
@@ -12999,8 +13005,8 @@ def _series_bulk_profile_from_result(
         quality=quality,
         require_original=audio_required,
         require_subs=subs_required,
-        voice_policy=VOICE_ANY_FROM_REFERENCE,
-        voices=release.voices,
+        voice_policy=voice_policy,
+        voices=preferred_voices or release.voices,
         release_type=release.release_type,
         release_group=release.release_group,
         tracker=str(result.get("tracker_name") or result.get("category") or ""),

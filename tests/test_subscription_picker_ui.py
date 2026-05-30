@@ -274,6 +274,54 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("⬅️ К выбору", labels)
         self.assertTrue(any("Озвучка: любая из эталона" in label for label in labels))
 
+    def test_bulk_profile_prefers_search_voice_hint_from_reference(self):
+        query = _make_query("srch:bulk_plan:0")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Clinic / Scrubs / S01 / WEB-DL 1080p / LostFilm / NewStudio",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_voice_hints"] = ["LostFilm"]
+        ctx.user_data["srch_voice_source"] = "default"
+
+        state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        profile = ctx.user_data["srch_series_bulk_profile_draft"]
+        self.assertEqual(profile.voice_policy, bot.VOICE_REQUIRE_SELECTED)
+        self.assertEqual(profile.voices, ("LostFilm",))
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("LostFilm", text)
+
+    def test_bulk_profile_keeps_reference_voices_when_voice_hint_is_absent(self):
+        query = _make_query("srch:bulk_plan:0")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Clinic / Scrubs / S01 / WEB-DL 1080p / LostFilm / NewStudio",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_voice_hints"] = ["AlexFilm"]
+        ctx.user_data["srch_voice_source"] = "default"
+
+        state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        profile = ctx.user_data["srch_series_bulk_profile_draft"]
+        self.assertEqual(profile.voice_policy, bot.VOICE_ANY_FROM_REFERENCE)
+        self.assertEqual(profile.voices, ("LostFilm", "NewStudio"))
+
     def test_bulk_profile_voice_accordion_updates_draft(self):
         query = _make_query("srch:bulk_plan:0")
         update = MagicMock(callback_query=query)
