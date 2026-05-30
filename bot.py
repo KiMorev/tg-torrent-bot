@@ -360,7 +360,7 @@ SETTINGS_CALLBACK_PREFIX = "settings"
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
-    BotCommand("settings", "Настройки по умолчанию"),
+    BotCommand("settings", "Предпочтения поиска"),
     BotCommand("continue", "Докачать сезон"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
@@ -6659,19 +6659,19 @@ def _quality_label(value: str) -> str:
 
 
 def _settings_voice_label(voices: list[str]) -> str:
-    return " / ".join(voices[:2]) if voices else "без предпочтений"
+    return f"предпочитаю {' / '.join(voices[:2])}" if voices else "без предпочтений"
 
 
 def _settings_text(defaults: dict) -> str:
     voices = _normalise_preferred_voices(defaults.get("preferred_voices"))
     return "\n".join([
-        "⚙️ Настройки по умолчанию",
+        "⚙️ Предпочтения поиска",
         "",
-        "Применяются к новым поискам, если в запросе не указано другое.",
+        "Учитываю в новых поисках как пожелания. Если точного варианта нет, покажу альтернативы.",
         "",
-        f"• Качество: {_quality_label(str(defaults.get('quality') or '1080p'))}",
-        f"• Original: {'нужен' if defaults.get('audio') else 'не обязательно'}",
-        f"• Субтитры: {'нужны' if defaults.get('subs') else 'не обязательно'}",
+        f"• Качество: предпочитаю {_quality_label(str(defaults.get('quality') or '1080p'))}",
+        f"• Original: {'предпочитаю' if defaults.get('audio') else 'не важно'}",
+        f"• Субтитры: {'предпочитаю' if defaults.get('subs') else 'не важно'}",
         f"• Переводы: {_settings_voice_label(voices)}",
     ])
 
@@ -6684,15 +6684,15 @@ def _settings_keyboard(defaults: dict, *, voices_expanded: bool = False) -> Inli
     voices = set(voice_list)
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(
-            f"🎞 Качество: {_quality_label(quality)}",
+            f"🎞 Качество: предпочитаю {_quality_label(quality)}",
             callback_data=f"{SETTINGS_CALLBACK_PREFIX}:quality",
         )],
         [InlineKeyboardButton(
-            f"🎧 Original: {'нужен' if audio else 'не обязательно'}",
+            f"🎧 Original: {'предпочитаю' if audio else 'не важно'}",
             callback_data=f"{SETTINGS_CALLBACK_PREFIX}:audio",
         )],
         [InlineKeyboardButton(
-            f"💬 Субтитры: {'нужны' if subs else 'не обязательно'}",
+            f"💬 Субтитры: {'предпочитаю' if subs else 'не важно'}",
             callback_data=f"{SETTINGS_CALLBACK_PREFIX}:subs",
         )],
         [InlineKeyboardButton(
@@ -6714,7 +6714,7 @@ def _settings_keyboard(defaults: dict, *, voices_expanded: bool = False) -> Inli
             )])
     rows.extend([
         [InlineKeyboardButton(
-            "↩️ Вернуть стартовые настройки",
+            "↩️ Вернуть стартовые предпочтения",
             callback_data=f"{SETTINGS_CALLBACK_PREFIX}:reset",
         )],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
@@ -19885,7 +19885,13 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # avoids a brief window where the task keeps running.)
     _cancel_didmean_prefetch(context)
 
-    if text.lower() in {"настройки", "настройки по умолчанию", "дефолты"}:
+    if text.lower() in {
+        "настройки",
+        "настройки по умолчанию",
+        "дефолты",
+        "предпочтения",
+        "предпочтения поиска",
+    }:
         await settings_command(update, context)
         return ConversationHandler.END
 

@@ -49,10 +49,10 @@
 
 | Флоу | Основной путь в коде |
 |---|---|
-| Текстовый поиск | `text_message_entry` -> `search_got_query` -> `search_intent.py` разбирает качество/сезон/весь сериал/озвучку -> defaults из `user_search_defaults.json` -> `SEARCH_OPTIONS` или `_run_search` для high-confidence one-release -> `SEARCH_RESULTS`. Новый текстовый ввод всегда сбрасывает `srch_intent` в обычный режим `Одна раздача`, если parser не распознал `series_master`. |
+| Текстовый поиск | `text_message_entry` -> `search_got_query` -> `search_intent.py` разбирает качество/сезон/весь сериал/озвучку -> предпочтения из `user_search_defaults.json` -> `SEARCH_OPTIONS` или `_run_search` для high-confidence one-release -> `SEARCH_RESULTS`. Новый текстовый ввод всегда сбрасывает `srch_intent` в обычный режим `Одна раздача`, если parser не распознал `series_master`. |
 | Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> `search_intent.py` -> тот же `SEARCH_OPTIONS` / `_run_search`; новый voice-ввод тоже сбрасывает `srch_intent`. |
 | Поиск по ссылке Кинопоиска | `text_message_entry` -> `kp_link_entry` -> KP metadata + `search_intent.py` для текста рядом со ссылкой -> `SEARCH_OPTIONS`; `все сезоны` применяются только если KP определил сериал. |
-| Настройки по умолчанию | `/settings` -> `settings_command` / `settings_callback` -> `state_store.load/save/reset_user_search_defaults`; callback namespace `settings:*`. В результатах поиска нет кнопок сохранения defaults. |
+| Предпочтения поиска | `/settings` -> `settings_command` / `settings_callback` -> `state_store.load/save/reset_user_search_defaults`; callback namespace `settings:*`. В результатах поиска нет кнопок сохранения предпочтений. |
 | Выбор варианта после неоднозначного поиска | `_build_search_clusters` группирует выдачу по типу контента, названию, году и сезону; `_enrich_clusters_with_plex_hints` добавляет ранние Plex-значки; `_cluster_picker_keyboard` показывает фильмы как `🎬 Название (год)`, сериалы как `📺 S6 · Название` / `📺 S1-S6 · Название`, а Plex-hit как `✅` / `⚠️` / `🔼`. |
 | Скачивание из результата | `search_download_pick` или `search_direct_download` -> Plex pre-check -> `_download_and_add` -> Download Station. |
 | Скачать сериал целиком из поиска | `search_choose_mode` переключает `srch_intent=series_master` прямо на текущем экране `Что скачать`; `search_quick` / `search_do` запускает `_run_search` с базовым названием без маркера сезона; `_run_search` фильтрует выдачу до сериалов и `_search_results_keyboard(..., series_master=True)` ведёт кнопки `🎯 N` в `search_series_bulk_plan`, а не в прямую загрузку. GPT did-you-mean, retry, снятие качества, все трекеры, tracker picker, clusters и pagination сохраняют текущий `srch_intent`. |
@@ -137,7 +137,7 @@
 | `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки и результат Plex polling. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
-| `user_search_defaults.json` | Личные настройки поиска по `chat_id`: качество, Original, субтитры и preferred voices. |
+| `user_search_defaults.json` | Личные предпочтения поиска по `chat_id`: качество, Original, субтитры и preferred voices. |
 | `gpt_usage.json` | Использование GPT-функций; `last_error` очищается успешным GPT-вызовом, transient-ошибки старше 24 ч не желтят диагностику. |
 | `torrent_titles_cache.json` | Кэш заголовков torrent/magnet для поиска task id. |
 | `public_trackers.txt` | Текстовый кэш публичных BT-трекеров. |

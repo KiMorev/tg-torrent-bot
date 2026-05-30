@@ -5415,9 +5415,9 @@ class SearchSettingsCommandTests(unittest.IsolatedAsyncioTestCase):
             await bot.settings_command(update, context)
 
         text = update.message.reply_text.await_args.args[0]
-        self.assertIn("Настройки по умолчанию", text)
-        self.assertIn("Качество: 4K", text)
-        self.assertIn("Переводы: LostFilm", text)
+        self.assertIn("Предпочтения поиска", text)
+        self.assertIn("Качество: предпочитаю 4K", text)
+        self.assertIn("Переводы: предпочитаю LostFilm", text)
 
     async def test_settings_callback_toggles_quality_and_saves(self):
         update = _make_callback_update(chat_id=100, callback_data="settings:quality")
@@ -5441,7 +5441,7 @@ class SearchSettingsCommandTests(unittest.IsolatedAsyncioTestCase):
         saved = store.save_user_search_defaults.call_args.args[1]
         self.assertEqual(saved["quality"], "720p")
         text = update.callback_query.edit_message_text.await_args.args[0]
-        self.assertIn("Качество: 720p", text)
+        self.assertIn("Качество: предпочитаю 720p", text)
 
 
 class SearchVoicePreferenceTests(unittest.TestCase):
