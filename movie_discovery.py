@@ -523,6 +523,8 @@ def _kp_cache_lookup(
 
     # Use per-entry ttl_days (supports jitter) with fallback to global constants
     if entry.get("kp_id"):
+        if "countries" not in entry:
+            return False, entry
         ttl = int(entry.get("ttl_days") or _KP_CACHE_TTL_FOUND_DAYS)
     else:
         ttl = _KP_CACHE_TTL_MISS_DAYS
