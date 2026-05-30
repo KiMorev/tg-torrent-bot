@@ -449,7 +449,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         final_text = query.edit_message_text.await_args.args[0]
         self.assertIn("📚 Скачать недостающие сезоны: Клиника", final_text)
         self.assertIn("Сезон 1 - уже есть в Plex", final_text)
-        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        self.assertIn("Сезон 2 - уверенно: WEB-DL", final_text)
         ctx.bot.send_animation.assert_awaited_once()
         gif_msg.delete.assert_awaited_once()
         kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
@@ -464,6 +464,27 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["seasons"]["1"]["plan_status"], bot.STATUS_ALREADY_IN_PLEX)
         self.assertEqual(job["seasons"]["2"]["plan_status"], bot.STATUS_EXACT)
         self.assertEqual(job["seasons"]["2"]["runtime_status"], "pending")
+
+    def test_bulk_plan_marks_good_candidate_as_likely_with_reason(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 0,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }
+        plan = _bulk_plan(seasons=[1], results=[result])
+        text = bot._series_bulk_plan_text(
+            plan,
+            _bulk_profile(),
+            result_count=1,
+        )
+
+        self.assertEqual(plan.seasons[0].status, bot.STATUS_GOOD)
+        self.assertIn("Сезон 1 - похоже: WEB-DL", text)
+        self.assertIn("сидов не видно", text)
 
     def test_bulk_build_all_seasons_in_plex_finishes_without_saved_job(self):
         query = _make_query("srch:bulk_plan:0")
@@ -647,8 +668,8 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             self._open_profile_and_build(update, ctx)
 
         final_text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Сезон 1 - WEB-DL", final_text)
-        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        self.assertIn("Сезон 1 - уверенно: WEB-DL", final_text)
+        self.assertIn("Сезон 2 - уверенно: WEB-DL", final_text)
         self.assertIn("Проверено раздач: 2", final_text)
         jackett.search.assert_called_once()
         self.assertEqual(jackett.search.call_args.args[0], "Клиника")
@@ -698,7 +719,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         final_text = query.edit_message_text.await_args.args[0]
         called_queries = [call.args[0] for call in jackett.search.call_args_list]
         self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 2"])
-        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        self.assertIn("Сезон 2 - уверенно: WEB-DL", final_text)
 
     def test_fetch_limit_supplements_all_needed_seasons_and_keeps_warning_when_targeted_limited(self):
         query = _make_query("srch:bulk_plan:0")
@@ -754,7 +775,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 1", "Клиника Сезон: 2"])
         self.assertIn("План собран не полностью", final_text)
         self.assertIn("Jackett: выдача достигла лимита 1", final_text)
-        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        self.assertIn("Сезон 2 - уверенно: WEB-DL", final_text)
 
     def test_fetch_limit_warning_is_removed_when_targeted_supplement_is_not_limited(self):
         query = _make_query("srch:bulk_plan:0")
@@ -811,7 +832,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(called_queries, ["Клиника", "Клиника Сезон: 1", "Клиника Сезон: 2"])
         self.assertNotIn("План собран не полностью", final_text)
         self.assertNotIn("Jackett: выдача достигла лимита 2", final_text)
-        self.assertIn("Сезон 2 - WEB-DL", final_text)
+        self.assertIn("Сезон 2 - уверенно: WEB-DL", final_text)
 
     def test_bulk_command_lists_saved_plans_for_current_chat(self):
         update = _make_message_update(chat_id=100)
@@ -902,7 +923,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("Открыл сохранённый план", text)
         self.assertIn("Проверено раздач: 7", text)
-        self.assertIn("Сезон 1 - WEB-DL", text)
+        self.assertIn("Сезон 1 - уверенно: WEB-DL", text)
         self.assertIn("Сезон 2 - не найдено", text)
         labels = [
             b.text
@@ -930,7 +951,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(state, bot.SEARCH_RESULTS)
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("Будет создано задач: 1", text)
-        self.assertIn("Сезон 1 - WEB-DL", text)
+        self.assertIn("Сезон 1 - уверенно: WEB-DL", text)
         self.assertNotIn("Сезон 2 -", text)
         kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
         labels = [b.text for row in kb.inline_keyboard for b in row]
@@ -1444,7 +1465,8 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Сезон 1 - нужен выбор", text)
+        self.assertIn("Сезон 1 - нужно проверить", text)
+        self.assertIn("несколько вариантов слишком близки", text)
         self.assertIn("LostFilm", text)
         self.assertIn("NewStudio", text)
         labels = [

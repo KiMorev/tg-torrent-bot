@@ -12789,6 +12789,90 @@ def _series_bulk_profile_line(profile: SeriesBulkProfile | None) -> str:
     return " · ".join(parts)
 
 
+def _series_bulk_reason_for_user(reason: str) -> str:
+    reason = str(reason or "").strip()
+    if not reason:
+        return ""
+    if reason.startswith("quality matches "):
+        return f"качество совпало: {reason.removeprefix('quality matches ')}"
+    if reason.startswith("voice matched: "):
+        return f"озвучка совпала: {reason.removeprefix('voice matched: ')}"
+    if reason.startswith("voice from reference matched: "):
+        return f"озвучка из эталона совпала: {reason.removeprefix('voice from reference matched: ')}"
+    if reason.startswith("release type matches "):
+        return f"тип релиза совпал: {reason.removeprefix('release type matches ')}"
+    if reason.startswith("release type differs: "):
+        return "тип релиза отличается"
+    mapping = {
+        "season matches": "сезон совпал",
+        "original audio found": "Original-дорожка найдена",
+        "original-only policy matched": "Original-дорожка найдена",
+        "subtitles found": "субтитры найдены",
+        "release group matches": "релиз-группа совпала",
+        "release group differs": "релиз-группа отличается",
+        "russian audio looks present": "русская дорожка найдена",
+        "voice preference is not constrained": "озвучка не ограничена",
+        "no selected voice to require": "озвучка не выбрана",
+        "no seeders reported": "сидов не видно",
+        "season is partial": "сезон неполный",
+        "quality does not match search preference": "качество не совпало с профилем",
+        "original audio not found": "не найдена Original-дорожка",
+        "subtitles not found": "не найдены субтитры",
+        "selected voice not found": "не найдена выбранная озвучка",
+        "russian audio not found": "не найдена русская дорожка",
+        "no voice from reference found": "не найдена озвучка из эталона",
+        "no candidate passed all hard filters": "нет варианта, который прошёл все требования",
+        "multiple candidates are too close to auto-select": "несколько вариантов слишком близки",
+        "soft search candidates": "варианты найдены мягким поиском",
+        "season is not complete yet": "сезон ещё не полный",
+    }
+    return mapping.get(reason, reason)
+
+
+def _series_bulk_first_reason_for_user(reasons: tuple[str, ...] | list[str] | None) -> str:
+    for reason in reasons or ():
+        text = _series_bulk_reason_for_user(reason)
+        if text:
+            return text
+    return ""
+
+
+def _series_bulk_candidate_confidence_label(candidate) -> str:
+    confidence = getattr(candidate, "confidence", "")
+    if confidence == STATUS_EXACT:
+        return "✅ Уверенно"
+    if confidence == STATUS_GOOD:
+        return "🟡 Похоже"
+    if confidence == STATUS_PARTIAL:
+        return "⏳ Неполный сезон"
+    return "⚠️ Нужно проверить"
+
+
+def _series_bulk_candidate_explanation(candidate) -> str:
+    if candidate is None:
+        return ""
+    if getattr(candidate, "episode_progress", None):
+        cur, total = candidate.episode_progress
+        if cur < total:
+            return f"доступно {cur}/{total} серий"
+    if getattr(candidate, "hard_failures", None):
+        return _series_bulk_first_reason_for_user(candidate.hard_failures)
+    if getattr(candidate, "warnings", None):
+        return _series_bulk_first_reason_for_user(candidate.warnings)
+    if getattr(candidate, "confidence", "") == STATUS_EXACT:
+        return "совпали ключевые параметры"
+    return _series_bulk_first_reason_for_user(getattr(candidate, "reasons", ()))
+
+
+def _series_bulk_plan_reason(season_plan: SeasonPlan) -> str:
+    reason = _series_bulk_first_reason_for_user(getattr(season_plan, "reasons", ()))
+    if reason:
+        return reason
+    if season_plan.candidates:
+        return _series_bulk_candidate_explanation(season_plan.candidates[0])
+    return ""
+
+
 def _series_bulk_status_line(
     season_plan: SeasonPlan,
     failed_error: str | None = None,
@@ -12807,17 +12891,23 @@ def _series_bulk_status_line(
         return f"✅ Сезон {season} - уже есть в Plex"
     if season_plan.status == STATUS_ALREADY_DOWNLOADING:
         return f"⏬ Сезон {season} - уже качается"
-    if season_plan.status in {STATUS_EXACT, STATUS_GOOD} and season_plan.selected:
-        return f"✅ Сезон {season} - {_series_bulk_candidate_label(season_plan.selected)}"
+    if season_plan.status == STATUS_EXACT and season_plan.selected:
+        return f"✅ Сезон {season} - уверенно: {_series_bulk_candidate_label(season_plan.selected)}"
+    if season_plan.status == STATUS_GOOD and season_plan.selected:
+        hint = _series_bulk_candidate_explanation(season_plan.selected)
+        suffix = f" ({hint})" if hint else ""
+        return f"🟡 Сезон {season} - похоже: {_series_bulk_candidate_label(season_plan.selected)}{suffix}"
     if season_plan.status == STATUS_NEEDS_DECISION:
         count = len(season_plan.candidates)
-        return f"⚠️ Сезон {season} - найдено кандидатов: {count}, нужен выбор"
+        reason = _series_bulk_plan_reason(season_plan)
+        suffix = f" ({reason})" if reason else ""
+        return f"⚠️ Сезон {season} - нужно проверить: кандидатов {count}{suffix}"
     if season_plan.status == STATUS_PARTIAL:
         candidate = season_plan.candidates[0] if season_plan.candidates else None
         if candidate and candidate.episode_progress:
             cur, total = candidate.episode_progress
-            return f"⏳ Сезон {season} - доступно {cur}/{total} серий"
-        return f"⏳ Сезон {season} - найден неполный сезон"
+            return f"⏳ Сезон {season} - неполный сезон: доступно {cur}/{total} серий"
+        return f"⏳ Сезон {season} - неполный сезон, нужно решить"
     if season_plan.status == STATUS_MISSING:
         return f"❌ Сезон {season} - не найдено"
     return f"• Сезон {season} - {season_plan.status}"
@@ -12970,11 +13060,7 @@ def _series_bulk_confirm_text(
             "Проверьте место на NAS и список сезонов перед подтверждением.",
         ])
     lines.append("")
-    lines.extend(
-        f"✅ Сезон {season.season} - {_series_bulk_candidate_label(season.selected)}"
-        for season in ready
-        if season.selected is not None
-    )
+    lines.extend(_series_bulk_status_line(season) for season in ready)
     lines.extend([
         "",
         "Скачаю только эти сезоны. Спорные, неполные, уже имеющиеся в Plex и уже качающиеся пропущу.",
@@ -13173,7 +13259,7 @@ def _series_bulk_review_text(
         if candidate:
             lines.extend([
                 "",
-                f"Текущий вариант: {_series_bulk_candidate_label(candidate)}",
+                f"Текущий вариант: {_series_bulk_candidate_confidence_label(candidate)}: {_series_bulk_candidate_label(candidate)}",
                 _short_title(candidate.result, limit=110),
             ])
         failed_key = _series_bulk_result_key(candidate.result) if candidate is not None else None
@@ -13186,7 +13272,7 @@ def _series_bulk_review_text(
             lines.extend(["", "Другие варианты:"])
             for index, candidate in alternatives:
                 lines.extend([
-                    f"{index}. {_series_bulk_candidate_label(candidate)}",
+                    f"{index}. {_series_bulk_candidate_confidence_label(candidate)}: {_series_bulk_candidate_label(candidate)}",
                     _short_title(candidate.result, limit=110),
                 ])
     elif season_plan.status == STATUS_PARTIAL:
@@ -13202,7 +13288,7 @@ def _series_bulk_review_text(
         if candidate:
             lines.extend([
                 "",
-                f"Кандидат: {_series_bulk_candidate_label(candidate)}",
+                f"Кандидат: {_series_bulk_candidate_confidence_label(candidate)}: {_series_bulk_candidate_label(candidate)}",
                 _short_title(candidate.result, limit=110),
             ])
     elif season_plan.status == STATUS_MISSING:
@@ -13213,7 +13299,11 @@ def _series_bulk_review_text(
             "Можно попробовать мягкий поиск: без жёстких требований к качеству, Original, субтитрам и озвучке.",
         ])
     else:
-        lines.append(f"⚠️ Сезон {season} - нужен выбор")
+        reason = _series_bulk_plan_reason(season_plan)
+        title = f"⚠️ Сезон {season} - нужно проверить"
+        if reason:
+            title += f": {reason}"
+        lines.append(title)
         lines.extend([
             "",
             "Нашёл несколько близких вариантов и не выбираю автоматически.",
@@ -13227,14 +13317,18 @@ def _series_bulk_review_text(
         lines.append("")
         for index, candidate in enumerate(season_plan.candidates[:3], start=1):
             result = candidate.result
-            details = [
-                f"сиды: {result.get('seeders')}",
-                f"размер: {result.get('size')}",
-            ]
+            details = []
+            explanation = _series_bulk_candidate_explanation(candidate)
+            if explanation:
+                details.append(f"причина: {explanation}")
+            if result.get("seeders") is not None:
+                details.append(f"сиды: {result.get('seeders')}")
+            if result.get("size"):
+                details.append(f"размер: {result.get('size')}")
             lines.extend([
-                f"{index}. {_series_bulk_candidate_label(candidate)}",
+                f"{index}. {_series_bulk_candidate_confidence_label(candidate)}: {_series_bulk_candidate_label(candidate)}",
                 _short_title(result, limit=110),
-                " · ".join(part for part in details if not part.endswith(": None")),
+                " · ".join(details),
             ])
 
     return "\n".join(line for line in lines if line is not None)
