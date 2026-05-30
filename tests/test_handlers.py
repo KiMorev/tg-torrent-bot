@@ -5445,7 +5445,7 @@ class SearchSettingsCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SearchVoicePreferenceTests(unittest.TestCase):
-    def test_explicit_voice_filters_when_found(self):
+    def test_explicit_voice_boosts_when_found_without_hiding_alternatives(self):
         context = _make_context(user_data={
             "srch_voice_hints": ["LostFilm"],
             "srch_voice_source": "explicit",
@@ -5457,9 +5457,9 @@ class SearchVoicePreferenceTests(unittest.TestCase):
 
         filtered, banner = bot._apply_voice_preferences(results, context)
 
-        self.assertEqual(len(filtered), 1)
+        self.assertEqual(len(filtered), 2)
         self.assertIn("LostFilm", filtered[0]["title"])
-        self.assertIn("Показаны варианты с LostFilm", banner)
+        self.assertIn("Сначала варианты с LostFilm", banner)
 
     def test_default_voice_only_boosts_and_keeps_alternatives(self):
         context = _make_context(user_data={
@@ -5488,6 +5488,18 @@ class SearchVoicePreferenceTests(unittest.TestCase):
 
         self.assertEqual(filtered, results)
         self.assertIn("не нашёл", banner)
+
+    def test_default_voice_without_matches_keeps_alternatives_with_banner(self):
+        context = _make_context(user_data={
+            "srch_voice_hints": ["LostFilm"],
+            "srch_voice_source": "default",
+        })
+        results = [{"title": "Клиника / Scrubs / Сезон: 1 / NewStudio", "size": "1 GB"}]
+
+        filtered, banner = bot._apply_voice_preferences(results, context)
+
+        self.assertEqual(filtered, results)
+        self.assertIn("Предпочитаемый перевод LostFilm не нашёл", banner)
 
 
 class SearchPlexHintTests(unittest.IsolatedAsyncioTestCase):

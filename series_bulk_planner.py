@@ -94,6 +94,7 @@ class SeriesBulkProfile:
     require_subs: bool = False
     voice_policy: str = VOICE_ANY_FROM_REFERENCE
     voices: tuple[str, ...] = ()
+    preferred_voices: tuple[str, ...] = ()
     release_type: str = ""
     release_group: str = ""
     tracker: str = ""
@@ -324,6 +325,7 @@ def _profile_copy(profile: SeriesBulkProfile, **updates) -> SeriesBulkProfile:
         "require_subs": profile.require_subs,
         "voice_policy": profile.voice_policy,
         "voices": profile.voices,
+        "preferred_voices": profile.preferred_voices,
         "release_type": profile.release_type,
         "release_group": profile.release_group,
         "tracker": profile.tracker,
@@ -469,7 +471,15 @@ def _candidate_confidence(
 def _voice_policy_score(release: ReleaseProfile, profile: SeriesBulkProfile) -> tuple[float, str, str]:
     policy = profile.voice_policy or VOICE_ANY_FROM_REFERENCE
     wanted = tuple(v for v in profile.voices if v)
+    preferred = tuple(v for v in profile.preferred_voices if v)
     overlap = _voice_overlap(release.voices, wanted)
+    preferred_overlap = _voice_overlap(release.voices, preferred)
+
+    preferred_score = 0.0
+    preferred_reason = ""
+    if preferred_overlap:
+        preferred_score = 80.0 + 10.0 * len(preferred_overlap)
+        preferred_reason = f"preferred voice matched: {', '.join(preferred_overlap)}"
 
     if policy == VOICE_ORIGINAL_ONLY:
         if release.has_original:
@@ -485,14 +495,22 @@ def _voice_policy_score(release: ReleaseProfile, profile: SeriesBulkProfile) -> 
 
     if policy == VOICE_ANY_RUSSIAN:
         if release.voices or release.has_russian_audio:
-            return 120.0, "russian audio looks present", ""
+            reason = "russian audio looks present"
+            if preferred_reason:
+                reason = f"{reason}; {preferred_reason}"
+            return 120.0 + preferred_score, reason, ""
         return 0.0, "", "russian audio not found"
 
     if wanted:
         if overlap:
-            return 160.0 + 20.0 * len(overlap), f"voice from reference matched: {', '.join(overlap)}", ""
+            reason = f"voice from reference matched: {', '.join(overlap)}"
+            if preferred_reason:
+                reason = f"{reason}; {preferred_reason}"
+            return 160.0 + 20.0 * len(overlap) + preferred_score, reason, ""
         return 0.0, "", "no voice from reference found"
 
+    if preferred_reason:
+        return preferred_score, preferred_reason, ""
     return 0.0, "voice preference is not constrained", ""
 
 

@@ -294,8 +294,9 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         profile = ctx.user_data["srch_series_bulk_profile_draft"]
-        self.assertEqual(profile.voice_policy, bot.VOICE_REQUIRE_SELECTED)
-        self.assertEqual(profile.voices, ("LostFilm",))
+        self.assertEqual(profile.voice_policy, bot.VOICE_ANY_FROM_REFERENCE)
+        self.assertEqual(profile.voices, ("LostFilm", "NewStudio"))
+        self.assertEqual(profile.preferred_voices, ("LostFilm",))
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("LostFilm", text)
 
@@ -321,6 +322,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         profile = ctx.user_data["srch_series_bulk_profile_draft"]
         self.assertEqual(profile.voice_policy, bot.VOICE_ANY_FROM_REFERENCE)
         self.assertEqual(profile.voices, ("LostFilm", "NewStudio"))
+        self.assertEqual(profile.preferred_voices, ())
 
     def test_bulk_profile_voice_accordion_updates_draft(self):
         query = _make_query("srch:bulk_plan:0")

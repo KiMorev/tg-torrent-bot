@@ -127,6 +127,32 @@ class SeriesBulkPlannerTests(unittest.TestCase):
         self.assertIsNone(season.selected)
         self.assertIn("selected voice not found", season.candidates[0].hard_failures)
 
+    def test_preferred_voice_boosts_but_does_not_block_other_reference_voice(self) -> None:
+        plan = build_series_bulk_plan(
+            series_title="Clinic",
+            seasons=[5, 6],
+            profile=_base_profile(
+                voices=("LostFilm", "NewStudio"),
+                preferred_voices=("LostFilm",),
+                require_original=False,
+            ),
+            results=[
+                _result("Clinic / Scrubs / S05 / WEB-DL 1080p / NewStudio"),
+                _result("Clinic / Scrubs / S06 / WEB-DL 1080p / NewStudio", seeders=500),
+                _result("Clinic / Scrubs / S06 / WEB-DL 1080p / LostFilm", seeders=1),
+            ],
+        )
+
+        season5 = plan.seasons[0]
+        season6 = plan.seasons[1]
+        self.assertEqual(season5.status, STATUS_EXACT)
+        self.assertIsNotNone(season5.selected)
+        self.assertIn("NewStudio", season5.selected.result["title"])
+        self.assertEqual(season6.status, STATUS_EXACT)
+        self.assertIsNotNone(season6.selected)
+        self.assertIn("LostFilm", season6.selected.result["title"])
+        self.assertTrue(any("preferred voice matched: LostFilm" in reason for reason in season6.selected.reasons))
+
     def test_original_and_subs_from_search_are_hard_filters(self) -> None:
         plan = build_series_bulk_plan(
             series_title="Клиника",

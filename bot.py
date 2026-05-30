@@ -7473,9 +7473,6 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         else:
             other_stats = _format_quality_stats(buckets)
             quality_banner = f"⚠️ В {preferred_quality} ничего не найдено. Показаны все качества: {other_stats}."
-    results_data, voice_banner = _apply_voice_preferences(results_data, context)
-    if voice_banner:
-        filter_banner_parts.append(voice_banner)
     series_master_banner = ""
     if series_master:
         before = len(results_data)
@@ -7490,6 +7487,9 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             "Выберите раздачу, по которой я пойму качество, тип релиза и возможные озвучки. "
             "Скачивание начнётся только после плана и подтверждения."
         )
+    results_data, voice_banner = _apply_voice_preferences(results_data, context)
+    if voice_banner:
+        filter_banner_parts.append(voice_banner)
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
@@ -7869,11 +7869,13 @@ def _apply_voice_preferences(results: list[dict], context: ContextTypes.DEFAULT_
     label = " / ".join(voices)
     source = context.user_data.get("srch_voice_source")
     if matched and source == "explicit":
-        return matched, f"🎙 Показаны варианты с {label}."
+        return matched + other, f"🎙 Сначала варианты с {label}; другие озвучки оставил ниже."
     if matched:
         return matched + other, ""
     if source == "explicit":
         return results, f"🎙 {label} не нашёл, показываю другие озвучки."
+    if source == "default":
+        return results, f"🎙 Предпочитаемый перевод {label} не нашёл, показываю другие озвучки."
     return results, ""
 
 
@@ -8764,10 +8766,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 preferred_quality, len(results_data), base_query,
             )
 
-    results_data, voice_banner = _apply_voice_preferences(results_data, context)
-    if voice_banner:
-        filter_banner_parts.append(voice_banner)
-
     series_master_banner = ""
     if series_master:
         before = len(results_data)
@@ -8793,6 +8791,10 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             "Выберите раздачу, по которой я пойму качество, тип релиза и возможные озвучки. "
             "Скачивание начнётся только после плана и подтверждения."
         )
+
+    results_data, voice_banner = _apply_voice_preferences(results_data, context)
+    if voice_banner:
+        filter_banner_parts.append(voice_banner)
 
     # --- Cluster picker (Proposal #1): when the same query returns ≥2
     # distinct (title, year) films with ≥2 releases each, show a picker
@@ -11813,6 +11815,7 @@ def _series_bulk_profile_snapshot(profile: SeriesBulkProfile | None) -> dict:
         "require_subs": profile.require_subs,
         "voice_policy": profile.voice_policy,
         "voices": list(profile.voices),
+        "preferred_voices": list(profile.preferred_voices),
         "release_type": profile.release_type,
         "release_group": profile.release_group,
         "tracker": profile.tracker,
@@ -12465,18 +12468,26 @@ def _series_bulk_merge_results(*groups: list[dict]) -> list[dict]:
 def _series_bulk_profile_from_snapshot(snapshot: dict | None) -> SeriesBulkProfile:
     data = snapshot if isinstance(snapshot, dict) else {}
     voices_raw = data.get("voices") or ()
+    preferred_raw = data.get("preferred_voices") or ()
     if isinstance(voices_raw, str):
         voices = (voices_raw,)
     elif isinstance(voices_raw, (list, tuple, set)):
         voices = tuple(str(value) for value in voices_raw if value)
     else:
         voices = ()
+    if isinstance(preferred_raw, str):
+        preferred_voices = (preferred_raw,)
+    elif isinstance(preferred_raw, (list, tuple, set)):
+        preferred_voices = tuple(str(value) for value in preferred_raw if value)
+    else:
+        preferred_voices = ()
     return SeriesBulkProfile(
         quality=str(data.get("quality") or "any"),
         require_original=bool(data.get("require_original")),
         require_subs=bool(data.get("require_subs")),
         voice_policy=str(data.get("voice_policy") or VOICE_ANY_FROM_REFERENCE),
         voices=voices,
+        preferred_voices=preferred_voices,
         release_type=str(data.get("release_type") or ""),
         release_group=str(data.get("release_group") or ""),
         tracker=str(data.get("tracker") or ""),
@@ -12983,7 +12994,6 @@ def _series_bulk_profile_from_result(
         for voice in _normalise_preferred_voices(context.user_data.get("srch_voice_hints"))
         if voice in release.voices
     )
-    voice_policy = VOICE_REQUIRE_SELECTED if preferred_voices else VOICE_ANY_FROM_REFERENCE
     search_query = str(
         context.user_data.get("srch_search_query")
         or context.user_data.get("srch_query")
@@ -13005,8 +13015,9 @@ def _series_bulk_profile_from_result(
         quality=quality,
         require_original=audio_required,
         require_subs=subs_required,
-        voice_policy=voice_policy,
-        voices=preferred_voices or release.voices,
+        voice_policy=VOICE_ANY_FROM_REFERENCE,
+        voices=release.voices,
+        preferred_voices=preferred_voices,
         release_type=release.release_type,
         release_group=release.release_group,
         tracker=str(result.get("tracker_name") or result.get("category") or ""),
@@ -13024,6 +13035,7 @@ def _series_bulk_profile_copy(
         "require_subs": profile.require_subs,
         "voice_policy": profile.voice_policy,
         "voices": profile.voices,
+        "preferred_voices": profile.preferred_voices,
         "release_type": profile.release_type,
         "release_group": profile.release_group,
         "tracker": profile.tracker,
@@ -13042,6 +13054,7 @@ def _series_bulk_soft_profile(profile: SeriesBulkProfile | None) -> SeriesBulkPr
         require_subs=False,
         voice_policy=VOICE_ANY_FROM_REFERENCE,
         voices=(),
+        preferred_voices=(),
         release_type="",
         release_group="",
     )
@@ -13049,6 +13062,7 @@ def _series_bulk_soft_profile(profile: SeriesBulkProfile | None) -> SeriesBulkPr
 
 def _series_bulk_profile_voice_label(profile: SeriesBulkProfile) -> str:
     voices = " / ".join(profile.voices[:3])
+    preferred = " / ".join(profile.preferred_voices[:2])
     if profile.voice_policy == VOICE_SINGLE_FROM_REFERENCE:
         return "одна на все сезоны"
     if profile.voice_policy == VOICE_ANY_RUSSIAN:
@@ -13057,6 +13071,9 @@ def _series_bulk_profile_voice_label(profile: SeriesBulkProfile) -> str:
         return f"выбрано: {voices}" if voices else "выбранные студии"
     if profile.voice_policy == VOICE_ORIGINAL_ONLY:
         return "только Original"
+    if preferred:
+        base = f"любая из эталона — {voices}" if voices else "любая из эталона"
+        return f"{base}; предпочитаю {preferred}"
     return f"любая из эталона — {voices}" if voices else "любая из эталона"
 
 
@@ -13636,6 +13653,7 @@ def _series_bulk_plan_text(
     failed = failed or {}
     quality = profile.quality if profile.quality and profile.quality != "any" else "любое"
     voices = " / ".join(profile.voices) if profile.voices else "не ограничиваю"
+    preferred_voices = " / ".join(profile.preferred_voices)
     lines = [
         f"📚 Скачать недостающие сезоны: {plan.series_title}",
         "",
@@ -13647,6 +13665,8 @@ def _series_bulk_plan_text(
         f"• Субтитры: {'нужны' if profile.require_subs else 'не требовались'}",
         f"• Озвучка: {voices}",
     ]
+    if preferred_voices and profile.voice_policy in {VOICE_ANY_FROM_REFERENCE, VOICE_ANY_RUSSIAN}:
+        lines.append(f"• Предпочитаю перевод: {preferred_voices}")
     if profile.release_type:
         lines.append(f"• Тип релиза: {profile.release_type}")
     if not plan.verified_season_range:
