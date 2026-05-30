@@ -117,7 +117,7 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("Задач сейчас нет", all_text)
         self.assertIn("задачи из Download Station", all_text)
 
-    def test_format_task_card_includes_core_fields(self) -> None:
+    def test_format_task_card_for_user_hides_technical_fields(self) -> None:
         text = format_task_card(
             {
                 "id": "tid1",
@@ -128,11 +128,52 @@ class TaskViewTests(unittest.TestCase):
             }
         )
 
+        self.assertIn("Загрузка", text)
+        self.assertIn("Файл: Movie", text)
+        self.assertNotIn("Задача Download Station", text)
+        self.assertNotIn("ID: tid1", text)
+        self.assertIn("Статус: ✅ завершено", text)
+        self.assertIn("Скачано: 100.0 B из 100.0 B (100.0%)", text)
+
+    def test_format_task_card_for_admin_includes_technical_fields(self) -> None:
+        text = format_task_card(
+            {
+                "id": "tid1",
+                "title": "Movie",
+                "status": "finished",
+                "size": 100,
+                "additional": {"transfer": {"size_downloaded": 100, "speed_download": 0}},
+            },
+            is_admin=True,
+        )
+
         self.assertIn("Задача Download Station", text)
         self.assertIn("Имя: Movie", text)
         self.assertIn("ID: tid1", text)
-        self.assertIn("Статус: ✅ завершено", text)
-        self.assertIn("Скачано: 100.0 B из 100.0 B (100.0%)", text)
+
+    def test_format_tasks_my_scope_hides_task_id(self) -> None:
+        text = format_tasks(
+            [{"id": "tid1", "title": "Movie", "status": "downloading", "size": 100}],
+            scope="my",
+            updated_at="12:00:00",
+            owners={"tid1": 100},
+            scope_all="all",
+        )
+
+        self.assertIn("Мои загрузки", text)
+        self.assertNotIn("ID: tid1", text)
+
+    def test_format_tasks_all_scope_includes_task_id(self) -> None:
+        text = format_tasks(
+            [{"id": "tid1", "title": "Movie", "status": "downloading", "size": 100}],
+            scope="all",
+            updated_at="12:00:00",
+            owners={"tid1": 100},
+            scope_all="all",
+        )
+
+        self.assertIn("Все задачи Download Station", text)
+        self.assertIn("ID: tid1", text)
 
     def test_complete_error_is_shown_as_downloaded_in_list_and_card(self) -> None:
         task = {
@@ -152,12 +193,14 @@ class TaskViewTests(unittest.TestCase):
             scope_all="all",
         )
         card_text = format_task_card(task)
+        admin_card_text = format_task_card(task, is_admin=True)
 
         self.assertIn("1. ✅ Movie", list_text)
         self.assertIn("Статус: скачано полностью", list_text)
         self.assertNotIn("Статус: ошибка", list_text)
         self.assertIn("Статус: ✅ скачано полностью", card_text)
-        self.assertIn("Download Station показывает ошибку, но файл скачан полностью.", card_text)
+        self.assertIn("Сервис загрузок показывает ошибку, но файл скачан полностью.", card_text)
+        self.assertIn("Download Station показывает ошибку, но файл скачан полностью.", admin_card_text)
 
     def test_has_active_tasks_checks_transfer_statuses(self) -> None:
         self.assertTrue(has_active_tasks([{"status": "waiting"}]))

@@ -210,6 +210,175 @@ class DidYouMeanTests(unittest.TestCase):
         self.assertEqual(err, "network")
 
 
+class SearchFailureAdviceTests(unittest.TestCase):
+    def _fake_chat_response(self, payload: dict):
+        import json as _json
+        return ({
+            "text": _json.dumps(payload),
+            "input_tokens": 120, "output_tokens": 30, "model": "gpt-4o-mini",
+        }, None)
+
+    def test_returns_sanitized_advice(self):
+        payload = {
+            "reason": "tracker_scope",
+            "message": "Похоже, сейчас смотрим не все трекеры.",
+            "suggested_action": "expand_trackers",
+            "suggested_queries": ["Дюна", "Dune"],
+        }
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response(payload),
+        ):
+            advice, err = gpt_features.diagnose_search_failure(
+                query="Дюра",
+                base_query="Дюра",
+                can_expand_trackers=True,
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(advice["reason"], "tracker_scope")
+        self.assertEqual(advice["suggested_action"], "expand_trackers")
+        self.assertEqual(advice["suggested_queries"], ["Дюна", "Dune"])
+
+    def test_rejects_unavailable_action(self):
+        payload = {
+            "reason": "tracker_scope",
+            "message": "Нужен более широкий поиск.",
+            "suggested_action": "expand_trackers",
+            "suggested_queries": [],
+        }
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response(payload),
+        ):
+            advice, err = gpt_features.diagnose_search_failure(
+                query="Дюна",
+                can_expand_trackers=False,
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(advice["suggested_action"], "manual_search")
+
+    def test_filters_duplicate_suggested_queries(self):
+        payload = {
+            "reason": "title_variant",
+            "message": "Попробуйте другое написание.",
+            "suggested_action": "try_original_title",
+            "suggested_queries": ["Дюра", "Дюна", "Dune", "Дюна"],
+        }
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response(payload),
+        ):
+            advice, _err = gpt_features.diagnose_search_failure(
+                query="Дюра",
+                suggestions=["Dune"],
+                api_key="sk-test",
+            )
+        self.assertEqual(advice["suggested_queries"], ["Дюна"])
+
+
+class SeriesBulkCandidateAdviceTests(unittest.TestCase):
+    def _fake_chat_response(self, payload: dict):
+        import json as _json
+        return ({
+            "text": _json.dumps(payload),
+            "input_tokens": 180, "output_tokens": 40, "model": "gpt-4o-mini",
+        }, None)
+
+    def test_returns_indexed_hints(self):
+        payload = {
+            "notes": [
+                {"index": 1, "hint": "Совпали качество и Original, но озвучку стоит проверить."},
+                {"index": 2, "hint": "Много сидов, но есть риск по субтитрам."},
+            ]
+        }
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response(payload),
+        ):
+            hints, err = gpt_features.explain_series_bulk_candidates(
+                series_title="Клиника",
+                season=2,
+                profile={"quality": "1080p"},
+                candidates=[{"title": "S02 1080p"}, {"title": "S02 WEB-DL"}],
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(hints[0], "Совпали качество и Original, но озвучку стоит проверить.")
+        self.assertEqual(hints[1], "Много сидов, но есть риск по субтитрам.")
+
+    def test_ignores_out_of_range_notes(self):
+        payload = {
+            "notes": [
+                {"index": 9, "hint": "не тот индекс"},
+                {"index": 1, "hint": "Нормальный кандидат."},
+            ]
+        }
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response(payload),
+        ):
+            hints, err = gpt_features.explain_series_bulk_candidates(
+                series_title="Клиника",
+                season=2,
+                profile={},
+                candidates=[{"title": "S02"}],
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(hints, {0: "Нормальный кандидат."})
+
+
+class MovieNotificationReleaseChoiceTests(unittest.TestCase):
+    def _fake_chat_response(self, payload: dict):
+        import json as _json
+        return ({
+            "text": _json.dumps(payload),
+            "input_tokens": 150, "output_tokens": 25, "model": "gpt-4o-mini",
+        }, None)
+
+    def test_accepts_confident_pick(self):
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response({
+                "pick": 2,
+                "confidence": 0.86,
+                "reason": "ближе к предпочтениям качества",
+            }),
+        ):
+            index, reason, err = gpt_features.choose_movie_notification_release(
+                title="Дюна",
+                year=2024,
+                defaults={"quality": "4K"},
+                candidates=[{"title": "1080p"}, {"title": "2160p"}],
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(index, 1)
+        self.assertIn("качества", reason)
+
+    def test_rejects_low_confidence_pick(self):
+        with patch.object(
+            gpt_features, "chat_completion",
+            return_value=self._fake_chat_response({
+                "pick": 2,
+                "confidence": 0.4,
+                "reason": "не уверен",
+            }),
+        ):
+            index, reason, err = gpt_features.choose_movie_notification_release(
+                title="Дюна",
+                year=2024,
+                defaults={},
+                candidates=[{"title": "A"}, {"title": "B"}],
+                api_key="sk-test",
+            )
+        self.assertIsNone(err)
+        self.assertIsNone(index)
+        self.assertEqual(reason, "не уверен")
+
+
 class ParseTorrentTitleTests(unittest.TestCase):
     """PR3: structured-metadata extraction from raw torrent titles."""
 

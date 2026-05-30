@@ -299,6 +299,52 @@ class HelpCommandTests(unittest.TestCase):
         # Subscription bullets appear when search sources are configured.
         self.assertIn("Подписаться на новые серии", text)
 
+    def test_help_mentions_current_settings_subs_and_new_push_flow(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
+            patch.object(bot, "PLEX_ENABLED", True),
+        ):
+            asyncio.run(help_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("/settings", text)
+        self.assertIn("качество, Original, субтитры и озвучка", text)
+        self.assertIn("/subs", text)
+        self.assertIn("правила уведомлений/скачивания", text)
+        self.assertIn("1-3 новинки", text)
+        self.assertIn("постером", text)
+        self.assertIn("ссылкой на КП", text)
+        self.assertIn("быстрыми кнопками скачивания", text)
+
+    def test_help_for_regular_user_uses_download_queue_wording(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "RUTRACKER_ENABLED", True),
+            patch.object(bot, "JACKETT_ENABLED", True),
+            patch.object(bot, "KINOPOISK_ENABLED", False),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", False),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(help_command(update, context))
+
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn("очередь загрузок", text)
+        self.assertNotIn("Download Station", text)
+
     def test_help_mentions_voice_search_when_enabled(self):
         """Voice-search line surfaces only when OPENAI_API_KEY is configured."""
         update = _make_message_update(chat_id=100)
@@ -1737,6 +1783,50 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertGreater(pos_old, 0)
         self.assertLess(pos_fresh, pos_old, "recomputed score must place fresh-year card first")
 
+    def test_movie_new_open_recomputes_score_on_cache_hit(self):
+        """The notification 'open /new' callback must render the same sorted view as /new."""
+        update = _make_callback_update(chat_id=100, callback_data="new:open")
+        context = _make_context()
+        from datetime import datetime as _dt
+        current_year = _dt.now(bot.DISPLAY_TIMEZONE).year
+        fake_cache = {
+            "updated_at": "2026-05-14 22:00",
+            "cards": [
+                {
+                    "title": "Old From Push",
+                    "year": 2020,
+                    "score": 0.99,
+                    "rating": 7.5,
+                    "best_seeders": 50,
+                    "best_quality": "1080p",
+                    "releases": [{"title": "x", "score": 1}],
+                },
+                {
+                    "title": "Fresh From Push",
+                    "year": current_year,
+                    "score": 0.10,
+                    "rating": 7.5,
+                    "best_seeders": 50,
+                    "best_quality": "1080p",
+                    "releases": [{"title": "x", "score": 1}],
+                },
+            ],
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=fake_cache),
+        ):
+            asyncio.run(bot.movie_new_open_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        pos_fresh = text.find("Fresh From Push")
+        pos_old = text.find("Old From Push")
+        self.assertGreater(pos_fresh, 0)
+        self.assertGreater(pos_old, 0)
+        self.assertLess(pos_fresh, pos_old)
+
     def test_recompute_and_resort_resorts_in_place(self):
         """_recompute_and_resort_cards: cards with stale wrong-order scores get re-sorted."""
         from datetime import datetime as _dt
@@ -2518,6 +2608,62 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             st.load_movie_discovery_settings.return_value = settings
             self.assertTrue(_is_card_notified(card, 100))
             self.assertFalse(_is_card_shown_in_new(card, 100))
+
+    async def test_notification_push_is_limited_to_three_cards(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [self._make_card(f"Movie {i}", kp_id=i) for i in range(1, 6)]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        text = app.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("Movie 1", text)
+        self.assertIn("Movie 3", text)
+        self.assertNotIn("Movie 4", text)
+        seen = settings.get("movie_seen_by_user", {}).get("100", {})
+        self.assertIn("kp:1", seen)
+        self.assertIn("kp:3", seen)
+        self.assertNotIn("kp:4", seen)
+
+    async def test_notification_push_saves_snapshot_for_download_buttons(self):
+        settings = {"movie_seen_by_user": {}}
+        self._patch_settings(settings)
+        app = AsyncMock()
+        card = self._make_card("Snapshot Movie", kp_id=77)
+        card["releases"] = [{
+            "source": "jackett",
+            "tracker": "rutracker",
+            "title": "Snapshot Movie 1080p Original",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=123",
+            "torrent_url": "https://jackett.local/dl/123",
+            "size": "2.5 GB",
+            "seeders": 10,
+        }]
+
+        with (
+            patch.object(bot, "_enrich_cards_with_plex"),
+            patch.object(bot, "_search_defaults_for_chat", return_value={
+                "quality": "1080p",
+                "audio": False,
+                "subs": False,
+                "preferred_voices": [],
+            }),
+        ):
+            sent = await bot._send_movie_notification_push_to_user([card], 100, app)
+
+        self.assertTrue(sent)
+        snapshots = settings.get("movie_notification_snapshots", {})
+        self.assertEqual(len(snapshots), 1)
+        snapshot = next(iter(snapshots.values()))
+        self.assertEqual(snapshot["chat_id"], "100")
+        self.assertEqual(snapshot["items"][0]["result"]["title"], "Snapshot Movie 1080p Original")
+        keyboard = app.bot.send_message.call_args.kwargs["reply_markup"]
+        buttons = {btn.text: btn.callback_data for row in keyboard.inline_keyboard for btn in row}
+        self.assertIn("⬇️ 1", buttons)
 
     async def test_already_shown_in_new_blocks_push(self):
         """If a user opened /new and saw the film, no push is sent (subscriber's
@@ -3407,6 +3553,90 @@ class FormatMovieDiscoveryCachePerUserBadgeTests(unittest.TestCase):
             }
             text = _format_movie_discovery_cache(self._cache(self._card("Seen", kp_id=1)), chat_id=100)
         self.assertNotIn("🆕", text)
+
+
+    def test_badge_gone_after_handled_from_notification(self):
+        from bot import _format_movie_discovery_cache
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = {
+                "movie_seen_by_user": {
+                    "100": {"kp:1": {"notified_at": "ts1", "handled_at": "ts2"}}
+                }
+            }
+            text = _format_movie_discovery_cache(self._cache(self._card("Handled", kp_id=1)), chat_id=100)
+        self.assertNotIn("🆕", text)
+
+
+# ---------------------------------------------------------------------------
+# Movie /new notification callbacks
+# ---------------------------------------------------------------------------
+
+
+class MovieNotificationDownloadCallbackTests(unittest.IsolatedAsyncioTestCase):
+    def _item(self, *, in_plex: bool = False) -> dict:
+        return {
+            "card": {
+                "title": "Snapshot Movie",
+                "year": 2026,
+                "kp_id": 77,
+                "in_plex": in_plex,
+            },
+            "result": {
+                "title": "Snapshot Movie 1080p",
+                "url": "https://rutracker.org/forum/viewtopic.php?t=123",
+                "torrent_url": "https://jackett.local/dl/123",
+                "tracker_name": "rutracker",
+                "source": "jackett",
+                "size": "2.5 GB",
+                "seeders": 10,
+            },
+        }
+
+    async def test_single_download_reuses_snapshot_result(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:dl:abc123def0:0")
+        context = _make_context()
+        item = self._item()
+        download = AsyncMock(return_value=bot.SEARCH_RESULTS)
+
+        with (
+            patch.object(bot, "_is_allowed", return_value=True),
+            patch.object(bot, "_load_movie_notification_snapshot", return_value={"items": [item]}),
+            patch.object(bot, "_download_and_add", download),
+        ):
+            state = await bot.movie_new_notification_download(update, context)
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        self.assertEqual(context.user_data["srch_results"], [item["result"]])
+        self.assertEqual(context.user_data["srch_source"], "movie_discovery_notification")
+        download.assert_awaited_once()
+        self.assertEqual(download.await_args.kwargs["_movie_handled_cards"], [item["card"]])
+
+    async def test_bulk_run_marks_successful_cards_handled(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:bulk_ok:abc123def0")
+        context = _make_context()
+        item = self._item()
+        plex_item = self._item(in_plex=True)
+        plex_item["card"]["kp_id"] = 78
+        settings = {"movie_seen_by_user": {}}
+        attempt = AsyncMock(return_value=("task1", "torrent-file"))
+
+        with (
+            patch.object(bot, "_is_allowed", return_value=True),
+            patch.object(bot, "_load_movie_notification_snapshot", return_value={"items": [item, plex_item]}),
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_attempt_pending_download", attempt),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_record_download_added_history"),
+            patch.object(bot, "_load_movie_discovery_settings", side_effect=lambda: settings),
+            patch.object(bot, "_save_movie_discovery_settings", side_effect=settings.update),
+        ):
+            await bot.movie_new_notification_bulk_run(update, context)
+
+        attempt.assert_awaited_once()
+        seen = settings["movie_seen_by_user"]["100"]
+        self.assertTrue(seen["kp:77"].get("handled_at"))
+        self.assertNotIn("kp:78", seen)
 
 
 # ---------------------------------------------------------------------------
@@ -4820,6 +5050,39 @@ class BuildTaskMetaTests(unittest.TestCase):
         self.assertEqual(meta["year"], 0)
         self.assertEqual(meta["quality"], "")
 
+    def test_from_title_with_gpt_adds_release_metadata(self):
+        parsed = {
+            "quality": "2160p",
+            "source": "WEB-DL",
+            "hdr": "HDR10",
+            "audio": "EAC3 5.1",
+            "langs": ["RUS", "ENG"],
+            "release_group": "NTb",
+            "edition": None,
+        }
+        store = MagicMock()
+        store.load_torrent_titles_cache.return_value = {}
+
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "state_store", store),
+            patch.object(bot, "gpt_features_parse_torrent_title",
+                         return_value=(parsed, None)) as parse,
+            patch.object(bot, "_gpt_record_usage") as usage,
+        ):
+            meta = asyncio.run(bot._build_task_meta_from_title_with_gpt(
+                "Dune.Part.Two.2024.2160p.WEB-DL.HDR10.EAC3.NTb",
+                source="magnet",
+            ))
+
+        self.assertEqual(meta["quality"], "4k")
+        self.assertEqual(meta["release"]["quality"], "2160p")
+        self.assertEqual(meta["release"]["hdr"], "HDR10")
+        self.assertEqual(meta["release"]["audio"], "EAC3 5.1")
+        parse.assert_called_once()
+        usage.assert_called_once()
+        store.save_torrent_titles_cache.assert_called_once()
+
 
 class DownloadHistoryTests(unittest.TestCase):
     def test_added_history_sanitizes_magnet_and_jackett_proxy_urls(self):
@@ -4861,6 +5124,30 @@ class DownloadHistoryTests(unittest.TestCase):
         self.assertNotIn("apikey", str(entry).lower())
         self.assertNotIn("magnet:", str(entry).lower())
         self.assertEqual(entry["release"]["langs"], ["Rus", "Eng"])
+
+    def test_added_history_from_title_keeps_gpt_release_meta(self):
+        store = MagicMock()
+        meta = {
+            "kind": "movie",
+            "title": "Dune",
+            "year": 2024,
+            "quality": "4k",
+            "source": "magnet",
+            "release": {"hdr": "HDR10", "audio": "EAC3 5.1"},
+        }
+
+        with patch.object(bot, "state_store", store):
+            bot._record_download_added_from_title_history(
+                "dbid_2",
+                100,
+                "Dune.2024.2160p",
+                method="magnet-ссылка",
+                meta_source="magnet",
+                meta=meta,
+            )
+
+        entry = store.append_download_history.call_args.args[0]
+        self.assertEqual(entry["release"], {"hdr": "HDR10", "audio": "EAC3 5.1"})
 
 
 class TaskMetaWrapperTests(unittest.TestCase):
@@ -5794,6 +6081,121 @@ class NotificationKeyboardTests(unittest.TestCase):
         # Existing buttons preserved
         self.assertIn("🎬 Открыть /new", labels)
         self.assertIn("🔕 Отписаться", labels)
+
+    def test_movie_notification_keyboard_has_download_actions(self):
+        from bot import _movie_notification_keyboard
+        keyboard = _movie_notification_keyboard("abc123def0", 3, [0, 2])
+        buttons = {btn.text: btn.callback_data for row in keyboard.inline_keyboard for btn in row}
+
+        self.assertEqual(buttons["⬇️ 1"], "new:dl:abc123def0:0")
+        self.assertEqual(buttons["⬇️ 3"], "new:dl:abc123def0:2")
+        self.assertEqual(buttons["⬇️ Скачать все 2"], "new:bulk:abc123def0")
+        self.assertNotIn("⬇️ 2", buttons)
+
+    def test_movie_notification_text_links_kinopoisk_title(self):
+        text = bot._format_movie_notification_text([{
+            "title": "Test Movie",
+            "alt_title": "Original Test",
+            "year": 2026,
+            "kp_url": "https://www.kinopoisk.ru/film/123/",
+            "rating": 8.1,
+        }])
+
+        self.assertIn(
+            '<a href="https://www.kinopoisk.ru/film/123/">Test Movie / Original Test</a>',
+            text,
+        )
+
+    def test_movie_notification_pick_release_uses_soft_defaults(self):
+        card = {"releases": [
+            {
+                "title": "Test Movie 1080p",
+                "tracker": "rutracker",
+                "url": "https://example.test/1080",
+                "size": "2 GB",
+                "seeders": 50,
+            },
+            {
+                "title": "Test Movie 2160p Original Sub",
+                "tracker": "rutracker",
+                "url": "https://example.test/2160",
+                "size": "8 GB",
+                "seeders": 1,
+            },
+        ]}
+
+        with (
+            patch.object(bot, "_score_result", return_value=0),
+            patch.object(bot, "_search_defaults_for_chat", return_value={
+                "quality": "4K",
+                "audio": True,
+                "subs": True,
+                "preferred_voices": [],
+            }),
+        ):
+            selected, notes = bot._movie_notification_pick_release(card, 100)
+
+        self.assertEqual(selected["title"], "Test Movie 2160p Original Sub")
+        self.assertEqual(notes, [])
+
+    def test_movie_notification_snapshot_tiebreak_can_use_gpt(self):
+        card = {"title": "Test Movie", "year": 2026, "releases": [
+            {
+                "title": "Test Movie 1080p A",
+                "tracker": "rutracker",
+                "url": "https://example.test/a",
+                "size": "2 GB",
+                "seeders": 50,
+            },
+            {
+                "title": "Test Movie 1080p Original B",
+                "tracker": "rutracker",
+                "url": "https://example.test/b",
+                "size": "3 GB",
+                "seeders": 45,
+            },
+        ]}
+
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "_score_result", return_value=0),
+            patch.object(bot, "_search_defaults_for_chat", return_value={
+                "quality": "any",
+                "audio": False,
+                "subs": False,
+                "preferred_voices": [],
+            }),
+            patch.object(bot, "gpt_choose_movie_notification_release",
+                         return_value=(1, "лучше по Original", None)) as choose,
+            patch.object(bot, "_gpt_record_usage"),
+        ):
+            selected, notes = asyncio.run(
+                bot._movie_notification_pick_release_for_snapshot(card, 100)
+            )
+
+        self.assertEqual(selected["title"], "Test Movie 1080p Original B")
+        self.assertIn("GPT выбрал: лучше по Original", notes)
+        choose.assert_called_once()
+
+    def test_movie_notification_snapshot_skips_gpt_when_score_gap_is_large(self):
+        card = {"title": "Test Movie", "releases": [
+            {"title": "Test Movie 1080p", "url": "https://example.test/a"},
+            {"title": "Test Movie 720p", "url": "https://example.test/b"},
+        ]}
+
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "_movie_notification_release_score", side_effect=[500, 0]),
+            patch.object(bot, "_search_defaults_for_chat", return_value={}),
+            patch.object(bot, "gpt_choose_movie_notification_release") as choose,
+            patch.object(bot, "_gpt_record_usage"),
+        ):
+            selected, _notes = asyncio.run(
+                bot._movie_notification_pick_release_for_snapshot(card, 100)
+            )
+
+        self.assertEqual(selected["title"], "Test Movie 1080p")
+        choose.assert_not_called()
 
     def test_final_download_statuses_show_task_button_not_generic_plex(self):
         with patch.object(bot, "PLEX_ENABLED", True):

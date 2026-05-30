@@ -1557,6 +1557,41 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("🔄 Искать мягче", labels)
         self.assertIn("⏭ Пропустить сезон", labels)
 
+    def test_review_screen_shows_gpt_candidate_hint(self):
+        results = [
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+            {
+                "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / NewStudio",
+                "source": "jackett",
+                "tracker_name": "rutracker",
+                "seeders": 20,
+                "size": "10 GB",
+            },
+        ]
+        plan = _bulk_plan(seasons=[1], results=results)
+        season = bot._series_bulk_apply_gpt_hints(
+            plan.seasons[0],
+            {0: "Совпали качество и Original, но проверьте озвучку."},
+        )
+        plan = bot.replace(plan, seasons=(season,))
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_series_bulk_plan"] = plan
+        ctx.user_data["srch_series_bulk_profile"] = _bulk_profile()
+        query = _make_query("srch:bulk_review")
+        update = MagicMock(callback_query=query)
+
+        state = asyncio.run(bot.search_series_bulk_review(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("🤖 Подсказка: Совпали качество и Original", text)
+
     def test_soft_search_adds_manual_candidate_without_changing_profile(self):
         initial = {
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",

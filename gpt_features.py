@@ -456,3 +456,339 @@ def did_you_mean(
         query, len(suggestions), suggestions,
     )
     return (suggestions, None)
+
+
+_SEARCH_FAILURE_REASONS = {
+    "quality_too_strict",
+    "title_variant",
+    "season_format",
+    "tracker_scope",
+    "tracker_failure",
+    "not_found",
+    "unknown",
+}
+
+_SEARCH_FAILURE_ACTIONS = {
+    "remove_quality",
+    "try_original_title",
+    "expand_trackers",
+    "retry",
+    "manual_search",
+}
+
+
+def diagnose_search_failure(
+    *,
+    query: str,
+    base_query: str = "",
+    preferred_quality: str | None = None,
+    audio_required: bool = False,
+    subs_required: bool = False,
+    has_quality_retry: bool = False,
+    can_expand_trackers: bool = False,
+    season_requested: bool = False,
+    source_status: str = "empty",
+    suggestions: list[str] | None = None,
+    api_key: str,
+    model: str = "gpt-4o-mini",
+    usage_sink: list | None = None,
+) -> tuple[dict | None, str | None]:
+    """Explain a 0-result search and suggest the safest next action.
+
+    This is intentionally advisory: callers keep deterministic buttons and
+    never let GPT start a download or hide existing fallbacks.
+    """
+    clean_query = (query or "").strip()
+    if not clean_query:
+        return (None, "empty")
+
+    clean_suggestions = [
+        str(s).strip()
+        for s in (suggestions or [])
+        if isinstance(s, str) and str(s).strip()
+    ][:3]
+    available_actions = ["retry", "manual_search"]
+    if has_quality_retry or preferred_quality:
+        available_actions.append("remove_quality")
+    if can_expand_trackers:
+        available_actions.append("expand_trackers")
+    available_actions.append("try_original_title")
+
+    facts = {
+        "query": clean_query,
+        "base_query": (base_query or clean_query).strip(),
+        "preferred_quality": preferred_quality,
+        "audio_required": bool(audio_required),
+        "subs_required": bool(subs_required),
+        "has_quality_retry_button": bool(has_quality_retry),
+        "can_expand_trackers": bool(can_expand_trackers),
+        "season_requested": bool(season_requested),
+        "source_status": source_status or "empty",
+        "existing_title_suggestions": clean_suggestions,
+        "available_actions": available_actions,
+    }
+
+    system_prompt = (
+        "Ты помощник поиска в Telegram-боте для фильмов и сериалов. "
+        "Поиск по трекерам вернул 0 результатов. Нужно коротко объяснить "
+        "пользователю вероятную причину и выбрать безопасное следующее "
+        "действие из списка available_actions.\n"
+        "\n"
+        "Правила:\n"
+        "- Не утверждай, что раздачи точно не существует: трекеры могут лагать.\n"
+        "- Не придумывай факты о наличии релиза.\n"
+        "- Если есть строгие фильтры качества/Original/subs, предпочти "
+        "remove_quality только когда это действительно похоже на причину.\n"
+        "- Если выбран не полный набор трекеров, expand_trackers часто лучше "
+        "manual_search.\n"
+        "- Если season_requested=true, учитывай формат сезона S01/сезон 1.\n"
+        "- suggested_queries заполняй только если уверен в варианте названия; "
+        "не дублируй existing_title_suggestions.\n"
+        "- message: одно русское предложение до 160 символов, без markdown.\n"
+        "\n"
+        "Reply with strict JSON:\n"
+        '{"reason":"quality_too_strict|title_variant|season_format|tracker_scope|'
+        'tracker_failure|not_found|unknown",'
+        '"message":"короткое объяснение",'
+        '"suggested_action":"remove_quality|try_original_title|expand_trackers|retry|manual_search",'
+        '"suggested_queries":["вариант 1","вариант 2"]}'
+    )
+
+    result, error = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
+        ],
+        api_key=api_key,
+        model=model,
+        max_tokens=220,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    _record_usage(usage_sink, result)
+    if error or not result:
+        return (None, error)
+
+    try:
+        data = json.loads(result["text"])
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        return (None, "parse")
+
+    reason = str(data.get("reason") or "unknown").strip()
+    if reason not in _SEARCH_FAILURE_REASONS:
+        reason = "unknown"
+    action = str(data.get("suggested_action") or "manual_search").strip()
+    if action not in _SEARCH_FAILURE_ACTIONS or action not in available_actions:
+        action = "manual_search"
+    message = str(data.get("message") or "").strip()
+    if len(message) > 180:
+        message = message[:177].rstrip() + "..."
+
+    raw_queries = data.get("suggested_queries") or []
+    query_norm = clean_query.lower()
+    existing_norm = {s.lower() for s in clean_suggestions}
+    suggested_queries: list[str] = []
+    if isinstance(raw_queries, list):
+        for raw in raw_queries:
+            candidate = str(raw).strip() if isinstance(raw, str) else ""
+            if not candidate:
+                continue
+            if candidate.lower() == query_norm or candidate.lower() in existing_norm:
+                continue
+            if candidate in suggested_queries:
+                continue
+            suggested_queries.append(candidate[:80])
+            if len(suggested_queries) >= 3:
+                break
+
+    if not message and not suggested_queries:
+        return (None, "empty")
+
+    advice = {
+        "reason": reason,
+        "message": message,
+        "suggested_action": action,
+        "suggested_queries": suggested_queries,
+    }
+    logger.info(
+        "GPT search_failure: query=%r reason=%s action=%s suggestions=%d",
+        clean_query, reason, action, len(suggested_queries),
+    )
+    return (advice, None)
+
+
+def explain_series_bulk_candidates(
+    *,
+    series_title: str,
+    season: int,
+    profile: dict,
+    candidates: list[dict],
+    api_key: str,
+    model: str = "gpt-4o-mini",
+    usage_sink: list | None = None,
+) -> tuple[dict[int, str], str | None]:
+    """Add short manual-review hints for ambiguous season candidates."""
+    if not series_title or not candidates:
+        return ({}, "empty")
+
+    compact_candidates = []
+    for index, candidate in enumerate(candidates[:3], start=1):
+        if not isinstance(candidate, dict):
+            continue
+        item = dict(candidate)
+        item["index"] = index
+        title = str(item.get("title") or "")
+        item["title"] = title[:220]
+        compact_candidates.append(item)
+    if not compact_candidates:
+        return ({}, "empty")
+
+    facts = {
+        "series_title": series_title,
+        "season": int(season),
+        "profile": profile if isinstance(profile, dict) else {},
+        "candidates": compact_candidates,
+    }
+    system_prompt = (
+        "Ты помогаешь пользователю вручную выбрать раздачу сезона сериала. "
+        "Автоматически скачивать ничего нельзя: нужны только короткие подсказки "
+        "к кандидатам.\n"
+        "\n"
+        "Для каждого кандидата напиши hint на русском до 130 символов: "
+        "что в нём хорошо или почему он рискованный. Опирайся только на "
+        "переданные признаки: сезон, качество, озвучки, Original/Sub, "
+        "warnings/hard_failures, сиды, размер. Не придумывай состав файлов.\n"
+        "\n"
+        "Reply with strict JSON: "
+        '{"notes":[{"index":1,"hint":"короткая подсказка"}]}'
+    )
+
+    result, error = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
+        ],
+        api_key=api_key,
+        model=model,
+        max_tokens=260,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    _record_usage(usage_sink, result)
+    if error or not result:
+        return ({}, error)
+
+    try:
+        data = json.loads(result["text"])
+        raw_notes = data.get("notes") or []
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        return ({}, "parse")
+
+    hints: dict[int, str] = {}
+    if isinstance(raw_notes, list):
+        for raw in raw_notes:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                index = int(raw.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if index < 1 or index > len(compact_candidates):
+                continue
+            hint = str(raw.get("hint") or "").strip()
+            if not hint:
+                continue
+            if len(hint) > 150:
+                hint = hint[:147].rstrip() + "..."
+            hints[index - 1] = hint
+
+    if not hints:
+        return ({}, "empty")
+    logger.info(
+        "GPT series_bulk_review: title=%r season=%s hints=%d",
+        series_title, season, len(hints),
+    )
+    return (hints, None)
+
+
+def choose_movie_notification_release(
+    *,
+    title: str,
+    year: int | None,
+    defaults: dict,
+    candidates: list[dict],
+    api_key: str,
+    model: str = "gpt-4o-mini",
+    usage_sink: list | None = None,
+) -> tuple[int | None, str, str | None]:
+    """Pick a release among close-scored /new one-click candidates."""
+    if not candidates:
+        return (None, "", "empty")
+
+    compact_candidates = []
+    for index, candidate in enumerate(candidates[:3], start=1):
+        if not isinstance(candidate, dict):
+            continue
+        item = dict(candidate)
+        item["index"] = index
+        item["title"] = str(item.get("title") or "")[:220]
+        compact_candidates.append(item)
+    if not compact_candidates:
+        return (None, "", "empty")
+
+    facts = {
+        "movie": {"title": title, "year": year},
+        "user_defaults": defaults if isinstance(defaults, dict) else {},
+        "candidates": compact_candidates,
+    }
+    system_prompt = (
+        "Ты выбираешь одну раздачу для кнопки «скачать» в уведомлении о новом "
+        "фильме. Все кандидаты уже близко оценены deterministic scoring; твоя "
+        "роль — аккуратный tie-break.\n"
+        "\n"
+        "Правила:\n"
+        "- Уважай user_defaults мягко: качество, Original, субтитры, preferred_voices.\n"
+        "- Не выбирай заведомо слабую раздачу только из-за одного признака.\n"
+        "- Если по данным нет явного преимущества, выбери первого кандидата.\n"
+        "- Не придумывай сведения вне заголовка и переданных признаков.\n"
+        "- confidence ставь 0.7+ только когда выбор реально лучше соседних.\n"
+        "- reason: коротко на русском, до 90 символов.\n"
+        "\n"
+        "Reply with strict JSON: "
+        '{"pick":1,"confidence":0.0,"reason":"почему"}'
+    )
+
+    result, error = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
+        ],
+        api_key=api_key,
+        model=model,
+        max_tokens=160,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    _record_usage(usage_sink, result)
+    if error or not result:
+        return (None, "", error)
+
+    try:
+        data = json.loads(result["text"])
+        pick_raw = int(data.get("pick", 0))
+        confidence = float(data.get("confidence", 0.0))
+        reason = str(data.get("reason") or "").strip()
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        return (None, "", "parse")
+
+    if not 1 <= pick_raw <= len(compact_candidates):
+        return (None, "", "empty")
+    if confidence < 0.7:
+        return (None, reason, None)
+    if len(reason) > 100:
+        reason = reason[:97].rstrip() + "..."
+    logger.info(
+        "GPT movie_notification_release: title=%r pick=%s confidence=%.2f",
+        title, pick_raw, confidence,
+    )
+    return (pick_raw - 1, reason, None)

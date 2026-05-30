@@ -190,8 +190,11 @@ from voice_transcription import (
     transcribe_audio_detailed,
 )
 from gpt_client import estimate_chat_cost_usd
+from gpt_features import diagnose_search_failure as gpt_diagnose_search_failure
+from gpt_features import choose_movie_notification_release as gpt_choose_movie_notification_release
 from gpt_features import did_you_mean as gpt_did_you_mean
 from gpt_features import explain_movie_card as gpt_features_explain_movie_card
+from gpt_features import explain_series_bulk_candidates as gpt_explain_series_bulk_candidates
 from gpt_features import kp_confidence_check as gpt_kp_confidence_check
 from gpt_features import parse_torrent_title as gpt_features_parse_torrent_title
 from movie_discovery import (
@@ -205,6 +208,7 @@ from movie_discovery import (
     is_recent_published_at as _movie_is_recent_published_at,
     movie_key as _movie_card_key,
     normalize_movie_title as _normalize_movie_title,
+    parse_size_gb as _movie_parse_size_gb,
     parse_published_at as _movie_parse_published_at,
     parse_qualities as _movie_parse_qualities,
     prune_kp_cache as _movie_prune_kp_cache,
@@ -1855,6 +1859,13 @@ def _entry_is_shown_in_new(entry) -> bool:
     return False
 
 
+def _entry_is_handled_in_new(entry) -> bool:
+    """True iff the user already acted on this film from /new."""
+    if isinstance(entry, dict):
+        return bool(entry.get("handled_at"))
+    return False
+
+
 def _get_user_entries(chat_id: int) -> dict:
     """Return the per-user dict of {film_id: entry}, where entry is either the
     new {notified_at, shown_at} dict or a legacy timestamp string."""
@@ -1893,14 +1904,24 @@ def _is_card_shown_in_new(card: dict, chat_id: int) -> bool:
     return False
 
 
+def _is_card_handled_in_new(card: dict, chat_id: int) -> bool:
+    entries = _get_user_entries(chat_id)
+    if not entries:
+        return False
+    for cid in _card_identifiers(card):
+        if _entry_is_handled_in_new(entries.get(cid)):
+            return True
+    return False
+
+
 def _mark_user_signal(chat_id: int, cards: list[dict], *, signal: str) -> None:
-    """Internal: set ``signal`` (either 'notified_at' or 'shown_at') = now for each
-    identifier of each card. Other fields of the entry are preserved.
+    """Internal: set a per-user /new signal timestamp for each card identifier.
+    Other fields of the entry are preserved.
 
     Legacy string entries are upgraded to the new dict format in place.
     Saves only when something actually changed (idempotent within the same minute).
     """
-    assert signal in ("notified_at", "shown_at")
+    assert signal in ("notified_at", "shown_at", "handled_at")
     if not chat_id or not cards:
         return
     now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -1951,6 +1972,11 @@ def _mark_user_shown_in_new(chat_id: int, cards: list[dict]) -> None:
     """Set ``shown_at`` for each card's identifiers. Preserves ``notified_at``.
     Called after rendering /new so the 🆕 badge disappears next time."""
     _mark_user_signal(chat_id, cards, signal="shown_at")
+
+
+def _mark_user_handled_in_new(chat_id: int, cards: list[dict]) -> None:
+    """Set ``handled_at`` for films successfully added from /new notification."""
+    _mark_user_signal(chat_id, cards, signal="handled_at")
 
 
 # --- Movie discovery subscription helpers ---
@@ -2190,7 +2216,11 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
         # Per-user badge: shown only when the user hasn't opened /new and seen
         # this film yet. A push alone does NOT clear the badge — the user must
         # actually open /new to confirm they've seen it.
-        new_mark = " 🆕" if (chat_id and not _is_card_shown_in_new(card, chat_id)) else ""
+        new_mark = " 🆕" if (
+            chat_id
+            and not _is_card_shown_in_new(card, chat_id)
+            and not _is_card_handled_in_new(card, chat_id)
+        ) else ""
         if card.get("in_plex"):
             plex_res = card.get("plex_resolution") or ""
             plex_mark = f" ✅ {html_module.escape(plex_res)}" if plex_res else " ✅"
@@ -2988,15 +3018,338 @@ def _is_in_notification_window() -> bool:
     return _NOTIFY_WINDOW_START_HOUR <= hour < _NOTIFY_WINDOW_END_HOUR
 
 
+_MOVIE_NOTIFICATION_ACTION_LIMIT = 3
+_MOVIE_NOTIFICATION_SNAPSHOT_TTL_HOURS = 72
+_MOVIE_NOTIFICATION_SNAPSHOT_MAX = 100
+_MOVIE_NOTIFICATION_GPT_TIE_DELTA = 180.0
+
+
+def _movie_notification_target_quality(defaults: dict) -> str:
+    quality = str(defaults.get("quality") or "1080p")
+    return {"4K": "2160p", "1080p": "1080p", "720p": "720p"}.get(quality, "")
+
+
+def _movie_release_quality_label(result: dict) -> str:
+    return str(result.get("quality") or _movie_detect_quality(str(result.get("title") or "")) or "")
+
+
+def _movie_notification_release_score(result: dict, defaults: dict) -> float:
+    """Soft-rank a release for one-tap /new downloads using user defaults."""
+    title = str(result.get("title") or "")
+    score = _score_result(result)
+    target_quality = _movie_notification_target_quality(defaults)
+    if target_quality and _movie_release_quality_label(result) == target_quality:
+        score += 350
+    if defaults.get("audio") and _detect_has_original_audio(title):
+        score += 180
+    if defaults.get("subs") and _detect_has_subs(title):
+        score += 120
+    voices = _normalise_preferred_voices(defaults.get("preferred_voices"))
+    if voices and _result_has_preferred_voice(result, voices):
+        score += 250
+    return score
+
+
+def _movie_notification_gpt_candidate_payload(result: dict, score: float) -> dict:
+    title = str(result.get("title") or "")
+    return {
+        "title": title,
+        "score": score,
+        "quality": _movie_release_quality_label(result),
+        "has_original": _detect_has_original_audio(title),
+        "has_subs": _detect_has_subs(title),
+        "tracker": str(result.get("tracker_name") or result.get("source") or ""),
+        "size": str(result.get("size") or ""),
+        "seeders": result.get("seeders"),
+    }
+
+
+async def _gpt_choose_movie_notification_release(
+    card: dict,
+    defaults: dict,
+    scored_releases: list[tuple[float, dict]],
+) -> tuple[dict | None, str]:
+    if not GPT_ENABLED or len(scored_releases) < 2:
+        return None, ""
+    top_score = scored_releases[0][0]
+    if top_score - scored_releases[1][0] > _MOVIE_NOTIFICATION_GPT_TIE_DELTA:
+        return None, ""
+    close = [
+        (score, result)
+        for score, result in scored_releases[:3]
+        if top_score - score <= _MOVIE_NOTIFICATION_GPT_TIE_DELTA
+    ]
+    if len(close) < 2:
+        return None, ""
+
+    sink: list = []
+    try:
+        pick_idx, reason, error = await asyncio.to_thread(
+            gpt_choose_movie_notification_release,
+            title=str(card.get("title") or ""),
+            year=card.get("year") if isinstance(card.get("year"), int) else None,
+            defaults=defaults,
+            candidates=[
+                _movie_notification_gpt_candidate_payload(result, score)
+                for score, result in close
+            ],
+            api_key=OPENAI_API_KEY,
+            model=GPT_MODEL,
+            usage_sink=sink,
+        )
+    except Exception:
+        logger.warning("movie notification GPT tie-break failed", exc_info=True)
+        return None, ""
+    _gpt_record_usage(
+        feature="movie_notification_release",
+        input_tokens=320,
+        output_tokens=90,
+        error_label=error,
+        usage=(sink[0] if sink else None),
+    )
+    if pick_idx is None or not (0 <= pick_idx < len(close)):
+        return None, ""
+    return close[pick_idx][1], reason
+
+
+def _movie_notification_preference_notes(
+    selected: dict,
+    releases: list[dict],
+    defaults: dict,
+) -> list[str]:
+    notes: list[str] = []
+    target_quality = _movie_notification_target_quality(defaults)
+    if target_quality and _movie_release_quality_label(selected) != target_quality:
+        if not any(_movie_release_quality_label(r) == target_quality for r in releases):
+            notes.append(f"{target_quality} не нашёл, выбрал лучшее доступное")
+        else:
+            notes.append(f"выбрал не {target_quality}: другой вариант заметно сильнее")
+
+    title = str(selected.get("title") or "")
+    if defaults.get("audio") and not _detect_has_original_audio(title):
+        if not any(_detect_has_original_audio(str(r.get("title") or "")) for r in releases):
+            notes.append("Original не нашёл")
+    if defaults.get("subs") and not _detect_has_subs(title):
+        if not any(_detect_has_subs(str(r.get("title") or "")) for r in releases):
+            notes.append("субтитры не нашёл")
+    voices = _normalise_preferred_voices(defaults.get("preferred_voices"))
+    if voices and not _result_has_preferred_voice(selected, voices):
+        if not any(_result_has_preferred_voice(r, voices) for r in releases):
+            notes.append(f"перевод {' / '.join(voices)} не нашёл")
+    return notes
+
+
+def _movie_notification_pick_release(card: dict, chat_id: int | None) -> tuple[dict | None, list[str]]:
+    releases = [
+        _movie_release_to_search_result(release)
+        for release in (card.get("releases") or [])
+        if isinstance(release, dict)
+    ]
+    if not releases:
+        return None, []
+    defaults = _search_defaults_for_chat(chat_id)
+    releases.sort(
+        key=lambda r: _movie_notification_release_score(r, defaults),
+        reverse=True,
+    )
+    selected = releases[0]
+    return selected, _movie_notification_preference_notes(selected, releases, defaults)
+
+
+async def _movie_notification_pick_release_for_snapshot(
+    card: dict,
+    chat_id: int | None,
+) -> tuple[dict | None, list[str]]:
+    releases = [
+        _movie_release_to_search_result(release)
+        for release in (card.get("releases") or [])
+        if isinstance(release, dict)
+    ]
+    if not releases:
+        return None, []
+    defaults = _search_defaults_for_chat(chat_id)
+    scored = sorted(
+        (
+            (_movie_notification_release_score(result, defaults), result)
+            for result in releases
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    selected = scored[0][1]
+    gpt_selected, gpt_reason = await _gpt_choose_movie_notification_release(
+        card, defaults, scored,
+    )
+    if gpt_selected is not None:
+        selected = gpt_selected
+    notes = _movie_notification_preference_notes(selected, releases, defaults)
+    if gpt_selected is not None and gpt_reason:
+        notes.append(f"GPT выбрал: {gpt_reason}")
+    return selected, notes
+
+
+def _movie_notification_snapshot_card(card: dict) -> dict:
+    keep = (
+        "key", "title", "alt_title", "year", "kp_id", "kp_url", "rating",
+        "kp_votes", "genres", "countries", "poster_url", "poster_preview_url",
+        "best_quality", "best_size", "best_seeders", "release_count",
+        "in_plex", "plex_resolution",
+    )
+    snap = {key: card.get(key) for key in keep if key in card}
+    snap["releases"] = [
+        dict(release)
+        for release in (card.get("releases") or [])[:8]
+        if isinstance(release, dict)
+    ]
+    return snap
+
+
+def _movie_notification_snapshot_items(cards: list[dict], chat_id: int | None) -> list[dict]:
+    items: list[dict] = []
+    for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]:
+        if not isinstance(card, dict):
+            continue
+        selected, notes = _movie_notification_pick_release(card, chat_id)
+        items.append({
+            "card": _movie_notification_snapshot_card(card),
+            "result": selected,
+            "notes": notes,
+        })
+    return items
+
+
+async def _movie_notification_snapshot_items_with_gpt(
+    cards: list[dict],
+    chat_id: int | None,
+) -> list[dict]:
+    items: list[dict] = []
+    for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]:
+        if not isinstance(card, dict):
+            continue
+        selected, notes = await _movie_notification_pick_release_for_snapshot(card, chat_id)
+        items.append({
+            "card": _movie_notification_snapshot_card(card),
+            "result": selected,
+            "notes": notes,
+        })
+    return items
+
+
+def _prune_movie_notification_snapshots(snapshots: dict, *, now: datetime) -> dict:
+    if not isinstance(snapshots, dict):
+        return {}
+    cutoff = now - timedelta(hours=_MOVIE_NOTIFICATION_SNAPSHOT_TTL_HOURS)
+    kept: dict[str, dict] = {}
+    for push_id, snapshot in snapshots.items():
+        if not isinstance(snapshot, dict):
+            continue
+        try:
+            created_at = datetime.fromisoformat(str(snapshot.get("created_at") or ""))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=DISPLAY_TIMEZONE)
+        except ValueError:
+            continue
+        if created_at >= cutoff:
+            kept[str(push_id)] = snapshot
+    if len(kept) > _MOVIE_NOTIFICATION_SNAPSHOT_MAX:
+        ordered = sorted(
+            kept.items(),
+            key=lambda item: str(item[1].get("created_at") or ""),
+        )
+        kept = dict(ordered[-_MOVIE_NOTIFICATION_SNAPSHOT_MAX:])
+    return kept
+
+
+def _save_movie_notification_snapshot(
+    chat_id: int,
+    cards: list[dict],
+    *,
+    items: list[dict] | None = None,
+) -> tuple[str, list[dict]]:
+    settings = _load_movie_discovery_settings()
+    now = datetime.now(DISPLAY_TIMEZONE)
+    snapshots = _prune_movie_notification_snapshots(
+        settings.get("movie_notification_snapshots") or {},
+        now=now,
+    )
+    push_id = uuid.uuid4().hex[:10]
+    if items is None:
+        items = _movie_notification_snapshot_items(cards, chat_id)
+    snapshots[push_id] = {
+        "chat_id": str(chat_id),
+        "created_at": now.isoformat(timespec="seconds"),
+        "items": items,
+    }
+    settings["movie_notification_snapshots"] = snapshots
+    _save_movie_discovery_settings(settings)
+    return push_id, items
+
+
+def _load_movie_notification_snapshot(push_id: str, chat_id: int | None) -> dict | None:
+    settings = _load_movie_discovery_settings()
+    now = datetime.now(DISPLAY_TIMEZONE)
+    snapshots = _prune_movie_notification_snapshots(
+        settings.get("movie_notification_snapshots") or {},
+        now=now,
+    )
+    if snapshots != (settings.get("movie_notification_snapshots") or {}):
+        settings["movie_notification_snapshots"] = snapshots
+        _save_movie_discovery_settings(settings)
+    snapshot = snapshots.get(str(push_id))
+    if not isinstance(snapshot, dict):
+        return None
+    if chat_id is not None and str(snapshot.get("chat_id") or "") != str(chat_id):
+        return None
+    return snapshot
+
+
+def _movie_notification_cards_from_items(items: list[dict]) -> list[dict]:
+    return [
+        item.get("card")
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("card"), dict)
+    ]
+
+
+def _movie_notification_result_label(result: dict | None) -> str:
+    if not isinstance(result, dict):
+        return "раздача не выбрана"
+    parts: list[str] = []
+    quality = _movie_release_quality_label(result)
+    if quality:
+        parts.append(quality)
+    size = str(result.get("size") or "").strip()
+    if size:
+        parts.append(size)
+    seeders = result.get("seeders")
+    if seeders not in (None, ""):
+        parts.append(f"сидов {seeders}")
+    return " · ".join(parts) or "лучшая раздача"
+
+
+def _movie_notification_total_size_gb(items: list[dict]) -> float:
+    total = 0.0
+    for item in items:
+        if not isinstance(item, dict) or item.get("skip_reason"):
+            continue
+        result = item.get("result")
+        if isinstance(result, dict):
+            total += _movie_parse_size_gb(str(result.get("size") or ""))
+    return total
+
+
 def _format_movie_notification_text(cards: list) -> str:
     """Build the HTML message body for a /new notification."""
     import html as _html
     lines = ["🎬 <b>Новые фильмы в /new:</b>", ""]
-    for card in cards[:5]:
+    for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]:
         title_str = _html.escape(str(card.get("title") or ""))
         alt = card.get("alt_title") or ""
         if alt:
             title_str = f"{title_str} / {_html.escape(str(alt))}"
+        kp_url = str(card.get("kp_url") or "").strip()
+        if kp_url.startswith(("http://", "https://")):
+            title_str = f"<a href=\"{_html.escape(kp_url, quote=True)}\">{title_str}</a>"
         year = card.get("year") or ""
         meta_parts = [str(year)] if year else []
         countries_text = _movie_countries_text(card)
@@ -3005,20 +3358,52 @@ def _format_movie_notification_text(cards: list) -> str:
         meta_text = f" ({_html.escape(', '.join(meta_parts))})" if meta_parts else ""
         rating = card.get("rating")
         rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
-        lines.append(f"• {title_str}{meta_text}{rating_text}")
-    if len(cards) > 5:
-        lines.append(f"и ещё {len(cards) - 5}…")
+        best_parts = [
+            str(value) for value in (card.get("best_quality"), card.get("best_size"))
+            if value
+        ]
+        best_text = f" · {html_module.escape(', '.join(best_parts))}" if best_parts else ""
+        lines.append(f"• {title_str}{meta_text}{rating_text}{best_text}")
     return "\n".join(lines)
 
 
-def _movie_notification_keyboard() -> "InlineKeyboardMarkup":
-    return InlineKeyboardMarkup([
+def _movie_notification_downloadable_indices(items: list[dict]) -> list[int]:
+    indices: list[int] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        card = item.get("card")
+        result = item.get("result")
+        if isinstance(card, dict) and isinstance(result, dict) and not card.get("in_plex"):
+            indices.append(index)
+    return indices
+
+
+def _movie_notification_keyboard(
+    push_id: str = "",
+    count: int = 0,
+    downloadable_indices: list[int] | None = None,
+) -> "InlineKeyboardMarkup":
+    rows: list[list[InlineKeyboardButton]] = []
+    if downloadable_indices is None:
+        downloadable_indices = list(range(max(0, count)))
+    if push_id and downloadable_indices:
+        rows.append([
+            InlineKeyboardButton(f"⬇️ {index + 1}", callback_data=f"new:dl:{push_id}:{index}")
+            for index in downloadable_indices
+        ])
+        if len(downloadable_indices) > 1:
+            rows.append([
+                InlineKeyboardButton(f"⬇️ Скачать все {len(downloadable_indices)}", callback_data=f"new:bulk:{push_id}")
+            ])
+    rows.extend([
         [
             InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
         ],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _movie_notification_poster_url(cards: list) -> str:
@@ -3036,8 +3421,18 @@ async def _send_movie_notification_push_to_user(
     cards: list, chat_id: int, app: "Application",
 ) -> bool:
     """Send a /new notification to a specific subscriber. Returns True on success."""
+    cards = cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+    if not cards:
+        return False
+    _enrich_cards_with_plex(cards)
+    items = await _movie_notification_snapshot_items_with_gpt(cards, chat_id)
+    push_id, items = _save_movie_notification_snapshot(chat_id, cards, items=items)
     text = _format_movie_notification_text(cards)
-    keyboard = _movie_notification_keyboard()
+    keyboard = _movie_notification_keyboard(
+        push_id,
+        len(items),
+        _movie_notification_downloadable_indices(items),
+    )
     poster_url = _movie_notification_poster_url(cards)
     if poster_url:
         try:
@@ -3059,6 +3454,7 @@ async def _send_movie_notification_push_to_user(
             text=text,
             parse_mode="HTML",
             reply_markup=keyboard,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         logger.info("Sent /new notification to chat_id=%s (%d films)", chat_id, len(cards))
         return True
@@ -3172,6 +3568,7 @@ async def _run_movie_discovery_notifications(
             c for c in top_cards
             if not _is_card_notified(c, chat_id)
             and not _is_card_shown_in_new(c, chat_id)
+            and not _is_card_handled_in_new(c, chat_id)
             and (not prev_top10_set or c.get("kp_id") in prev_top10_set)
         ]
         if not new_for_user:
@@ -3188,23 +3585,24 @@ async def _run_movie_discovery_notifications(
             ",".join(str(c.get("kp_id") or "-") for c in new_for_user),
         )
 
-        sent = await _send_movie_notification_push_to_user(new_for_user, chat_id, app)
+        push_cards = new_for_user[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+        sent = await _send_movie_notification_push_to_user(push_cards, chat_id, app)
         if sent:
             # Only set notified_at — shown_at remains empty so the 🆕 badge stays
             # visible when the user clicks "Открыть /new" from the push.
-            _mark_user_notified(chat_id, new_for_user)
+            _mark_user_notified(chat_id, push_cards)
             logger.info(
                 "movie_discovery: notify sent chat=%s pushed=%d kp_ids=[%s]",
                 chat_id,
-                len(new_for_user),
-                ",".join(str(c.get("kp_id") or "-") for c in new_for_user),
+                len(push_cards),
+                ",".join(str(c.get("kp_id") or "-") for c in push_cards),
             )
         else:
             logger.warning(
                 "movie_discovery: notify failed chat=%s candidates=%d kp_ids=[%s]",
                 chat_id,
-                len(new_for_user),
-                ",".join(str(c.get("kp_id") or "-") for c in new_for_user),
+                len(push_cards),
+                ",".join(str(c.get("kp_id") or "-") for c in push_cards),
             )
 
 
@@ -4743,8 +5141,8 @@ def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") 
     return _make_task_keyboard(task_id, status, task_type)
 
 
-def _format_task_card(task: dict) -> str:
-    return _view_format_task_card(task)
+def _format_task_card(task: dict, chat_id: int | None = None) -> str:
+    return _view_format_task_card(task, is_admin=_is_admin_chat(chat_id))
 
 
 def _load_task_owners() -> dict[str, int]:
@@ -4876,6 +5274,73 @@ def _build_task_meta_from_title(title: str, *, source: str) -> dict:
     }
 
 
+def _merge_task_meta_release(meta: dict, parsed: dict | None) -> dict:
+    if not isinstance(parsed, dict):
+        return meta
+    release = {
+        key: parsed.get(key)
+        for key in ("quality", "source", "hdr", "audio", "langs", "release_group", "edition")
+        if parsed.get(key) not in (None, "", [], {})
+    }
+    if not release:
+        return meta
+    enriched = dict(meta)
+    enriched["release"] = _history_jsonable(release)
+    if not enriched.get("quality") and release.get("quality"):
+        enriched["quality"] = str(release["quality"])
+    return enriched
+
+
+async def _build_task_meta_from_title_with_gpt(title: str, *, source: str) -> dict:
+    meta = _build_task_meta_from_title(title, source=source)
+    if not GPT_ENABLED or not title:
+        return meta
+
+    try:
+        cache = state_store.load_torrent_titles_cache()
+    except Exception:
+        logger.warning("manual title cache load failed", exc_info=True)
+        cache = {}
+    title_hash = _title_hash(title)
+    cached = cache.get(title_hash) if isinstance(cache, dict) else None
+    if isinstance(cached, dict):
+        return _merge_task_meta_release(meta, cached)
+
+    sink: list = []
+    try:
+        parsed, error = await asyncio.to_thread(
+            gpt_features_parse_torrent_title,
+            title=title,
+            api_key=OPENAI_API_KEY,
+            model=GPT_MODEL,
+            usage_sink=sink,
+        )
+    except Exception:
+        logger.warning("manual title parse failed for %r", title[:80], exc_info=True)
+        return meta
+
+    _gpt_record_usage(
+        feature="manual_title_parse",
+        input_tokens=200,
+        output_tokens=80,
+        error_label=error,
+        usage=(sink[0] if sink else None),
+    )
+    if not parsed:
+        return meta
+
+    if isinstance(cache, dict):
+        cache[title_hash] = parsed
+        if len(cache) > _TITLE_CACHE_MAX_ENTRIES:
+            for old_hash in list(cache.keys())[:_TITLE_CACHE_EVICT_BATCH]:
+                cache.pop(old_hash, None)
+        try:
+            state_store.save_torrent_titles_cache(cache)
+        except Exception:
+            logger.warning("manual title cache save failed", exc_info=True)
+    return _merge_task_meta_release(meta, parsed)
+
+
 def _history_jsonable(value):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -4951,6 +5416,7 @@ def _history_fields_from_meta(meta: dict | None) -> dict:
         "series_query": meta.get("series_query"),
         "season": meta.get("season_num"),
         "meta_source": meta.get("source"),
+        "release": meta.get("release"),
     }
     return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {}, -1)}
 
@@ -5062,12 +5528,13 @@ def _record_download_added_from_title_history(
     *,
     method: str,
     meta_source: str,
+    meta: dict | None = None,
 ) -> None:
     _record_download_history(
         "download_added",
         chat_id=chat_id,
         task_id=task_id,
-        meta=_build_task_meta_from_title(title, source=meta_source) if title else None,
+        meta=meta or (_build_task_meta_from_title(title, source=meta_source) if title else None),
         title=title,
         method=method,
     )
@@ -6287,7 +6754,7 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
                 await app.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=_format_task_card(task),
+                    text=_format_task_card(task, chat_id),
                     reply_markup=_make_task_keyboard(task_id, status, task.get("type", "")),
                 )
             except BadRequest as e:
@@ -7611,12 +8078,51 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         has_quality, _ = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
         suggestions = _remember_didmean_suggestions(context, suggestions)
+        advice = None
+        if not multi_tracker_coverage_lost and not original_kp_match:
+            advice = await _gpt_get_search_failure_advice(
+                search_query,
+                base_query=base_query,
+                preferred_quality=preferred_quality,
+                audio_required=audio_required,
+                subs_required=subs_required,
+                has_quality=has_quality,
+                jackett_can_expand=jackett_can_expand,
+                season_requested=bool(_extract_season_from_query(search_query)),
+                source_status="empty",
+                suggestions=suggestions,
+            )
+            extra_suggestions = (advice or {}).get("suggested_queries") or []
+            if extra_suggestions:
+                suggestions = _remember_didmean_suggestions(
+                    context, [*suggestions, *extra_suggestions],
+                )
+        advice = await _gpt_get_search_failure_advice(
+            search_query,
+            base_query=base_query,
+            preferred_quality=preferred_quality,
+            audio_required=audio_required,
+            subs_required=subs_required,
+            has_quality=has_quality,
+            jackett_can_expand=False,
+            season_requested=bool(_extract_season_from_query(search_query)),
+            source_status="rutracker_empty",
+            suggestions=suggestions,
+        )
+        extra_suggestions = (advice or {}).get("suggested_queries") or []
+        if extra_suggestions:
+            suggestions = _remember_didmean_suggestions(
+                context, [*suggestions, *extra_suggestions],
+            )
         # Direct Rutracker path — Jackett expansion is irrelevant here.
         if series_master:
             text = "Не нашёл сериальных раздач в Rutracker."
         else:
             text = f"По запросу {_format_search_query_label(search_query)} ничего не найдено в Rutracker."
-        if suggestions:
+        advice_text = _format_search_failure_advice(advice)
+        if advice_text:
+            text += f"\n\n{advice_text}"
+        elif suggestions:
             text += (
                 "\n\n🤖 Возможно вы имели в виду — попробуйте вариант ниже "
                 "или измените запрос вручную."
@@ -8783,6 +9289,25 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 suggestions = []
 
         suggestions = _remember_didmean_suggestions(context, suggestions)
+        advice = None
+        if not multi_tracker_coverage_lost and not original_kp_match:
+            advice = await _gpt_get_search_failure_advice(
+                search_query,
+                base_query=base_query,
+                preferred_quality=preferred_quality,
+                audio_required=audio_required,
+                subs_required=subs_required,
+                has_quality=has_quality,
+                jackett_can_expand=jackett_can_expand,
+                season_requested=bool(_extract_season_from_query(search_query)),
+                source_status=("tracker_failure" if jackett_errored else "empty"),
+                suggestions=suggestions,
+            )
+            extra_suggestions = (advice or {}).get("suggested_queries") or []
+            if extra_suggestions:
+                suggestions = _remember_didmean_suggestions(
+                    context, [*suggestions, *extra_suggestions],
+                )
 
         # Prefetch (Proposal #2): fire a background Jackett search for the
         # TOP-1 suggestion while the user reads the buttons. Top-1 only —
@@ -8810,6 +9335,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             subs_required=subs_required,
             banner=banner,
         )
+        advice_text = _format_search_failure_advice(advice)
         if multi_tracker_coverage_lost:
             # New branch (A): Jackett errored + we lost non-rutracker coverage.
             # Don't suggest variants — push the user toward a retry instead.
@@ -8828,6 +9354,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "сейчас не доступен. Попробуйте позже или поищите по "
                 "оригинальному названию."
             )
+        elif advice_text:
+            no_results_text = f"{no_results_text}\n\n{advice_text}"
         elif suggestions:
             no_results_text = (
                 f"{no_results_text}\n\n"
@@ -8868,6 +9396,23 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
         suggestions = _remember_didmean_suggestions(context, suggestions)
+        advice = await _gpt_get_search_failure_advice(
+            search_query,
+            base_query=base_query,
+            preferred_quality=preferred_quality,
+            audio_required=audio_required,
+            subs_required=subs_required,
+            has_quality=has_quality,
+            jackett_can_expand=jackett_can_expand,
+            season_requested=bool(_extract_season_from_query(search_query)),
+            source_status="filters_empty",
+            suggestions=suggestions,
+        )
+        extra_suggestions = (advice or {}).get("suggested_queries") or []
+        if extra_suggestions:
+            suggestions = _remember_didmean_suggestions(
+                context, [*suggestions, *extra_suggestions],
+            )
         text = (
             _search_empty_text(
                 search_query,
@@ -8875,7 +9420,10 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 audio_required=audio_required,
                 subs_required=subs_required,
                 body="\n".join(filter_banner_parts),
-                action_hint="Можно отключить Original/субтитры в настройках поиска и попробовать снова.",
+                action_hint=(
+                    _format_search_failure_advice(advice)
+                    or "Можно отключить Original/субтитры в настройках поиска и попробовать снова."
+                ),
             )
         )
         await edit_fn(
@@ -9058,17 +9606,36 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
             # Generic dead-end after season filter wiped everything: offer to
             # broaden trackers (the requested season may exist elsewhere).
+            advice = await _gpt_get_search_failure_advice(
+                search_query,
+                base_query=base_query,
+                preferred_quality=preferred_quality,
+                audio_required=audio_required,
+                subs_required=subs_required,
+                has_quality=False,
+                jackett_can_expand=jackett_can_expand,
+                season_requested=True,
+                source_status="season_empty",
+                suggestions=[],
+            )
+            suggestions = _remember_didmean_suggestions(
+                context, (advice or {}).get("suggested_queries") or [],
+            )
             await edit_fn(
                 _search_empty_text(
                     search_query,
                     preferred_quality=preferred_quality,
                     audio_required=audio_required,
                     subs_required=subs_required,
-                    action_hint="Можно расширить поиск или попробовать другой вариант названия сезона.",
+                    action_hint=(
+                        _format_search_failure_advice(advice)
+                        or "Можно расширить поиск или попробовать другой вариант названия сезона."
+                    ),
                 ),
                 reply_markup=_no_results_keyboard(
                     has_quality=False,
                     jackett_can_expand=jackett_can_expand,
+                    suggestions=suggestions,
                 ),
             )
             return SEARCH_RESULTS
@@ -11157,6 +11724,7 @@ async def _download_and_add(
     notify_policy: str | None = None,
     download_policy: str | None = None,
     _skip_plex_check: bool = False,
+    _movie_handled_cards: list[dict] | None = None,
 ) -> int:
     """Shared implementation for direct-download and direct-subscribe from the results list.
 
@@ -11200,6 +11768,7 @@ async def _download_and_add(
                 "subscribe": subscribe,
                 "notify_policy": notify_policy,
                 "download_policy": download_policy,
+                "movie_handled_cards": _movie_handled_cards,
             }
             await query.edit_message_text(
                 _plex_confirm_text(plex_check, display_title, req_quality),
@@ -11219,6 +11788,7 @@ async def _download_and_add(
                     "subscribe": subscribe,
                     "notify_policy": notify_policy,
                     "download_policy": download_policy,
+                    "movie_handled_cards": _movie_handled_cards,
                     # R.2: stash the existing season's rating_key so the
                     # «🔼 Заменить» button can mark it for future removal
                     # after Plex indexes the new download.
@@ -11423,6 +11993,8 @@ async def _download_and_add(
             notify_policy=notify_policy if subscribe else None,
             download_policy=download_policy if subscribe else None,
         )
+        if chat_id and _movie_handled_cards:
+            _mark_user_handled_in_new(chat_id, _movie_handled_cards)
 
         if task_id and temp_path.exists():
             if _torrent_file_is_private(temp_path):
@@ -12016,6 +12588,7 @@ def _series_bulk_candidate_snapshot(candidate) -> dict:
         "warnings": list(candidate.warnings),
         "hard_failures": list(candidate.hard_failures),
         "episode_progress": list(candidate.episode_progress) if candidate.episode_progress else None,
+        "gpt_hint": str(getattr(candidate, "gpt_hint", "") or ""),
         "release": _series_bulk_release_snapshot(candidate.release),
         "result": _series_bulk_result_snapshot(candidate.result),
     }
@@ -12727,6 +13300,7 @@ def _series_bulk_candidate_from_snapshot(
         warnings=tuple(str(value) for value in data.get("warnings") or ()),
         hard_failures=tuple(str(value) for value in data.get("hard_failures") or ()),
         episode_progress=episode_progress,
+        gpt_hint=str(data.get("gpt_hint") or ""),
     )
 
 
@@ -13764,6 +14338,116 @@ def _series_bulk_candidate_explanation(candidate) -> str:
     return _series_bulk_first_reason_for_user(getattr(candidate, "reasons", ()))
 
 
+def _series_bulk_candidate_gpt_payload(candidate) -> dict:
+    result = getattr(candidate, "result", {}) or {}
+    release = getattr(candidate, "release", None)
+    return {
+        "title": str(result.get("title") or ""),
+        "tracker": str(result.get("tracker_name") or result.get("source") or ""),
+        "seeders": result.get("seeders"),
+        "size": str(result.get("size") or ""),
+        "score": getattr(candidate, "score", 0.0),
+        "confidence": getattr(candidate, "confidence", ""),
+        "reasons": list(getattr(candidate, "reasons", ()) or ()),
+        "warnings": list(getattr(candidate, "warnings", ()) or ()),
+        "hard_failures": list(getattr(candidate, "hard_failures", ()) or ()),
+        "episode_progress": list(candidate.episode_progress) if getattr(candidate, "episode_progress", None) else None,
+        "quality": getattr(release, "quality", ""),
+        "release_type": getattr(release, "release_type", ""),
+        "voices": list(getattr(release, "voices", ()) or ()),
+        "has_original": bool(getattr(release, "has_original", False)),
+        "has_subs": bool(getattr(release, "has_subs", False)),
+        "release_group": getattr(release, "release_group", ""),
+    }
+
+
+def _series_bulk_apply_gpt_hints(season_plan: SeasonPlan, hints: dict[int, str]) -> SeasonPlan:
+    if not hints:
+        return season_plan
+    candidates = []
+    for index, candidate in enumerate(season_plan.candidates):
+        hint = str(hints.get(index) or "").strip()
+        candidates.append(replace(candidate, gpt_hint=hint) if hint else candidate)
+    selected = season_plan.selected
+    if selected is not None:
+        selected_key = _series_bulk_result_key(selected.result)
+        for candidate in candidates:
+            if _series_bulk_result_key(candidate.result) == selected_key:
+                selected = candidate
+                break
+    return replace(season_plan, selected=selected, candidates=tuple(candidates))
+
+
+async def _gpt_enrich_series_bulk_plan(
+    plan,
+    profile: SeriesBulkProfile,
+    *,
+    max_seasons: int = 3,
+) -> object:
+    if not GPT_ENABLED or plan is None:
+        return plan
+    targets = [
+        season
+        for season in getattr(plan, "seasons", ())
+        if season.status == STATUS_NEEDS_DECISION and season.candidates
+    ][:max_seasons]
+    if not targets:
+        return plan
+
+    profile_payload = _series_bulk_profile_snapshot(profile)
+    sinks: list[list] = [[] for _ in targets]
+
+    def _call(season_plan: SeasonPlan, sink: list):
+        return gpt_explain_series_bulk_candidates(
+            series_title=str(getattr(plan, "series_title", "")),
+            season=season_plan.season,
+            profile=profile_payload,
+            candidates=[
+                _series_bulk_candidate_gpt_payload(candidate)
+                for candidate in season_plan.candidates[:3]
+            ],
+            api_key=OPENAI_API_KEY,
+            model=GPT_MODEL,
+            usage_sink=sink,
+        )
+
+    outcomes = await asyncio.gather(
+        *[
+            asyncio.to_thread(_call, season_plan, sink)
+            for season_plan, sink in zip(targets, sinks)
+        ],
+        return_exceptions=True,
+    )
+
+    hints_by_season: dict[int, dict[int, str]] = {}
+    for season_plan, outcome, sink in zip(targets, outcomes, sinks):
+        if isinstance(outcome, Exception):
+            logger.warning(
+                "series_bulk GPT review failed: season=%s error=%s",
+                season_plan.season,
+                outcome,
+            )
+            continue
+        hints, error = outcome
+        _gpt_record_usage(
+            feature="series_bulk_review",
+            input_tokens=450,
+            output_tokens=160,
+            error_label=error,
+            usage=(sink[0] if sink else None),
+        )
+        if hints:
+            hints_by_season[season_plan.season] = hints
+    if not hints_by_season:
+        return plan
+
+    seasons = tuple(
+        _series_bulk_apply_gpt_hints(season, hints_by_season.get(season.season, {}))
+        for season in getattr(plan, "seasons", ())
+    )
+    return replace(plan, seasons=seasons)
+
+
 def _series_bulk_plan_reason(season_plan: SeasonPlan) -> str:
     reason = _series_bulk_first_reason_for_user(getattr(season_plan, "reasons", ()))
     if reason:
@@ -14233,6 +14917,9 @@ def _series_bulk_review_text(
                 _short_title(result, limit=110),
                 " · ".join(details),
             ])
+            gpt_hint = str(getattr(candidate, "gpt_hint", "") or "").strip()
+            if gpt_hint:
+                lines.append(f"🤖 Подсказка: {gpt_hint}")
 
     return "\n".join(line for line in lines if line is not None)
 
@@ -14751,7 +15438,9 @@ async def search_series_bulk_soft_search(update: Update, context: ContextTypes.D
         verified_season_range=getattr(plan, "verified_season_range", True),
     )
     updated = _series_bulk_manual_season_from_soft_result(season_plan, soft_plan.seasons[0])
-    context.user_data["srch_series_bulk_plan"] = _series_bulk_replace_season(plan, updated)
+    updated_plan = _series_bulk_replace_season(plan, updated)
+    updated_plan = await _gpt_enrich_series_bulk_plan(updated_plan, _series_bulk_soft_profile(profile), max_seasons=1)
+    context.user_data["srch_series_bulk_plan"] = updated_plan
     context.user_data["srch_series_bulk_results"] = combined_results
     if search_warnings:
         existing_warnings = tuple(context.user_data.get("srch_series_bulk_warnings") or ())
@@ -15373,6 +16062,7 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
             downloading_seasons=downloading_seasons,
             verified_season_range=verified,
         )
+        plan = await _gpt_enrich_series_bulk_plan(plan, profile)
         context.user_data["srch_series_bulk_plan"] = plan
         context.user_data["srch_series_bulk_profile"] = profile
         context.user_data["srch_series_bulk_results"] = combined_results
@@ -15801,6 +16491,7 @@ async def plex_confirm_download(update: Update, context: ContextTypes.DEFAULT_TY
             notify_policy=pending.get("notify_policy"),
             download_policy=pending.get("download_policy"),
             _skip_plex_check=True,
+            _movie_handled_cards=pending.get("movie_handled_cards"),
         )
 
     # magnet / torrent — handled via global plex_confirm_standalone below
@@ -15844,6 +16535,7 @@ async def plex_upgrade_download(update: Update, context: ContextTypes.DEFAULT_TY
             notify_policy=pending.get("notify_policy"),
             download_policy=pending.get("download_policy"),
             _skip_plex_check=True,
+            _movie_handled_cards=pending.get("movie_handled_cards"),
         )
 
     await query.edit_message_text("Неизвестный тип ожидания.", reply_markup=_task_error_keyboard())
@@ -17647,28 +18339,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id if update.effective_chat else None
     is_admin = _is_admin_chat(chat_id)
 
-    # ---- Главное: точки входа в правильном приоритете
     main_bullets: list[str] = []
     if search_enabled:
         main_bullets.append(
-            f"• 🔍 Пришлите название фильма/сериала{kp_hint} — найду и предложу варианты"
+            f"• 🔍 Пришлите название фильма/сериала{kp_hint} — найду раздачи и предложу скачать"
         )
     if VOICE_SEARCH_ENABLED and search_enabled:
         main_bullets.append(
             "• 🎙 Или запишите голосовое сообщение — распознаю и запущу тот же поиск"
         )
+    if search_enabled:
+        main_bullets.append(
+            "• ⚙️ /settings — предпочтения поиска: качество, Original, субтитры и озвучка"
+        )
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         main_bullets.append(
-            "• 🎬 /new — рейтинг свежих фильмов и сериалов с КП-оценкой и пометкой «уже в Plex»"
+            "• 🎬 /new — свежие фильмы и мультфильмы; в push можно скачать 1-3 новинки или все доступные"
         )
     if is_admin:
-        main_bullets.append("• 📋 /status — все загрузки (переключатель «мои / все»)")
+        main_bullets.append("• 📋 /status — все загрузки, переключатель «мои / все»")
     else:
         main_bullets.append("• 📋 /status — ваши загрузки и недавняя история")
+    main_bullets.append("• 🔔 /subs — активные подписки: прогресс и правила уведомлений/скачивания")
 
-    # ---- Можно ещё: вторичные способы
     extras: list[str] = []
-    extras.append("• Прислать .torrent-файл или magnet-ссылку — добавлю в Download Station")
+    extras.append("• Прислать .torrent-файл или magnet-ссылку — добавлю в очередь загрузок")
     if search_enabled:
         extras.append(
             "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
@@ -17676,9 +18371,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if PLEX_ENABLED:
         extras.append("• /continue — найти в Plex сезоны, которые можно докачать по истории загрузок")
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
-        extras.append("• Подписаться на новинки /new — пришлю push когда появится свежий фильм с высоким рейтингом")
+        extras.append("• Подписаться на /new — пришлю push с постером, ссылкой на КП и быстрыми кнопками скачивания")
 
-    # ---- 🧠 Умный поиск с AI (показываем только когда реально работает)
     smart_lines: list[str] = []
     if GPT_ENABLED and search_enabled:
         smart_lines.append("• AI ловит опечатки: «Дюра» → подскажу «Дюна»")
@@ -17686,14 +18380,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if MOVIE_DISCOVERY_ENABLED:
             smart_lines.append("• 💭 короткое объяснение «почему этот фильм» в карточках /new")
 
-    # ---- Уведомления приходят сами
     auto: list[str] = ["• когда скачивание завершилось или упало с ошибкой"]
     if search_enabled:
         auto.append("• когда вышла новая серия в подписке")
     if PLEX_ENABLED:
         auto.append("• когда контент появился в Plex (с кнопкой «▶️ Открыть в Plex»)")
 
-    # ---- Служебное
     service: list[str] = ["• /ping — проверка связи", "• /id — показать ваш chat_id"]
     if is_admin:
         service.append("• /admin — админ-панель (диагностика, пользователи, подписки)")
@@ -18279,6 +18971,7 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
         ",".join(str(c.get("kp_id") or "-") for c in (cache.get("cards") or [])[:10]),
     )
     _enrich_cards_with_plex(cache.get("cards") or [])
+    _recompute_and_resort_cards(cache.get("cards") or [])
     await _safe_edit_callback(
         query,
         _format_movie_discovery_cache(cache, chat_id=chat_id),
@@ -18287,6 +18980,300 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+
+
+def _movie_notification_stale_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open")],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _movie_notification_bulk_keyboard(push_id: str, count: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if count > 0:
+        rows.append([InlineKeyboardButton(f"✅ Скачать {count}", callback_data=f"new:bulk_ok:{push_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"new:push_back:{push_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _movie_notification_done_keyboard(chat_id: int | None) -> InlineKeyboardMarkup:
+    scope = _default_list_scope(chat_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 К списку загрузок", callback_data=_task_callback("list", scope))],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _movie_notification_confirm_text(items: list[dict]) -> tuple[str, int]:
+    download_items: list[dict] = []
+    skipped_plex: list[dict] = []
+    unavailable: list[dict] = []
+    for item in items:
+        card = item.get("card") if isinstance(item, dict) else {}
+        result = item.get("result") if isinstance(item, dict) else None
+        if isinstance(card, dict) and card.get("in_plex"):
+            skipped_plex.append(item)
+        elif isinstance(result, dict):
+            download_items.append(item)
+        else:
+            unavailable.append(item)
+
+    lines = ["⬇️ <b>Скачать все из уведомления?</b>", ""]
+    if download_items:
+        lines.append("Будет добавлено:")
+        for index, item in enumerate(download_items, 1):
+            card = item["card"]
+            result = item["result"]
+            title = html_module.escape(str(card.get("title") or result.get("title") or "Без названия"))
+            lines.append(f"{index}. {title} — {html_module.escape(_movie_notification_result_label(result))}")
+            for note in item.get("notes") or []:
+                lines.append(f"   {html_module.escape(str(note))}")
+        total_gb = _movie_notification_total_size_gb(download_items)
+        if total_gb > 0:
+            lines.extend(["", f"Всего примерно: {total_gb:.1f} GB"])
+    if skipped_plex:
+        lines.extend(["", f"Уже есть в Plex, пропущу: {len(skipped_plex)}"])
+    if unavailable:
+        lines.extend(["", f"Без доступной раздачи, пропущу: {len(unavailable)}"])
+    return "\n".join(lines), len(download_items)
+
+
+async def movie_new_notification_push_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        push_id = (query.data or "").split(":")[2]
+    except IndexError:
+        push_id = ""
+    snapshot = _load_movie_notification_snapshot(push_id, chat_id)
+    if not snapshot:
+        await query.edit_message_text(
+            "Уведомление устарело. Откройте свежий список /new.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return
+    items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+    cards = _movie_notification_cards_from_items(items)
+    await query.edit_message_text(
+        _format_movie_notification_text(cards),
+        reply_markup=_movie_notification_keyboard(
+            push_id,
+            len(items),
+            _movie_notification_downloadable_indices(items),
+        ),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+
+
+async def movie_new_notification_bulk_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        push_id = (query.data or "").split(":")[2]
+    except IndexError:
+        push_id = ""
+    snapshot = _load_movie_notification_snapshot(push_id, chat_id)
+    if not snapshot:
+        await query.edit_message_text(
+            "Уведомление устарело. Откройте свежий список /new.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return
+    items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+    text, count = _movie_notification_confirm_text(items)
+    await query.edit_message_text(
+        text,
+        reply_markup=_movie_notification_bulk_keyboard(push_id, count),
+        parse_mode="HTML",
+    )
+
+
+async def movie_new_notification_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        _prefix, _action, push_id, index_raw = (query.data or "").split(":", 3)
+        index = int(index_raw)
+    except (ValueError, IndexError):
+        await query.edit_message_text(
+            "Не удалось разобрать кнопку скачивания.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return ConversationHandler.END
+    snapshot = _load_movie_notification_snapshot(push_id, chat_id)
+    items = snapshot.get("items") if isinstance(snapshot, dict) and isinstance(snapshot.get("items"), list) else []
+    if not (0 <= index < len(items)):
+        await query.edit_message_text(
+            "Уведомление устарело. Откройте свежий список /new.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return ConversationHandler.END
+    item = items[index]
+    card = item.get("card") if isinstance(item.get("card"), dict) else {}
+    result = item.get("result") if isinstance(item.get("result"), dict) else None
+    if card.get("in_plex"):
+        await query.edit_message_text(
+            "Этот фильм уже есть в Plex. Откройте /new, если хотите выбрать другую новинку.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return ConversationHandler.END
+    if result is None:
+        await query.edit_message_text(
+            "По этой новинке нет доступной раздачи. Откройте /new и выберите другой фильм.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return ConversationHandler.END
+
+    search_query = f"{card.get('title', '')} {card.get('year', '')}".strip()
+    context.user_data["srch_results"] = [result]
+    context.user_data["srch_results_page"] = 0
+    context.user_data["srch_search_query"] = search_query
+    context.user_data["srch_query"] = search_query
+    context.user_data["srch_source"] = "movie_discovery_notification"
+    context.user_data["srch_banner"] = "🎬 Раздача из уведомления /new"
+    return await _download_and_add(
+        query,
+        context,
+        0,
+        subscribe=False,
+        _movie_handled_cards=[card] if card else None,
+    )
+
+
+async def movie_new_notification_bulk_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        push_id = (query.data or "").split(":")[2]
+    except IndexError:
+        push_id = ""
+    snapshot = _load_movie_notification_snapshot(push_id, chat_id)
+    if not snapshot:
+        await query.edit_message_text(
+            "Уведомление устарело. Откройте свежий список /new.",
+            reply_markup=_movie_notification_stale_keyboard(),
+        )
+        return
+    items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+    to_download = [
+        item for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("card"), dict)
+        and isinstance(item.get("result"), dict)
+        and not item["card"].get("in_plex")
+    ]
+    skipped_plex = [
+        item for item in items
+        if isinstance(item, dict) and isinstance(item.get("card"), dict) and item["card"].get("in_plex")
+    ]
+    if not to_download:
+        await query.edit_message_text(
+            "Все фильмы из уведомления уже есть в Plex или недоступны для скачивания.",
+            reply_markup=_movie_notification_done_keyboard(chat_id),
+        )
+        return
+
+    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
+    disk_warn = ""
+    if disk_check is not None:
+        severity, msg = disk_check
+        if severity == "block":
+            await query.edit_message_text(
+                msg,
+                reply_markup=_movie_notification_done_keyboard(chat_id),
+                parse_mode="HTML",
+            )
+            return
+        disk_warn = msg
+
+    successes: list[dict] = []
+    failures: list[dict] = []
+    total = len(to_download)
+    for index, item in enumerate(to_download, 1):
+        card = item["card"]
+        result = item["result"]
+        title = str(card.get("title") or result.get("title") or "Без названия")
+        await query.edit_message_text(
+            f"⏳ Добавляю загрузки\n\n{index}/{total}: {html_module.escape(title)}",
+            parse_mode="HTML",
+        )
+        try:
+            entry = _pending_download_entry_from_result(
+                result,
+                chat_id=chat_id,
+                subscribe=False,
+                error="",
+            )
+            task_id, method = await _attempt_pending_download(entry)
+            if task_id:
+                _remember_task_owner(task_id, chat_id)
+                _remember_task_meta(task_id, _build_task_meta_from_result(result, source="movie_discovery"))
+            _record_download_added_history(
+                task_id,
+                chat_id,
+                result,
+                method=method,
+                meta_source="movie_discovery",
+                subscribe=False,
+            )
+            if chat_id:
+                _mark_user_handled_in_new(chat_id, [card])
+            successes.append({"title": title, "task_id": task_id, "method": method})
+        except (JackettError, RutrackerError, DownloadStationError, RuntimeError) as exc:
+            failures.append({"title": title, "error": _format_download_error(exc)})
+            _record_download_history(
+                "download_failed",
+                chat_id=chat_id,
+                result=result,
+                meta=_build_task_meta_from_result(result, source="movie_discovery"),
+                error=_format_download_error(exc),
+            )
+
+    lines = ["⬇️ <b>Скачивание из уведомления</b>", ""]
+    if successes:
+        lines.append(f"Добавлено: {len(successes)}")
+        for item in successes:
+            task = f" · ID: {item['task_id']}" if item.get("task_id") else ""
+            lines.append(f"• {html_module.escape(item['title'])}{task}")
+    if skipped_plex:
+        lines.extend(["", f"Уже есть в Plex, пропущено: {len(skipped_plex)}"])
+    if failures:
+        lines.extend(["", f"Ошибок: {len(failures)}"])
+        for item in failures:
+            lines.append(f"• {html_module.escape(item['title'])}: {html_module.escape(item['error'])}")
+    if disk_warn:
+        lines.extend(["", html_module.escape(disk_warn)])
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=_movie_notification_done_keyboard(chat_id),
+        parse_mode="HTML",
+    )
 
 
 async def help_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18710,7 +19697,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         if (task.get("type") or "").lower() != "bt":
             await query.edit_message_text(
-                f"Public-трекеры доступны только для BT-задач.\n\n{_format_task_card(task)}",
+                f"Public-трекеры доступны только для BT-задач.\n\n{_format_task_card(task, chat_id)}",
                 reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
             )
             return
@@ -18726,7 +19713,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         tracker_lines = _tracker_result_lines(tracker_result) or ["Public-трекеры: выключены"]
         await query.edit_message_text(
-            "\n".join(["Трекеры обновлены.", *tracker_lines, "", _format_task_card(task)]),
+            "\n".join(["Трекеры обновлены.", *tracker_lines, "", _format_task_card(task, chat_id)]),
             reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
         )
         _register_task_card_from_query(query, task_id)
@@ -18831,7 +19818,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         task = _find_task(tasks, task_id)
         if task:
             await query.edit_message_text(
-                f"{notice}\n\n{_format_task_card(task)}",
+                f"{notice}\n\n{_format_task_card(task, chat_id)}",
                 reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
             )
             _register_task_card_from_query(query, task_id)
@@ -18872,7 +19859,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     status = (task.get("status") or "").lower()
     await query.edit_message_text(
-        _format_task_card(task),
+        _format_task_card(task, chat_id),
         reply_markup=_make_task_keyboard(task_id, status, task.get("type", "")),
     )
     _register_task_card_from_query(query, task_id)
@@ -18936,14 +19923,16 @@ async def _do_process_magnet(
         if task_id:
             _remember_task_owner(task_id, chat_id)
             dn = _extract_magnet_dn(magnet_uri)
+            meta = await _build_task_meta_from_title_with_gpt(dn, source="magnet") if dn else None
             if dn:
-                _remember_task_meta(task_id, _build_task_meta_from_title(dn, source="magnet"))
+                _remember_task_meta(task_id, meta)
             _record_download_added_from_title_history(
                 task_id,
                 chat_id,
                 dn,
                 method="magnet-ссылка",
                 meta_source="magnet",
+                meta=meta,
             )
             await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
@@ -19007,14 +19996,16 @@ async def _do_process_torrent(
             raise _missing_task_id_error("для torrent-файла")
         _remember_task_owner(task_id, chat_id)
         meta_title = _normalize_torrent_filename_for_match(safe_name)
+        meta = await _build_task_meta_from_title_with_gpt(meta_title, source="torrent_file") if meta_title else None
         if meta_title:
-            _remember_task_meta(task_id, _build_task_meta_from_title(meta_title, source="torrent_file"))
+            _remember_task_meta(task_id, meta)
         _record_download_added_from_title_history(
             task_id,
             chat_id,
             meta_title or safe_name,
             method="torrent-файл",
             meta_source="torrent_file",
+            meta=meta,
         )
         if _torrent_file_is_private(temp_path):
             tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
@@ -19279,6 +20270,75 @@ async def _gpt_get_did_you_mean(search_query: str) -> list[str]:
     elif not suggestions:
         logger.info("did_you_mean returned no suggestions for %r", search_query)
     return suggestions
+
+
+def _format_search_failure_advice(advice: dict | None) -> str:
+    if not isinstance(advice, dict):
+        return ""
+    message = str(advice.get("message") or "").strip()
+    if not message:
+        return ""
+    if len(message) > 180:
+        message = message[:177].rstrip() + "..."
+    action = str(advice.get("suggested_action") or "").strip()
+    hints = {
+        "remove_quality": "Лучшее следующее действие: нажать «Искать без качества».",
+        "expand_trackers": "Лучшее следующее действие: нажать «Искать на всех трекерах».",
+        "retry": "Лучшее следующее действие: повторить поиск через минуту.",
+        "try_original_title": "Лучшее следующее действие: попробовать вариант названия ниже.",
+        "manual_search": "Лучшее следующее действие: изменить запрос вручную.",
+    }
+    hint = hints.get(action, "")
+    return "\n".join(part for part in (f"🤖 {message}", hint) if part)
+
+
+async def _gpt_get_search_failure_advice(
+    search_query: str,
+    *,
+    base_query: str = "",
+    preferred_quality: str | None = None,
+    audio_required: bool = False,
+    subs_required: bool = False,
+    has_quality: bool = False,
+    jackett_can_expand: bool = False,
+    season_requested: bool = False,
+    source_status: str = "empty",
+    suggestions: list[str] | None = None,
+) -> dict | None:
+    """Return GPT no-results advice, or None on disabled/error fallback."""
+    if not GPT_ENABLED:
+        return None
+    sink: list = []
+    try:
+        advice, error = await asyncio.to_thread(
+            gpt_diagnose_search_failure,
+            query=search_query,
+            base_query=base_query,
+            preferred_quality=preferred_quality,
+            audio_required=audio_required,
+            subs_required=subs_required,
+            has_quality_retry=has_quality,
+            can_expand_trackers=jackett_can_expand,
+            season_requested=season_requested,
+            source_status=source_status,
+            suggestions=suggestions or [],
+            api_key=OPENAI_API_KEY,
+            model=GPT_MODEL,
+            usage_sink=sink,
+        )
+    except Exception:
+        logger.warning("search_failure advice call failed", exc_info=True)
+        return None
+    _gpt_record_usage(
+        feature="search_failure",
+        input_tokens=220,
+        output_tokens=120,
+        error_label=error,
+        usage=(sink[0] if sink else None),
+    )
+    if error:
+        logger.info("search_failure advice returned no advice for %r: %s", search_query, error)
+    return advice
 
 
 # ─── KP verification for original-query did-you-mean suppression ───────────
@@ -19726,7 +20786,7 @@ def _gpt_validate_kp_match(query: str, match) -> bool:
 
 def _gpt_record_usage(
     *,
-    feature: str,  # "kp_confidence" | "did_you_mean" | "explain_card" | "quality_parse" | "plex_unmatched"
+    feature: str,
     input_tokens: int = 0,
     output_tokens: int = 0,
     error_label: str | None,
@@ -20338,6 +21398,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(movie_new_subscribe_callback, pattern=r"^new:subscribe$"))
     app.add_handler(CallbackQueryHandler(movie_new_unsubscribe_callback, pattern=r"^new:unsubscribe$"))
     app.add_handler(CallbackQueryHandler(movie_new_open_callback, pattern=r"^new:open$"))
+    app.add_handler(CallbackQueryHandler(movie_new_notification_bulk_confirm, pattern=r"^new:bulk:[0-9a-f]{10}$"))
+    app.add_handler(CallbackQueryHandler(movie_new_notification_bulk_run, pattern=r"^new:bulk_ok:[0-9a-f]{10}$"))
+    app.add_handler(CallbackQueryHandler(movie_new_notification_push_back, pattern=r"^new:push_back:[0-9a-f]{10}$"))
     app.add_handler(CallbackQueryHandler(help_close_callback, pattern=r"^help:close$"))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=rf"^{SETTINGS_CALLBACK_PREFIX}:"))
     app.add_handler(CommandHandler("users", users_command))
@@ -20358,6 +21421,7 @@ def main() -> None:
                 pattern=rf"^{SUB_CALLBACK_PREFIX}:jackett_view:",
             ),
             CallbackQueryHandler(movie_new_show_releases, pattern=r"^new:show:\d+(?::[0-9a-f]{12})?$"),
+            CallbackQueryHandler(movie_new_notification_download, pattern=r"^new:dl:[0-9a-f]{10}:\d+$"),
             # Re-run the last search from an error message (conversation already ended).
             CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
             CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),

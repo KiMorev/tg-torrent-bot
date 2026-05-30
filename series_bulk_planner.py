@@ -112,6 +112,7 @@ class CandidateEvaluation:
     warnings: tuple[str, ...] = ()
     hard_failures: tuple[str, ...] = ()
     episode_progress: tuple[int, int] | None = None
+    gpt_hint: str = ""
 
 
 @dataclass(frozen=True)

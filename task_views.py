@@ -113,12 +113,11 @@ def format_tasks(
             f"   Скачано: {progress}\n"
             f"   Скорость: {speed}/s | Осталось: {eta}"
         )
-        if task_id:
+        if task_id and scope == scope_all:
             line += f"\n   ID: {task_id}"
-            if scope == scope_all:
-                owner = owners.get(str(task_id))
-                label = (owner_labels or {}).get(owner, str(owner)) if owner else ""
-                line += f"\n   Владелец: {label}" if label else "\n   Владелец: неизвестно"
+            owner = owners.get(str(task_id))
+            label = (owner_labels or {}).get(owner, str(owner)) if owner else ""
+            line += f"\n   Владелец: {label}" if label else "\n   Владелец: неизвестно"
         lines.append(line)
         if index - start < len(visible_tasks):
             lines.append("────────────")
@@ -137,7 +136,7 @@ def find_task(tasks: list[dict], task_id: str) -> dict | None:
     return None
 
 
-def format_task_card(task: dict) -> str:
+def format_task_card(task: dict, *, is_admin: bool = False) -> str:
     title = task.get("title") or "без названия"
     task_id = task.get("id") or "unknown"
     transfer = task.get("additional", {}).get("transfer", {})
@@ -150,18 +149,29 @@ def format_task_card(task: dict) -> str:
     eta = _format_eta(_task_remaining_bytes(task, transfer), speed_bytes)
     complete_despite_error = is_complete_despite_error(task)
 
-    lines = [
-        "Задача Download Station",
-        f"Имя: {title}",
-        f"ID: {task_id}",
+    if is_admin:
+        lines = [
+            "Задача Download Station",
+            f"Имя: {title}",
+            f"ID: {task_id}",
+        ]
+    else:
+        lines = [
+            "Загрузка",
+            f"Файл: {title}",
+        ]
+    lines.extend([
         f"Статус: {user_task_status_icon(task)} {user_task_status_label(task)}",
         f"Прогресс: {_progress_bar(percent)}",
         f"Скачано: {progress}",
         f"Скорость: {speed}/s",
         f"Осталось: {eta}",
-    ]
+    ])
     if complete_despite_error:
-        lines.append("Download Station показывает ошибку, но файл скачан полностью.")
+        if is_admin:
+            lines.append("Download Station показывает ошибку, но файл скачан полностью.")
+        else:
+            lines.append("Сервис загрузок показывает ошибку, но файл скачан полностью.")
 
     return "\n".join(lines)
 
