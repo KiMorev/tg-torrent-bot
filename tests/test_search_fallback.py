@@ -632,6 +632,58 @@ class AudioSubsFilterIntegrationTests(unittest.TestCase):
         # Dub-only result must not appear
         self.assertNotIn("WEB-DL", text)
 
+    def test_default_audio_preference_boosts_without_hiding_alternatives(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            self._make_jackett_result("Dune 2024 1080p WEB-DL"),
+            self._make_jackett_result("Dune 2024 1080p Dual"),
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+        context.user_data["srch_setting_sources"] = {
+            "quality": "default",
+            "audio": "default",
+            "subs": "default",
+        }
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Dune Original"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Dune 2024 1080p Dual", text)
+        self.assertIn("Dune 2024 1080p WEB-DL", text)
+        self.assertLess(text.index("Dune 2024 1080p Dual"), text.index("Dune 2024 1080p WEB-DL"))
+
+    def test_explicit_audio_without_matches_keeps_alternatives_with_banner(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = [
+            self._make_jackett_result("Dune 2024 1080p WEB-DL"),
+        ]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+        context.user_data["srch_setting_sources"] = {
+            "quality": "default",
+            "audio": "explicit",
+            "subs": "default",
+        }
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Dune Original"))
+
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Dune 2024 1080p WEB-DL", text)
+        self.assertIn("Original не нашёл", text)
+
 
 class MediaIntentFilterIntegrationTests(unittest.TestCase):
     """Explicit «фильм» / «сериал» wording should narrow mixed tracker output."""

@@ -6599,6 +6599,23 @@ def _build_search_query(base: str, settings: dict) -> str:
     return " ".join(parts)
 
 
+def _default_search_setting_sources() -> dict[str, str]:
+    return {"quality": "default", "audio": "default", "subs": "default"}
+
+
+def _search_setting_source(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
+    sources = context.user_data.get("srch_setting_sources")
+    if isinstance(sources, dict) and sources.get(key) in {"default", "explicit"}:
+        return str(sources[key])
+    return "explicit"
+
+
+def _mark_search_setting_source(context: ContextTypes.DEFAULT_TYPE, key: str, source: str) -> None:
+    sources = context.user_data.setdefault("srch_setting_sources", _default_search_setting_sources())
+    if isinstance(sources, dict):
+        sources[key] = source
+
+
 def _normalise_preferred_voices(values) -> list[str]:
     allowed = {label.lower(): label for label in KNOWN_VOICE_LABELS}
     voices: list[str] = []
@@ -6995,6 +7012,7 @@ def _search_is_series_master(context: ContextTypes.DEFAULT_TYPE) -> bool:
 def _clear_search_intent(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("srch_intent", None)
     context.user_data.pop("srch_intent_draft", None)
+    context.user_data.pop("srch_setting_sources", None)
     context.user_data.pop("srch_voice_hints", None)
     context.user_data.pop("srch_voice_required", None)
     context.user_data.pop("srch_voice_source", None)
@@ -7050,12 +7068,16 @@ def _apply_intent_to_search_state(
         "audio": bool(defaults.get("audio", False)),
         "subs": bool(defaults.get("subs", False)),
     }
+    sources = _default_search_setting_sources()
     if draft.quality in {"4K", "1080p", "720p", "any"}:
         settings["quality"] = draft.quality
+        sources["quality"] = "explicit"
     if draft.audio_original is not None:
         settings["audio"] = bool(draft.audio_original)
+        sources["audio"] = "explicit"
     if draft.subs is not None:
         settings["subs"] = bool(draft.subs)
+        sources["subs"] = "explicit"
 
     if draft.intent == INTENT_SERIES_MASTER:
         context.user_data["srch_intent"] = SEARCH_INTENT_SERIES_MASTER
@@ -7087,6 +7109,7 @@ def _apply_intent_to_search_state(
         base = _base_query_from_intent(draft, fallback_text)
     context.user_data["srch_query"] = base
     context.user_data["srch_settings"] = settings
+    context.user_data["srch_setting_sources"] = sources
     context.user_data["srch_intent_draft"] = {
         "confidence": draft.confidence,
         "conflicts": list(draft.conflicts),
@@ -7449,17 +7472,12 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             "torrent_url": None,
             "tracker_name": "rutracker",
         })
-    filter_banner_parts: list[str] = []
-    if audio_required:
-        before = len(results_data)
-        results_data = [r for r in results_data if _detect_has_original_audio(r.get("title", ""))]
-        if before != len(results_data):
-            filter_banner_parts.append(f"⚙️ Оставлены {len(results_data)}/{before} с оригинальной дорожкой")
-    if subs_required:
-        before = len(results_data)
-        results_data = [r for r in results_data if _detect_has_subs(r.get("title", ""))]
-        if before != len(results_data):
-            filter_banner_parts.append(f"⚙️ Оставлены {len(results_data)}/{before} с субтитрами")
+    results_data, filter_banner_parts = _apply_audio_subs_preferences(
+        results_data,
+        context,
+        audio_required=audio_required,
+        subs_required=subs_required,
+    )
     quality_banner = ""
     if preferred_quality and results_data:
         buckets = _classify_results_by_quality(results_data)
@@ -7879,8 +7897,80 @@ def _apply_voice_preferences(results: list[dict], context: ContextTypes.DEFAULT_
     return results, ""
 
 
+def _apply_presence_preference(
+    results: list[dict],
+    *,
+    enabled: bool,
+    explicit: bool,
+    predicate,
+    flag: str,
+    kept_label: str,
+    missing_explicit: str,
+    missing_default: str,
+) -> tuple[list[dict], str]:
+    if not enabled or not results:
+        return results, ""
+    matched: list[dict] = []
+    other: list[dict] = []
+    for result in results:
+        if predicate(str(result.get("title") or "")):
+            result[flag] = True
+            matched.append(result)
+        else:
+            result.pop(flag, None)
+            other.append(result)
+    if not matched:
+        return results, missing_explicit if explicit else missing_default
+    if explicit:
+        dropped = len(results) - len(matched)
+        if dropped > 0:
+            return matched, f"⚙️ Оставлены {len(matched)}/{len(results)} {kept_label} (скрыто {dropped})"
+        return matched, ""
+    return matched + other, ""
+
+
+def _apply_audio_subs_preferences(
+    results: list[dict],
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    audio_required: bool,
+    subs_required: bool,
+) -> tuple[list[dict], list[str]]:
+    banners: list[str] = []
+    results, banner = _apply_presence_preference(
+        results,
+        enabled=audio_required,
+        explicit=_search_setting_source(context, "audio") == "explicit",
+        predicate=_detect_has_original_audio,
+        flag="audio_preferred",
+        kept_label="с оригинальной дорожкой",
+        missing_explicit="🎧 Original не нашёл, показываю другие варианты.",
+        missing_default="🎧 Предпочитаемую Original-дорожку не нашёл, показываю другие варианты.",
+    )
+    if banner:
+        banners.append(banner)
+    results, banner = _apply_presence_preference(
+        results,
+        enabled=subs_required,
+        explicit=_search_setting_source(context, "subs") == "explicit",
+        predicate=_detect_has_subs,
+        flag="subs_preferred",
+        kept_label="с субтитрами",
+        missing_explicit="💬 Субтитры не нашёл, показываю варианты без них.",
+        missing_default="💬 Предпочитаемые субтитры не нашёл, показываю варианты без них.",
+    )
+    if banner:
+        banners.append(banner)
+    return results, banners
+
+
 def _search_result_sort_score(result: dict) -> float:
-    return _score_result(result) + (10000 if result.get("voice_preferred") else 0)
+    return (
+        _score_result(result)
+        + (10000 if result.get("voice_preferred") else 0)
+        + (5000 if result.get("audio_preferred") else 0)
+        + (3000 if result.get("subs_preferred") else 0)
+    )
 
 
 def _cancel_didmean_prefetch(context) -> None:
@@ -8665,37 +8755,16 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     # doesn't change the quality landscape). Quality filter runs after so the
     # «found in other quality» banner reflects what's actually available
     # given the audio/subs preference.
-    filter_banner_parts: list[str] = []
-    if audio_required:
-        before = len(results_data)
-        results_data = [r for r in results_data if _detect_has_original_audio(r.get("title", ""))]
-        dropped = before - len(results_data)
-        if dropped > 0:
-            filter_banner_parts.append(
-                f"⚙️ Оставлены {len(results_data)}/{before} с оригинальной дорожкой "
-                f"(скрыто {dropped})"
-            )
-            logger.info(
-                "Search: audio filter kept %d/%d for %r",
-                len(results_data), before, base_query,
-            )
-    if subs_required:
-        before = len(results_data)
-        results_data = [r for r in results_data if _detect_has_subs(r.get("title", ""))]
-        dropped = before - len(results_data)
-        if dropped > 0:
-            filter_banner_parts.append(
-                f"⚙️ Оставлены {len(results_data)}/{before} с субтитрами "
-                f"(скрыто {dropped})"
-            )
-            logger.info(
-                "Search: subs filter kept %d/%d for %r",
-                len(results_data), before, base_query,
-            )
+    results_data, filter_banner_parts = _apply_audio_subs_preferences(
+        results_data,
+        context,
+        audio_required=audio_required,
+        subs_required=subs_required,
+    )
 
-    # If audio/subs filter wiped everything but we DID have results before —
-    # show no-results with a helpful banner. Otherwise fall through to quality
-    # filter (which has its own «empty bucket → show all» recovery).
+    # Audio/subs preferences now keep alternatives when there is no exact
+    # match. This branch remains as a defensive guard for edge cases where
+    # another presence filter produced an empty set.
     if not results_data and filter_banner_parts:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
@@ -9495,6 +9564,7 @@ async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYP
         _search_settings_for_chat(_chat_id_from_query(query)),
     ))
     context.user_data["srch_settings"] = settings
+    context.user_data.setdefault("srch_setting_sources", _default_search_setting_sources())
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
         _search_advanced_text(base, context),
@@ -9521,8 +9591,10 @@ async def search_toggle_setting(update: Update, context: ContextTypes.DEFAULT_TY
 
     if action == "quality":
         settings["quality"] = value
+        _mark_search_setting_source(context, "quality", "explicit")
     elif action == "toggle" and value in ("audio", "subs"):
         settings[value] = not settings.get(value, False)
+        _mark_search_setting_source(context, value, "explicit")
 
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
@@ -13001,6 +13073,8 @@ def _series_bulk_profile_from_result(
     )
     _base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
     settings = context.user_data.get("srch_settings") or {}
+    audio_source = _search_setting_source(context, "audio")
+    subs_source = _search_setting_source(context, "subs")
     quality = (
         context.user_data.get("srch_preferred_quality")
         or preferred_quality
@@ -13009,8 +13083,8 @@ def _series_bulk_profile_from_result(
     )
     if quality == "any":
         quality = "any"
-    audio_required = bool(audio_required or settings.get("audio"))
-    subs_required = bool(subs_required or settings.get("subs"))
+    audio_required = bool((audio_required or settings.get("audio")) and audio_source == "explicit")
+    subs_required = bool((subs_required or settings.get("subs")) and subs_source == "explicit")
     return SeriesBulkProfile(
         quality=quality,
         require_original=audio_required,

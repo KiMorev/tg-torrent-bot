@@ -274,6 +274,34 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("⬅️ К выбору", labels)
         self.assertTrue(any("Озвучка: любая из эталона" in label for label in labels))
 
+    def test_bulk_profile_treats_default_original_and_subs_as_soft_preferences(self):
+        query = _make_query("srch:bulk_plan:0")
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / LostFilm",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.user_data["srch_settings"] = {"quality": "1080p", "audio": True, "subs": True}
+        ctx.user_data["srch_setting_sources"] = {
+            "quality": "default",
+            "audio": "default",
+            "subs": "default",
+        }
+
+        state = asyncio.run(bot.search_series_bulk_plan(update, ctx))
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        profile = ctx.user_data["srch_series_bulk_profile_draft"]
+        self.assertFalse(profile.require_original)
+        self.assertFalse(profile.require_subs)
+
     def test_bulk_profile_prefers_search_voice_hint_from_reference(self):
         query = _make_query("srch:bulk_plan:0")
         update = MagicMock(callback_query=query)

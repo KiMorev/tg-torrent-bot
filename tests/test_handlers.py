@@ -5348,6 +5348,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.user_data["srch_settings"]["audio"])
         self.assertEqual(context.user_data["srch_voice_hints"], ["LostFilm"])
         self.assertEqual(context.user_data["srch_voice_source"], "default")
+        self.assertEqual(context.user_data["srch_setting_sources"]["audio"], "default")
+        self.assertEqual(context.user_data["srch_setting_sources"]["subs"], "default")
 
     async def test_explicit_query_overrides_personal_defaults_and_autostarts(self):
         update = _make_message_update(chat_id=100)

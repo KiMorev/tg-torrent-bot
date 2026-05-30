@@ -408,7 +408,8 @@ updated_at: iso datetime
 2. поверх применить personal defaults текущего `chat_id`, если есть;
 3. поверх применить deterministic/GPT intent из конкретного запроса;
 4. если запрос конфликтный, показать options screen с уже заполненными настройками;
-5. preferred voices применить только как ranking/profile hint, если конкретный запрос не указал озвучку явно.
+5. хранить источник параметров (`default`/`explicit`): предпочтения из `/settings` дают ranking/profile hint, а явный ввод пользователя сильнее;
+6. preferred voices, Original и субтитры из `/settings` не должны обнулять выдачу: если точного варианта нет, показываем альтернативы с пояснением.
 
 Примеры:
 
@@ -416,6 +417,8 @@ updated_at: iso datetime
 - default `4K`, запрос `Дюна 1080` -> ищем `Дюна 1080p`;
 - default `Original + Sub`, запрос `Дюна без субтитров` -> `Original=true`, `subs=false`;
 - default `1080p`, запрос `любое качество` -> `quality=any`.
+- default `Original + Sub`, запрос `Дюна` -> раздачи с Original/Sub выше, остальные остаются в выдаче;
+- запрос `Дюна в оригинале`, но Original не найден -> показываем другие варианты с пояснением;
 - preferred voice `LostFilm`, запрос `Клиника` -> релизы LostFilm выше, но альтернативы остаются;
 - preferred voice `LostFilm`, запрос `Клиника в озвучке Кубик` -> ищем/приоритизируем `Кубик`, а не LostFilm.
 
