@@ -306,6 +306,7 @@ DS_VERIFY_SSL=false
 | `JACKETT_INDEXERS` | Индексеры Jackett для обычного поиска. По умолчанию `all`. |
 | `JACKETT_MAX_RESULTS` | Сколько результатов показывать из Jackett. |
 | `JACKETT_FETCH_LIMIT` | Сколько сырых результатов запрашивать у Jackett до фильтрации. |
+| `JACKETT_SEARCH_TIMEOUT_SECONDS` | Сколько секунд бот ждёт ответ поиска Jackett. По умолчанию `90`, потому что некоторые индексеры возвращают кэш только после своего 60-секундного timeout. |
 | `JACKETT_WARMUP_ENABLED` | Включает лёгкий фоновый прогрев Jackett, если Jackett настроен. |
 | `JACKETT_WARMUP_INTERVAL_SECONDS` | Как часто запускать прогрев. По умолчанию 15 минут. |
 | `JACKETT_WARMUP_QUERY` | Короткий запрос для прогрева. По умолчанию `1080p`. |

@@ -319,6 +319,7 @@ JACKETT_ENABLED = settings.jackett_enabled
 JACKETT_INDEXERS = settings.jackett_indexers
 JACKETT_MAX_RESULTS = settings.jackett_max_results
 JACKETT_FETCH_LIMIT = settings.jackett_fetch_limit
+JACKETT_SEARCH_TIMEOUT_SECONDS = settings.jackett_search_timeout_seconds
 JACKETT_WARMUP_ENABLED = settings.jackett_warmup_enabled
 JACKETT_WARMUP_INTERVAL_SECONDS = settings.jackett_warmup_interval_seconds
 JACKETT_WARMUP_QUERY = settings.jackett_warmup_query
@@ -8124,7 +8125,7 @@ async def _didmean_prefetch_jackett(
                 indexers=indexers,
                 fetch_limit=JACKETT_FETCH_LIMIT,
             ),
-            timeout=45.0,
+            timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
         )
     except asyncio.CancelledError:
         raise
@@ -8587,11 +8588,11 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                             indexers=list(selected),
                             fetch_limit=JACKETT_FETCH_LIMIT,
                         ),
-                        timeout=45.0,
+                        timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
                     )
             except (JackettError, asyncio.TimeoutError) as e:
                 raw_err = (
-                    "Jackett не ответил за 45 сек — проверьте Global timeout в настройках Jackett"
+                    f"Jackett не ответил за {int(JACKETT_SEARCH_TIMEOUT_SECONDS)} сек — проверьте Global timeout в настройках Jackett"
                     if isinstance(e, asyncio.TimeoutError) else str(e)
                 )
                 logger.error("Jackett search failed in _run_search: %s", raw_err)
@@ -13090,7 +13091,7 @@ async def _series_bulk_search_once(
                     indexers=list(selected),
                     fetch_limit=JACKETT_FETCH_LIMIT,
                 ),
-                timeout=45.0,
+                timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
             )
             if JACKETT_FETCH_LIMIT and len(raw) >= JACKETT_FETCH_LIMIT:
                 warnings.append(

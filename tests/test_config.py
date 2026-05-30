@@ -76,6 +76,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.rutracker_max_results, 50)
         self.assertEqual(settings.jackett_max_results, 20)
         self.assertEqual(settings.jackett_fetch_limit, 100)
+        self.assertEqual(settings.jackett_search_timeout_seconds, 90.0)
         self.assertTrue(settings.jackett_warmup_enabled)
         self.assertEqual(settings.jackett_warmup_interval_seconds, 900)
         self.assertEqual(settings.jackett_warmup_query, "1080p")
@@ -113,6 +114,7 @@ class ConfigParsingTests(unittest.TestCase):
             "RUTRACKER_MAX_RESULTS": "500",
             "JACKETT_MAX_RESULTS": "500",
             "JACKETT_FETCH_LIMIT": "500",
+            "JACKETT_SEARCH_TIMEOUT_SECONDS": "500",
             "JACKETT_WARMUP_ENABLED": "false",
             "JACKETT_WARMUP_INTERVAL_SECONDS": "10",
             "JACKETT_WARMUP_QUERY": " test ",
@@ -146,6 +148,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.rutracker_max_results, 50)
         self.assertEqual(settings.jackett_max_results, 50)
         self.assertEqual(settings.jackett_fetch_limit, 200)
+        self.assertEqual(settings.jackett_search_timeout_seconds, 180.0)
         self.assertFalse(settings.jackett_warmup_enabled)
         self.assertEqual(settings.jackett_warmup_interval_seconds, 60)
         self.assertEqual(settings.jackett_warmup_query, "test")
@@ -222,6 +225,7 @@ class AppContextTests(unittest.TestCase):
         self.assertEqual(context.ds_client.base_url, "https://nas.example:5001")
         self.assertIsNotNone(context.rutracker_client)
         self.assertIsNotNone(context.jackett_client)
+        self.assertEqual(context.jackett_client._search_timeout, 90.0)
         self.assertIsNotNone(context.kinopoisk_client)
 
     def test_build_app_context_leaves_optional_clients_disabled(self) -> None:

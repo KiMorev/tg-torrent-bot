@@ -174,11 +174,13 @@ class JackettClient:
         api_key: str,
         max_results: int = 10,
         indexers: str = "all",
+        search_timeout: float = 90.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._max_results = max_results
         self._indexers = indexers or "all"
+        self._search_timeout = max(30.0, float(search_timeout))
         self._lock = threading.RLock()
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "tg-torrent-bot/1.0"})
@@ -417,7 +419,7 @@ class JackettClient:
 
         def _do_search(params: list[tuple[str, str]]) -> tuple[list[JackettResult], list[JackettIndexerStatus]]:
             try:
-                resp = self._session.get(url, params=params, timeout=(10, 40))
+                resp = self._session.get(url, params=params, timeout=(10, self._search_timeout))
                 resp.raise_for_status()
             except requests.ConnectionError as e:
                 self._reset_session()

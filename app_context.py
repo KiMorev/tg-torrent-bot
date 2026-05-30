@@ -64,6 +64,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
             settings.jackett_api_key,
             max_results=settings.jackett_max_results,
             indexers=settings.jackett_indexers,
+            search_timeout=settings.jackett_search_timeout_seconds,
         )
         if settings.jackett_enabled
         else None

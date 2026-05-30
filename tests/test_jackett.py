@@ -128,6 +128,27 @@ class JackettStartupRetryTests(unittest.TestCase):
         self.assertNotIn("secret", message)
         self.assertIn("apikey=***", message)
 
+    def test_search_uses_configured_read_timeout(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret", search_timeout=90)
+        payload = {
+            "Results": [{
+                "Title": "Movie 2026 1080p",
+                "Size": 1_000_000_000,
+                "Seeders": 10,
+                "TrackerId": "rutracker",
+                "Details": "https://rutracker.org/forum/viewtopic.php?t=123",
+                "Link": "http://jackett.local/dl/rutracker/?path=ABC",
+                "MagnetUri": "",
+                "PublishDate": "",
+            }],
+        }
+        session = SequenceSession([FakeResponse(text=json.dumps(payload))])
+        client._session = session
+
+        client.search("movie")
+
+        self.assertEqual(session.requests[0][1]["timeout"], (10, 90.0))
+
 
 class WarmupTests(unittest.TestCase):
     def test_warmup_returns_success_and_tracker_filter(self) -> None:

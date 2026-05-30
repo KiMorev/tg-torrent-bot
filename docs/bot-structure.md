@@ -87,7 +87,7 @@
 |---|---|
 | `bot.py` | Telegram handlers, пользовательские флоу, фоновые циклы, связывание модулей. |
 | `keyboards.py` | Inline-клавиатуры, callback prefixes, правила расположения кнопок. |
-| `config.py` | `.env` -> `AppSettings`, дефолты, feature flags, пути к state-файлам. |
+| `config.py` | `.env` -> `AppSettings`, дефолты, feature flags, таймауты Jackett, пути к state-файлам. |
 | `app_context.py` | Общий runtime context и клиенты внешних сервисов. |
 | `download_station.py` | Synology Download Station API, ошибки, lock вокруг HTTP-сессии. |
 | `rutracker.py` | Прямой клиент Rutracker: login, search, download, unavailable topic. |
