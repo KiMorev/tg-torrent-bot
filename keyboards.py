@@ -572,7 +572,11 @@ def _cluster_picker_keyboard(clusters: list[dict], *, total_count: int | None = 
     for idx, cluster in enumerate(clusters):
         year_str = f" ({cluster['year']})" if cluster.get("year") else ""
         icon = "📺" if cluster.get("kind") == "series" else "🎬"
-        label = f"{icon} {cluster['title']}{year_str} · {cluster['count']} разд."
+        season_label = str(cluster.get("season_label") or "").strip()
+        if cluster.get("kind") == "series" and season_label:
+            label = f"{icon} {season_label} · {cluster['title']}{year_str} · {cluster['count']} разд."
+        else:
+            label = f"{icon} {cluster['title']}{year_str} · {cluster['count']} разд."
         # Trim label if too long (Telegram limit ~64 chars)
         if len(label) > 60:
             label = label[:57] + "…"

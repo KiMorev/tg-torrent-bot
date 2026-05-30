@@ -919,7 +919,7 @@ class SearchQueryLabelTests(unittest.TestCase):
 
 
 class BuildSearchClustersTests(unittest.TestCase):
-    """Proposal #1 cluster detection — groups results by (normalized_title, year)."""
+    """Proposal #1 cluster detection — groups results by title/year/type/season."""
 
     def test_single_film_makes_single_cluster(self):
         results = [
@@ -945,6 +945,42 @@ class BuildSearchClustersTests(unittest.TestCase):
         years = [c["year"] for c in clusters]
         # Sort: newest first
         self.assertEqual(years, sorted(years, reverse=True))
+
+    def test_series_seasons_make_separate_clusters(self):
+        results = [
+            {"title": "Peaky Blinders S06 2022 1080p WEB-DL", "category": "series"},
+            {"title": "Peaky Blinders S05 2019 1080p WEB-DL", "category": "series"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        self.assertEqual(
+            [(c["title"], c["year"], c["season_label"], c["seasons"]) for c in clusters],
+            [
+                ("Peaky Blinders", 2022, "S6", [6]),
+                ("Peaky Blinders", 2019, "S5", [5]),
+            ],
+        )
+
+    def test_series_pack_gets_range_label(self):
+        clusters = bot._build_search_clusters([
+            {"title": "Peaky Blinders S01-S06 1080p WEB-DL", "category": "series"},
+        ])
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["title"], "Peaky Blinders")
+        self.assertEqual(clusters[0]["season_label"], "S1-S6")
+        self.assertEqual(clusters[0]["seasons"], [1, 2, 3, 4, 5, 6])
+
+    def test_same_title_movie_and_series_do_not_merge(self):
+        results = [
+            {"title": "Fargo 2014 1080p WEB-DL", "category": "movies"},
+            {"title": "Fargo S01 2014 1080p WEB-DL", "category": "series"},
+        ]
+        clusters = bot._build_search_clusters(results)
+        by_kind = {cluster["kind"]: cluster for cluster in clusters}
+        self.assertEqual(len(clusters), 2)
+        self.assertEqual(by_kind["movie"]["title"], "Fargo")
+        self.assertEqual(by_kind["movie"]["season_label"], "")
+        self.assertEqual(by_kind["series"]["title"], "Fargo")
+        self.assertEqual(by_kind["series"]["season_label"], "S1")
 
     def test_should_show_picker_when_multiple_real_clusters(self):
         results = [

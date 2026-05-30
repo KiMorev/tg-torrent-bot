@@ -392,6 +392,32 @@ class SearchResultsKeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["🎬 Драйв (2011) · 1 разд."], "srch:cluster:0")
         self.assertEqual(buttons["📺 Клиника (2001) · 3 разд."], "srch:cluster:1")
 
+    def test_cluster_picker_puts_series_season_first(self) -> None:
+        keyboard = _cluster_picker_keyboard([
+            {
+                "title": "Peaky Blinders",
+                "year": 2022,
+                "count": 9,
+                "kind": "series",
+                "season_label": "S6",
+            },
+        ], total_count=9)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["📺 S6 · Peaky Blinders (2022) · 9 разд."], "srch:cluster:0")
+
+    def test_cluster_picker_puts_series_pack_first(self) -> None:
+        keyboard = _cluster_picker_keyboard([
+            {
+                "title": "Peaky Blinders",
+                "year": None,
+                "count": 2,
+                "kind": "series",
+                "season_label": "S1-S6",
+            },
+        ], total_count=2)
+        buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+        self.assertEqual(buttons["📺 S1-S6 · Peaky Blinders · 2 разд."], "srch:cluster:0")
+
     def test_retry_jackett_and_switch_trackers_are_mutually_exclusive(self) -> None:
         labels_switch = [b.text for row in _search_results_keyboard([], show_switch_trackers=True).inline_keyboard for b in row]
         labels_retry = [b.text for row in _search_results_keyboard([], show_retry_jackett=True).inline_keyboard for b in row]

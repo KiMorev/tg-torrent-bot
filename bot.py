@@ -7314,6 +7314,41 @@ def _normalize_search_cluster_title(title: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _strip_search_cluster_series_markers(title: str) -> str:
+    title = _normalize_season_in_query(title or "")
+    title = re.sub(r"\bS0*\d{1,2}\s*[-‑–—]\s*S?0*\d{1,2}\b", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\bS0*\d{1,2}E\d{1,2}(?:-\d{1,2})?(?:\s+of\s+\d{1,2})?\b", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\bS0*\d{1,2}\b", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\bСезоны?[:\s]+0*\d{1,2}\s*[-‑–—]\s*0*\d{1,2}\b", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\bСезон[:\s]+0*\d{1,2}\b", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b0*\d{1,2}\s*(?:[-‑–—]?\s*(?:й|ый|ой))?\s+сезон\b", " ", title, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def _search_cluster_series_meta(title: str) -> tuple[str, tuple[int, ...], str]:
+    pack_range = season_pack_range_from_title(title)
+    if pack_range is not None:
+        start, end = pack_range
+        seasons = tuple(range(start, end + 1))
+        return "pack", seasons, f"S{start}-S{end}"
+
+    season = _extract_season_from_query(title)
+    if season is not None:
+        return "season", (season,), f"S{season}"
+
+    return "unknown", (), ""
+
+
+def _search_cluster_display_title(title: str, kind: str) -> str:
+    if kind != "series":
+        return _normalize_search_cluster_title(title)
+
+    base = _extract_series_base_query(title) or title
+    stripped = _strip_search_cluster_series_markers(base)
+    normalized = _normalize_search_cluster_title(stripped)
+    return normalized or _normalize_search_cluster_title(title)
+
+
 _SEARCH_CLUSTER_SERIES_MARKERS = (
     "сериал",
     "сериалы",
@@ -7342,47 +7377,49 @@ def _search_cluster_kind(result: dict) -> str:
 
 
 def _build_search_clusters(results_data: list[dict]) -> list[dict]:
-    """Group search results by (normalized_title, year) — used for the
-    «Какую Дюну?» picker when one query returns multiple distinct titles.
+    """Group search results by title/year, with seasons split for series.
 
     Returns a list of cluster dicts, each:
         {
-          "key": "<title>|<year>",         # for callback_data
+          "key": "<title>|<year>",         # human-readable identity
           "title": "Дюна",                 # display title (best from cluster)
           "year": 2024,                    # or None if unparseable
           "kind": "movie",                 # "movie" or "series"
+          "season_label": "S2",            # series only, empty when unknown
           "count": 12,                     # number of releases
           "indices": [0, 3, 7, ...],       # positions in results_data
         }
 
-    Sort: by year descending, then count descending — newest + most-seeded
-    films first so users tap the freshest match more easily.
+    Sort: by year descending, then season/count descending.
     """
-    clusters: dict[tuple[str, int | None], dict] = {}
+    clusters: dict[tuple, dict] = {}
     for idx, r in enumerate(results_data):
         title = r.get("title") or ""
-        normalized = _normalize_search_cluster_title(title)
         year = _search_cluster_year(title)
         kind = _search_cluster_kind(r)
-        key = (normalized.lower(), year)
+        normalized = _search_cluster_display_title(title, kind)
+        season_kind, seasons, season_label = _search_cluster_series_meta(title) if kind == "series" else ("", (), "")
+        season_key = (season_kind, seasons) if kind == "series" else None
+        key = (kind, normalized.lower(), year, season_key)
         if key not in clusters:
             clusters[key] = {
                 "key": f"{normalized}|{year if year else '?'}",
                 "title": normalized or title,
                 "year": year,
                 "kind": kind,
+                "season_label": season_label,
+                "seasons": list(seasons),
                 "count": 0,
                 "indices": [],
             }
-        elif kind == "series":
-            clusters[key]["kind"] = "series"
         clusters[key]["count"] += 1
         clusters[key]["indices"].append(idx)
-    # Sort: newer films first, then by release count
+    # Sort: newer first, then by season and release count.
     return sorted(
         clusters.values(),
         key=lambda c: (
             -(c["year"] or 0),
+            -max(c.get("seasons") or [0]),
             -c["count"],
             c["title"],
         ),
@@ -7426,6 +7463,7 @@ def _clusters_for_query_picker(clusters: list[dict], query: str) -> list[dict]:
             key=lambda item: (
                 -item[0],
                 -(item[1].get("year") or 0),
+                -max(item[1].get("seasons") or [0]),
                 -item[1].get("count", 0),
                 item[1].get("title") or "",
             )
