@@ -197,14 +197,13 @@ class JackettErrorFallsBackToRutrackerTests(unittest.TestCase):
 
 
 class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
-    """When BOTH sources fail, we want the no-results screen (with did-you-
-    mean), NOT the dead-end fatal error screen."""
+    """When BOTH sources fail, show a temporary-failure screen without suggestions."""
 
-    def test_jackett_error_then_rutracker_error_shows_no_results_with_banner(self):
+    def test_jackett_error_then_rutracker_error_shows_temporary_failure_without_suggestions(self):
         mock_jackett = MagicMock()
-        mock_jackett.search.side_effect = JackettError("jackett down")
+        mock_jackett.search.side_effect = JackettError("jackett did not answer in 45 sec")
         mock_rutracker = MagicMock()
-        mock_rutracker.search.side_effect = RutrackerError("rutracker login broken")
+        mock_rutracker.search.side_effect = RutrackerError("521 Server Error: <none> for url")
         send_fn, message = _make_send_fn()
         context = _make_context()
 
@@ -218,18 +217,19 @@ class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
         ):
             asyncio.run(bot._run_search(send_fn, context, "Some Query"))
 
-        # No-results screen rendered (not fatal error screen).
         args, kwargs = message.edit_text.call_args
         text = args[0] if args else kwargs.get("text", "")
-        self.assertIn("ничего не найдено", text)
-        # Banner mentions both sources being down.
-        self.assertIn("Оба источника недоступны", text)
-        self.assertIn("Jackett", text)
-        self.assertIn("Rutracker", text)
-        # Did-you-mean suggestion still surfaced even on double failure.
+        self.assertIn("Поиск временно не получился", text)
+        self.assertIn("источники поиска сейчас не ответили", text)
+        self.assertIn("Это не значит, что раздач нет", text)
+        self.assertNotIn("ничего не найдено", text)
+        self.assertNotIn("Возможно вы имели в виду", text)
+        self.assertNotIn("521 Server Error", text)
+        self.assertNotIn("45 sec", text)
         keyboard = kwargs["reply_markup"].inline_keyboard
         labels = [b.text for row in keyboard for b in row]
-        self.assertTrue(any("альтернатива" in lbl for lbl in labels))
+        self.assertFalse(any("альтернатива" in lbl for lbl in labels))
+        self.assertTrue(any("Повторить поиск" in lbl for lbl in labels))
 
 
 class SplitQuerySettingsTests(unittest.TestCase):

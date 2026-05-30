@@ -7606,6 +7606,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     source = "rutracker"
     jackett_errored = False
     jackett_err_msg = ""
+    both_sources_unavailable = False
 
     if jackett_client:
         # --- Jackett-first: use pre-selected indexers (default to Rutracker indexer) ---
@@ -7754,14 +7755,10 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                     reply_markup=_search_error_keyboard(), parse_mode="HTML",
                 )
                 return ConversationHandler.END
-            # Context B — both sources down. Build a banner and fall through to
-            # the no-results screen below (which has did-you-mean suggestions).
+            # Context B — both sources down. Fall through to the dedicated
+            # temporary-failure screen below; did-you-mean would be misleading.
             logger.warning("Rutracker fallback also failed for %r: %s", search_query, rt_err)
-            banner = (
-                f"⚠️ Оба источника недоступны.\n"
-                f"Jackett: {jackett_err_msg[:60]}\n"
-                f"Rutracker: {str(rt_err)[:60]}"
-            )
+            both_sources_unavailable = True
             rt_results = []
         for r in rt_results:
             ep = _parse_episode_info(r.title)
@@ -7799,6 +7796,25 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     if not results_data:
         has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+        if both_sources_unavailable:
+            _remember_didmean_suggestions(context, [])
+            _cancel_didmean_prefetch(context)
+            no_results_text = (
+                "⚠️ Поиск временно не получился\n\n"
+                f"Запрос {_format_search_query_label(search_query)} не удалось проверить: "
+                "источники поиска сейчас не ответили.\n\n"
+                "Это не значит, что раздач нет. Повторите поиск через минуту. "
+                "Если проблема повторяется, проверьте диагностику в /admin."
+            )
+            await edit_fn(
+                no_results_text,
+                reply_markup=_no_results_keyboard(
+                    has_quality=False,
+                    jackett_can_expand=False,
+                    suggestions=[],
+                ),
+            )
+            return SEARCH_RESULTS
 
         # === Failure-vs-empty distinction (Problem A) =====================
         # If Jackett errored AND user's selected indexers covered trackers
