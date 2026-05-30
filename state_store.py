@@ -31,6 +31,7 @@ class JsonStateStore:
         series_bulk_jobs_file: Path | None = None,
         storage_history_file: Path | None = None,
         voice_usage_file: Path | None = None,
+        user_search_defaults_file: Path | None = None,
         gpt_usage_file: Path | None = None,
         torrent_titles_cache_file: Path | None = None,
         download_history_file: Path | None = None,
@@ -48,6 +49,7 @@ class JsonStateStore:
         self.series_bulk_jobs_file = series_bulk_jobs_file
         self.storage_history_file = storage_history_file
         self.voice_usage_file = voice_usage_file
+        self.user_search_defaults_file = user_search_defaults_file
         self.gpt_usage_file = gpt_usage_file
         self.torrent_titles_cache_file = torrent_titles_cache_file
         self.download_history_file = download_history_file
@@ -543,6 +545,62 @@ class JsonStateStore:
         if not self.voice_usage_file:
             return
         self.save_json_file(self.voice_usage_file, payload, "voice usage")
+
+    def load_user_search_defaults(self, chat_id: int) -> dict | None:
+        if not self.user_search_defaults_file:
+            return None
+        payload = self.load_json_file(self.user_search_defaults_file, {})
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get(str(chat_id))
+        if not isinstance(raw, dict):
+            return None
+        quality = str(raw.get("quality") or "1080p")
+        if quality not in {"4K", "1080p", "720p", "any"}:
+            quality = "1080p"
+        voices_raw = raw.get("preferred_voices") or []
+        if isinstance(voices_raw, str):
+            voices = [voices_raw]
+        elif isinstance(voices_raw, list):
+            voices = [str(v) for v in voices_raw if v]
+        else:
+            voices = []
+        return {
+            "quality": quality,
+            "audio": bool(raw.get("audio", False)),
+            "subs": bool(raw.get("subs", False)),
+            "preferred_voices": voices[:2],
+            "updated_at": str(raw.get("updated_at") or ""),
+        }
+
+    def save_user_search_defaults(self, chat_id: int, defaults: dict) -> None:
+        if not self.user_search_defaults_file:
+            return
+        payload = self.load_json_file(self.user_search_defaults_file, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        quality = str(defaults.get("quality") or "1080p")
+        if quality not in {"4K", "1080p", "720p", "any"}:
+            quality = "1080p"
+        voices_raw = defaults.get("preferred_voices") or []
+        voices = [str(v) for v in voices_raw if v] if isinstance(voices_raw, list) else []
+        payload[str(chat_id)] = {
+            "quality": quality,
+            "audio": bool(defaults.get("audio", False)),
+            "subs": bool(defaults.get("subs", False)),
+            "preferred_voices": voices[:2],
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self.save_json_file(self.user_search_defaults_file, payload, "user search defaults")
+
+    def reset_user_search_defaults(self, chat_id: int) -> None:
+        if not self.user_search_defaults_file:
+            return
+        payload = self.load_json_file(self.user_search_defaults_file, {})
+        if not isinstance(payload, dict):
+            return
+        payload.pop(str(chat_id), None)
+        self.save_json_file(self.user_search_defaults_file, payload, "user search defaults")
 
     # ---- GPT chat usage stats (per-feature: kp_confidence, did_you_mean, ...) ----
 

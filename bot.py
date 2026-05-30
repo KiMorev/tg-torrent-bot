@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -136,12 +137,20 @@ from series_bulk_planner import (
     VOICE_ORIGINAL_ONLY,
     VOICE_REQUIRE_SELECTED,
     VOICE_SINGLE_FROM_REFERENCE,
+    KNOWN_VOICE_LABELS,
     SeriesBulkProfile,
     SeriesBulkPlan,
     SeasonPlan,
     build_series_bulk_plan,
     release_profile_from_title,
     season_pack_range_from_title,
+)
+from search_intent import (
+    INTENT_ONE_RELEASE,
+    INTENT_SERIES_MASTER,
+    SearchIntentDraft,
+    parse_search_intent,
+    parse_search_intent_with_gpt,
 )
 from series_continue import (
     SeriesCatchUpCandidate,
@@ -347,9 +356,11 @@ _movie_discovery_refresh_last_finished_at: float = 0.0
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
 SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate warning
+SETTINGS_CALLBACK_PREFIX = "settings"
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
+    BotCommand("settings", "Настройки по умолчанию"),
     BotCommand("continue", "Докачать сезон"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
@@ -4026,6 +4037,18 @@ def _plex_quality_from_title(title: str) -> str:
     return _plex_normalise_resolution(_movie_detect_quality(title) or "")
 
 
+def _positive_ints(values) -> list[int]:
+    result: list[int] = []
+    for value in values or []:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            result.append(number)
+    return result
+
+
 def _plex_pre_check(title: str, year: int, requested_quality: str) -> "PlexCheckResult | None":
     """Return a PlexCheckResult when a Plex duplicate is found, else None.
 
@@ -4049,6 +4072,134 @@ def _plex_pre_check(title: str, year: int, requested_quality: str) -> "PlexCheck
     if match is None:
         return None
     return _plex_check_before_download(match, requested_quality)
+
+
+async def _plex_result_hint(result: dict, requested_quality: str) -> dict | None:
+    if not PLEX_ENABLED or not requested_quality:
+        return None
+    title = str(result.get("title") or "")
+    season_num = _extract_season_from_query(title)
+    series_query = _extract_series_base_query(title)
+    if series_query and season_num and _plex_shows_library:
+        check = await _plex_pre_check_series(series_query, season_num, requested_quality)
+        if check is not None:
+            return {
+                "kind": "series",
+                "action": check.action,
+                "quality": check.season.resolution,
+                "season": season_num,
+                "confidence": "high",
+            }
+        show = _plex_show_find(series_query)
+        if show is not None:
+            seasons = await _plex_ensure_show_seasons_lite(show, focus_season=None)
+            other = sorted(s for s in show.seasons if s != season_num)
+            if other:
+                return {
+                    "kind": "series",
+                    "action": "other_seasons",
+                    "seasons": other,
+                    "season": season_num,
+                    "confidence": "medium",
+                }
+        return None
+    year = _movie_extract_year(title) or 0
+    check = _plex_pre_check(title, year, requested_quality)
+    if check is None:
+        return None
+    return {
+        "kind": "movie",
+        "action": check.action,
+        "quality": check.plex_movie.resolution,
+        "confidence": "high",
+    }
+
+
+async def _enrich_results_with_plex_hints(
+    results: list[dict],
+    requested_quality: str | None,
+    *,
+    max_n: int = 15,
+) -> None:
+    if not requested_quality:
+        return
+    requested_quality = _plex_normalise_resolution(requested_quality)
+    if not requested_quality:
+        return
+    for result in results[:max_n]:
+        if result.get("plex_hint"):
+            continue
+        hint = await _plex_result_hint(result, requested_quality)
+        if hint:
+            result["plex_hint"] = hint
+
+
+async def _cluster_plex_hint(cluster: dict, requested_quality: str | None) -> dict | None:
+    if not PLEX_ENABLED or not requested_quality:
+        return None
+    title = str(cluster.get("title") or "")
+    if cluster.get("kind") == "series":
+        show = _plex_show_find(title)
+        if show is None:
+            return None
+        seasons = _positive_ints(cluster.get("seasons") or [])
+        if len(seasons) == 1:
+            season_num = seasons[0]
+            await _plex_ensure_show_seasons_lite(show, focus_season=season_num)
+            season = show.seasons.get(season_num)
+            if season is None:
+                return None
+            check = _plex_check_before_download_season(show, season, requested_quality)
+            return {
+                "kind": "series",
+                "action": check.action,
+                "quality": season.resolution,
+                "season": season_num,
+                "confidence": "high",
+            }
+        await _plex_ensure_show_seasons_lite(show, focus_season=None)
+        present = sorted(s for s in seasons if s in show.seasons)
+        if present and len(present) == len(seasons):
+            return {
+                "kind": "series",
+                "action": "warn_same",
+                "seasons": present,
+                "confidence": "medium",
+            }
+        if present:
+            return {
+                "kind": "series",
+                "action": "other_seasons",
+                "seasons": present,
+                "confidence": "medium",
+            }
+        return None
+
+    year = int(cluster.get("year") or 0)
+    match = _plex_library_find(title, year)
+    if match is None:
+        return None
+    check = _plex_check_before_download(match, requested_quality)
+    return {
+        "kind": "movie",
+        "action": check.action,
+        "quality": match.resolution,
+        "confidence": "high",
+    }
+
+
+async def _enrich_clusters_with_plex_hints(clusters: list[dict], requested_quality: str | None) -> None:
+    if not requested_quality:
+        return
+    requested_quality = _plex_normalise_resolution(requested_quality)
+    if not requested_quality:
+        return
+    for cluster in clusters:
+        if cluster.get("plex_hint"):
+            continue
+        hint = await _cluster_plex_hint(cluster, requested_quality)
+        if hint:
+            cluster["plex_hint"] = hint
 
 
 async def _plex_pre_check_series(
@@ -6448,6 +6599,211 @@ def _build_search_query(base: str, settings: dict) -> str:
     return " ".join(parts)
 
 
+def _normalise_preferred_voices(values) -> list[str]:
+    allowed = {label.lower(): label for label in KNOWN_VOICE_LABELS}
+    voices: list[str] = []
+    raw_values = values if isinstance(values, (list, tuple, set)) else []
+    for value in raw_values:
+        label = allowed.get(str(value).strip().lower())
+        if label and label not in voices:
+            voices.append(label)
+    return voices[:2]
+
+
+def _global_search_defaults() -> dict:
+    defaults = dict(_SRCH_DEFAULT_SETTINGS)
+    defaults["preferred_voices"] = []
+    return defaults
+
+
+def _search_defaults_for_chat(chat_id: int | None) -> dict:
+    defaults = _global_search_defaults()
+    if chat_id is None:
+        return defaults
+    try:
+        personal = state_store.load_user_search_defaults(int(chat_id))
+    except Exception:
+        logger.warning("Failed to load user search defaults chat_id=%s", chat_id, exc_info=True)
+        return defaults
+    if not isinstance(personal, dict):
+        return defaults
+    quality = personal.get("quality")
+    if quality in {"4K", "1080p", "720p", "any"}:
+        defaults["quality"] = quality
+    defaults["audio"] = bool(personal.get("audio", defaults.get("audio", False)))
+    defaults["subs"] = bool(personal.get("subs", defaults.get("subs", False)))
+    defaults["preferred_voices"] = _normalise_preferred_voices(personal.get("preferred_voices"))
+    return defaults
+
+
+def _search_settings_for_chat(chat_id: int | None) -> dict:
+    defaults = _search_defaults_for_chat(chat_id)
+    return {
+        "quality": defaults.get("quality", "1080p"),
+        "audio": bool(defaults.get("audio", False)),
+        "subs": bool(defaults.get("subs", False)),
+    }
+
+
+def _save_search_defaults(chat_id: int, defaults: dict) -> None:
+    state_store.save_user_search_defaults(chat_id, {
+        "quality": defaults.get("quality", "1080p"),
+        "audio": bool(defaults.get("audio", False)),
+        "subs": bool(defaults.get("subs", False)),
+        "preferred_voices": _normalise_preferred_voices(defaults.get("preferred_voices")),
+    })
+
+
+def _quality_label(value: str) -> str:
+    return {"4K": "4K", "1080p": "1080p", "720p": "720p", "any": "любое"}.get(value, "1080p")
+
+
+def _settings_voice_label(voices: list[str]) -> str:
+    return " / ".join(voices[:2]) if voices else "без предпочтений"
+
+
+def _settings_text(defaults: dict) -> str:
+    voices = _normalise_preferred_voices(defaults.get("preferred_voices"))
+    return "\n".join([
+        "⚙️ Настройки по умолчанию",
+        "",
+        "Применяются к новым поискам, если в запросе не указано другое.",
+        "",
+        f"• Качество: {_quality_label(str(defaults.get('quality') or '1080p'))}",
+        f"• Original: {'нужен' if defaults.get('audio') else 'не обязательно'}",
+        f"• Субтитры: {'нужны' if defaults.get('subs') else 'не обязательно'}",
+        f"• Переводы: {_settings_voice_label(voices)}",
+    ])
+
+
+def _settings_keyboard(defaults: dict, *, voices_expanded: bool = False) -> InlineKeyboardMarkup:
+    quality = str(defaults.get("quality") or "1080p")
+    audio = bool(defaults.get("audio", False))
+    subs = bool(defaults.get("subs", False))
+    voice_list = _normalise_preferred_voices(defaults.get("preferred_voices"))
+    voices = set(voice_list)
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            f"🎞 Качество: {_quality_label(quality)}",
+            callback_data=f"{SETTINGS_CALLBACK_PREFIX}:quality",
+        )],
+        [InlineKeyboardButton(
+            f"🎧 Original: {'нужен' if audio else 'не обязательно'}",
+            callback_data=f"{SETTINGS_CALLBACK_PREFIX}:audio",
+        )],
+        [InlineKeyboardButton(
+            f"💬 Субтитры: {'нужны' if subs else 'не обязательно'}",
+            callback_data=f"{SETTINGS_CALLBACK_PREFIX}:subs",
+        )],
+        [InlineKeyboardButton(
+            f"🎙 Переводы: {_settings_voice_label(voice_list)}",
+            callback_data=f"{SETTINGS_CALLBACK_PREFIX}:voices",
+        )],
+    ]
+    if voices_expanded:
+        for idx, label in enumerate(KNOWN_VOICE_LABELS):
+            mark = "☑️" if label in voices else "⬜"
+            rows.append([InlineKeyboardButton(
+                f"{mark} {label}",
+                callback_data=f"{SETTINGS_CALLBACK_PREFIX}:voice:{idx}",
+            )])
+        if voices:
+            rows.append([InlineKeyboardButton(
+                "🚫 Без предпочтений",
+                callback_data=f"{SETTINGS_CALLBACK_PREFIX}:voices_clear",
+            )])
+    rows.extend([
+        [InlineKeyboardButton(
+            "↩️ Вернуть стартовые настройки",
+            callback_data=f"{SETTINGS_CALLBACK_PREFIX}:reset",
+        )],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await _reply_access_pending(update, context)
+        return
+    chat_id = _chat_id(update)
+    defaults = _search_defaults_for_chat(chat_id)
+    msg = await update.message.reply_text(
+        _settings_text(defaults),
+        reply_markup=_settings_keyboard(defaults),
+    )
+    context.user_data["settings_ui_msg_id"] = msg.message_id
+    context.user_data["settings_ui_chat_id"] = chat_id
+
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = _chat_id_from_query(query)
+    if not isinstance(chat_id, int) or not _is_allowed(update):
+        await _safe_answer(query)
+        return
+    defaults = _search_defaults_for_chat(chat_id)
+    parts = (query.data or "").split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    voices_expanded = bool(context.user_data.get("settings_voices_expanded"))
+
+    if action == "quality":
+        order = ["4K", "1080p", "720p", "any"]
+        current = str(defaults.get("quality") or "1080p")
+        defaults["quality"] = order[(order.index(current) + 1) % len(order)] if current in order else "1080p"
+    elif action == "audio":
+        defaults["audio"] = not bool(defaults.get("audio", False))
+    elif action == "subs":
+        defaults["subs"] = not bool(defaults.get("subs", False))
+    elif action == "voices":
+        voices_expanded = not voices_expanded
+        context.user_data["settings_voices_expanded"] = voices_expanded
+    elif action == "voice" and len(parts) > 2:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            idx = -1
+        if 0 <= idx < len(KNOWN_VOICE_LABELS):
+            voices = _normalise_preferred_voices(defaults.get("preferred_voices"))
+            label = KNOWN_VOICE_LABELS[idx]
+            if label in voices:
+                voices.remove(label)
+            elif len(voices) >= 2:
+                await _safe_answer(query, "Можно выбрать до двух переводов", show_alert=True)
+            else:
+                voices.append(label)
+            defaults["preferred_voices"] = voices
+            voices_expanded = True
+            context.user_data["settings_voices_expanded"] = True
+    elif action == "voices_clear":
+        defaults["preferred_voices"] = []
+        voices_expanded = True
+        context.user_data["settings_voices_expanded"] = True
+    elif action == "reset":
+        state_store.reset_user_search_defaults(chat_id)
+        context.user_data["settings_voices_expanded"] = False
+        defaults = _global_search_defaults()
+        await _safe_answer(query, "Сброшено")
+        await query.edit_message_text(
+            _settings_text(defaults),
+            reply_markup=_settings_keyboard(defaults),
+        )
+        return
+    else:
+        await _safe_answer(query)
+        return
+
+    if action not in {"voices"}:
+        _save_search_defaults(chat_id, defaults)
+        await _safe_answer(query, "Сохранено")
+    else:
+        await _safe_answer(query)
+    await query.edit_message_text(
+        _settings_text(defaults),
+        reply_markup=_settings_keyboard(defaults, voices_expanded=voices_expanded),
+    )
+
+
 _ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY = "admin_last_diagnostics_report"
 
 
@@ -6579,6 +6935,18 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "type_label": info.type_label,
         "director": info.director,
     }
+    draft = await _parse_search_intent_for_user_text(text.replace(str(kp_id), " "))
+    if info.media_type in {"TV_SERIES", "MINI_SERIES", "TV_SHOW"} and draft.intent == INTENT_SERIES_MASTER:
+        pass
+    elif info.media_type == "FILM" and draft.intent == INTENT_SERIES_MASTER:
+        draft = replace(draft, intent=INTENT_ONE_RELEASE, whole_series=False, conflicts=(*draft.conflicts, "kp_movie_series"))
+    _apply_intent_to_search_state(
+        context,
+        draft,
+        chat_id=_chat_id(update),
+        fallback_text=info.search_base,
+        force_base=info.search_base,
+    )
 
     lines = [f"{info.type_label}: <b>{info.title_ru}</b>"]
     if info.title_en and info.title_en.lower() != info.title_ru.lower():
@@ -6588,7 +6956,7 @@ async def kp_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if info.director:
         lines.append(f"🎬 Режиссёр: {info.director}")
     lines.append(f"\n🔍 Запрос для поиска: «{info.search_base}»")
-    lines.append("\nЧто скачать: одна раздача")
+    lines.append(f"\nЧто скачать: {_search_mode_label(_search_intent(context))}")
 
     await msg.edit_text(
         "\n".join(lines),
@@ -6626,6 +6994,114 @@ def _search_is_series_master(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 def _clear_search_intent(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("srch_intent", None)
+    context.user_data.pop("srch_intent_draft", None)
+    context.user_data.pop("srch_voice_hints", None)
+    context.user_data.pop("srch_voice_required", None)
+    context.user_data.pop("srch_voice_source", None)
+    context.user_data.pop("srch_partial_policy_hint", None)
+
+
+async def _parse_search_intent_for_user_text(text: str) -> SearchIntentDraft:
+    draft = parse_search_intent(text)
+    if GPT_ENABLED and (draft.confidence == "low" or bool(draft.conflicts)):
+        sink: list = []
+        try:
+            gpt_draft, error = await asyncio.to_thread(
+                parse_search_intent_with_gpt,
+                text,
+                draft,
+                api_key=OPENAI_API_KEY,
+                model=GPT_MODEL,
+                usage_sink=sink,
+            )
+        except Exception:
+            logger.warning("intent parse GPT call failed", exc_info=True)
+            return draft
+        _gpt_record_usage(
+            feature="intent_parse",
+            input_tokens=200,
+            output_tokens=80,
+            error_label=error,
+            usage=(sink[0] if sink else None),
+        )
+        if gpt_draft is not None:
+            return gpt_draft
+    return draft
+
+
+def _base_query_from_intent(draft: SearchIntentDraft, fallback_text: str) -> str:
+    base = (draft.base_query or fallback_text or "").strip()
+    if draft.season is not None and _extract_season_from_query(base) is None:
+        base = f"{base} Сезон: {draft.season}".strip()
+    return _normalize_season_in_query(base)
+
+
+def _apply_intent_to_search_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    draft: SearchIntentDraft,
+    *,
+    chat_id: int | None,
+    fallback_text: str,
+    force_base: str | None = None,
+) -> tuple[str, dict]:
+    defaults = _search_defaults_for_chat(chat_id)
+    settings = {
+        "quality": defaults.get("quality", "1080p"),
+        "audio": bool(defaults.get("audio", False)),
+        "subs": bool(defaults.get("subs", False)),
+    }
+    if draft.quality in {"4K", "1080p", "720p", "any"}:
+        settings["quality"] = draft.quality
+    if draft.audio_original is not None:
+        settings["audio"] = bool(draft.audio_original)
+    if draft.subs is not None:
+        settings["subs"] = bool(draft.subs)
+
+    if draft.intent == INTENT_SERIES_MASTER:
+        context.user_data["srch_intent"] = SEARCH_INTENT_SERIES_MASTER
+
+    explicit_voices = _normalise_preferred_voices(draft.voice_hints)
+    preferred_voices = _normalise_preferred_voices(defaults.get("preferred_voices"))
+    if explicit_voices:
+        context.user_data["srch_voice_hints"] = explicit_voices
+        context.user_data["srch_voice_required"] = bool(draft.voice_required)
+        context.user_data["srch_voice_source"] = "explicit"
+    elif preferred_voices:
+        context.user_data["srch_voice_hints"] = preferred_voices
+        context.user_data["srch_voice_required"] = False
+        context.user_data["srch_voice_source"] = "default"
+    else:
+        context.user_data.pop("srch_voice_hints", None)
+        context.user_data.pop("srch_voice_required", None)
+        context.user_data.pop("srch_voice_source", None)
+
+    if draft.partial_policy_hint:
+        context.user_data["srch_partial_policy_hint"] = draft.partial_policy_hint
+
+    if force_base:
+        base = force_base.strip()
+        if draft.season is not None and _extract_season_from_query(base) is None:
+            base = f"{base} Сезон: {draft.season}".strip()
+        base = _normalize_season_in_query(base)
+    else:
+        base = _base_query_from_intent(draft, fallback_text)
+    context.user_data["srch_query"] = base
+    context.user_data["srch_settings"] = settings
+    context.user_data["srch_intent_draft"] = {
+        "confidence": draft.confidence,
+        "conflicts": list(draft.conflicts),
+        "voice_hints": list(draft.voice_hints),
+        "voice_required": draft.voice_required,
+    }
+    return base, settings
+
+
+def _should_auto_start_search(draft: SearchIntentDraft) -> bool:
+    if draft.intent == INTENT_SERIES_MASTER:
+        return False
+    if draft.confidence != "high" or draft.conflicts:
+        return False
+    return draft.has_explicit_settings
 
 
 def _strip_season_marker_from_query(base: str) -> str:
@@ -6695,14 +7171,27 @@ def _search_advanced_text(base: str, context: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 async def search_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query_text = (update.message.text or "").strip()
-    if not query_text:
+    raw_text = (update.message.text or "").strip()
+    if not raw_text:
         await update.message.reply_text("Введите текст для поиска или /cancel для отмены.")
         return ConversationHandler.END
 
-    # Normalise 'Сезон N' → 'Сезон: N' to match Rutracker title format
-    query_text = _normalize_season_in_query(query_text)
-    context.user_data["srch_query"] = query_text
+    draft = await _parse_search_intent_for_user_text(raw_text)
+    query_text, settings = _apply_intent_to_search_state(
+        context,
+        draft,
+        chat_id=_chat_id(update),
+        fallback_text=raw_text,
+    )
+    if not query_text:
+        await update.message.reply_text("Введите название фильма или сериала.")
+        return ConversationHandler.END
+    if _should_auto_start_search(draft):
+        return await _run_search(
+            update.message.reply_text,
+            context,
+            _build_current_mode_search_query(context, query_text, settings),
+        )
     msg = await update.message.reply_text(
         _search_options_text(query_text, context),
         reply_markup=_search_options_keyboard(
@@ -6752,6 +7241,7 @@ def _build_results_text(results_data: list[dict], search_query: str, page: int, 
             f"\n{icon} {index + 1}. {tracker_prefix}{title_linked}"
             f"\n   📦 {r['size']} | 🌱 {r['seeders']}{ep_note}"
             f"{meta_lines}"
+            f"{_format_plex_hint_line(r.get('plex_hint'))}"
         )
     return "\n".join(lines)
 
@@ -6786,6 +7276,55 @@ def _format_parsed_meta_lines(meta: dict | None) -> str:
     if not badges:
         return ""
     return f"\n   🎬 {html_module.escape(' · '.join(badges))}"
+
+
+def _display_quality_from_plex_resolution(value: str) -> str:
+    return {
+        "4k": "4K",
+        "1080": "1080p",
+        "720": "720p",
+        "480": "480p",
+        "sd": "SD",
+    }.get((value or "").lower(), value or "")
+
+
+def _format_plex_hint_line(hint: dict | None) -> str:
+    if not isinstance(hint, dict):
+        return ""
+    action = hint.get("action")
+    quality = _display_quality_from_plex_resolution(str(hint.get("quality") or ""))
+    kind = hint.get("kind")
+    season = hint.get("season")
+    season_label = f"S{season}" if season else "Сезон"
+    if kind == "series":
+        if action == "warn_same":
+            suffix = f": {season_label}, {quality}" if quality else f": {season_label}"
+            return f"\n   ✅ Сезон уже есть в Plex{suffix}"
+        if action == "warn_better":
+            suffix = f": {season_label}, {quality}" if quality else f": {season_label}"
+            return f"\n   ⚠️ В Plex есть этот сезон лучше{suffix}"
+        if action == "offer_upgrade":
+            suffix = f": {season_label}, {quality}" if quality else f": {season_label}"
+            return f"\n   🔼 В Plex есть хуже{suffix}, можно улучшить"
+        if action == "partial_exists":
+            return f"\n   📺 В Plex уже есть часть сезона: {season_label}"
+        if action == "other_seasons":
+            labels = ", ".join(
+                f"S{int(s)}" for s in (hint.get("seasons") or [])[:8]
+                if isinstance(s, int) or str(s).isdigit()
+            )
+            return f"\n   📺 В Plex уже есть другие сезоны: {labels}" if labels else ""
+    else:
+        if action == "warn_same":
+            suffix = f": {quality}" if quality else ""
+            return f"\n   ✅ Уже есть в Plex{suffix}"
+        if action == "warn_better":
+            suffix = f": {quality}" if quality else ""
+            return f"\n   ⚠️ В Plex есть лучше{suffix}"
+        if action == "offer_upgrade":
+            suffix = f": {quality}" if quality else ""
+            return f"\n   🔼 В Plex есть хуже{suffix}, можно улучшить"
+    return ""
 
 
 async def _show_jackett_selector(
@@ -6934,6 +7473,9 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         else:
             other_stats = _format_quality_stats(buckets)
             quality_banner = f"⚠️ В {preferred_quality} ничего не найдено. Показаны все качества: {other_stats}."
+    results_data, voice_banner = _apply_voice_preferences(results_data, context)
+    if voice_banner:
+        filter_banner_parts.append(voice_banner)
     series_master_banner = ""
     if series_master:
         before = len(results_data)
@@ -6971,8 +7513,9 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             ),
         )
         return SEARCH_RESULTS
-    results_data.sort(key=_score_result, reverse=True)
+    results_data.sort(key=_search_result_sort_score, reverse=True)
     results_data[0]["recommended"] = True
+    await _enrich_results_with_plex_hints(results_data, preferred_quality, max_n=15)
     banner = "\n".join(b for b in (series_master_banner, "🔗 Прямой поиск Rutracker", *filter_banner_parts, quality_banner) if b)
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
@@ -7303,6 +7846,41 @@ def _format_quality_stats(buckets: dict[str, list[dict]], exclude: str | None = 
     return ", ".join(parts)
 
 
+def _result_has_preferred_voice(result: dict, voices: list[str]) -> bool:
+    if not voices:
+        return False
+    release = release_profile_from_title(str(result.get("title") or ""), size=str(result.get("size") or ""))
+    return bool(set(release.voices) & set(voices))
+
+
+def _apply_voice_preferences(results: list[dict], context: ContextTypes.DEFAULT_TYPE) -> tuple[list[dict], str]:
+    voices = _normalise_preferred_voices(context.user_data.get("srch_voice_hints"))
+    if not voices or not results:
+        return results, ""
+    matched: list[dict] = []
+    other: list[dict] = []
+    for result in results:
+        if _result_has_preferred_voice(result, voices):
+            result["voice_preferred"] = True
+            matched.append(result)
+        else:
+            result.pop("voice_preferred", None)
+            other.append(result)
+    label = " / ".join(voices)
+    source = context.user_data.get("srch_voice_source")
+    if matched and source == "explicit":
+        return matched, f"🎙 Показаны варианты с {label}."
+    if matched:
+        return matched + other, ""
+    if source == "explicit":
+        return results, f"🎙 {label} не нашёл, показываю другие озвучки."
+    return results, ""
+
+
+def _search_result_sort_score(result: dict) -> float:
+    return _score_result(result) + (10000 if result.get("voice_preferred") else 0)
+
+
 def _cancel_didmean_prefetch(context) -> None:
     """Cancel an in-flight did-you-mean prefetch task and pop the slot.
 
@@ -7546,6 +8124,37 @@ def _cluster_picker_text(search_query: str, banner: str = "") -> str:
     if banner:
         return f"{banner}\n{text}"
     return text
+
+
+def _cluster_plex_summary(clusters: list[dict]) -> str:
+    series_clusters = [
+        c for c in clusters
+        if c.get("kind") == "series" and isinstance(c.get("plex_hint"), dict)
+    ]
+    if not series_clusters:
+        return ""
+    by_title: dict[str, list[int]] = {}
+    for cluster in series_clusters:
+        hint = cluster.get("plex_hint") or {}
+        if hint.get("action") not in {"warn_same", "warn_better", "offer_upgrade"}:
+            continue
+        seasons = cluster.get("seasons") or []
+        if len(seasons) != 1:
+            continue
+        title = str(cluster.get("title") or "").strip()
+        if title:
+            by_title.setdefault(title, []).append(int(seasons[0]))
+    if not by_title:
+        return ""
+    title, seasons = max(by_title.items(), key=lambda item: len(item[1]))
+    season_labels = ", ".join(f"S{s}" for s in sorted(set(seasons)))
+    return f"Plex: по «{html_module.escape(title)}» уже есть {season_labels}."
+
+
+def _cluster_picker_text_with_hints(search_query: str, clusters: list[dict], banner: str = "") -> str:
+    summary = _cluster_plex_summary(clusters)
+    prefix = "\n".join(p for p in (banner, summary) if p)
+    return _cluster_picker_text(search_query, prefix)
 
 
 def _should_show_cluster_picker(
@@ -8155,6 +8764,10 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 preferred_quality, len(results_data), base_query,
             )
 
+    results_data, voice_banner = _apply_voice_preferences(results_data, context)
+    if voice_banner:
+        filter_banner_parts.append(voice_banner)
+
     series_master_banner = ""
     if series_master:
         before = len(results_data)
@@ -8191,6 +8804,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     if _maybe_season is None:
         clusters = _build_search_clusters(results_data)
         picker_clusters = _clusters_for_query_picker(clusters, base_query)
+        await _enrich_clusters_with_plex_hints(picker_clusters, preferred_quality)
         picker_is_focused = any(
             _cluster_query_relevance(cluster, base_query) >= 2
             for cluster in picker_clusters
@@ -8214,7 +8828,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             )
             context.user_data["srch_banner"] = picker_banner
             await edit_fn(
-                _cluster_picker_text(search_query, picker_banner),
+                _cluster_picker_text_with_hints(search_query, picker_clusters, picker_banner),
                 reply_markup=_cluster_picker_keyboard(
                     picker_clusters,
                     total_count=len(results_data),
@@ -8290,13 +8904,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             return SEARCH_RESULTS
 
     # --- Step 2: sort by score, best first ---
-    results_data.sort(key=_score_result, reverse=True)
+    results_data.sort(key=_search_result_sort_score, reverse=True)
     results_data[0]["recommended"] = True
 
     # PR3: enrich top-10 with GPT-parsed metadata (badges in card UI).
     # Runs after sort so the right results get the badges (top of list);
     # cache makes repeat searches instant. Silent no-op when GPT_ENABLED=false.
     await _enrich_top_results_with_metadata(results_data, max_n=10)
+    await _enrich_results_with_plex_hints(results_data, preferred_quality, max_n=15)
 
     # Combine all banners (in display order): source-fallback message,
     # audio/subs filter stats, quality filter stats. Any may be empty.
@@ -8377,7 +8992,7 @@ async def search_quick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
     base = context.user_data.get("srch_query", "")
-    settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+    settings = context.user_data.get("srch_settings", _search_settings_for_chat(_chat_id_from_query(query)))
     return await _execute_search(query, context, _build_current_mode_search_query(context, base, settings))
 
 
@@ -8441,13 +9056,18 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
     # delegate to the existing results keyboard. Picker state stays in user_data
     # so «⬅️ К вариантам» can restore the original chooser.
     if results_data:
-        results_data.sort(key=_score_result, reverse=True)
+        results_data.sort(key=_search_result_sort_score, reverse=True)
         results_data[0]["recommended"] = True
 
     # PR3: enrich top-10 of the cluster slice. Cluster results are typically
     # a subset of what was fetched, so most are likely cache hits (we already
     # enriched the full set in _run_search above) — fast in practice.
     await _enrich_top_results_with_metadata(results_data, max_n=10)
+    await _enrich_results_with_plex_hints(
+        results_data,
+        context.user_data.get("srch_preferred_quality"),
+        max_n=15,
+    )
 
     search_query = context.user_data.get("srch_search_query", "")
     source = context.user_data.get("srch_source", "")
@@ -8499,7 +9119,7 @@ async def search_cluster_back(update: Update, context: ContextTypes.DEFAULT_TYPE
         return SEARCH_RESULTS
 
     await query.edit_message_text(
-        _cluster_picker_text(search_query, banner),
+        _cluster_picker_text_with_hints(search_query, picker_clusters, banner),
         reply_markup=_cluster_picker_keyboard(
             picker_clusters,
             total_count=len(full),
@@ -8868,7 +9488,10 @@ async def search_show_advanced(update: Update, context: ContextTypes.DEFAULT_TYP
     """Показать расширенные настройки поиска."""
     query = update.callback_query
     await query.answer()
-    settings = dict(_SRCH_DEFAULT_SETTINGS)
+    settings = dict(context.user_data.get(
+        "srch_settings",
+        _search_settings_for_chat(_chat_id_from_query(query)),
+    ))
     context.user_data["srch_settings"] = settings
     base = context.user_data.get("srch_query", "")
     await query.edit_message_text(
@@ -8916,7 +9539,7 @@ async def search_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     base = context.user_data.get("srch_query", "")
-    settings = context.user_data.get("srch_settings", dict(_SRCH_DEFAULT_SETTINGS))
+    settings = context.user_data.get("srch_settings", _search_settings_for_chat(_chat_id_from_query(query)))
     return await _execute_search(query, context, _build_current_mode_search_query(context, base, settings))
 
 
@@ -10980,17 +11603,19 @@ def _download_picker_keyboard(
     show_bulk_plan: bool = False,
 ) -> InlineKeyboardMarkup:
     prefix = SEARCH_CALLBACK_PREFIX
-    rows = [
-        [InlineKeyboardButton("⬇️ Скачать сейчас",
-                              callback_data=f"{prefix}:dl:{index}")],
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
     if partial:
         rows.extend([
             [InlineKeyboardButton("⬇️ Скачать сейчас + новые серии по мере выхода",
                                   callback_data=f"{prefix}:sub_preset:{index}:each")],
+            [InlineKeyboardButton("⬇️ Скачать только доступные",
+                                  callback_data=f"{prefix}:dl:{index}")],
             [InlineKeyboardButton("📦 Скачать, когда сезон завершится",
                                   callback_data=f"{prefix}:sub_preset:{index}:after")],
         ])
+    else:
+        rows.append([InlineKeyboardButton("⬇️ Скачать сейчас",
+                                          callback_data=f"{prefix}:dl:{index}")])
     if show_bulk_plan:
         rows.append([InlineKeyboardButton("📚 Скачать недостающие сезоны",
                                           callback_data=f"{prefix}:bulk_plan:{index}")])
@@ -19115,15 +19740,15 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         if error_label == "quota_exceeded":
             friendly_hint = (
-                "🎙 OpenAI: исчерпан баланс/лимит. Скажите админу или напишите текстом."
+                "🎙 Голосовой поиск сейчас недоступен из-за лимита сервиса. Напишите текстом."
             )
         elif error_label == "auth":
             friendly_hint = (
-                "🎙 OpenAI: ключ невалиден. Скажите админу или напишите текстом."
+                "🎙 Голосовой поиск сейчас не настроен. Напишите текстом."
             )
         elif error_label == "timeout":
             friendly_hint = (
-                "🎙 OpenAI не отвечает (таймаут). Попробуйте ещё раз через минуту."
+                "🎙 Распознавание отвечает слишком долго. Попробуйте ещё раз через минуту."
             )
         await _safe_edit_message(
             status,
@@ -19150,7 +19775,7 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Hand off to the existing search flow. We replicate the relevant
     # prefix of `search_got_query` rather than call it directly — the
     # search_got_query expects update.message.text which is None on voice.
-    query_text = _normalize_season_in_query(transcription)
+    draft = await _parse_search_intent_for_user_text(transcription)
 
     # Clean up any stale conversation state (matches text_message_entry).
     _cleanup_plex_pending(context.user_data.pop("plex_pending", None))
@@ -19164,12 +19789,28 @@ async def voice_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _safe_edit_message(
             status,
             "🎙 Услышал: «{}»\n\nНо ни Rutracker, ни Jackett не настроены — поиск невозможен."
-            .format(html_module.escape(query_text)),
+            .format(html_module.escape(_base_query_from_intent(draft, transcription) or transcription)),
             parse_mode="HTML",
         )
         return ConversationHandler.END
 
-    context.user_data["srch_query"] = query_text
+    query_text, search_settings = _apply_intent_to_search_state(
+        context,
+        draft,
+        chat_id=_chat_id(update),
+        fallback_text=transcription,
+    )
+    if _should_auto_start_search(draft):
+        await _safe_edit_message(
+            status,
+            f"🎙 Услышал: «{html_module.escape(transcription)}»\n\n🔎 Запускаю поиск…",
+            parse_mode="HTML",
+        )
+        return await _run_search(
+            status.edit_text,
+            context,
+            _build_current_mode_search_query(context, query_text, search_settings),
+        )
     await _safe_edit_message(
         status,
         f"🎙 Услышал: «{html_module.escape(query_text)}»\n\n"
@@ -19217,6 +19858,10 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # (_run_search would cancel it too on mismatch, but explicit cancel here
     # avoids a brief window where the task keeps running.)
     _cancel_didmean_prefetch(context)
+
+    if text.lower() in {"настройки", "настройки по умолчанию", "дефолты"}:
+        await settings_command(update, context)
+        return ConversationHandler.END
 
     # 1. Magnet link — handle immediately, don't start a search conversation.
     magnet_uri = _find_magnet(text)
@@ -19473,6 +20118,7 @@ def main() -> None:
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("new", movie_new_command))
+    app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("bulk", series_bulk_command))
     app.add_handler(CommandHandler("continue", series_continue_command))
     app.add_handler(CommandHandler("resume", resume))
@@ -19488,6 +20134,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(movie_new_unsubscribe_callback, pattern=r"^new:unsubscribe$"))
     app.add_handler(CallbackQueryHandler(movie_new_open_callback, pattern=r"^new:open$"))
     app.add_handler(CallbackQueryHandler(help_close_callback, pattern=r"^help:close$"))
+    app.add_handler(CallbackQueryHandler(settings_callback, pattern=rf"^{SETTINGS_CALLBACK_PREFIX}:"))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("subs", subs_command))
     # Always register the ConversationHandler so text_message_entry intercepts

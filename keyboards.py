@@ -572,6 +572,15 @@ def _cluster_picker_keyboard(clusters: list[dict], *, total_count: int | None = 
     for idx, cluster in enumerate(clusters):
         year_str = f" ({cluster['year']})" if cluster.get("year") else ""
         icon = "📺" if cluster.get("kind") == "series" else "🎬"
+        hint = cluster.get("plex_hint")
+        if isinstance(hint, dict):
+            action_icon = {
+                "warn_same": "✅",
+                "warn_better": "⚠️",
+                "offer_upgrade": "🔼",
+            }.get(str(hint.get("action") or ""))
+            if action_icon:
+                icon = action_icon
         season_label = str(cluster.get("season_label") or "").strip()
         if cluster.get("kind") == "series" and season_label:
             label = f"{icon} {season_label} · {cluster['title']}{year_str} · {cluster['count']} разд."

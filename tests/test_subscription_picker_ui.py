@@ -179,8 +179,8 @@ class SearchDownloadPickTests(unittest.TestCase):
         kb = call.kwargs.get("reply_markup")
         self.assertIn("Что скачать", text)
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertIn("⬇️ Скачать сейчас", labels)
-        self.assertIn("⬇️ Скачать сейчас + новые серии по мере выхода", labels)
+        self.assertEqual(labels[0], "⬇️ Скачать сейчас + новые серии по мере выхода")
+        self.assertIn("⬇️ Скачать только доступные", labels)
         self.assertIn("📦 Скачать, когда сезон завершится", labels)
         self.assertTrue(any("К результатам" in l for l in labels))
 

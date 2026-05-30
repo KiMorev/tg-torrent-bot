@@ -72,6 +72,7 @@ _VOICE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("BaibaKo", r"baibako|байбако"),
     ("AlexFilm", r"alexfilm|alex\s*film"),
 )
+KNOWN_VOICE_LABELS: tuple[str, ...] = tuple(label for label, _pattern in _VOICE_PATTERNS)
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,11 @@ def release_profile_from_title(title: str, *, size: str = "") -> ReleaseProfile:
         release_group=_extract_release_group(title),
         size_gb=parse_size_gb(size),
     )
+
+
+def extract_voice_labels(text: str) -> tuple[str, ...]:
+    """Return known voice/studio labels mentioned in ``text``."""
+    return _extract_voices(text)
 
 
 def season_pack_range_from_title(title: str) -> tuple[int, int] | None:

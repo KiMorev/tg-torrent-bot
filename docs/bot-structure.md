@@ -21,7 +21,7 @@
 |---|---|---|
 | Команды Telegram, доступ, приветствие | `bot.py`: `main`, `start`, `help_command`, `text_message_entry`; `access_control.py`; `keyboards.py` | `tests/test_handlers.py`, `tests/test_keyboards.py`, `tests/test_access_control.py` |
 | Кнопки и callback-data | `keyboards.py`; регистрация обработчиков в `bot.py::main`; правила в `AGENTS.md` | `tests/test_keyboards.py`, `tests/test_handlers.py` |
-| Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
+| Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `search_intent.py`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_intent.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
 | Скачивание и очередь | `bot.py`: `_download_and_add`, `search_direct_download`, `_do_process_magnet`, `_do_process_torrent`, `_run_pending_downloads_once`; `download_station.py`; `torrent_utils.py` | `tests/test_handlers.py`, `tests/test_background.py`, `tests/test_download_station_locking.py`, `tests/test_disk_space_guard.py`, `tests/test_torrent_utils.py` |
 | История загрузок | `bot.py`: `_record_download_history`, `_record_download_added_history`, `_record_task_notification_history`, `_plex_poll_after_finish`; `state_store.py`: `download_history.jsonl`; подробности в `docs/download-history.md` | `tests/test_state_store.py`, `tests/test_handlers.py`, `tests/test_background.py` |
 | Сериалы и подписки | `bot.py`: `search_subscribe_*`, `_check_subscriptions`, `_check_jackett_subscriptions`; `jackett_subscriptions.py`; `subscription_policy.py`; `series_bulk_planner.py`; `formatters.py` | `tests/test_subscription_policy.py`, `tests/test_subscription_picker_ui.py`, `tests/test_jackett_subscriptions.py`, `tests/test_series_bulk_planner.py`, `tests/test_background.py` |
@@ -49,10 +49,11 @@
 
 | Флоу | Основной путь в коде |
 |---|---|
-| Текстовый поиск | `text_message_entry` -> `search_got_query` -> `SEARCH_OPTIONS` с настройкой `Что скачать` -> `_run_search` -> `SEARCH_RESULTS`. Новый текстовый ввод всегда сбрасывает `srch_intent` в обычный режим `Одна раздача`. |
-| Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> тот же `SEARCH_OPTIONS` / `_run_search`; новый voice-ввод тоже сбрасывает `srch_intent`. |
-| Поиск по ссылке Кинопоиска | `text_message_entry` -> `kp_link_entry` -> `SEARCH_OPTIONS`; KP-ссылка стартует в обычном режиме `Одна раздача`, дальше можно выбрать `Что скачать: сериал целиком`. |
-| Выбор варианта после неоднозначного поиска | `_build_search_clusters` группирует выдачу по типу контента, названию, году и сезону; `_cluster_picker_keyboard` показывает фильмы как `🎬 Название (год)`, а сериалы с известным сезоном/паком как `📺 S6 · Название` или `📺 S1-S6 · Название`. |
+| Текстовый поиск | `text_message_entry` -> `search_got_query` -> `search_intent.py` разбирает качество/сезон/весь сериал/озвучку -> defaults из `user_search_defaults.json` -> `SEARCH_OPTIONS` или `_run_search` для high-confidence one-release -> `SEARCH_RESULTS`. Новый текстовый ввод всегда сбрасывает `srch_intent` в обычный режим `Одна раздача`, если parser не распознал `series_master`. |
+| Голосовой поиск | `voice_message_entry` -> `voice_transcription.py` -> `search_intent.py` -> тот же `SEARCH_OPTIONS` / `_run_search`; новый voice-ввод тоже сбрасывает `srch_intent`. |
+| Поиск по ссылке Кинопоиска | `text_message_entry` -> `kp_link_entry` -> KP metadata + `search_intent.py` для текста рядом со ссылкой -> `SEARCH_OPTIONS`; `все сезоны` применяются только если KP определил сериал. |
+| Настройки по умолчанию | `/settings` -> `settings_command` / `settings_callback` -> `state_store.load/save/reset_user_search_defaults`; callback namespace `settings:*`. В результатах поиска нет кнопок сохранения defaults. |
+| Выбор варианта после неоднозначного поиска | `_build_search_clusters` группирует выдачу по типу контента, названию, году и сезону; `_enrich_clusters_with_plex_hints` добавляет ранние Plex-значки; `_cluster_picker_keyboard` показывает фильмы как `🎬 Название (год)`, сериалы как `📺 S6 · Название` / `📺 S1-S6 · Название`, а Plex-hit как `✅` / `⚠️` / `🔼`. |
 | Скачивание из результата | `search_download_pick` или `search_direct_download` -> Plex pre-check -> `_download_and_add` -> Download Station. |
 | Скачать сериал целиком из поиска | `search_choose_mode` переключает `srch_intent=series_master` прямо на текущем экране `Что скачать`; `search_quick` / `search_do` запускает `_run_search` с базовым названием без маркера сезона; `_run_search` фильтрует выдачу до сериалов и `_search_results_keyboard(..., series_master=True)` ведёт кнопки `🎯 N` в `search_series_bulk_plan`, а не в прямую загрузку. GPT did-you-mean, retry, снятие качества, все трекеры, tracker picker, clusters и pagination сохраняют текущий `srch_intent`. |
 | План недостающих сезонов | `search_download_pick` -> `search_series_bulk_plan` показывает профиль -> `search_series_bulk_profile_callback` меняет профиль: главный экран, раскрываемый блок озвучки, ручной выбор 1-2 студий и `⚙️ Остальные настройки` -> `search_series_bulk_build_plan` запускает wide/targeted tracker search неблокирующим handler'ом; при fetch-limit широкий поиск расширяет targeted-pass до всех нужных сезонов; ожидательный экран использует search animation, обновляет этапы сборки и при долгой работе добавляет мягкий статус; `ConversationHandler.WAITING` принимает `srch:cancel`, выставляет cancel-token, сборка останавливается между сетевыми этапами; далее `series_bulk_planner.py`; если все сезоны уже есть в Plex или уже качаются, бот показывает финальный экран и не создаёт job; иначе создаётся `series_bulk_jobs.json` job -> `search_series_bulk_confirm` -> `search_series_bulk_run` для уверенных сезонов; если после batch остаются спорные/ненайденные сезоны, итоговый экран остаётся в search-flow и ведёт к `search_series_bulk_review` или обратно к плану; временные ошибки добавления уходят в `pending_downloads.json` с `series_bulk`-ссылкой и фоновый retry обновляет job; скрытый `/bulk` -> `series_bulk_command` -> `search_series_bulk_open` восстанавливает только actionable job после рестарта, а `cancelled`/`replaced` планы не показываются; `search_series_bulk_pack_list` -> `search_series_bulk_pack_confirm` -> `search_series_bulk_pack_run` вручную добавляет выбранный pack и помечает покрытые сезоны в job; `search_series_bulk_rebuild` помечает прежний job как `replaced` и возвращает готовый план к профилю для новой сборки; `search_series_bulk_review` разбирает `missing`/`needs_decision`/`partial` и постоянные ошибки добавления, `search_series_bulk_soft_search` мягко добирает кандидатов для текущего сезона, `search_series_bulk_retry` повторяет failed-сезон, результат пишется в job. |
@@ -71,6 +72,7 @@
 | Namespace | Где формируется | Где обрабатывается |
 |---|---|---|
 | `srch:*` | `keyboards.py`, локально в search-блоке `bot.py`; `srch:mode:*` переключает настройку `Что скачать` без отдельного меню | `ConversationHandler` в `bot.py::main` |
+| `settings:*` | `bot.py::_settings_keyboard` | `settings_callback`: quality/audio/subs/preferred voices/reset для `/settings` |
 | `task:*` | `keyboards.py` | `task_callback` |
 | `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
 | `access:*` | `keyboards.py` | `access_callback` |
@@ -93,6 +95,7 @@
 | `jackett_subscriptions.py` | Якорь подписки и выбор новой серии/раздачи из Jackett results. |
 | `subscription_policy.py` | Решение, уведомлять ли и скачивать ли по подписке. |
 | `series_bulk_planner.py` | Чистый планировщик массовой загрузки сезонов: scoring кандидатов, статусы сезонов и политика `single_from_reference`, которая выбирает одну общую озвучку из эталона. |
+| `search_intent.py` | Чистый parser естественного поискового ввода и GPT validation: качество, сезон, весь сериал, Original/Sub, partial policy и known voice hints. |
 | `series_continue.py` | Чистые модели `/continue`: Plex identity, detector, completeness resolver и проверка той же темы. |
 | `kinopoisk.py` | KP API, извлечение id, поиск карточек и метаданных. |
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
@@ -134,6 +137,7 @@
 | `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки и результат Plex polling. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
+| `user_search_defaults.json` | Личные настройки поиска по `chat_id`: качество, Original, субтитры и preferred voices. |
 | `gpt_usage.json` | Использование GPT-функций; `last_error` очищается успешным GPT-вызовом, transient-ошибки старше 24 ч не желтят диагностику. |
 | `torrent_titles_cache.json` | Кэш заголовков torrent/magnet для поиска task id. |
 | `public_trackers.txt` | Текстовый кэш публичных BT-трекеров. |

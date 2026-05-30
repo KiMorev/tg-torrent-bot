@@ -44,6 +44,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         series_bulk_jobs_file=settings.series_bulk_jobs_file,
         storage_history_file=settings.storage_history_file,
         voice_usage_file=settings.voice_usage_file,
+        user_search_defaults_file=settings.user_search_defaults_file,
         gpt_usage_file=settings.gpt_usage_file,
         torrent_titles_cache_file=settings.torrent_titles_cache_file,
         download_history_file=settings.state_dir / "download_history.jsonl",

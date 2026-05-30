@@ -5318,6 +5318,63 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("Что скачать: одна раздача", text)
 
+    async def test_new_text_query_prefills_personal_defaults(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "Дюна"
+        reply = MagicMock()
+        reply.message_id = 77
+        update.message.reply_text.return_value = reply
+        context = _make_context()
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_user_search_defaults.return_value = {
+            "quality": "4K",
+            "audio": True,
+            "subs": False,
+            "preferred_voices": ["LostFilm"],
+        }
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "jackett_client", None),
+        ):
+            result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.SEARCH_OPTIONS)
+        self.assertEqual(context.user_data["srch_settings"]["quality"], "4K")
+        self.assertTrue(context.user_data["srch_settings"]["audio"])
+        self.assertEqual(context.user_data["srch_voice_hints"], ["LostFilm"])
+        self.assertEqual(context.user_data["srch_voice_source"], "default")
+
+    async def test_explicit_query_overrides_personal_defaults_and_autostarts(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "Дюна 720р"
+        context = _make_context()
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_user_search_defaults.return_value = {
+            "quality": "4K",
+            "audio": False,
+            "subs": False,
+            "preferred_voices": [],
+        }
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "_run_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as run_search,
+        ):
+            result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        self.assertEqual(run_search.await_args.args[2], "Дюна 720p")
+
     async def test_didmean_preserves_series_mode_and_strips_season_from_query(self):
         update = _make_callback_update(callback_data="srch:didmean:0")
         context = _make_context(user_data={
@@ -5332,6 +5389,155 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, bot.SEARCH_RESULTS)
         self.assertEqual(context.user_data["srch_intent"], bot.SEARCH_INTENT_SERIES_MASTER)
         self.assertEqual(run_search.await_args.args[2], "Клиника 1080p")
+
+
+class SearchSettingsCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settings_command_renders_personal_defaults(self):
+        update = _make_message_update(chat_id=100)
+        reply = MagicMock()
+        reply.message_id = 77
+        update.message.reply_text.return_value = reply
+        context = _make_context()
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_user_search_defaults.return_value = {
+            "quality": "4K",
+            "audio": True,
+            "subs": True,
+            "preferred_voices": ["LostFilm"],
+        }
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+        ):
+            await bot.settings_command(update, context)
+
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Настройки по умолчанию", text)
+        self.assertIn("Качество: 4K", text)
+        self.assertIn("Переводы: LostFilm", text)
+
+    async def test_settings_callback_toggles_quality_and_saves(self):
+        update = _make_callback_update(chat_id=100, callback_data="settings:quality")
+        context = _make_context()
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_user_search_defaults.return_value = {
+            "quality": "1080p",
+            "audio": False,
+            "subs": False,
+            "preferred_voices": [],
+        }
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+        ):
+            await bot.settings_callback(update, context)
+
+        saved = store.save_user_search_defaults.call_args.args[1]
+        self.assertEqual(saved["quality"], "720p")
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Качество: 720p", text)
+
+
+class SearchVoicePreferenceTests(unittest.TestCase):
+    def test_explicit_voice_filters_when_found(self):
+        context = _make_context(user_data={
+            "srch_voice_hints": ["LostFilm"],
+            "srch_voice_source": "explicit",
+        })
+        results = [
+            {"title": "Клиника / Scrubs / Сезон: 1 / LostFilm", "size": "1 GB"},
+            {"title": "Клиника / Scrubs / Сезон: 1 / NewStudio", "size": "1 GB"},
+        ]
+
+        filtered, banner = bot._apply_voice_preferences(results, context)
+
+        self.assertEqual(len(filtered), 1)
+        self.assertIn("LostFilm", filtered[0]["title"])
+        self.assertIn("Показаны варианты с LostFilm", banner)
+
+    def test_default_voice_only_boosts_and_keeps_alternatives(self):
+        context = _make_context(user_data={
+            "srch_voice_hints": ["LostFilm"],
+            "srch_voice_source": "default",
+        })
+        results = [
+            {"title": "Клиника / Scrubs / Сезон: 1 / NewStudio", "size": "1 GB"},
+            {"title": "Клиника / Scrubs / Сезон: 1 / LostFilm", "size": "1 GB"},
+        ]
+
+        filtered, banner = bot._apply_voice_preferences(results, context)
+
+        self.assertEqual(len(filtered), 2)
+        self.assertIn("LostFilm", filtered[0]["title"])
+        self.assertEqual(banner, "")
+
+    def test_explicit_voice_without_matches_keeps_alternatives_with_banner(self):
+        context = _make_context(user_data={
+            "srch_voice_hints": ["LostFilm"],
+            "srch_voice_source": "explicit",
+        })
+        results = [{"title": "Клиника / Scrubs / Сезон: 1 / NewStudio", "size": "1 GB"}]
+
+        filtered, banner = bot._apply_voice_preferences(results, context)
+
+        self.assertEqual(filtered, results)
+        self.assertIn("не нашёл", banner)
+
+
+class SearchPlexHintTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cluster_hint_marks_existing_series_season(self):
+        show = bot.PlexShow(
+            title="Острые козырьки",
+            year=2013,
+            rating_key="show1",
+            seasons={
+                6: bot.PlexSeason(
+                    rating_key="season6",
+                    season_number=6,
+                    episode_count=6,
+                    resolution="1080",
+                )
+            },
+        )
+        old_shows = bot._plex_shows_library
+        try:
+            bot._plex_shows_library = {bot._plex_cache_key("Острые козырьки", 2013): show}
+            with patch.object(bot, "PLEX_ENABLED", True):
+                hint = await bot._cluster_plex_hint({
+                    "kind": "series",
+                    "title": "Острые козырьки",
+                    "seasons": [6],
+                }, "1080")
+        finally:
+            bot._plex_shows_library = old_shows
+
+        self.assertEqual(hint["action"], "warn_same")
+        self.assertEqual(hint["season"], 6)
+
+    async def test_cluster_hint_does_not_mark_movie_from_series_match(self):
+        show = bot.PlexShow(title="Острые козырьки", year=2013, rating_key="show1")
+        old_shows = bot._plex_shows_library
+        old_movies = bot._plex_library
+        try:
+            bot._plex_shows_library = {bot._plex_cache_key("Острые козырьки", 2013): show}
+            bot._plex_library = {}
+            with patch.object(bot, "PLEX_ENABLED", True):
+                hint = await bot._cluster_plex_hint({
+                    "kind": "movie",
+                    "title": "Острые козырьки Бессмертный человек",
+                    "year": 2026,
+                }, "1080")
+        finally:
+            bot._plex_shows_library = old_shows
+            bot._plex_library = old_movies
+
+        self.assertIsNone(hint)
 
 
 class SearchSeasonBackToPickerHandlerTests(unittest.IsolatedAsyncioTestCase):
