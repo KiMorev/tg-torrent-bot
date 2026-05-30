@@ -704,6 +704,7 @@ def build_cards(
                 # cached with kp_id=None means previously not found — skip API call
             elif cached is not None:
                 # Stale entry: refresh if under per-run cap, else degrade gracefully
+                legacy_country_refresh = bool(cached.get("kp_id") and "countries" not in cached)
                 can_refresh = max_stale_refresh is None or stale_refresh_count < max_stale_refresh
                 if can_refresh:
                     stale_refresh_count += 1
@@ -717,12 +718,14 @@ def build_cards(
                     if match is not None and kp_match_validator is not None:
                         if not kp_match_validator(search_title, match):
                             match = None
-                    _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
+                    refreshed = False
                     if match is not None:
                         year_ok = not (
                             match.year and match.year not in {card["year"], card["year"] - 1, card["year"] + 1}
                         )
                         if year_ok:
+                            _kp_cache_store(kp_cache, search_title, search_year, match, now_text)
+                            refreshed = True
                             card["kp_id"] = match.kp_id
                             card["kp_url"] = match.url
                             card["rating"] = match.rating
@@ -732,6 +735,18 @@ def build_cards(
                             card["title"] = match.title
                             card["poster_url"] = getattr(match, "poster_url", "") or ""
                             card["poster_preview_url"] = getattr(match, "poster_preview_url", "") or ""
+                    if not refreshed and legacy_country_refresh:
+                        card["kp_id"] = cached["kp_id"]
+                        card["kp_url"] = cached.get("url", "")
+                        card["rating"] = cached.get("rating")
+                        card["kp_votes"] = cached.get("votes")
+                        card["genres"] = cached.get("genres", [])
+                        card["countries"] = []
+                        card["title"] = cached.get("title") or search_title
+                        card["poster_url"] = cached.get("poster_url", "")
+                        card["poster_preview_url"] = cached.get("poster_preview_url", "")
+                    elif not refreshed:
+                        _kp_cache_store(kp_cache, search_title, search_year, None, now_text)
                 else:
                     # Per-run cap exhausted — use stale data silently (no user-visible degradation)
                     logger.debug("KP stale cap hit, using stale data for %r", search_title)

@@ -690,6 +690,34 @@ class BuildCardsKpCacheTests(unittest.TestCase):
         self.assertEqual(call_count["n"], 1)
         self.assertEqual(result["cards"][0]["countries"], ["USA"])
 
+    def test_legacy_cache_without_countries_keeps_stale_card_on_refresh_miss(self) -> None:
+        releases = [self._make_release()]
+        kp_cache = {
+            "тест|2026": {
+                "kp_id": 99,
+                "title": "Тест (KP)",
+                "year": 2026,
+                "rating": 7.8,
+                "genres": [],
+                "url": "https://www.kinopoisk.ru/film/99/",
+                "cached_at": "2026-05-12T11:00:00+00:00",
+            }
+        }
+
+        result = build_cards(
+            releases,
+            now_text="2026-05-12 12:00",
+            known_fingerprints=set(),
+            limit=20,
+            min_kp_rating=7.0,
+            kinopoisk_client=SimpleNamespace(search_movie=lambda title, year, **kw: None),
+            kp_cache=kp_cache,
+        )
+
+        self.assertEqual(len(result["cards"]), 1)
+        self.assertEqual(result["cards"][0]["kp_id"], 99)
+        self.assertEqual(result["cards"][0]["rating"], 7.8)
+
     def test_cache_miss_calls_api_and_stores_result(self) -> None:
         """On a cache miss the API is called and the result is stored in the returned cache."""
         releases = [self._make_release()]
