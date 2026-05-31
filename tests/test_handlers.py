@@ -2563,14 +2563,14 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         settings = {
             "movie_subscriptions": {"100": {"subscribed_at": "2026-05-14 11:00"}},
             "movie_seen_by_user": {
-                "100": {"2026:старый фильм": "2026-05-14 10:00"},
+                "100": {"kp:1": "2026-05-14 10:00"},
             },
         }
         self._patch_settings(settings)
         app = AsyncMock()
         cache = {"cards": [
-            self._make_card("Старый фильм"),
-            self._make_card("Новый фильм"),
+            self._make_card("Старый фильм", kp_id=1),
+            self._make_card("Новый фильм", kp_id=2),
         ]}
         with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
             await _run_movie_discovery_notifications(cache, app)
@@ -2611,6 +2611,49 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         kwargs = app.bot.send_message.call_args.kwargs
         self.assertIn("Фильм 1", kwargs["text"])
         self.assertIn("Фильм 2", kwargs["text"])
+
+    async def test_notification_skips_cards_without_kp_id(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [
+            self._make_card("Raw tracker only"),
+            self._make_card("KP enriched", kp_id=2),
+        ]}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+        kwargs = app.bot.send_message.call_args.kwargs
+        self.assertNotIn("Raw tracker only", kwargs["text"])
+        self.assertIn("KP enriched", kwargs["text"])
+
+    async def test_notification_skips_cards_already_in_plex(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": [
+            self._make_card("Plexed", kp_id=1),
+            self._make_card("Fresh", kp_id=2),
+        ]}
+
+        def enrich(cards):
+            for card in cards:
+                if card.get("title") == "Plexed":
+                    card["in_plex"] = True
+
+        with (
+            unittest.mock.patch("bot._is_in_notification_window", return_value=True),
+            unittest.mock.patch("bot._enrich_cards_with_plex", side_effect=enrich),
+        ):
+            await _run_movie_discovery_notifications(cache, app)
+        kwargs = app.bot.send_message.call_args.kwargs
+        self.assertNotIn("Plexed", kwargs["text"])
+        self.assertIn("Fresh", kwargs["text"])
 
     async def test_only_top10_cards_are_considered(self):
         """Cards beyond position 10 must NOT trigger notifications."""
@@ -2657,6 +2700,43 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         app.bot.send_message.assert_not_called()
         # Seen set must remain empty — film will be delivered later
         self.assertEqual(settings.get("movie_seen_by_user", {}).get("100", {}), {})
+
+    async def test_permanent_delivery_failures_unsubscribe_after_cap(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        app.bot.send_message = AsyncMock(side_effect=bot.Forbidden("blocked"))
+        cache = {"cards": [self._make_card("Blocked", kp_id=1)]}
+
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            for _ in range(bot._MOVIE_NOTIFICATION_MAX_FAILURES):
+                await _run_movie_discovery_notifications(cache, app)
+
+        self.assertNotIn("100", settings.get("movie_subscriptions", {}))
+        self.assertEqual(app.bot.send_message.await_count, bot._MOVIE_NOTIFICATION_MAX_FAILURES)
+
+    async def test_notification_selection_loads_settings_once(self):
+        settings = {
+            "movie_subscriptions": {"100": {}, "200": {}},
+            "movie_seen_by_user": {},
+        }
+        app = AsyncMock()
+        cache = {"cards": [self._make_card(f"Movie {i}", kp_id=i) for i in range(1, 6)]}
+        with (
+            unittest.mock.patch("bot._load_movie_discovery_settings", side_effect=lambda: settings) as load,
+            unittest.mock.patch("bot._save_movie_discovery_settings"),
+            unittest.mock.patch("bot._is_in_notification_window", return_value=True),
+            unittest.mock.patch(
+                "bot._send_movie_notification_push_to_user_result",
+                new=AsyncMock(return_value=(False, "network", False)),
+            ),
+        ):
+            await _run_movie_discovery_notifications(cache, app)
+
+        self.assertEqual(load.call_count, 1)
 
     async def test_notification_keyboard_has_open_and_unsub_buttons(self):
         settings = {
@@ -3482,6 +3562,20 @@ class MovieSeenByUserHelpersTests(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertTrue(any(i.startswith("2021:") for i in ids))
 
+    def test_card_identifiers_include_key_and_alt_title(self):
+        from bot import _card_identifiers
+        ids = _card_identifiers({
+            "key": "2026:raw title",
+            "kp_id": 12345,
+            "title": "Canonical Title",
+            "alt_title": "Raw Title",
+            "year": 2026,
+        })
+        self.assertIn("2026:raw title", ids)
+        self.assertIn("kp:12345", ids)
+        self.assertIn("2026:canonical title", ids)
+        self.assertEqual(len(ids), 3)
+
     def test_card_identifiers_only_movie_key_when_no_kp(self):
         from bot import _card_identifiers
         ids = _card_identifiers({"title": "Dune", "year": 2021})
@@ -3530,6 +3624,19 @@ class MovieSeenByUserHelpersTests(unittest.TestCase):
         with patch("bot.state_store") as st:
             st.load_movie_discovery_settings.return_value = store
             self.assertTrue(_is_card_notified({"kp_id": 777, "title": "X", "year": 2024}, 100))
+
+    def test_is_card_notified_matches_original_key_after_title_changes(self):
+        from bot import _is_card_notified
+        store = {"movie_seen_by_user": {"100": {"2026:raw title": {"notified_at": "ts"}}}}
+        card = {
+            "key": "2026:raw title",
+            "kp_id": 777,
+            "title": "Canonical Title",
+            "year": 2026,
+        }
+        with patch("bot.state_store") as st:
+            st.load_movie_discovery_settings.return_value = store
+            self.assertTrue(_is_card_notified(card, 100))
 
     def test_is_card_shown_in_new_distinguishes_from_notified(self):
         """Card with only notified_at must NOT count as shown."""

@@ -1818,26 +1818,44 @@ def _card_identifiers(card: dict) -> list[str]:
     A card's key flips between refreshes when KP enrichment status changes:
         - kp resolved later → key = "kp:N"
         - kp cache miss → key = movie_key(title, year)
-    To match a previously-stored ID through such flips we ALWAYS store both
-    ``kp:N`` (if kp_id is known) and ``movie_key(title, year)`` (if title+year
-    are known), and at lookup time check whether ANY of them appears in the
-    user's tracking dict.
+    To match a previously-stored ID through such flips we store every stable
+    handle the card already carries: original ``key``, ``kp:N`` (if known),
+    plus ``movie_key(title, year)`` for both title and alt_title.
     """
     ids: list[str] = []
+
+    def _append(value: str) -> None:
+        if value and value not in ids:
+            ids.append(value)
+
+    key = str(card.get("key") or "")
+    if key:
+        _append(key)
     kp_id = card.get("kp_id")
     if kp_id:
-        ids.append(f"kp:{kp_id}")
-    title = str(card.get("title") or "")
+        _append(f"kp:{kp_id}")
     try:
         year = int(card.get("year") or 0)
     except (TypeError, ValueError):
         year = 0
-    if title and year:
-        try:
-            ids.append(_movie_card_key(title, year))
-        except (TypeError, ValueError):
-            pass
+    if year:
+        for title_field in (card.get("title"), card.get("alt_title")):
+            title = str(title_field or "")
+            if not title:
+                continue
+            try:
+                _append(_movie_card_key(title, year))
+            except (TypeError, ValueError):
+                pass
     return ids
+
+
+def _get_user_entries_from_settings(settings: dict, chat_id: int) -> dict:
+    if not chat_id:
+        return {}
+    seen_by_user = settings.get("movie_seen_by_user") or {}
+    user_entry = seen_by_user.get(str(chat_id)) if isinstance(seen_by_user, dict) else {}
+    return user_entry if isinstance(user_entry, dict) else {}
 
 
 def _entry_is_notified(entry) -> bool:
@@ -1877,11 +1895,28 @@ def _entry_is_handled_in_new(entry) -> bool:
 def _get_user_entries(chat_id: int) -> dict:
     """Return the per-user dict of {film_id: entry}, where entry is either the
     new {notified_at, shown_at} dict or a legacy timestamp string."""
-    if not chat_id:
-        return {}
-    seen_by_user = _load_movie_discovery_settings().get("movie_seen_by_user") or {}
-    user_entry = seen_by_user.get(str(chat_id))
-    return user_entry if isinstance(user_entry, dict) else {}
+    return _get_user_entries_from_settings(_load_movie_discovery_settings(), chat_id)
+
+
+def _card_has_signal(card: dict, entries: dict, predicate) -> bool:
+    if not entries:
+        return False
+    for cid in _card_identifiers(card):
+        if predicate(entries.get(cid)):
+            return True
+    return False
+
+
+def _is_card_notified_in_entries(card: dict, entries: dict) -> bool:
+    return _card_has_signal(card, entries, _entry_is_notified)
+
+
+def _is_card_shown_in_new_in_entries(card: dict, entries: dict) -> bool:
+    return _card_has_signal(card, entries, _entry_is_shown_in_new)
+
+
+def _is_card_handled_in_new_in_entries(card: dict, entries: dict) -> bool:
+    return _card_has_signal(card, entries, _entry_is_handled_in_new)
 
 
 def _is_card_notified(card: dict, chat_id: int) -> bool:
@@ -1889,13 +1924,7 @@ def _is_card_notified(card: dict, chat_id: int) -> bool:
 
     Used to skip duplicate push.
     """
-    entries = _get_user_entries(chat_id)
-    if not entries:
-        return False
-    for cid in _card_identifiers(card):
-        if _entry_is_notified(entries.get(cid)):
-            return True
-    return False
+    return _is_card_notified_in_entries(card, _get_user_entries(chat_id))
 
 
 def _is_card_shown_in_new(card: dict, chat_id: int) -> bool:
@@ -1903,23 +1932,11 @@ def _is_card_shown_in_new(card: dict, chat_id: int) -> bool:
 
     Used to hide the 🆕 badge in /new for already-shown films.
     """
-    entries = _get_user_entries(chat_id)
-    if not entries:
-        return False
-    for cid in _card_identifiers(card):
-        if _entry_is_shown_in_new(entries.get(cid)):
-            return True
-    return False
+    return _is_card_shown_in_new_in_entries(card, _get_user_entries(chat_id))
 
 
 def _is_card_handled_in_new(card: dict, chat_id: int) -> bool:
-    entries = _get_user_entries(chat_id)
-    if not entries:
-        return False
-    for cid in _card_identifiers(card):
-        if _entry_is_handled_in_new(entries.get(cid)):
-            return True
-    return False
+    return _is_card_handled_in_new_in_entries(card, _get_user_entries(chat_id))
 
 
 def _mark_user_signal(chat_id: int, cards: list[dict], *, signal: str) -> None:
@@ -2008,6 +2025,53 @@ def _set_movie_subscription(chat_id: int, subscribed: bool) -> None:
     else:
         subs.pop(str(chat_id), None)
     _save_movie_discovery_settings(settings)
+
+
+def _clear_movie_subscription_failures(chat_id: int) -> None:
+    settings = _load_movie_discovery_settings()
+    subs = settings.get("movie_subscriptions")
+    if not isinstance(subs, dict):
+        return
+    entry = subs.get(str(chat_id))
+    if not isinstance(entry, dict):
+        return
+    changed = False
+    for key in ("failures", "last_failure_at", "last_failure_label"):
+        if key in entry:
+            entry.pop(key, None)
+            changed = True
+    if changed:
+        _save_movie_discovery_settings(settings)
+
+
+def _record_movie_subscription_failure(chat_id: int, label: str) -> tuple[int, bool]:
+    """Record a permanent /new push failure.
+
+    Returns ``(failure_count, unsubscribed)``. At the cap the subscription is
+    removed so a dead chat does not get retried forever.
+    """
+    settings = _load_movie_discovery_settings()
+    subs = settings.get("movie_subscriptions")
+    if not isinstance(subs, dict):
+        return 0, False
+    key = str(chat_id)
+    entry = subs.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+    try:
+        failure_count = int(entry.get("failures") or 0) + 1
+    except (TypeError, ValueError):
+        failure_count = 1
+    if failure_count >= _MOVIE_NOTIFICATION_MAX_FAILURES:
+        subs.pop(key, None)
+        _save_movie_discovery_settings(settings)
+        return failure_count, True
+    entry["failures"] = failure_count
+    entry["last_failure_at"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    entry["last_failure_label"] = label
+    subs[key] = entry
+    _save_movie_discovery_settings(settings)
+    return failure_count, False
 
 
 def _save_movie_discovery_debug(report: dict) -> None:
@@ -3030,6 +3094,7 @@ _MOVIE_NOTIFICATION_ACTION_LIMIT = 3
 _MOVIE_NOTIFICATION_SNAPSHOT_TTL_HOURS = 72
 _MOVIE_NOTIFICATION_SNAPSHOT_MAX = 100
 _MOVIE_NOTIFICATION_GPT_TIE_DELTA = 180.0
+_MOVIE_NOTIFICATION_MAX_FAILURES = MAX_TASK_NOTIFICATION_FAILURES
 
 
 def _movie_notification_target_quality(defaults: dict) -> str:
@@ -3425,14 +3490,20 @@ def _movie_notification_poster_url(cards: list) -> str:
     return url
 
 
-async def _send_movie_notification_push_to_user(
+async def _send_movie_notification_push_to_user_result(
     cards: list, chat_id: int, app: "Application",
-) -> bool:
-    """Send a /new notification to a specific subscriber. Returns True on success."""
-    cards = cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+) -> tuple[bool, str | None, bool]:
+    """Send a /new notification.
+
+    Returns ``(sent, failure_label, is_permanent)``.
+    """
+    cards = [c for c in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT] if c.get("kp_id")]
     if not cards:
-        return False
+        return False, "no_eligible_cards", False
     _enrich_cards_with_plex(cards)
+    cards = [c for c in cards if not c.get("in_plex")]
+    if not cards:
+        return False, "already_in_plex", False
     items = await _movie_notification_snapshot_items_with_gpt(cards, chat_id)
     push_id, items = _save_movie_notification_snapshot(chat_id, cards, items=items)
     text = _format_movie_notification_text(cards)
@@ -3452,7 +3523,7 @@ async def _send_movie_notification_push_to_user(
                 reply_markup=keyboard,
             )
             logger.info("Sent /new photo notification to chat_id=%s (%d films)", chat_id, len(cards))
-            return True
+            return True, None, False
         except Exception as exc:
             logger.warning("Failed to send /new poster to %s, falling back to text: %s", chat_id, exc)
 
@@ -3465,10 +3536,19 @@ async def _send_movie_notification_push_to_user(
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         logger.info("Sent /new notification to chat_id=%s (%d films)", chat_id, len(cards))
-        return True
+        return True, None, False
     except Exception as exc:
-        logger.warning("Failed to send /new notification to %s: %s", chat_id, exc)
-        return False
+        label, is_permanent = await _classify_send_error(exc)
+        logger.warning("Failed to send /new notification to %s (%s): %s", chat_id, label, exc)
+        return False, label, is_permanent
+
+
+async def _send_movie_notification_push_to_user(
+    cards: list, chat_id: int, app: "Application",
+) -> bool:
+    """Send a /new notification to a specific subscriber. Returns True on success."""
+    sent, _label, _is_permanent = await _send_movie_notification_push_to_user_result(cards, chat_id, app)
+    return sent
 
 
 async def _run_movie_discovery_notifications(
@@ -3503,10 +3583,11 @@ async def _run_movie_discovery_notifications(
          60%, the refresh is "unstable" (likely the same Jackett warm-up
          scenario carrying over to a non-first cycle). Skip push entirely.
 
-      D. Consensus filter — only push kp_ids that appear in BOTH the current
-         top-10 AND the previous top-10 (stored in ``cache.prev_top10_kp_ids``).
-         A genuinely-new film waits one cycle for confirmation; a transient
-         dies before reaching the user.
+      D. Eligibility + consensus filter — push only KP-enriched cards that are
+         not already in Plex, and only when their kp_id appears in BOTH the
+         current top-10 AND the previous top-10 (stored in
+         ``cache.prev_top10_kp_ids``). A genuinely-new film waits one cycle for
+         confirmation; a transient dies before reaching the user.
     """
     top_cards = (cache.get("cards") or [])[:10]
     if not top_cards:
@@ -3524,7 +3605,10 @@ async def _run_movie_discovery_notifications(
         logger.info("movie_discovery: notify skipped — first refresh after startup")
         return
 
-    subs = _get_movie_subscriptions()
+    settings = _load_movie_discovery_settings()
+    subs = settings.get("movie_subscriptions") or {}
+    if not isinstance(subs, dict):
+        subs = {}
     if not subs:
         logger.info("movie_discovery: notify skipped — no subscribers")
         return
@@ -3552,6 +3636,8 @@ async def _run_movie_discovery_notifications(
             )
             return
 
+    _enrich_cards_with_plex(top_cards)
+
     logger.info(
         "movie_discovery: notify start subscribers=%d top10_kp=[%s] prev_top10_kp=[%s]",
         len(subs),
@@ -3569,14 +3655,18 @@ async def _run_movie_discovery_notifications(
         #   - notified_at: bot has already pushed it once → avoid duplicate push
         #   - shown_at: user has already opened /new and seen the film → push
         #     would be redundant
-        # Plus Layer D: only push kp_ids confirmed by appearing in the previous
-        # top-10. A film entering the top-10 for the first time has to survive
-        # one more cycle before its push is allowed.
+        # Plus Layer D: only push KP-enriched cards that are not already in Plex
+        # and whose kp_id is confirmed by appearing in the previous top-10. A
+        # film entering the top-10 for the first time has to survive one more
+        # cycle before its push is allowed.
+        user_entries = _get_user_entries_from_settings(settings, chat_id)
         new_for_user = [
             c for c in top_cards
-            if not _is_card_notified(c, chat_id)
-            and not _is_card_shown_in_new(c, chat_id)
-            and not _is_card_handled_in_new(c, chat_id)
+            if c.get("kp_id")
+            and not c.get("in_plex")
+            and not _is_card_notified_in_entries(c, user_entries)
+            and not _is_card_shown_in_new_in_entries(c, user_entries)
+            and not _is_card_handled_in_new_in_entries(c, user_entries)
             and (not prev_top10_set or c.get("kp_id") in prev_top10_set)
         ]
         if not new_for_user:
@@ -3594,11 +3684,14 @@ async def _run_movie_discovery_notifications(
         )
 
         push_cards = new_for_user[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
-        sent = await _send_movie_notification_push_to_user(push_cards, chat_id, app)
+        sent, failure_label, is_permanent = await _send_movie_notification_push_to_user_result(
+            push_cards, chat_id, app
+        )
         if sent:
             # Only set notified_at — shown_at remains empty so the 🆕 badge stays
             # visible when the user clicks "Открыть /new" from the push.
             _mark_user_notified(chat_id, push_cards)
+            _clear_movie_subscription_failures(chat_id)
             logger.info(
                 "movie_discovery: notify sent chat=%s pushed=%d kp_ids=[%s]",
                 chat_id,
@@ -3606,12 +3699,32 @@ async def _run_movie_discovery_notifications(
                 ",".join(str(c.get("kp_id") or "-") for c in push_cards),
             )
         else:
-            logger.warning(
-                "movie_discovery: notify failed chat=%s candidates=%d kp_ids=[%s]",
-                chat_id,
-                len(push_cards),
-                ",".join(str(c.get("kp_id") or "-") for c in push_cards),
-            )
+            if is_permanent:
+                failure_count, unsubscribed = _record_movie_subscription_failure(
+                    chat_id, failure_label or "permanent"
+                )
+                if unsubscribed:
+                    logger.warning(
+                        "movie_discovery: notify failed permanently chat=%s label=%s "
+                        "attempt=%s/%s — unsubscribed from /new",
+                        chat_id, failure_label, failure_count, _MOVIE_NOTIFICATION_MAX_FAILURES,
+                    )
+                else:
+                    logger.warning(
+                        "movie_discovery: notify failed permanently chat=%s label=%s "
+                        "attempt=%s/%s",
+                        chat_id, failure_label, failure_count, _MOVIE_NOTIFICATION_MAX_FAILURES,
+                    )
+            else:
+                log_level = logging.ERROR if failure_label == "message_format_bug" else logging.INFO
+                logger.log(
+                    log_level,
+                    "movie_discovery: notify deferred chat=%s label=%s candidates=%d kp_ids=[%s]",
+                    chat_id,
+                    failure_label,
+                    len(push_cards),
+                    ",".join(str(c.get("kp_id") or "-") for c in push_cards),
+                )
 
 
 # Exponential backoff schedule when a refresh comes back with failed query
