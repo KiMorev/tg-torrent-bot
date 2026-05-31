@@ -1589,11 +1589,19 @@ def _admin_panel_kb_kwargs() -> dict:
     }
 
 
+_ADMIN_TASKS_TIMEOUT_SECONDS = 3.0
+
+
 async def _build_admin_panel_text() -> str:
     tasks = None
     task_error = ""
     try:
-        tasks = await asyncio.to_thread(ds_client.list_tasks)
+        tasks = await asyncio.wait_for(
+            asyncio.to_thread(ds_client.list_tasks),
+            timeout=_ADMIN_TASKS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        task_error = f"Download Station не ответил за {_ADMIN_TASKS_TIMEOUT_SECONDS:g} с"
     except DownloadStationError as exc:
         task_error = str(exc)
 
@@ -7388,12 +7396,20 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 _ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY = "admin_last_diagnostics_report"
+_ADMIN_DIAGNOSTICS_REPORT_TS_CACHE_KEY = "admin_last_diagnostics_report_at"
 
 
-def _cache_diagnostics_report(context: ContextTypes.DEFAULT_TYPE, report) -> None:
+def _diagnostics_snapshot_time() -> str:
+    return datetime.now(DISPLAY_TIMEZONE).strftime("%d.%m %H:%M")
+
+
+def _cache_diagnostics_report(context: ContextTypes.DEFAULT_TYPE, report) -> str:
+    snapshot_at = _diagnostics_snapshot_time()
     chat_data = getattr(context, "chat_data", None)
     if isinstance(chat_data, dict):
         chat_data[_ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY] = report
+        chat_data[_ADMIN_DIAGNOSTICS_REPORT_TS_CACHE_KEY] = snapshot_at
+    return snapshot_at
 
 
 def _cached_diagnostics_report(context: ContextTypes.DEFAULT_TYPE):
@@ -7401,6 +7417,22 @@ def _cached_diagnostics_report(context: ContextTypes.DEFAULT_TYPE):
     if not isinstance(chat_data, dict):
         return None
     return chat_data.get(_ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY)
+
+
+def _cached_diagnostics_snapshot_time(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    chat_data = getattr(context, "chat_data", None)
+    if not isinstance(chat_data, dict):
+        return None
+    snapshot_at = chat_data.get(_ADMIN_DIAGNOSTICS_REPORT_TS_CACHE_KEY)
+    return str(snapshot_at) if snapshot_at else None
+
+
+def _with_diagnostics_snapshot_time(text: str, snapshot_at: str | None) -> str:
+    snapshot_at = snapshot_at or _diagnostics_snapshot_time()
+    lines = text.splitlines()
+    if not lines:
+        return f"Снимок: {snapshot_at}"
+    return "\n".join([lines[0], f"Снимок: {snapshot_at}", *lines[1:]])
 
 
 async def _build_diagnostics_report():
@@ -7426,16 +7458,20 @@ async def _build_diagnostics_report():
 
 async def _build_diagnostics_text(context: ContextTypes.DEFAULT_TYPE | None = None) -> str:
     report = await _build_diagnostics_report()
+    snapshot_at = _diagnostics_snapshot_time()
     if context is not None:
-        _cache_diagnostics_report(context, report)
-    return format_diagnostics(report)
+        snapshot_at = _cache_diagnostics_report(context, report)
+    return _with_diagnostics_snapshot_time(format_diagnostics(report), snapshot_at)
 
 
 async def _build_cached_diagnostics_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     report = _cached_diagnostics_report(context)
     if report is None:
         return await _build_diagnostics_text(context)
-    return format_diagnostics(report)
+    return _with_diagnostics_snapshot_time(
+        format_diagnostics(report),
+        _cached_diagnostics_snapshot_time(context),
+    )
 
 
 async def _build_diagnostics_section_text(
@@ -7447,9 +7483,12 @@ async def _build_diagnostics_section_text(
     report = None if refresh or context is None else _cached_diagnostics_report(context)
     if report is None:
         report = await _build_diagnostics_report()
+        snapshot_at = _diagnostics_snapshot_time()
         if context is not None:
-            _cache_diagnostics_report(context, report)
-    return format_diagnostics_section(report, section)
+            snapshot_at = _cache_diagnostics_report(context, report)
+    else:
+        snapshot_at = _cached_diagnostics_snapshot_time(context) if context is not None else None
+    return _with_diagnostics_snapshot_time(format_diagnostics_section(report, section), snapshot_at)
 
 
 def _kinopoisk_lookup_error_text() -> str:
@@ -18436,10 +18475,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.warning("Rejected admin callback from chat_id=%s", admin_chat_id)
         return
 
-    await query.answer()
-
     parts = (query.data or "").split(":", 1)
     action = parts[1] if len(parts) > 1 else "home"
+    if action != "plex_unmatched_toggle":
+        await query.answer()
 
     if action == "close":
         chat_id = query.message.chat.id if query.message else None

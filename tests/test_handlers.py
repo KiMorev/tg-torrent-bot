@@ -744,6 +744,163 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Сброшено", last_text)
         self.assertIn("2", last_text)
 
+    def test_admin_panel_times_out_download_station_summary(self):
+        async def slow_to_thread(_func, *args, **kwargs):
+            await asyncio.sleep(0.05)
+            return []
+
+        fake_store = MagicMock()
+        fake_store.load_topic_subscriptions.return_value = {}
+        fake_store.load_notified_tasks.return_value = {}
+
+        with (
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot.asyncio, "to_thread", slow_to_thread),
+            patch.object(bot, "_ADMIN_TASKS_TIMEOUT_SECONDS", 0.001),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "MOVIE_DISCOVERY_ENABLED", False),
+            patch.object(bot, "VOICE_SEARCH_ENABLED", False),
+            patch.object(bot, "GPT_ENABLED", False),
+            patch.object(bot, "get_unified_disk_info", return_value=None),
+        ):
+            text = asyncio.run(bot._build_admin_panel_text())
+
+        self.assertIn("Download Station", text)
+        self.assertIn("0.001", text)
+
+    def test_cached_diagnostics_text_includes_snapshot_time(self):
+        context = _make_context()
+        context.chat_data = {
+            bot._ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY: object(),
+            bot._ADMIN_DIAGNOSTICS_REPORT_TS_CACHE_KEY: "31.05 12:34",
+        }
+
+        with patch.object(bot, "format_diagnostics", MagicMock(return_value="Diag\n\nBody")):
+            text = asyncio.run(bot._build_cached_diagnostics_text(context))
+
+        self.assertEqual(text.splitlines()[:2], ["Diag", "Снимок: 31.05 12:34"])
+
+    def test_admin_movie_status_callback_renders_details(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:movie_status")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "KINOPOISK_ENABLED", True),
+            patch.object(bot, "_format_admin_movie_discovery_details", MagicMock(return_value="movie details")),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        update.callback_query.answer.assert_called_once()
+        update.callback_query.edit_message_text.assert_called_once()
+        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "movie details")
+        markup = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+        self.assertIn("admin:force_kp_refresh", callbacks)
+
+    def test_admin_force_kp_refresh_callback_renders_budget(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:force_kp_refresh")
+        context = _make_context()
+        today = datetime.now(bot.DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
+        cache = {
+            "kp_cache": {"hit": {"kp_id": "1"}, "miss": {}},
+            "kp_api_stats": {"date": today, "searches": 0},
+        }
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_load_movie_discovery_cache", MagicMock(return_value=cache)),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("KP", text)
+        markup = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+        self.assertIn("admin:confirm_force_kp_refresh_gradual", callbacks)
+
+    def test_admin_clear_kp_cache_callback_renders_confirmation(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:clear_kp_cache")
+        context = _make_context()
+        cache = {"kp_cache": {"one": {"kp_id": "1"}}}
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_load_movie_discovery_cache", MagicMock(return_value=cache)),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        markup = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+        self.assertIn("admin:confirm_clear_kp_cache", callbacks)
+
+    def test_admin_movie_trackers_callback_renders_panel(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:movie_trackers")
+        context = _make_context()
+        keyboard = MagicMock()
+        panel = AsyncMock(return_value=("trackers", keyboard))
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_movie_trackers_panel", panel),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        panel.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_called_once()
+        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "trackers")
+        self.assertIs(update.callback_query.edit_message_text.call_args.kwargs["reply_markup"], keyboard)
+
+    def test_admin_tracker_toggle_saves_selection_and_schedules_recompute(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:tracker_toggle:kinozal")
+        context = _make_context()
+        saved = {}
+        scheduled = []
+
+        def fake_create_task(coro):
+            scheduled.append(coro)
+            coro.close()
+            return MagicMock()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_load_movie_discovery_settings", MagicMock(return_value={
+                "jackett_trackers_known": ["kinozal", "rutracker"],
+                "jackett_trackers_enabled": ["kinozal", "rutracker"],
+            })),
+            patch.object(bot, "_save_movie_discovery_settings", MagicMock(side_effect=saved.update)),
+            patch.object(bot, "_movie_trackers_panel", AsyncMock(return_value=("trackers", MagicMock()))),
+            patch.object(bot, "_recompute_movie_discovery_from_cache", AsyncMock()),
+            patch.object(bot.asyncio, "create_task", MagicMock(side_effect=fake_create_task)),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        self.assertEqual(saved["jackett_trackers_enabled"], ["rutracker"])
+        self.assertEqual(len(scheduled), 1)
+
+    def test_admin_tracker_enable_all_clears_selection_override(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:tracker_enable_all")
+        context = _make_context()
+        saved = {}
+
+        def fake_create_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_load_movie_discovery_settings", MagicMock(return_value={
+                "jackett_trackers_enabled": ["kinozal"],
+            })),
+            patch.object(bot, "_save_movie_discovery_settings", MagicMock(side_effect=saved.update)),
+            patch.object(bot, "_movie_trackers_panel", AsyncMock(return_value=("trackers", MagicMock()))),
+            patch.object(bot, "_recompute_movie_discovery_from_cache", AsyncMock()),
+            patch.object(bot.asyncio, "create_task", MagicMock(side_effect=fake_create_task)),
+        ):
+            asyncio.run(admin_callback(update, context))
+
+        self.assertIsNone(saved["jackett_trackers_enabled"])
+
     def test_admin_diagnostics_callback_reuses_diagnostics_view(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:diagnostics")
         context = _make_context()
@@ -793,7 +950,8 @@ class AdminPanelTests(unittest.TestCase):
         build_report.assert_not_awaited()
         update.callback_query.answer.assert_called_once()
         update.callback_query.edit_message_text.assert_called_once()
-        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "cached diag")
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertTrue(text.startswith("cached diag\nСнимок: "))
 
     def test_admin_diagnostics_detail_uses_cached_report_without_refresh(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:diag_plex")
@@ -813,7 +971,8 @@ class AdminPanelTests(unittest.TestCase):
         build_report.assert_not_awaited()
         format_section.assert_called_once_with(cached_report, "plex")
         update.callback_query.edit_message_text.assert_called_once()
-        self.assertEqual(update.callback_query.edit_message_text.call_args.args[0], "plex detail")
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertTrue(text.startswith("plex detail\nСнимок: "))
 
     def test_admin_diagnostics_detail_refresh_updates_cached_report(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:diag_refresh:plex")
@@ -830,7 +989,8 @@ class AdminPanelTests(unittest.TestCase):
 
         self.assertIs(context.chat_data[bot._ADMIN_DIAGNOSTICS_REPORT_CACHE_KEY], fresh_report)
         self.assertEqual(update.callback_query.edit_message_text.call_count, 2)
-        self.assertEqual(update.callback_query.edit_message_text.call_args_list[1].args[0], "fresh plex detail")
+        text = update.callback_query.edit_message_text.call_args_list[1].args[0]
+        self.assertTrue(text.startswith("fresh plex detail\nСнимок: "))
 
     def test_admin_subscriptions_callback_shows_all_owners(self):
         update = _make_callback_update(chat_id=300, callback_data="admin:subscriptions")
@@ -3273,9 +3433,8 @@ class AdminPlexUnmatchedCallbackTests(unittest.IsolatedAsyncioTestCase):
 
         # State flipped
         self.assertTrue(store["plex_unmatched_notify_enabled"])
-        # Pop-up text confirms — admin_callback already calls answer() at entry,
-        # then our handler calls answer("…notification enabled…") again.
-        self.assertGreaterEqual(update.callback_query.answer.call_count, 1)
+        # Pop-up text confirms the toggle; admin_callback should answer once.
+        self.assertEqual(update.callback_query.answer.call_count, 1)
         confirmations = [
             call.args[0] for call in update.callback_query.answer.call_args_list
             if call.args and "Уведомления" in call.args[0]
