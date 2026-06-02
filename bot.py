@@ -4302,7 +4302,11 @@ def _record_plex_success() -> None:
     _plex_consecutive_failures = 0
 
 
-async def _refresh_plex_library(app: "Application | None" = None) -> None:
+async def _refresh_plex_library(
+    app: "Application | None" = None,
+    *,
+    check_unmatched: bool = True,
+) -> None:
     """Fetch all movies from Plex and rebuild the in-memory cache.
 
     Single-flight: serialised by ``_plex_refresh_lock`` so concurrent callers
@@ -4380,11 +4384,12 @@ async def _refresh_plex_library(app: "Application | None" = None) -> None:
             _plex_shows_updated_at = time.time()
             logger.debug("Plex shows cache refreshed: %d shows", len(_plex_shows_library))
 
-        # Admin radar: check for newly-appeared unmatched files. Runs after both
-        # movie and show caches are fresh so the diff is consistent. The seen
-        # snapshot is updated unconditionally — that way an off→on toggle later
-        # doesn't dump every existing unmatched file at once.
-        await _check_plex_unmatched_against_seen(app=app)
+        if check_unmatched:
+            # Admin radar: check for newly-appeared unmatched files. Runs after both
+            # movie and show caches are fresh so the diff is consistent. The seen
+            # snapshot is updated unconditionally — that way an off→on toggle later
+            # doesn't dump every existing unmatched file at once.
+            await _check_plex_unmatched_against_seen(app=app)
 
 
 async def _check_plex_unmatched_against_seen(app: "Application | None") -> None:
@@ -5043,10 +5048,9 @@ async def _plex_poll_after_finish(
             if attempt > 0:
                 await asyncio.sleep(interval_seconds)
 
-            # Refresh Plex library, then look for the file. Passing app so any
-            # newly-appeared unmatched files trigger an admin push during the
-            # 10-min poll window — same channel the background loop uses.
-            await _refresh_plex_library(app)
+            # Refresh Plex library, then look for the file. Unmatched admin radar
+            # stays on the regular cache loop so Plex has time to finish matching.
+            await _refresh_plex_library(app, check_unmatched=False)
             # Heuristic: if the global failure counter is at 0,
             # this refresh succeeded.
             if _plex_consecutive_failures == 0:

@@ -4923,6 +4923,28 @@ class PlexPollingTests(unittest.TestCase):
         self.assertNotIn("task1", polling_tasks)
         fake_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=555)
 
+    def test_poll_after_finish_suppresses_unmatched_admin_radar_refresh(self):
+        """Post-download polling should not alert admins before Plex matching settles."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        refresh = AsyncMock()
+
+        with (
+            patch.object(bot, "_refresh_plex_library", refresh),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=None),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app,
+                "task1",
+                "Movie",
+                [100],
+                max_attempts=1,
+                interval_seconds=0,
+            ))
+
+        refresh.assert_awaited_once_with(fake_app, check_unmatched=False)
+
     def test_cleanup_plex_pending_removes_temp_file(self):
         """_cleanup_plex_pending must delete the temp .torrent if present."""
         import tempfile
