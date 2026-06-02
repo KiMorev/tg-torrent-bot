@@ -75,7 +75,7 @@
 | `settings:*` | `bot.py::_settings_keyboard` | `settings_callback`: quality/audio/subs/preferred voices/reset для `/settings` |
 | `task:*` | `keyboards.py` | `task_callback` |
 | `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
-| `access:*` | `keyboards.py` | `access_callback` |
+| `access:*` | `keyboards.py` | `access_callback`: approve/deny заявок, `/users` refresh, подтверждение и удаление доступа |
 | `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
 | `new:*` | `bot.py`, `keyboards.py` | `movie_new_*` callbacks; `new:dl:*` входит в search conversation, `new:bulk:*` / `new:bulk_ok:*` / `new:push_back:*` обрабатываются глобально |
 | `cont:*` | `bot.py` | `series_continue_callback`: список `/continue`, переключение `Моё` / `Всё`, refresh, карточка сезона, `cont:update_topic:*`, `cont:subscribe_topic:*`, `cont:search_alt:*`, `cont:alt_dl:*` |

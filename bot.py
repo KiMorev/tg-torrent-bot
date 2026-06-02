@@ -61,6 +61,7 @@ from formatters import (
 from keyboards import (
     ACCESS_CALLBACK_PREFIX,
     ADMIN_CALLBACK_PREFIX,
+    BUTTON_BACK,
     BUTTON_CLOSE,
     BUTTON_DOWNLOAD_LIST,
     BUTTON_REFRESH,
@@ -19579,10 +19580,16 @@ async def movie_new_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def _format_users_panel(*, back_to_admin: bool = True) -> tuple[str, InlineKeyboardMarkup]:
     admins = sorted(ADMIN_CHAT_IDS)
     permanent = sorted(ALLOWED_CHAT_IDS - ADMIN_CHAT_IDS)
+    stored_approved_users = state_store.load_approved_users()
     approved_users = {
         uid: info
-        for uid, info in sorted(state_store.load_approved_users().items())
+        for uid, info in sorted(stored_approved_users.items())
         if uid not in ALLOWED_CHAT_IDS and uid not in ADMIN_CHAT_IDS
+    }
+    pending_users = {
+        uid: label
+        for uid, label in sorted(ACCESS_PENDING_USERS.items())
+        if uid not in ALLOWED_CHAT_IDS and uid not in ADMIN_CHAT_IDS and uid not in stored_approved_users
     }
 
     lines = ["👥 Пользователи с доступом\n"]
@@ -19611,7 +19618,17 @@ def _format_users_panel(*, back_to_admin: bool = True) -> tuple[str, InlineKeybo
     else:
         lines.append("  (нет)")
 
-    return "\n".join(lines), users_keyboard(approved_users, back_to_admin=back_to_admin)
+    lines.append("\n⏳ Ожидают решения:")
+    if pending_users:
+        lines.extend(f"  • {uid} — {label}" if label else f"  • {uid}" for uid, label in pending_users.items())
+    else:
+        lines.append("  (нет)")
+
+    return "\n".join(lines), users_keyboard(
+        approved_users,
+        pending_users,
+        back_to_admin=back_to_admin,
+    )
 
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -19629,6 +19646,13 @@ def _access_result_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home"),
         InlineKeyboardButton(BUTTON_CLOSE, callback_data=f"{ADMIN_CALLBACK_PREFIX}:close"),
     ]])
+
+
+def _access_remove_confirm_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Удалить доступ", callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove:{chat_id}")],
+        [InlineKeyboardButton(BUTTON_BACK, callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")],
+    ])
 
 
 async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -19686,6 +19710,19 @@ async def access_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(
             f"Запрос доступа отклонен.\nchat_id: {target_chat_id}",
             reply_markup=_access_result_keyboard(),
+        )
+        return
+
+    if action == "remove_confirm":
+        users = state_store.load_approved_users()
+        info = users.get(target_chat_id, {})
+        name = info.get("name", "") if isinstance(info, dict) else ""
+        label = f"\nПользователь: {name}" if name else ""
+        await query.edit_message_text(
+            "Удалить доступ?\n"
+            f"chat_id: {target_chat_id}{label}\n\n"
+            "Связанные задачи и подписки пользователя будут очищены.",
+            reply_markup=_access_remove_confirm_keyboard(target_chat_id),
         )
         return
 

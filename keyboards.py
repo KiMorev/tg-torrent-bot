@@ -978,6 +978,7 @@ def _jackett_select_keyboard(
 
 def users_keyboard(
     approved_users: dict,
+    pending_users: dict[int, str] | None = None,
     *,
     back_to_admin: bool = True,
 ) -> InlineKeyboardMarkup:
@@ -985,10 +986,21 @@ def users_keyboard(
     rows = [
         [InlineKeyboardButton(
             f"🚫 {info.get('name', '') or uid}",
-            callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove:{uid}",
+            callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove_confirm:{uid}",
         )]
         for uid, info in approved_users.items()
     ]
+    for uid, label in (pending_users or {}).items():
+        rows.append([
+            InlineKeyboardButton(
+                f"✅ {label or uid}",
+                callback_data=f"{ACCESS_CALLBACK_PREFIX}:approve:{uid}",
+            ),
+            InlineKeyboardButton(
+                "🚫 Отклонить",
+                callback_data=f"{ACCESS_CALLBACK_PREFIX}:deny:{uid}",
+            ),
+        ])
     rows.append([InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
     if back_to_admin:
         rows.append([InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home")])

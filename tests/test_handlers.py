@@ -1653,6 +1653,58 @@ class AdminPanelTests(unittest.TestCase):
             update.callback_query.edit_message_text.call_args.kwargs["reply_markup"],
         )
 
+    def test_access_users_refresh_shows_pending_requests(self):
+        update = _make_callback_update(chat_id=300, callback_data="access:users_refresh")
+        context = _make_context()
+        fake_store = MagicMock()
+        fake_store.load_approved_users.return_value = {}
+
+        with (
+            patch.dict(bot.ACCESS_PENDING_USERS, {200: "Petr"}, clear=True),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "ALLOWED_CHAT_IDS", set()),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            asyncio.run(access_callback(update, context))
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("⏳ Ожидают решения:", text)
+        self.assertIn("200 — Petr", text)
+        buttons = {
+            button.text: button.callback_data
+            for row in update.callback_query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["✅ Petr"], "access:approve:200")
+        self.assertEqual(buttons["🚫 Отклонить"], "access:deny:200")
+
+    def test_access_remove_confirm_does_not_revoke_access(self):
+        update = _make_callback_update(chat_id=300, callback_data="access:remove_confirm:200")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.add_approved_user(200, "Petr")
+
+            with (
+                patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+                patch.object(bot, "state_store", store),
+            ):
+                asyncio.run(access_callback(update, context))
+
+            self.assertIn(200, store.load_approved_chat_ids())
+
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Удалить доступ?", text)
+        self.assertIn("Petr", text)
+        buttons = {
+            button.text: button.callback_data
+            for row in update.callback_query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["✅ Удалить доступ"], "access:remove:200")
+        self.assertEqual(buttons["⬅️ Назад"], "access:users_refresh")
+
     def test_access_remove_revokes_owned_tasks_and_subscriptions(self):
         update = _make_callback_update(chat_id=300, callback_data="access:remove:200")
         context = _make_context()

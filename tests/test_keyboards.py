@@ -806,7 +806,13 @@ class UsersKeyboardTests(unittest.TestCase):
         kb = users_keyboard(approved)
         buttons = self._buttons(kb)
         self.assertIn("🚫 Alice", buttons)
-        self.assertEqual(buttons["🚫 Alice"], "access:remove:12345")
+        self.assertEqual(buttons["🚫 Alice"], "access:remove_confirm:12345")
+
+    def test_pending_users_get_approve_and_deny_buttons(self) -> None:
+        kb = users_keyboard({}, {12345: "Alice"})
+        buttons = self._buttons(kb)
+        self.assertEqual(buttons["✅ Alice"], "access:approve:12345")
+        self.assertEqual(buttons["🚫 Отклонить"], "access:deny:12345")
 
     def test_refresh_button_always_present(self) -> None:
         kb = users_keyboard({})
