@@ -4,6 +4,7 @@ from pathlib import Path
 
 from search_facts import (
     SearchFact,
+    detect_query_tags,
     format_search_fact_line,
     load_search_facts,
     select_search_fact,
@@ -110,6 +111,87 @@ class SearchFactsTests(unittest.TestCase):
         )
 
         self.assertEqual(state["chats"]["100"]["recent_shown_ids"], ["fact_1", "fact_2"])
+
+    def test_detect_query_tags_uses_local_aliases(self) -> None:
+        self.assertEqual(detect_query_tags("пила 4"), {"horror", "saw"})
+        self.assertIn("sci-fi", detect_query_tags("Дюна 2 1080p"))
+
+    def test_query_tags_prefer_matching_facts(self) -> None:
+        facts = [
+            SearchFact(id="general", text="Общий факт", tags=("cinema",)),
+            SearchFact(id="horror", text="Факт ужасов", tags=("horror",)),
+        ]
+
+        text, state = select_search_fact(
+            facts,
+            {},
+            100,
+            query="пила 4",
+            pool_size=2,
+            choice=_first,
+            sample=_first_sample,
+        )
+
+        self.assertEqual(text, "Факт ужасов")
+        self.assertEqual(state["chats"]["100"]["pool_fact_ids"], ["horror"])
+        self.assertEqual(state["chats"]["100"]["pool_query_tags"], ["horror", "saw"])
+
+    def test_query_tag_change_rebuilds_existing_pool(self) -> None:
+        facts = [
+            SearchFact(id="general", text="Общий факт", tags=("cinema",)),
+            SearchFact(id="horror", text="Факт ужасов", tags=("horror",)),
+        ]
+        state = {
+            "chats": {
+                "100": {
+                    "pool_fact_ids": ["general"],
+                    "shown_in_pool": [],
+                    "recent_shown_ids": [],
+                    "pool_query_tags": [],
+                }
+            }
+        }
+
+        text, state = select_search_fact(
+            facts,
+            state,
+            100,
+            query="пила 4",
+            pool_size=2,
+            choice=_first,
+            sample=_first_sample,
+        )
+
+        self.assertEqual(text, "Факт ужасов")
+        self.assertEqual(state["chats"]["100"]["pool_fact_ids"], ["horror"])
+
+    def test_recent_history_can_fall_back_from_matching_facts(self) -> None:
+        facts = [
+            SearchFact(id="general", text="Общий факт", tags=("cinema",)),
+            SearchFact(id="horror", text="Факт ужасов", tags=("horror",)),
+        ]
+        state = {
+            "chats": {
+                "100": {
+                    "pool_fact_ids": ["horror"],
+                    "shown_in_pool": ["horror"],
+                    "recent_shown_ids": ["horror"],
+                }
+            }
+        }
+
+        text, state = select_search_fact(
+            facts,
+            state,
+            100,
+            query="пила 4",
+            pool_size=2,
+            choice=_first,
+            sample=_first_sample,
+        )
+
+        self.assertEqual(text, "Общий факт")
+        self.assertEqual(state["chats"]["100"]["pool_fact_ids"], ["general"])
 
     def test_load_search_facts_skips_invalid_and_duplicate_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

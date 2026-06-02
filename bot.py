@@ -454,13 +454,13 @@ kinopoisk_client = app_context.kinopoisk_client
 plex_client = app_context.plex_client
 
 
-def _pick_search_fact_for_chat(chat_id: int | None) -> str:
+def _pick_search_fact_for_chat(chat_id: int | None, query: str = "") -> str:
     if chat_id is None:
         return ""
     try:
         facts = load_search_facts()
         state = state_store.load_search_facts_state()
-        fact_text, updated_state = select_search_fact(facts, state, int(chat_id))
+        fact_text, updated_state = select_search_fact(facts, state, int(chat_id), query=query)
         if fact_text:
             state_store.save_search_facts_state(updated_state)
         return format_search_fact_line(fact_text)
@@ -9157,7 +9157,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     loading_msg = await send_fn(loading_text)
     if loading_msg is not None:
-        fact_line = _pick_search_fact_for_chat(getattr(loading_msg, "chat_id", None))
+        fact_line = _pick_search_fact_for_chat(getattr(loading_msg, "chat_id", None), search_query)
         if fact_line:
             loading_text += fact_line
             try:
