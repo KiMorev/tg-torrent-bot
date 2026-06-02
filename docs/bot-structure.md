@@ -112,7 +112,7 @@
 | `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break. |
 | `access_control.py` | Проверка разрешённых/admin chat ids и подпись заявки на доступ. |
 | `progressive_status.py` | Прогрессивные сообщения ожидания для поиска и голосового ввода. |
-| `search_facts.py` | Локальные кинофакты для экрана ожидания поиска: выбор, ротация пула и защита от повторов по `chat_id`. |
+| `search_facts.py` | Локальные кинофакты для экрана ожидания поиска: выбор, alias-теги запроса, ротация пула и защита от повторов по `chat_id`. |
 | `scripts/setup_wizard.py` | Wizard установки и генерация `.env`. |
 | `tests/conftest.py` | Bootstrap тестового окружения: изолированные `TMP_DIR`/`STATE_DIR` до импорта `bot.py`. |
 

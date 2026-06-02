@@ -6,6 +6,7 @@ from search_facts import (
     SearchFact,
     detect_query_tags,
     format_search_fact_line,
+    load_search_fact_aliases,
     load_search_facts,
     select_search_fact,
 )
@@ -116,6 +117,11 @@ class SearchFactsTests(unittest.TestCase):
         self.assertEqual(detect_query_tags("пила 4"), {"horror", "saw"})
         self.assertIn("sci-fi", detect_query_tags("Дюна 2 1080p"))
 
+    def test_detect_query_tags_accepts_custom_aliases(self) -> None:
+        aliases = {"custom movie": ("custom",)}
+
+        self.assertEqual(detect_query_tags("custom movie 2026", aliases=aliases), {"custom"})
+
     def test_query_tags_prefer_matching_facts(self) -> None:
         facts = [
             SearchFact(id="general", text="Общий факт", tags=("cinema",)),
@@ -204,6 +210,32 @@ class SearchFactsTests(unittest.TestCase):
             facts = load_search_facts(path)
 
         self.assertEqual(facts, [SearchFact(id="a", text="A")])
+
+    def test_load_search_fact_aliases_skips_invalid_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "aliases.json"
+            path.write_text(
+                '{"ok":["horror","horror",""],"bad":"horror","empty":[]}',
+                encoding="utf-8",
+            )
+
+            aliases = load_search_fact_aliases(path)
+
+        self.assertEqual(aliases, {"ok": ("horror",)})
+
+    def test_local_fact_data_is_valid(self) -> None:
+        facts = load_search_facts()
+        aliases = load_search_fact_aliases()
+        fact_ids = [fact.id for fact in facts]
+        fact_tags = {tag for fact in facts for tag in fact.tags}
+        alias_tags = {tag for tags in aliases.values() for tag in tags}
+
+        self.assertGreaterEqual(len(facts), 80)
+        self.assertEqual(len(fact_ids), len(set(fact_ids)))
+        self.assertTrue(all(fact.text.strip() for fact in facts))
+        self.assertTrue(all(fact.tags for fact in facts))
+        self.assertTrue(aliases)
+        self.assertFalse(alias_tags - fact_tags)
 
     def test_format_search_fact_line(self) -> None:
         self.assertEqual(format_search_fact_line(None), "")

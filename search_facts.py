@@ -11,36 +11,10 @@ from typing import Any, Callable
 
 
 DEFAULT_SEARCH_FACTS_PATH = Path(__file__).resolve().parent / "data" / "search_facts.json"
+DEFAULT_SEARCH_FACT_ALIASES_PATH = Path(__file__).resolve().parent / "data" / "search_fact_aliases.json"
 DEFAULT_POOL_SIZE = 100
 DEFAULT_REFRESH_THRESHOLD = 0.7
 DEFAULT_RECENT_LIMIT = 500
-
-QUERY_TAG_ALIASES: dict[str, tuple[str, ...]] = {
-    "аниме": ("animation",),
-    "гарри поттер": ("fantasy", "harry_potter"),
-    "дюна": ("sci-fi", "dune"),
-    "звездные войны": ("sci-fi", "star_wars"),
-    "звёздные войны": ("sci-fi", "star_wars"),
-    "матрица": ("sci-fi", "matrix"),
-    "мульт": ("animation",),
-    "мультфильм": ("animation",),
-    "пила": ("horror", "saw"),
-    "ужасы": ("horror",),
-    "ужастик": ("horror",),
-    "хоррор": ("horror",),
-    "alien": ("horror", "sci-fi"),
-    "anime": ("animation",),
-    "animation": ("animation",),
-    "dune": ("sci-fi", "dune"),
-    "fantasy": ("fantasy",),
-    "harry potter": ("fantasy", "harry_potter"),
-    "horror": ("horror",),
-    "matrix": ("sci-fi", "matrix"),
-    "saw": ("horror", "saw"),
-    "sci fi": ("sci-fi",),
-    "sci-fi": ("sci-fi",),
-    "star wars": ("sci-fi", "star_wars"),
-}
 
 
 @dataclass(frozen=True)
@@ -77,6 +51,25 @@ def load_search_facts(path: Path = DEFAULT_SEARCH_FACTS_PATH) -> list[SearchFact
     return facts
 
 
+def load_search_fact_aliases(path: Path = DEFAULT_SEARCH_FACT_ALIASES_PATH) -> dict[str, tuple[str, ...]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    aliases: dict[str, tuple[str, ...]] = {}
+    for alias, raw_tags in payload.items():
+        alias_text = str(alias).strip()
+        if not alias_text or alias_text in aliases or not isinstance(raw_tags, list):
+            continue
+        tags = tuple(dict.fromkeys(str(tag).strip().lower() for tag in raw_tags if str(tag).strip()))
+        if tags:
+            aliases[alias_text] = tags
+    return aliases
+
+
 def format_search_fact_line(fact_text: str | None) -> str:
     if not fact_text:
         return ""
@@ -94,6 +87,7 @@ def select_search_fact(
     recent_limit: int = DEFAULT_RECENT_LIMIT,
     choice: Callable[[list[str]], str] | None = None,
     sample: Callable[[list[str], int], list[str]] | None = None,
+    aliases: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     if not facts:
         return None, state if isinstance(state, dict) else {}
@@ -114,7 +108,7 @@ def select_search_fact(
 
     fact_by_id = {fact.id: fact for fact in facts}
     all_ids = [fact.id for fact in facts]
-    query_tags = detect_query_tags(query or "")
+    query_tags = detect_query_tags(query or "", aliases=aliases)
     priority_ids = _priority_fact_ids(facts, query_tags)
     candidate_ids = priority_ids or all_ids
     target_pool_size = min(max(1, pool_size), len(all_ids))
@@ -153,12 +147,13 @@ def select_search_fact(
     return fact_by_id[fact_id].text, state
 
 
-def detect_query_tags(query: str) -> set[str]:
+def detect_query_tags(query: str, aliases: dict[str, tuple[str, ...]] | None = None) -> set[str]:
     normalized = _normalize_query(query)
     if not normalized:
         return set()
+    aliases = aliases if aliases is not None else load_search_fact_aliases()
     tags: set[str] = set()
-    for alias, alias_tags in QUERY_TAG_ALIASES.items():
+    for alias, alias_tags in aliases.items():
         if _alias_matches(normalized, _normalize_query(alias)):
             tags.update(alias_tags)
     if re.search(r"\bs\d{1,2}\b|\bseason\b|сезон", normalized):
