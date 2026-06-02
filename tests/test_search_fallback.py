@@ -518,6 +518,24 @@ class LoadingMessageWordingTests(unittest.TestCase):
         # No filter sub-line — year is part of the title, not a tracked setting
         self.assertNotIn("⚙️", loading_text)
 
+    def test_loading_text_includes_fact_on_first_send(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search.return_value = []
+        send_fn, _msg = _make_send_fn()
+        context = _make_context()
+        context._chat_id = 100
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+            patch.object(bot, "_pick_search_fact_for_chat", return_value="\n\n💡: факт"),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Дюна 2024"))
+
+        loading_text = send_fn.call_args.args[0]
+        self.assertIn("\n\n💡: факт", loading_text)
+
 
 class SearchDidmeanPreservesSettingsTests(unittest.TestCase):
     """search_didmean must keep the user's quality/audio/subs choices when

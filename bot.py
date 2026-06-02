@@ -9309,9 +9309,14 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     if filter_parts:
         loading_text += f"\n⚙️ Фильтры: {' · '.join(filter_parts)}"
 
+    context_chat_id = getattr(context, "_chat_id", None)
+    fact_line = _pick_search_fact_for_chat(context_chat_id if isinstance(context_chat_id, int) else None, search_query)
+    if fact_line:
+        loading_text += fact_line
+
     loading_msg = await send_fn(loading_text)
     if loading_msg is not None:
-        fact_line = _pick_search_fact_for_chat(getattr(loading_msg, "chat_id", None), search_query)
+        fact_line = "" if fact_line else _pick_search_fact_for_chat(getattr(loading_msg, "chat_id", None), search_query)
         if fact_line:
             loading_text += fact_line
             try:

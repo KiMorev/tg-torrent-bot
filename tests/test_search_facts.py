@@ -370,7 +370,7 @@ class SearchFactsTests(unittest.TestCase):
 
     def test_format_search_fact_line(self) -> None:
         self.assertEqual(format_search_fact_line(None), "")
-        self.assertEqual(format_search_fact_line("факт"), "\n\n💡 Пока ждёте: факт")
+        self.assertEqual(format_search_fact_line("факт"), "\n\n💡: факт")
 
 
 class SearchFactsStateStoreTests(unittest.TestCase):

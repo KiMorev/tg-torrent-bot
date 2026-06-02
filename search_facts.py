@@ -151,7 +151,7 @@ def build_search_fact_catalog_payload(
 def format_search_fact_line(fact_text: str | None) -> str:
     if not fact_text:
         return ""
-    return f"\n\n💡 Пока ждёте: {fact_text}"
+    return f"\n\n💡: {fact_text}"
 
 
 def select_search_fact(
