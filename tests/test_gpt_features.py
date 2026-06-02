@@ -25,6 +25,7 @@ os.environ.setdefault("DS_DESTINATION", "video")
 import requests as _requests
 import gpt_client
 import gpt_features
+from search_facts import SearchFact
 
 
 class ChatCompletionTests(unittest.TestCase):
@@ -79,6 +80,63 @@ class ChatCompletionTests(unittest.TestCase):
         with patch.object(gpt_client.requests, "post", return_value=mock_response):
             _result, err = gpt_client.chat_completion(messages=[], api_key="sk-test")
         self.assertEqual(err, "empty")
+
+
+class SearchFactCatalogGenerationTests(unittest.TestCase):
+    def _catalog_text(self, count: int = 60) -> str:
+        import json
+
+        return json.dumps(
+            {
+                "facts": [
+                    {"id": f"gpt:fact_{i}", "text": f"Короткий кинофакт номер {i}.", "tags": ["cinema"]}
+                    for i in range(count)
+                ],
+                "aliases": {"кино": ["cinema"]},
+                "markers": {"generated_for": "search_waiting_facts"},
+            },
+            ensure_ascii=False,
+        )
+
+    def test_generate_search_fact_catalog_accepts_valid_json(self) -> None:
+        usage_sink: list[dict] = []
+        with patch.object(
+            gpt_features,
+            "chat_completion",
+            return_value=(
+                {"text": self._catalog_text(), "input_tokens": 10, "output_tokens": 20, "model": "gpt-4o-mini"},
+                None,
+            ),
+        ):
+            catalog, error = gpt_features.generate_search_fact_catalog(
+                existing_facts=[SearchFact(id="local:1", text="старый факт", tags=("cinema",))],
+                existing_aliases={"кино": ("cinema",)},
+                api_key="key",
+                usage_sink=usage_sink,
+            )
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(catalog)
+        self.assertEqual(len(catalog["facts"]), 60)
+        self.assertEqual(usage_sink[0]["input_tokens"], 10)
+
+    def test_generate_search_fact_catalog_rejects_invalid_catalog(self) -> None:
+        with patch.object(
+            gpt_features,
+            "chat_completion",
+            return_value=(
+                {"text": '{"facts":[],"aliases":{} }', "input_tokens": 10, "output_tokens": 20, "model": "gpt-4o-mini"},
+                None,
+            ),
+        ):
+            catalog, error = gpt_features.generate_search_fact_catalog(
+                existing_facts=[],
+                existing_aliases={},
+                api_key="key",
+            )
+
+        self.assertIsNone(catalog)
+        self.assertEqual(error, "invalid_catalog")
 
 
 class EstimateCostTests(unittest.TestCase):

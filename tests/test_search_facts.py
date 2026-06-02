@@ -1,14 +1,18 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from search_facts import (
     SearchFact,
+    build_search_fact_catalog_payload,
     detect_query_tags,
     format_search_fact_line,
     load_search_fact_aliases,
+    load_search_fact_catalog,
     load_search_facts,
     select_search_fact,
+    validate_search_fact_catalog,
 )
 from state_store import JsonStateStore
 
@@ -112,6 +116,48 @@ class SearchFactsTests(unittest.TestCase):
         )
 
         self.assertEqual(state["chats"]["100"]["recent_shown_ids"], ["fact_1", "fact_2"])
+
+    def test_catalog_progress_requests_refresh_after_threshold(self) -> None:
+        state: dict = {}
+
+        for _ in range(2):
+            _, state = select_search_fact(
+                _facts(3),
+                state,
+                100,
+                pool_size=3,
+                catalog_refresh_threshold=0.5,
+                choice=_first,
+                sample=_first_sample,
+            )
+
+        catalog = state["catalog"]
+        self.assertEqual(catalog["total_facts"], 3)
+        self.assertGreaterEqual(catalog["shown_percent"], 0.5)
+        self.assertTrue(catalog["refresh_requested_at"])
+
+    def test_catalog_progress_resets_when_catalog_changes(self) -> None:
+        _, state = select_search_fact(
+            _facts(2),
+            {},
+            100,
+            pool_size=2,
+            choice=_first,
+            sample=_first_sample,
+        )
+        first_catalog_id = state["catalog"]["id"]
+
+        _, state = select_search_fact(
+            _facts(3),
+            state,
+            100,
+            pool_size=3,
+            choice=_first,
+            sample=_first_sample,
+        )
+
+        self.assertNotEqual(state["catalog"]["id"], first_catalog_id)
+        self.assertEqual(len(state["catalog"]["shown_unique_ids"]), 1)
 
     def test_detect_query_tags_uses_local_aliases(self) -> None:
         self.assertEqual(detect_query_tags("пила 4"), {"horror", "saw"})
@@ -222,6 +268,44 @@ class SearchFactsTests(unittest.TestCase):
             aliases = load_search_fact_aliases(path)
 
         self.assertEqual(aliases, {"ok": ("horror",)})
+
+    def test_runtime_catalog_loads_when_valid(self) -> None:
+        facts = [SearchFact(id=f"fact_{i}", text=f"Fact {i}", tags=("cinema",)) for i in range(40)]
+        aliases = {"movie": ("cinema",)}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "catalog.json"
+            path.write_text(
+                json.dumps(
+                    build_search_fact_catalog_payload(facts, aliases),
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            loaded_facts, loaded_aliases, markers = load_search_fact_catalog(path)
+
+        self.assertEqual(len(loaded_facts), 40)
+        self.assertEqual(loaded_aliases, aliases)
+        self.assertEqual(markers, {})
+
+    def test_runtime_catalog_falls_back_when_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "catalog.json"
+            path.write_text('{"facts":[],"aliases":{}}', encoding="utf-8")
+
+            loaded_facts, loaded_aliases, markers = load_search_fact_catalog(path)
+
+        self.assertGreaterEqual(len(loaded_facts), 80)
+        self.assertIn("пила", loaded_aliases)
+        self.assertEqual(markers, {"source": "bundled"})
+
+    def test_validate_search_fact_catalog_rejects_unknown_alias_tag(self) -> None:
+        payload = build_search_fact_catalog_payload(
+            [SearchFact(id=f"fact_{i}", text=f"Fact {i}", tags=("cinema",)) for i in range(40)],
+            {"bad": ("unknown",)},
+        )
+
+        self.assertIsNone(validate_search_fact_catalog(payload))
 
     def test_local_fact_data_is_valid(self) -> None:
         facts = load_search_facts()

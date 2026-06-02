@@ -5,6 +5,7 @@ import random
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +16,8 @@ DEFAULT_SEARCH_FACT_ALIASES_PATH = Path(__file__).resolve().parent / "data" / "s
 DEFAULT_POOL_SIZE = 100
 DEFAULT_REFRESH_THRESHOLD = 0.7
 DEFAULT_RECENT_LIMIT = 500
+DEFAULT_CATALOG_REFRESH_THRESHOLD = 0.7
+MIN_CATALOG_FACTS = 40
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,71 @@ def load_search_fact_aliases(path: Path = DEFAULT_SEARCH_FACT_ALIASES_PATH) -> d
     return aliases
 
 
+def load_search_fact_catalog(
+    runtime_path: Path | None = None,
+) -> tuple[list[SearchFact], dict[str, tuple[str, ...]], dict[str, Any]]:
+    if runtime_path is not None:
+        payload = _load_json_payload(runtime_path)
+        catalog = validate_search_fact_catalog(payload, min_facts=MIN_CATALOG_FACTS)
+        if catalog is not None:
+            return (
+                _facts_from_payload(catalog["facts"]),
+                _aliases_from_payload(catalog["aliases"]),
+                catalog.get("markers", {}),
+            )
+
+    return (
+        load_search_facts(),
+        load_search_fact_aliases(),
+        {"source": "bundled"},
+    )
+
+
+def validate_search_fact_catalog(payload: Any, *, min_facts: int = MIN_CATALOG_FACTS) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    facts = _normalise_fact_payload(payload.get("facts"))
+    aliases = _normalise_alias_payload(payload.get("aliases"))
+    if len(facts) < min_facts or not aliases:
+        return None
+
+    fact_tags = {tag for fact in facts for tag in fact["tags"]}
+    alias_tags = {tag for tags in aliases.values() for tag in tags}
+    if alias_tags - fact_tags:
+        return None
+
+    markers = payload.get("markers")
+    if not isinstance(markers, dict):
+        markers = {}
+
+    return {
+        "schema": 1,
+        "generated_at": str(payload.get("generated_at") or _utc_now_iso()),
+        "facts": facts,
+        "aliases": aliases,
+        "markers": {str(k): v for k, v in markers.items() if str(k).strip()},
+    }
+
+
+def build_search_fact_catalog_payload(
+    facts: list[SearchFact],
+    aliases: dict[str, tuple[str, ...]],
+    *,
+    markers: dict[str, Any] | None = None,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": 1,
+        "generated_at": generated_at or _utc_now_iso(),
+        "facts": [
+            {"id": fact.id, "text": fact.text, "tags": list(fact.tags)}
+            for fact in facts
+        ],
+        "aliases": {alias: list(tags) for alias, tags in aliases.items()},
+        "markers": markers or {},
+    }
+
+
 def format_search_fact_line(fact_text: str | None) -> str:
     if not fact_text:
         return ""
@@ -88,6 +156,7 @@ def select_search_fact(
     choice: Callable[[list[str]], str] | None = None,
     sample: Callable[[list[str], int], list[str]] | None = None,
     aliases: dict[str, tuple[str, ...]] | None = None,
+    catalog_refresh_threshold: float = DEFAULT_CATALOG_REFRESH_THRESHOLD,
 ) -> tuple[str | None, dict[str, Any]]:
     if not facts:
         return None, state if isinstance(state, dict) else {}
@@ -143,6 +212,7 @@ def select_search_fact(
     chat_state["shown_in_pool"] = shown_ids
     chat_state["recent_shown_ids"] = recent_ids
     chat_state["pool_query_tags"] = current_query_tags
+    _record_catalog_progress(state, facts, fact_id, catalog_refresh_threshold)
 
     return fact_by_id[fact_id].text, state
 
@@ -247,3 +317,106 @@ def _append_unique(items: list[str], item: str) -> list[str]:
 def _pool_id(pool_ids: list[str]) -> str:
     digest = sha1("\n".join(pool_ids).encode("utf-8")).hexdigest()[:12]
     return f"pool:{digest}"
+
+
+def _record_catalog_progress(
+    state: dict[str, Any],
+    facts: list[SearchFact],
+    fact_id: str,
+    refresh_threshold: float,
+) -> None:
+    catalog_id = _catalog_id(facts)
+    catalog = state.get("catalog")
+    if not isinstance(catalog, dict) or catalog.get("id") != catalog_id:
+        catalog = {
+            "id": catalog_id,
+            "shown_unique_ids": [],
+            "refresh_requested_at": "",
+            "last_refresh_attempt_at": "",
+            "last_refresh_success_at": "",
+            "last_refresh_error": "",
+        }
+        state["catalog"] = catalog
+
+    shown_ids = _normalise_id_list(catalog.get("shown_unique_ids"), {fact.id: fact for fact in facts})
+    shown_ids = _append_unique(shown_ids, fact_id)
+    total = len(facts)
+    shown_percent = (len(shown_ids) / total) if total else 0.0
+    catalog["shown_unique_ids"] = shown_ids
+    catalog["total_facts"] = total
+    catalog["shown_percent"] = round(shown_percent, 4)
+    if shown_percent >= max(0.0, min(1.0, refresh_threshold)) and not catalog.get("refresh_requested_at"):
+        catalog["refresh_requested_at"] = _utc_now_iso()
+
+
+def _catalog_id(facts: list[SearchFact]) -> str:
+    digest = sha1(
+        "\n".join(f"{fact.id}\t{fact.text}" for fact in facts).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"catalog:{digest}"
+
+
+def _load_json_payload(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _facts_from_payload(payload: list[dict[str, Any]]) -> list[SearchFact]:
+    return [
+        SearchFact(id=str(item["id"]), text=str(item["text"]), tags=tuple(item["tags"]))
+        for item in payload
+    ]
+
+
+def _aliases_from_payload(payload: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:
+    return {str(alias): tuple(tags) for alias, tags in payload.items()}
+
+
+def _normalise_fact_payload(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    facts: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_texts: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        fact_id = str(item.get("id") or "").strip()
+        text = str(item.get("text") or "").strip()
+        if not fact_id or not text or fact_id in seen_ids or text.casefold() in seen_texts:
+            continue
+        tags = tuple(dict.fromkeys(
+            str(tag).strip().lower()
+            for tag in item.get("tags", [])
+            if str(tag).strip()
+        ))
+        if not tags or len(text) > 180:
+            continue
+        facts.append({"id": fact_id, "text": text, "tags": list(tags)})
+        seen_ids.add(fact_id)
+        seen_texts.add(text.casefold())
+    return facts
+
+
+def _normalise_alias_payload(payload: Any) -> dict[str, list[str]]:
+    if not isinstance(payload, dict):
+        return {}
+    aliases: dict[str, list[str]] = {}
+    for alias, raw_tags in payload.items():
+        alias_text = str(alias).strip()
+        if not alias_text or not isinstance(raw_tags, list):
+            continue
+        tags = list(dict.fromkeys(
+            str(tag).strip().lower()
+            for tag in raw_tags
+            if str(tag).strip()
+        ))
+        if tags:
+            aliases[alias_text] = tags
+    return aliases
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

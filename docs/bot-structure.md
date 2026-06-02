@@ -109,10 +109,10 @@
 | `tracker_service.py` | Публичные BT-трекеры: загрузка списка, cache, применение к задачам. |
 | `storage.py` | Информация о диске и history для storage alerts. |
 | `voice_transcription.py` | Whisper transcription, проверки ключа, расчёт стоимости. |
-| `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break. |
+| `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break, фоновое обновление каталога search facts. |
 | `access_control.py` | Проверка разрешённых/admin chat ids и подпись заявки на доступ. |
 | `progressive_status.py` | Прогрессивные сообщения ожидания для поиска и голосового ввода. |
-| `search_facts.py` | Локальные кинофакты для экрана ожидания поиска: выбор, alias-теги запроса, ротация пула и защита от повторов по `chat_id`. |
+| `search_facts.py` | Локальные кинофакты для экрана ожидания поиска: bundled/runtime-каталог, alias-теги запроса, ротация пула, общий прогресс каталога и защита от повторов по `chat_id`. |
 | `scripts/setup_wizard.py` | Wizard установки и генерация `.env`. |
 | `tests/conftest.py` | Bootstrap тестового окружения: изолированные `TMP_DIR`/`STATE_DIR` до импорта `bot.py`. |
 
@@ -139,7 +139,8 @@
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `user_search_defaults.json` | Личные предпочтения поиска по `chat_id`: качество, Original, субтитры и preferred voices. |
-| `search_facts_state.json` | История показанных кинофактов по `chat_id`: текущий пул, показанные в пуле и recent-history для защиты от повторов. |
+| `search_facts_state.json` | История показанных кинофактов по `chat_id`: текущий пул, показанные в пуле, recent-history, общий прогресс каталога и флаги фонового GPT-refresh. |
+| `search_facts_catalog.json` | Runtime-каталог кинофактов и aliases, созданный фоновым GPT-refresh; при ошибке или отсутствии бот использует bundled `data/search_facts.json` / `data/search_fact_aliases.json`. |
 | `gpt_usage.json` | Использование GPT-функций; `last_error` очищается успешным GPT-вызовом, transient-ошибки старше 24 ч не желтят диагностику. |
 | `torrent_titles_cache.json` | Кэш GPT-разбора заголовков torrent/magnet для бейджей, task metadata и повторных ручных загрузок. |
 | `public_trackers.txt` | Текстовый кэш публичных BT-трекеров. |

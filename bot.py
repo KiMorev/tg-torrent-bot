@@ -155,7 +155,7 @@ from search_intent import (
 )
 from search_facts import (
     format_search_fact_line,
-    load_search_facts,
+    load_search_fact_catalog,
     select_search_fact,
 )
 from series_continue import (
@@ -201,6 +201,7 @@ from gpt_features import choose_movie_notification_release as gpt_choose_movie_n
 from gpt_features import did_you_mean as gpt_did_you_mean
 from gpt_features import explain_movie_card as gpt_features_explain_movie_card
 from gpt_features import explain_series_bulk_candidates as gpt_explain_series_bulk_candidates
+from gpt_features import generate_search_fact_catalog as gpt_generate_search_fact_catalog
 from gpt_features import kp_confidence_check as gpt_kp_confidence_check
 from gpt_features import parse_torrent_title as gpt_features_parse_torrent_title
 from movie_discovery import (
@@ -353,6 +354,7 @@ VOICE_SEARCH_ENABLED = settings.voice_search_enabled and bool(OPENAI_API_KEY)
 VOICE_MAX_SECONDS = settings.voice_max_seconds
 GPT_ENABLED = settings.gpt_enabled and bool(OPENAI_API_KEY)
 GPT_MODEL = settings.gpt_model
+SEARCH_FACTS_CATALOG_FILE = STATE_DIR / "search_facts_catalog.json"
 
 # kinopoiskapiunofficial.tech free tier: 500 requests/day
 _KP_DAILY_LIMIT = 500
@@ -411,6 +413,7 @@ MAX_TASK_NOTIFICATION_FAILURES = 3
 _next_subscription_check_at: float | None = None
 # Unix timestamp of next scheduled pending-downloads check (set by the loop)
 _next_pending_check_at: float | None = None
+_next_search_facts_catalog_check_at: float | None = None
 _next_jackett_warmup_at: float | None = None
 _jackett_warmup_cursor: int = 0
 _JACKETT_WARMUP_STATUS: dict[str, object] = {}
@@ -458,9 +461,9 @@ def _pick_search_fact_for_chat(chat_id: int | None, query: str = "") -> str:
     if chat_id is None:
         return ""
     try:
-        facts = load_search_facts()
+        facts, aliases, _catalog_markers = load_search_fact_catalog(SEARCH_FACTS_CATALOG_FILE)
         state = state_store.load_search_facts_state()
-        fact_text, updated_state = select_search_fact(facts, state, int(chat_id), query=query)
+        fact_text, updated_state = select_search_fact(facts, state, int(chat_id), query=query, aliases=aliases)
         if fact_text:
             state_store.save_search_facts_state(updated_state)
         return format_search_fact_line(fact_text)
@@ -998,10 +1001,108 @@ async def _run_pending_downloads_gated(app: Application) -> None:
         _next_pending_check_at = time.time() + PENDING_DOWNLOADS_INTERVAL_SECONDS
 
 
+def _search_facts_catalog_refresh_needed(state: dict, now_ts: float | None = None) -> bool:
+    catalog = state.get("catalog")
+    if not isinstance(catalog, dict):
+        return True
+    if catalog.get("refresh_requested_at"):
+        return True
+    return not bool(catalog.get("initial_refresh_attempted_at"))
+
+
+def _search_facts_catalog_refresh_gated(state: dict, now_ts: float | None = None) -> bool:
+    now_ts = time.time() if now_ts is None else now_ts
+    catalog = state.get("catalog")
+    if not isinstance(catalog, dict):
+        return True
+    try:
+        last_attempt = float(catalog.get("last_refresh_attempt_ts") or 0.0)
+    except (TypeError, ValueError):
+        last_attempt = 0.0
+    return now_ts - last_attempt >= 24 * 60 * 60
+
+
+async def _run_search_facts_catalog_refresh_once() -> None:
+    if not GPT_ENABLED:
+        return
+
+    state = state_store.load_search_facts_state()
+    now_ts = time.time()
+    if not _search_facts_catalog_refresh_needed(state, now_ts):
+        return
+    if not _search_facts_catalog_refresh_gated(state, now_ts):
+        return
+
+    catalog_state = state.get("catalog")
+    if not isinstance(catalog_state, dict):
+        catalog_state = {}
+        state["catalog"] = catalog_state
+    catalog_state["initial_refresh_attempted_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    catalog_state["last_refresh_attempt_ts"] = now_ts
+    catalog_state["last_refresh_attempt_at"] = catalog_state["initial_refresh_attempted_at"]
+    state_store.save_search_facts_state(state)
+
+    facts, aliases, _markers = load_search_fact_catalog(SEARCH_FACTS_CATALOG_FILE)
+    usage_sink: list[dict] = []
+    catalog, error = await asyncio.to_thread(
+        gpt_generate_search_fact_catalog,
+        existing_facts=facts,
+        existing_aliases=aliases,
+        api_key=OPENAI_API_KEY,
+        model=GPT_MODEL,
+        target_count=max(100, len(facts)),
+        usage_sink=usage_sink,
+    )
+    _gpt_record_usage(
+        feature="search_fact_catalog",
+        input_tokens=1200,
+        output_tokens=3500,
+        error_label=error,
+        usage=(usage_sink[0] if usage_sink else None),
+    )
+
+    state = state_store.load_search_facts_state()
+    catalog_state = state.get("catalog")
+    if not isinstance(catalog_state, dict):
+        catalog_state = {}
+        state["catalog"] = catalog_state
+
+    if error or catalog is None:
+        catalog_state["last_refresh_error"] = error or "empty"
+        state_store.save_search_facts_state(state)
+        logger.warning("search_facts: GPT catalog refresh failed error=%s", error)
+        return
+
+    state_store.save_json_file(SEARCH_FACTS_CATALOG_FILE, catalog, "search facts runtime catalog")
+    catalog_state.pop("refresh_requested_at", None)
+    catalog_state["shown_unique_ids"] = []
+    catalog_state["last_refresh_error"] = ""
+    catalog_state["last_refresh_success_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    catalog_state["runtime_catalog_generated_at"] = str(catalog.get("generated_at") or "")
+    state_store.save_search_facts_state(state)
+    logger.info(
+        "search_facts: runtime catalog refreshed facts=%d aliases=%d",
+        len(catalog.get("facts") or []),
+        len(catalog.get("aliases") or {}),
+    )
+
+
+async def _run_search_facts_catalog_refresh_gated() -> None:
+    global _next_search_facts_catalog_check_at
+    now_ts = time.time()
+    if _next_search_facts_catalog_check_at is not None and now_ts < _next_search_facts_catalog_check_at:
+        return
+    try:
+        await _run_search_facts_catalog_refresh_once()
+    finally:
+        _next_search_facts_catalog_check_at = time.time() + 60 * 60
+
+
 async def _run_task_maintenance_cycle(app: Application) -> None:
     await _run_background_step("task notifications", lambda: _run_task_notifications_once(app))
     await _run_background_step("auto-delete finished tasks", _run_auto_delete_finished_once)
     await _run_background_step("pending downloads", lambda: _run_pending_downloads_gated(app))
+    await _run_background_step("search facts catalog refresh", _run_search_facts_catalog_refresh_gated)
     await _run_background_step("storage snapshot", lambda: _run_storage_snapshot_gated(app))
     await _run_background_step("stale state pruning", _run_prune_stale_state_once)
 
