@@ -19,7 +19,7 @@
 
 | Что меняем | Куда смотреть сначала | Обычно затронутые тесты |
 |---|---|---|
-| Команды Telegram, доступ, приветствие | `bot.py`: `main`, `start`, `help_command`, `text_message_entry`; `access_control.py`; `keyboards.py` | `tests/test_handlers.py`, `tests/test_keyboards.py`, `tests/test_access_control.py` |
+| Команды Telegram, доступ, приветствие | `bot.py`: `main`, `start`, `help_command`, `_delete_command_message_safely`, `text_message_entry`; `access_control.py`; `keyboards.py` | `tests/test_handlers.py`, `tests/test_keyboards.py`, `tests/test_access_control.py` |
 | Кнопки и callback-data | `keyboards.py`; регистрация обработчиков в `bot.py::main`; правила в `AGENTS.md` | `tests/test_keyboards.py`, `tests/test_handlers.py` |
 | Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `search_intent.py`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_intent.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
 | Скачивание и очередь | `bot.py`: `_download_and_add`, `search_direct_download`, `_do_process_magnet`, `_do_process_torrent`, `_run_pending_downloads_once`; `download_station.py`; `torrent_utils.py` | `tests/test_handlers.py`, `tests/test_background.py`, `tests/test_download_station_locking.py`, `tests/test_disk_space_guard.py`, `tests/test_torrent_utils.py` |

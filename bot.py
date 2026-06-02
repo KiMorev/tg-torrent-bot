@@ -7157,6 +7157,19 @@ async def _delete_message_safely(
         logger.warning("Could not delete %s %s in chat %s", label, message_id, chat_id, exc_info=True)
 
 
+async def _delete_command_message_safely(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    label: str = "command",
+) -> None:
+    chat = update.effective_chat
+    message = update.effective_message
+    message_id = getattr(message, "message_id", None)
+    if not chat or not isinstance(message_id, int):
+        return
+    await _delete_message_safely(context, chat.id, message_id, label)
+
+
 async def _delete_download_panel(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -7447,6 +7460,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     context.user_data["settings_ui_msg_id"] = msg.message_id
     context.user_data["settings_ui_chat_id"] = chat_id
+    await _delete_command_message_safely(update, context, "settings command")
 
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -11262,6 +11276,7 @@ async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_
             parse_mode="HTML",
             reply_markup=_series_continue_close_keyboard(),
         )
+        await _delete_command_message_safely(update, context, "continue command")
         return
 
     progress = await update.message.reply_text(
@@ -11280,6 +11295,7 @@ async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="HTML",
         reply_markup=_series_continue_list_keyboard(state, scope, page),
     )
+    await _delete_command_message_safely(update, context, "continue command")
 
 
 async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -15136,6 +15152,7 @@ async def series_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         _series_bulk_jobs_text(jobs),
         reply_markup=_series_bulk_jobs_keyboard(jobs),
     )
+    await _delete_command_message_safely(update, context, "bulk command")
 
 
 async def search_series_bulk_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -16808,6 +16825,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             except Exception:
                 pass
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Отменено"))
+        await _delete_command_message_safely(update, context, "cancel command")
 
     for key in (
         "srch_query", "srch_search_query", "srch_settings", "srch_results",
@@ -17329,6 +17347,7 @@ async def subs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id if update.effective_chat else None
     text, keyboard = _build_subscriptions_view(chat_id)
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await _delete_command_message_safely(update, context, "subs command")
 
 
 async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18487,6 +18506,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Подробнее — /help."
     )
     await update.message.reply_text(text, parse_mode="HTML")
+    await _delete_command_message_safely(update, context, "start command")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18570,6 +18590,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             [[InlineKeyboardButton(BUTTON_CLOSE, callback_data="help:close")]]
         ),
     )
+    await _delete_command_message_safely(update, context, "help command")
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18584,6 +18605,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode="HTML",
         reply_markup=_admin_panel_keyboard(**_admin_panel_kb_kwargs()),
     )
+    await _delete_command_message_safely(update, context, "admin command")
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18912,6 +18934,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text("pong")
+    await _delete_command_message_safely(update, context, "ping command")
 
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18923,6 +18946,7 @@ async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(f"Ваш chat_id: {chat_id}")
+    await _delete_command_message_safely(update, context, "id command")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18936,8 +18960,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not chat or not message:
         return
 
-    await _delete_message_safely(context, chat.id, message.message_id, "status command")
     progress_message = await context.bot.send_message(chat_id=chat.id, text="📋 Получаю список загрузок…")
+    await _delete_command_message_safely(update, context, "status command")
 
     try:
         tasks = await asyncio.to_thread(ds_client.list_tasks)
@@ -18970,6 +18994,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if not _movie_discovery_enabled():
         await update.message.reply_text("Новинки недоступны: не настроен Rutracker или Jackett.")
+        await _delete_command_message_safely(update, context, "new command")
         return
 
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -18997,6 +19022,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+        await _delete_command_message_safely(update, context, "new command")
         return
 
     # Re-apply Plex badges from current in-memory library (cheap, no network).
@@ -19017,6 +19043,7 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Mark the displayed top-10 as 'seen' for this user — the «🆕» badge will
     # disappear next time they open /new (until a new film appears).
     _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+    await _delete_command_message_safely(update, context, "new command")
 
 
 async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -19579,6 +19606,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     text, keyboard = _format_users_panel(back_to_admin=False)
     await update.message.reply_text(text, reply_markup=keyboard)
+    await _delete_command_message_safely(update, context, "users command")
 
 
 def _access_result_keyboard() -> InlineKeyboardMarkup:
@@ -20038,14 +20066,17 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not context.args:
         await update.message.reply_text("Укажите id задачи, например: /resume dbid_421")
+        await _delete_command_message_safely(update, context, "resume command")
         return
 
     task_id = context.args[0].strip()
     if not _can_access_task_id(update.effective_chat.id if update.effective_chat else None, task_id):
         await update.message.reply_text("Эта задача не относится к вашим загрузкам.")
+        await _delete_command_message_safely(update, context, "resume command")
         return
 
     progress_message = await update.message.reply_text("▶️ Отправляю команду запуска…")
+    await _delete_command_message_safely(update, context, "resume command")
     try:
         await asyncio.to_thread(ds_client.resume_task, task_id)
     except DownloadStationError as e:

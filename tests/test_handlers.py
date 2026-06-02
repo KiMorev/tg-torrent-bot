@@ -126,6 +126,8 @@ def _make_message_update(chat_id: int = 100):
     message = MagicMock()
     message.reply_text = AsyncMock()
     message.message_id = 42
+    message.chat = MagicMock()
+    message.chat.id = chat_id
 
     update = MagicMock()
     update.effective_chat = MagicMock()
@@ -143,7 +145,11 @@ def _make_command_update(chat_id: int = 100, text: str = "/cancel"):
     update.callback_query = None
     update.message = MagicMock()
     update.message.text = text
+    update.message.message_id = 42
+    update.message.chat = MagicMock()
+    update.message.chat.id = chat_id
     update.message.reply_text = AsyncMock()
+    update.effective_message = update.message
     return update
 
 
@@ -1886,6 +1892,7 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         lpo = call_kwargs.get("link_preview_options")
         self.assertIsNotNone(lpo, "link_preview_options must be set")
         self.assertTrue(lpo.is_disabled, "link preview must be disabled in /new")
+        context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
 
     def test_movie_new_recomputes_score_on_cache_hit(self):
         """Cache hit must recompute score under current formula/year and resort.
@@ -6983,6 +6990,7 @@ class StatusCommandTests(unittest.TestCase):
             asyncio.run(status(update, context))
 
         context.bot.send_message.assert_called_once_with(chat_id=100, text="📋 Получаю список загрузок…")
+        context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
         self.assertIn("Film", progress_message.edit_text.call_args.args[0])
         self.assertEqual(bot.DOWNLOAD_PANEL_MESSAGES[100], 77)
         bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
@@ -7301,6 +7309,7 @@ class SearchCancelCommandTests(unittest.TestCase):
         context = _make_context()
         asyncio.run(search_cancel(update, context))
         update.message.reply_text.assert_not_called()
+        context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
 
     def test_deletes_photo_message_when_present(self):
         update = _make_command_update()
@@ -7312,13 +7321,15 @@ class SearchCancelCommandTests(unittest.TestCase):
         asyncio.run(search_cancel(update, context))
         # reply_text is NOT called; notification goes via auto-delete task
         update.message.reply_text.assert_not_called()
-        context.bot.delete_message.assert_called_once_with(chat_id=100, message_id=77)
+        context.bot.delete_message.assert_any_await(chat_id=100, message_id=77)
+        context.bot.delete_message.assert_any_await(chat_id=100, message_id=42)
+        self.assertEqual(context.bot.delete_message.await_count, 2)
 
-    def test_no_delete_when_no_photo(self):
+    def test_deletes_command_when_no_photo(self):
         update = _make_command_update()
         context = _make_context()
         asyncio.run(search_cancel(update, context))
-        context.bot.delete_message.assert_not_called()
+        context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
 
 
 # ---------------------------------------------------------------------------
