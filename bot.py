@@ -1413,10 +1413,10 @@ def _format_admin_search_facts_line() -> str:
         parts.append("ожидает GPT-refresh" if GPT_ENABLED else "refresh ждёт включённый GPT")
     last_success = _short_admin_datetime(catalog_state.get("last_refresh_success_at"))
     last_error = str(catalog_state.get("last_refresh_error") or "").strip()
-    if last_success:
-        parts.append(f"GPT успех {last_success}")
     if last_error:
         parts.append(f"ошибка {html_module.escape(last_error)}")
+    elif last_success:
+        parts.append(f"GPT успех {last_success}")
     return " · ".join(parts)
 
 

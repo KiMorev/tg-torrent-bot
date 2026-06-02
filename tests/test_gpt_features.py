@@ -86,13 +86,18 @@ class SearchFactCatalogGenerationTests(unittest.TestCase):
     def _catalog_text(self, count: int = 60) -> str:
         import json
 
+        tags = ("cinema", "horror", "sci-fi", "fantasy", "animation", "comedy", "action", "series")
         return json.dumps(
             {
                 "facts": [
-                    {"id": f"gpt:fact_{i}", "text": f"Короткий кинофакт номер {i}.", "tags": ["cinema"]}
+                    {
+                        "id": f"gpt:fact_{i}",
+                        "text": f"короткий русский кинофакт номер {i} помогает ждать поиск без повторов.",
+                        "tags": [tags[i % len(tags)]],
+                    }
                     for i in range(count)
                 ],
-                "aliases": {"кино": ["cinema"]},
+                "aliases": {f"alias_{i}": [tags[i % len(tags)]] for i in range(8)},
                 "markers": {"generated_for": "search_waiting_facts"},
             },
             ensure_ascii=False,

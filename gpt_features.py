@@ -871,6 +871,7 @@ def generate_search_fact_catalog(
             "markers": data.get("markers"),
         },
         min_facts=60,
+        strict_quality=True,
     )
     if catalog is None:
         return (None, "invalid_catalog")

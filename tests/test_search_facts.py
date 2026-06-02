@@ -168,6 +168,25 @@ class SearchFactsTests(unittest.TestCase):
 
         self.assertEqual(detect_query_tags("custom movie 2026", aliases=aliases), {"custom"})
 
+    def test_series_query_tag_prefers_series_facts(self) -> None:
+        facts = [
+            SearchFact(id="general", text="Общий факт", tags=("cinema",)),
+            SearchFact(id="series", text="Сериальный факт", tags=("series",)),
+        ]
+
+        text, state = select_search_fact(
+            facts,
+            {},
+            100,
+            query="сезон 2",
+            pool_size=2,
+            choice=_first,
+            sample=_first_sample,
+        )
+
+        self.assertEqual(text, "Сериальный факт")
+        self.assertEqual(state["chats"]["100"]["pool_fact_ids"], ["series"])
+
     def test_query_tags_prefer_matching_facts(self) -> None:
         facts = [
             SearchFact(id="general", text="Общий факт", tags=("cinema",)),
@@ -307,6 +326,34 @@ class SearchFactsTests(unittest.TestCase):
 
         self.assertIsNone(validate_search_fact_catalog(payload))
 
+    def test_validate_search_fact_catalog_strict_quality_rejects_weak_catalog(self) -> None:
+        payload = build_search_fact_catalog_payload(
+            [SearchFact(id=f"fact_{i}", text=f"Fact {i}", tags=("cinema",)) for i in range(60)],
+            {"movie": ("cinema",)},
+        )
+
+        self.assertIsNone(validate_search_fact_catalog(payload, min_facts=60, strict_quality=True))
+
+    def test_validate_search_fact_catalog_strict_quality_accepts_varied_catalog(self) -> None:
+        tags = ("cinema", "horror", "sci-fi", "fantasy", "animation", "comedy", "action", "series")
+        facts = [
+            SearchFact(
+                id=f"fact_{i}",
+                text=f"короткий русский кинофакт номер {i} помогает ждать поиск без повторов.",
+                tags=(tags[i % len(tags)],),
+            )
+            for i in range(60)
+        ]
+        aliases = {f"alias_{i}": (tags[i % len(tags)],) for i in range(8)}
+
+        catalog = validate_search_fact_catalog(
+            build_search_fact_catalog_payload(facts, aliases),
+            min_facts=60,
+            strict_quality=True,
+        )
+
+        self.assertIsNotNone(catalog)
+
     def test_local_fact_data_is_valid(self) -> None:
         facts = load_search_facts()
         aliases = load_search_fact_aliases()
@@ -314,7 +361,7 @@ class SearchFactsTests(unittest.TestCase):
         fact_tags = {tag for fact in facts for tag in fact.tags}
         alias_tags = {tag for tags in aliases.values() for tag in tags}
 
-        self.assertGreaterEqual(len(facts), 80)
+        self.assertGreaterEqual(len(facts), 82)
         self.assertEqual(len(fact_ids), len(set(fact_ids)))
         self.assertTrue(all(fact.text.strip() for fact in facts))
         self.assertTrue(all(fact.tags for fact in facts))
@@ -323,7 +370,7 @@ class SearchFactsTests(unittest.TestCase):
 
     def test_format_search_fact_line(self) -> None:
         self.assertEqual(format_search_fact_line(None), "")
-        self.assertEqual(format_search_fact_line("факт"), "\n\nПока ждёте: факт")
+        self.assertEqual(format_search_fact_line("факт"), "\n\n💡 Пока ждёте: факт")
 
 
 class SearchFactsStateStoreTests(unittest.TestCase):

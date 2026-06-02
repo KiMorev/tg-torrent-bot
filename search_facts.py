@@ -18,6 +18,9 @@ DEFAULT_REFRESH_THRESHOLD = 0.7
 DEFAULT_RECENT_LIMIT = 500
 DEFAULT_CATALOG_REFRESH_THRESHOLD = 0.7
 MIN_CATALOG_FACTS = 40
+SEARCH_FACT_CORE_TAGS = frozenset(
+    ("cinema", "horror", "sci-fi", "fantasy", "animation", "comedy", "action")
+)
 
 
 @dataclass(frozen=True)
@@ -93,10 +96,15 @@ def load_search_fact_catalog(
     )
 
 
-def validate_search_fact_catalog(payload: Any, *, min_facts: int = MIN_CATALOG_FACTS) -> dict[str, Any] | None:
+def validate_search_fact_catalog(
+    payload: Any,
+    *,
+    min_facts: int = MIN_CATALOG_FACTS,
+    strict_quality: bool = False,
+) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
-    facts = _normalise_fact_payload(payload.get("facts"))
+    facts = _normalise_fact_payload(payload.get("facts"), strict_quality=strict_quality)
     aliases = _normalise_alias_payload(payload.get("aliases"))
     if len(facts) < min_facts or not aliases:
         return None
@@ -104,6 +112,8 @@ def validate_search_fact_catalog(payload: Any, *, min_facts: int = MIN_CATALOG_F
     fact_tags = {tag for fact in facts for tag in fact["tags"]}
     alias_tags = {tag for tags in aliases.values() for tag in tags}
     if alias_tags - fact_tags:
+        return None
+    if strict_quality and not _catalog_has_enough_variety(fact_tags, aliases):
         return None
 
     markers = payload.get("markers")
@@ -141,7 +151,7 @@ def build_search_fact_catalog_payload(
 def format_search_fact_line(fact_text: str | None) -> str:
     if not fact_text:
         return ""
-    return f"\n\nПока ждёте: {fact_text}"
+    return f"\n\n💡 Пока ждёте: {fact_text}"
 
 
 def select_search_fact(
@@ -374,7 +384,7 @@ def _aliases_from_payload(payload: dict[str, list[str]]) -> dict[str, tuple[str,
     return {str(alias): tuple(tags) for alias, tags in payload.items()}
 
 
-def _normalise_fact_payload(payload: Any) -> list[dict[str, Any]]:
+def _normalise_fact_payload(payload: Any, *, strict_quality: bool = False) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
     facts: list[dict[str, Any]] = []
@@ -394,10 +404,34 @@ def _normalise_fact_payload(payload: Any) -> list[dict[str, Any]]:
         ))
         if not tags or len(text) > 180:
             continue
+        if strict_quality and not _fact_text_has_good_shape(text):
+            continue
         facts.append({"id": fact_id, "text": text, "tags": list(tags)})
         seen_ids.add(fact_id)
         seen_texts.add(text.casefold())
     return facts
+
+
+def _fact_text_has_good_shape(text: str) -> bool:
+    if len(text) < 35:
+        return False
+    if not re.search(r"[а-яё]", text.casefold()):
+        return False
+    if re.search(r"https?://|www\.", text, flags=re.IGNORECASE):
+        return False
+    if any(token in text for token in ("```", "[", "]", "<", ">")):
+        return False
+    return True
+
+
+def _catalog_has_enough_variety(fact_tags: set[str], aliases: dict[str, list[str]]) -> bool:
+    if len(fact_tags) < 8:
+        return False
+    if len(SEARCH_FACT_CORE_TAGS & fact_tags) < 5:
+        return False
+    if len(aliases) < 8:
+        return False
+    return True
 
 
 def _normalise_alias_payload(payload: Any) -> dict[str, list[str]]:
