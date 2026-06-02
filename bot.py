@@ -153,6 +153,11 @@ from search_intent import (
     parse_search_intent,
     parse_search_intent_with_gpt,
 )
+from search_facts import (
+    format_search_fact_line,
+    load_search_facts,
+    select_search_fact,
+)
 from series_continue import (
     SeriesCatchUpCandidate,
     build_series_catch_up_candidates,
@@ -447,6 +452,21 @@ rutracker_client = app_context.rutracker_client
 jackett_client = app_context.jackett_client
 kinopoisk_client = app_context.kinopoisk_client
 plex_client = app_context.plex_client
+
+
+def _pick_search_fact_for_chat(chat_id: int | None) -> str:
+    if chat_id is None:
+        return ""
+    try:
+        facts = load_search_facts()
+        state = state_store.load_search_facts_state()
+        fact_text, updated_state = select_search_fact(facts, state, int(chat_id))
+        if fact_text:
+            state_store.save_search_facts_state(updated_state)
+        return format_search_fact_line(fact_text)
+    except Exception:
+        logger.debug("Search fact selection failed", exc_info=True)
+        return ""
 
 # In-memory Plex library cache: (normalized_title, year) → PlexMovie
 # Updated every 30 minutes by _plex_cache_background_loop.
@@ -9137,6 +9157,13 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
     loading_msg = await send_fn(loading_text)
     if loading_msg is not None:
+        fact_line = _pick_search_fact_for_chat(getattr(loading_msg, "chat_id", None))
+        if fact_line:
+            loading_text += fact_line
+            try:
+                await loading_msg.edit_text(loading_text)
+            except Exception:
+                logger.debug("Search loading fact edit failed", exc_info=True)
         context.user_data["srch_ui_msg_id"] = loading_msg.message_id
         context.user_data["srch_ui_chat_id"] = loading_msg.chat_id
 
