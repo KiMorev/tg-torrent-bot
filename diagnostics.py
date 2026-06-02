@@ -591,6 +591,7 @@ _GPT_FEATURE_LABELS = {
     "explain_card": "📝 Объяснения карточек",
     "quality_parse": "🏷 Парсинг качества",
     "plex_unmatched": "🧹 Plex unmatched fix",
+    "search_fact_catalog": "🎞 Каталог фактов ожидания",
 }
 
 

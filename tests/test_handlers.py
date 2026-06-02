@@ -717,6 +717,36 @@ class AdminPanelTests(unittest.TestCase):
         ):
             self.assertEqual(bot._count_stuck_notifications(), 2)
 
+    def test_admin_search_facts_line_shows_catalog_refresh_state(self):
+        fake_store = MagicMock()
+        fake_store.load_search_facts_state.return_value = {
+            "catalog": {
+                "total_facts": 100,
+                "shown_unique_ids": ["a", "b", "c"],
+                "shown_percent": 0.03,
+                "refresh_requested_at": "2026-06-02T10:00:00+00:00",
+                "last_refresh_success_at": "2026-06-02T09:00:00+00:00",
+                "last_refresh_error": "invalid_catalog",
+            }
+        }
+
+        with (
+            patch.object(bot, "state_store", fake_store),
+            patch.object(
+                bot,
+                "load_search_fact_catalog",
+                return_value=([object()] * 100, {}, {"generated_for": "search_waiting_facts"}),
+            ),
+            patch.object(bot, "GPT_ENABLED", True),
+        ):
+            text = bot._format_admin_search_facts_line()
+
+        self.assertIn("Факты ожидания: runtime", text)
+        self.assertIn("100 фактов", text)
+        self.assertIn("показано 3/100 (3%)", text)
+        self.assertIn("ожидает GPT-refresh", text)
+        self.assertIn("invalid_catalog", text)
+
     def test_reset_notify_failures_callback_clears_all(self):
         """Tapping «🔄 Сбросить счётчики» wipes failures across all entries."""
         update = _make_callback_update(chat_id=300, callback_data="admin:reset_notify_failures")

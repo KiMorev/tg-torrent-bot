@@ -623,6 +623,10 @@ class GptChatDiagnosticTests(unittest.TestCase):
                     "calls": 5, "input_tokens": 500, "output_tokens": 400,
                     "estimated_cost_usd": 0.00033,
                 },
+                "search_fact_catalog": {
+                    "calls": 1, "input_tokens": 1200, "output_tokens": 3000,
+                    "estimated_cost_usd": 0.002,
+                },
             },
         }
         report = self._run(enabled=True, api_key="sk-test", usage=usage)
@@ -630,10 +634,11 @@ class GptChatDiagnosticTests(unittest.TestCase):
         self.assertEqual(svc.status, "ok")
         joined = " ".join(svc.details)
         # Total monthly aggregate
-        self.assertIn("28", joined)  # 23 + 5 = 28
+        self.assertIn("29", joined)  # 23 + 5 + 1 = 29
         # Per-feature lines
         self.assertIn("KP confidence", joined)
         self.assertIn("Did-you-mean", joined)
+        self.assertIn("Каталог фактов ожидания", joined)
         self.assertIn("23", joined)  # KP calls
         self.assertIn("5", joined)   # did-you-mean calls
 

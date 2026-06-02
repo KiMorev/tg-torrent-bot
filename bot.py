@@ -1381,6 +1381,58 @@ def _format_admin_search_defaults_line() -> str:
     return f"• Поиск: {quality} · оригинальная дорожка: {audio} · субтитры: {subs}"
 
 
+def _format_admin_search_facts_line() -> str:
+    try:
+        facts, _aliases, markers = load_search_fact_catalog(SEARCH_FACTS_CATALOG_FILE)
+        state = state_store.load_search_facts_state()
+    except Exception:
+        logger.debug("Search facts admin status failed", exc_info=True)
+        return "• Факты ожидания: статус недоступен"
+
+    if not isinstance(state, dict):
+        state = {}
+    catalog_state = state.get("catalog")
+    if not isinstance(catalog_state, dict):
+        catalog_state = {}
+
+    source = "runtime" if markers.get("source") != "bundled" else "bundled"
+    total = int(catalog_state.get("total_facts") or len(facts) or 0)
+    shown_ids = catalog_state.get("shown_unique_ids")
+    shown = len(shown_ids) if isinstance(shown_ids, list) else 0
+    try:
+        shown_percent = float(catalog_state.get("shown_percent") or 0.0)
+    except (TypeError, ValueError):
+        shown_percent = 0.0
+
+    parts = [
+        f"• Факты ожидания: {source}",
+        f"{len(facts)} фактов",
+        f"показано {shown}/{total} ({shown_percent * 100:.0f}%)",
+    ]
+    if catalog_state.get("refresh_requested_at"):
+        parts.append("ожидает GPT-refresh" if GPT_ENABLED else "refresh ждёт включённый GPT")
+    last_success = _short_admin_datetime(catalog_state.get("last_refresh_success_at"))
+    last_error = str(catalog_state.get("last_refresh_error") or "").strip()
+    if last_success:
+        parts.append(f"GPT успех {last_success}")
+    if last_error:
+        parts.append(f"ошибка {html_module.escape(last_error)}")
+    return " · ".join(parts)
+
+
+def _short_admin_datetime(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return html_module.escape(raw)
+    if dt.tzinfo:
+        dt = dt.astimezone(DISPLAY_TIMEZONE)
+    return dt.strftime("%d.%m %H:%M")
+
+
 def _format_kp_api_stats_line(cache: dict) -> str:
     """Format the KP API budget line for the admin panel Новинки section."""
     if not KINOPOISK_ENABLED:
@@ -1742,6 +1794,7 @@ async def _build_admin_panel_text() -> str:
         _format_admin_auto_delete_line(),
         _format_admin_notifications_line(),
         _format_admin_search_defaults_line(),
+        _format_admin_search_facts_line(),
         "<i>Живой статус сервисов — в разделе «Диагностика».</i>",
         "",
         "🎬 <b>Новинки</b>",
