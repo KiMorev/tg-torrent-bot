@@ -4896,6 +4896,33 @@ class PlexPollingTests(unittest.TestCase):
         self.assertIn("task1", saved)
         self.assertTrue(saved["task1"].get("plex_done"))
 
+    def test_poll_after_finish_cancel_does_not_persist_plex_done_marker(self):
+        """Cancelled polling must be retried after restart, not marked done."""
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        fake_app.bot.delete_message = AsyncMock()
+        polling_tasks = {"task1": object()}
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock(side_effect=asyncio.CancelledError)),
+            patch.object(bot, "_PLEX_POLLING_TASKS", polling_tasks),
+            patch.object(bot, "_mark_plex_poll_done") as mark_done,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(_plex_poll_after_finish(
+                    fake_app,
+                    "task1",
+                    "Movie",
+                    [100],
+                    hint_msg_ids={100: 555},
+                    max_attempts=1,
+                    interval_seconds=0,
+                ))
+
+        mark_done.assert_not_called()
+        self.assertNotIn("task1", polling_tasks)
+        fake_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=555)
+
     def test_cleanup_plex_pending_removes_temp_file(self):
         """_cleanup_plex_pending must delete the temp .torrent if present."""
         import tempfile

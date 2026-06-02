@@ -5037,6 +5037,7 @@ async def _plex_poll_after_finish(
     # Track whether at least one refresh succeeded so we can distinguish
     # "movie genuinely not in Plex" from "Plex was unreachable the whole time".
     refresh_succeeded_at_least_once = False
+    cancelled = False
     try:
         for attempt in range(max_attempts):
             if attempt > 0:
@@ -5142,12 +5143,16 @@ async def _plex_poll_after_finish(
             task_title, max_attempts, log_reason,
         )
     except asyncio.CancelledError:
+        cancelled = True
         await _delete_hint_messages()
         logger.info("Plex polling task cancelled for task_id=%s", task_id)
         raise
     finally:
-        _PLEX_POLLING_TASKS[task_id] = None  # Mark as done; key stays to prevent re-launch
-        _mark_plex_poll_done(task_id)  # Persist so restart doesn't re-launch polling
+        if cancelled:
+            _PLEX_POLLING_TASKS.pop(task_id, None)
+        else:
+            _PLEX_POLLING_TASKS[task_id] = None  # Mark as done; key stays to prevent re-launch
+            _mark_plex_poll_done(task_id)  # Persist so restart doesn't re-launch polling
 
 
 def _plex_confirm_text(check: "PlexCheckResult", display_title: str, requested_quality: str) -> str:
