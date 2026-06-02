@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from task_views import (
     default_list_scope,
@@ -78,8 +79,9 @@ class TaskViewTests(unittest.TestCase):
             scope_all="all",
         )
 
-        self.assertIn("Все задачи Download Station", text)
+        self.assertIn("Все загрузки", text)
         self.assertIn("Обновлено: 12:00:00", text)
+        self.assertIn("Всего: 3 · Активно: 3 · Завершено: 0 · С ошибкой: 0", text)
         self.assertIn("3. ⬇️ Movie 3", text)
         self.assertIn("Владелец: Ivan (100)", text)
         self.assertIn("Страница 2 из 2", text)
@@ -132,8 +134,9 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("Файл: Movie", text)
         self.assertNotIn("Задача Download Station", text)
         self.assertNotIn("ID: tid1", text)
-        self.assertIn("Статус: ✅ завершено", text)
-        self.assertIn("Скачано: 100.0 B из 100.0 B (100.0%)", text)
+        self.assertIn("Статус: ✅ Завершено", text)
+        self.assertIn("Скачано: 100.0 B", text)
+        self.assertNotIn("Осталось:", text)
 
     def test_format_task_card_for_admin_includes_technical_fields(self) -> None:
         text = format_task_card(
@@ -147,7 +150,8 @@ class TaskViewTests(unittest.TestCase):
             is_admin=True,
         )
 
-        self.assertIn("Задача Download Station", text)
+        self.assertIn("Задача", text)
+        self.assertNotIn("Задача Download Station", text)
         self.assertIn("Имя: Movie", text)
         self.assertIn("ID: tid1", text)
 
@@ -172,8 +176,86 @@ class TaskViewTests(unittest.TestCase):
             scope_all="all",
         )
 
-        self.assertIn("Все задачи Download Station", text)
+        self.assertIn("Все загрузки", text)
         self.assertIn("ID: tid1", text)
+
+    def test_finished_task_shows_short_time_size_and_auto_delete_deadline(self) -> None:
+        display_timezone = timezone(timedelta(hours=3), "MSK")
+        finished_at = datetime(2026, 6, 2, 14, 20, tzinfo=display_timezone).timestamp()
+        now = datetime(2026, 6, 2, 15, 20, tzinfo=display_timezone)
+        task = {
+            "id": "tid1",
+            "title": "Movie",
+            "status": "finished",
+            "size": 100,
+            "additional": {"transfer": {"size_downloaded": 100, "speed_download": 0}},
+        }
+
+        list_text = format_tasks(
+            [task],
+            scope="my",
+            updated_at="12:00:00",
+            owners={"tid1": 100},
+            scope_all="all",
+            auto_delete_tasks={"tid1": finished_at},
+            auto_delete_enabled=True,
+            auto_delete_statuses={"finished"},
+            auto_delete_after_hours=24,
+            now=now,
+            display_timezone=display_timezone,
+        )
+        card_text = format_task_card(
+            task,
+            auto_delete_tasks={"tid1": finished_at},
+            auto_delete_enabled=True,
+            auto_delete_statuses={"finished"},
+            auto_delete_after_hours=24,
+            now=now,
+            display_timezone=display_timezone,
+        )
+
+        self.assertIn("Завершено · сегодня 14:20 · 100.0 B", list_text)
+        self.assertIn("Автоочистка: через 23 ч", list_text)
+        self.assertNotIn("Скорость:", list_text)
+        self.assertIn("Статус: ✅ Завершено · сегодня 14:20", card_text)
+        self.assertIn("Скачано: 100.0 B", card_text)
+        self.assertIn("Автоочистка: через 23 ч", card_text)
+
+    def test_status_summary_counts_seeding_and_soft_complete_as_finished(self) -> None:
+        tasks = [
+            {"id": "active", "title": "Active", "status": "downloading", "size": 100},
+            {
+                "id": "seed",
+                "title": "Seed",
+                "status": "seeding",
+                "size": 100,
+                "additional": {"transfer": {"size_downloaded": 100}},
+            },
+            {
+                "id": "soft",
+                "title": "Soft",
+                "status": "error",
+                "type": "bt",
+                "size": 100,
+                "additional": {"transfer": {"size_downloaded": 100}, "detail": {}},
+            },
+            {"id": "broken", "title": "Broken", "status": "error", "size": 100},
+        ]
+
+        text = format_tasks(
+            tasks,
+            scope="my",
+            updated_at="12:00:00",
+            owners={},
+            scope_all="all",
+        )
+
+        self.assertIn("Всего: 4 · Активно: 1 · Завершено: 2 · С ошибкой: 1", text)
+        self.assertIn("2. ✅ Seed", text)
+        self.assertIn("Завершено · 100.0 B", text)
+        self.assertIn("3. ✅ Soft", text)
+        self.assertIn("Скачано полностью · 100.0 B", text)
+        self.assertIn("Статус: ошибка", text)
 
     def test_complete_error_is_shown_as_downloaded_in_list_and_card(self) -> None:
         task = {
@@ -196,9 +278,9 @@ class TaskViewTests(unittest.TestCase):
         admin_card_text = format_task_card(task, is_admin=True)
 
         self.assertIn("1. ✅ Movie", list_text)
-        self.assertIn("Статус: скачано полностью", list_text)
+        self.assertIn("Скачано полностью · 100.0 B", list_text)
         self.assertNotIn("Статус: ошибка", list_text)
-        self.assertIn("Статус: ✅ скачано полностью", card_text)
+        self.assertIn("Статус: ✅ Скачано полностью", card_text)
         self.assertIn("Сервис загрузок показывает ошибку, но файл скачан полностью.", card_text)
         self.assertIn("Download Station показывает ошибку, но файл скачан полностью.", admin_card_text)
 

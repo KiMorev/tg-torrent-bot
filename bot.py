@@ -1726,6 +1726,7 @@ def _format_tasks(
     page: int = 0,
 ) -> str:
     owners = _load_task_owners() if scope == TASK_LIST_SCOPE_ALL else {}
+    auto_delete_enabled = _auto_delete_finished_enabled()
     return _view_format_tasks(
         tasks,
         scope=scope,
@@ -1736,6 +1737,11 @@ def _format_tasks(
         page=page,
         page_size=TASK_LIST_PAGE_SIZE,
         scope_all=TASK_LIST_SCOPE_ALL,
+        auto_delete_tasks=_load_auto_delete_tasks() if auto_delete_enabled else {},
+        auto_delete_enabled=auto_delete_enabled,
+        auto_delete_statuses=AUTO_DELETE_FINISHED_STATUSES,
+        auto_delete_after_hours=AUTO_DELETE_FINISHED_AFTER_HOURS,
+        display_timezone=DISPLAY_TIMEZONE,
     )
 
 
@@ -5272,7 +5278,16 @@ def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") 
 
 
 def _format_task_card(task: dict, chat_id: int | None = None) -> str:
-    return _view_format_task_card(task, is_admin=_is_admin_chat(chat_id))
+    auto_delete_enabled = _auto_delete_finished_enabled()
+    return _view_format_task_card(
+        task,
+        is_admin=_is_admin_chat(chat_id),
+        auto_delete_tasks=_load_auto_delete_tasks() if auto_delete_enabled else {},
+        auto_delete_enabled=auto_delete_enabled,
+        auto_delete_statuses=AUTO_DELETE_FINISHED_STATUSES,
+        auto_delete_after_hours=AUTO_DELETE_FINISHED_AFTER_HOURS,
+        display_timezone=DISPLAY_TIMEZONE,
+    )
 
 
 def _load_task_owners() -> dict[str, int]:
