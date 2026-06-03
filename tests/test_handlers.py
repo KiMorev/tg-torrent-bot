@@ -3588,6 +3588,13 @@ class PlexUnmatchedFormattingTests(unittest.TestCase):
         self.assertNotIn("📺", text_movies_only)
         self.assertIn("🎬", text_movies_only)
 
+    def test_push_links_file_to_plex_web_details(self):
+        from bot import _format_unmatched_push
+        with patch.object(bot, "_plex_machine_id", "machine-1"):
+            text = _format_unmatched_push([self._make_movie("X.mkv")], [], kind="new")
+
+        self.assertIn('<a href="https://app.plex.tv/desktop/#!/server/machine-1/details?key=%2Flibrary%2Fmetadata%2Fr">X.mkv</a>', text)
+
 
 class FormatUnmatchedListTests(unittest.TestCase):
     """Tests for _format_unmatched_list (admin /admin → 📋 Несматчено screen)."""
@@ -3611,6 +3618,13 @@ class FormatUnmatchedListTests(unittest.TestCase):
         self.assertIn("ещё 5", text)
         # The 26th+ should not appear inline
         self.assertNotIn("file25.mkv", text)
+
+    def test_list_links_file_to_plex_web_details(self):
+        from bot import _format_unmatched_list
+        with patch.object(bot, "_plex_machine_id", "machine-1"):
+            text = _format_unmatched_list([self._make_movie("unmatched.mkv")], [])
+
+        self.assertIn('<a href="https://app.plex.tv/desktop/#!/server/machine-1/details?key=%2Flibrary%2Fmetadata%2Fr">unmatched.mkv</a>', text)
 
 
 class AdminPlexUnmatchedCallbackTests(unittest.IsolatedAsyncioTestCase):

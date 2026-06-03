@@ -4450,6 +4450,23 @@ def _format_unmatched_short_label(entry) -> str:
     return f"#{getattr(entry, 'rating_key', '?')}"
 
 
+def _plex_web_details_link(rating_key: str = "", machine_id: str = "") -> str:
+    if not rating_key or not machine_id:
+        return ""
+    return (
+        f"https://app.plex.tv/desktop/#!/server/{machine_id}"
+        f"/details?key=%2Flibrary%2Fmetadata%2F{rating_key}"
+    )
+
+
+def _format_unmatched_entry_link(entry) -> str:
+    label = html_module.escape(_format_unmatched_short_label(entry))
+    url = _plex_web_details_link(getattr(entry, "rating_key", ""), _plex_machine_id)
+    if not url:
+        return f"<code>{label}</code>"
+    return f'<a href="{html_module.escape(url, quote=True)}">{label}</a>'
+
+
 def _plex_cache_info() -> dict:
     """Return metadata dict for diagnostics, including health state."""
     import time, datetime
@@ -4667,7 +4684,7 @@ def _format_unmatched_list(movies: list, shows: list) -> str:
 
     def _bullets(items: list, limit: int = 25) -> list[str]:
         out = [
-            f"• <code>{html_module.escape(_format_unmatched_short_label(x))}</code>"
+            f"• {_format_unmatched_entry_link(x)}"
             for x in items[:limit]
         ]
         extra = len(items) - limit
@@ -4705,7 +4722,7 @@ def _format_unmatched_push(movies: list, shows: list, *, kind: str) -> str:
 
     def _bullets(items: list, limit: int = 5) -> str:
         head_part = "\n".join(
-            f"• <code>{html_module.escape(_format_unmatched_short_label(x))}</code>"
+            f"• {_format_unmatched_entry_link(x)}"
             for x in items[:limit]
         )
         extra = len(items) - limit
