@@ -6747,7 +6747,7 @@ class SubscriptionAdvancedKeyboardTests(unittest.TestCase):
 
 
 class SeriesContinueCommandTests(unittest.TestCase):
-    def _candidate(self, index: int = 0, *, topic_id: str = "12345"):
+    def _candidate(self, index: int = 0, *, topic_id: str = "12345", source: str = "history"):
         from series_continue import PlexSeriesIdentity, SeriesCatchUpCandidate
 
         title = "The Rookie" if index == 0 else f"The Rookie {index}"
@@ -6763,7 +6763,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
             present_count=8,
             known_total=18,
             quality="1080p",
-            source="history",
+            source=source,
             topic_id=topic_id,
             tracker="RuTracker",
             history_chat_ids=(100,),
@@ -7147,6 +7147,24 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("cont:hide:all:0", callbacks)
         self.assertIn("cont:list:all:0", callbacks)
         self.assertIn("task:close:", callbacks)
+
+    def test_continue_callback_opens_plex_only_candidate_search(self):
+        candidate = self._candidate(topic_id="", source="plex")
+        state = {"mine": [], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:open:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+
+        async def run():
+            with self._allowed_context():
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = self._callbacks(keyboard)
+        self.assertIn("cont:search_alt:all:0", callbacks)
+        self.assertIn("cont:hide:all:0", callbacks)
+        self.assertNotIn("cont:update_topic:all:0", callbacks)
 
     def test_continue_same_topic_downloads_and_subscribes_when_updated(self):
         candidate = self._candidate()

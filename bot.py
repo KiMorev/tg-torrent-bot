@@ -11303,6 +11303,13 @@ def _series_continue_detail_keyboard(
                 callback_data=f"{CONTINUE_CALLBACK_PREFIX}:update_topic:{scope}:{index}",
             )
         ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                "🔎 Найти раздачи",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:search_alt:{scope}:{index}",
+            )
+        ])
     if not hidden_view:
         rows.append([
             InlineKeyboardButton(
