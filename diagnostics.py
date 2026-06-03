@@ -479,9 +479,8 @@ def _plex_webhook_diagnostic(webhook_info: dict | None) -> ServiceDiagnostic:
             ["   PLEX_WEBHOOK_ENABLED=false. Plex polling работает как раньше."],
         )
 
-    details = [
-        f"   URL: http://<NAS_IP>:{int(info.get('port') or 0)}/plex/webhook?token=***",
-    ]
+    webhook_url = html.escape(f"http://<NAS_IP>:{int(info.get('port') or 0)}/plex/webhook?token=***")
+    details = [f"   URL: {webhook_url}"]
     if info.get("last_received_at"):
         details.append(f"   Последний webhook: {_short_datetime(info.get('last_received_at'))}")
     if info.get("last_accepted_at"):

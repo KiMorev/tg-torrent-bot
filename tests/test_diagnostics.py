@@ -235,6 +235,19 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("Фильмов в библиотеке: 42", plex_text)
         self.assertIn("Кэш обновлён: 2026-05-14 22:00", plex_text)
 
+    def test_plex_webhook_detail_escapes_placeholder_url_for_html(self) -> None:
+        report = run_diagnostics(
+            rutracker_client=None, jackett_client=None,
+            ds_client=FakeDownloadStation(), tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc,
+            plex_webhook_info={"enabled": True, "listening": True, "port": 8099},
+        )
+
+        plex_text = format_diagnostics_section(report, "plex")
+
+        self.assertIn("http://&lt;NAS_IP&gt;:8099/plex/webhook?token=***", plex_text)
+        self.assertNotIn("http://<NAS_IP>", plex_text)
+
     def test_plex_error_when_unhealthy(self) -> None:
         from unittest.mock import MagicMock
         plex = MagicMock()
