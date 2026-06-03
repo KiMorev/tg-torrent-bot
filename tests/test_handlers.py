@@ -7026,6 +7026,41 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("cont:open:mine:0", self._callbacks(keyboard))
         self.assertIn("task:close:", self._callbacks(keyboard))
 
+    def test_continue_list_marks_own_exact_topic_subscription(self):
+        candidate = self._candidate()
+        sub = {
+            "chat_id": 100,
+            "title": "The Rookie S8E1-8 of 18 WEB-DL 1080p",
+            "notify_policy": bot.NOTIFY_FINAL_ONLY,
+            "download_policy": bot.DOWNLOAD_ONLY_WHEN_COMPLETE,
+        }
+        state = {
+            "mine": [candidate],
+            "all": [candidate],
+            "topic_subscriptions": {"12345": sub},
+            "scope": "mine",
+            "page": 0,
+        }
+
+        text = bot._series_continue_list_text(state, "mine", 0)
+        detail = bot._series_continue_detail_text(candidate, state)
+
+        self.assertIn("Подписка: " + bot.policies_summary_ru(sub), text)
+        self.assertIn("Подписка: " + bot.policies_summary_ru(sub), detail)
+
+    def test_continue_subscription_map_ignores_other_users_and_jackett(self):
+        store = MagicMock()
+        store.load_topic_subscriptions.return_value = {
+            "12345": {"chat_id": 200, "title": "Other user"},
+            "67890": {"chat_id": 100, "title": "Mine"},
+            "jackett:1": {"chat_id": 100, "type": "jackett", "query": "The Rookie"},
+        }
+
+        with patch.object(bot, "state_store", store):
+            subs = bot._series_continue_subscription_map_for_chat(100)
+
+        self.assertEqual(subs, {"67890": {"chat_id": 100, "title": "Mine"}})
+
     def test_continue_empty_mine_can_switch_to_all(self):
         state = {"mine": [], "all": [self._candidate()], "scope": "mine", "page": 0}
 

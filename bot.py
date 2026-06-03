@@ -10982,6 +10982,7 @@ async def _series_continue_build_state(
             scope="all",
             known_totals_by_show=known_totals,
         ),
+        "topic_subscriptions": _series_continue_subscription_map_for_chat(chat_id),
         "scope": "mine",
         "page": 0,
     }
@@ -10997,6 +10998,7 @@ def _series_continue_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
         "all": [],
         "hidden_mine": [],
         "hidden_all": [],
+        "topic_subscriptions": {},
         "scope": "mine",
         "page": 0,
     }
@@ -11122,6 +11124,43 @@ def _series_continue_plex_badge(candidate: SeriesCatchUpCandidate) -> str:
     return f"Plex {candidate.present_count} сер."
 
 
+def _series_continue_subscription_map_for_chat(chat_id: int | None) -> dict[str, dict]:
+    if chat_id is None:
+        return {}
+    try:
+        subs = state_store.load_topic_subscriptions()
+    except Exception:
+        logger.warning("Failed to load topic subscriptions for series continue", exc_info=True)
+        return {}
+    if not isinstance(subs, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for sub_key, sub in subs.items():
+        if not isinstance(sub, dict) or sub.get("type") == "jackett":
+            continue
+        if sub.get("chat_id") != chat_id:
+            continue
+        topic_id = str(sub.get("topic_id") or sub_key or "").strip()
+        if topic_id:
+            out[topic_id] = sub
+    return out
+
+
+def _series_continue_subscription_for_candidate(state: dict, candidate: SeriesCatchUpCandidate) -> dict | None:
+    topic_id = str(candidate.topic_id or "").strip()
+    if not topic_id:
+        return None
+    subs = state.get("topic_subscriptions")
+    if not isinstance(subs, dict):
+        return None
+    sub = subs.get(topic_id)
+    return sub if isinstance(sub, dict) else None
+
+
+def _series_continue_subscription_line(sub: dict) -> str:
+    return "Подписка: " + policies_summary_ru(sub)
+
+
 def _series_continue_profile_line(candidate: SeriesCatchUpCandidate) -> str:
     parts = [part for part in (candidate.quality, candidate.tracker) if part]
     if not parts:
@@ -11129,7 +11168,7 @@ def _series_continue_profile_line(candidate: SeriesCatchUpCandidate) -> str:
     return "Профиль: " + ", ".join(parts)
 
 
-def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidate) -> str:
+def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidate, state: dict | None = None) -> str:
     title = html_module.escape(_series_continue_candidate_title(candidate))
     lines = [
         f"{index}. <b>{title}</b> · S{candidate.season_number:02d} · {_series_continue_plex_badge(candidate)}",
@@ -11142,6 +11181,10 @@ def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidat
         details.append("прошлая тема есть")
     elif candidate.source == "plex":
         details.append("без прошлой темы")
+    if state:
+        sub = _series_continue_subscription_for_candidate(state, candidate)
+        if sub:
+            details.append(html_module.escape(_series_continue_subscription_line(sub)))
     if details:
         lines.append("   " + " · ".join(details))
     return "\n".join(lines)
@@ -11194,7 +11237,7 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     if not hidden_view and hidden_count:
         lines.extend([f"Скрыто: {hidden_count}", ""])
     for offset, candidate in enumerate(visible, start=1):
-        lines.append(_series_continue_candidate_line(start + offset, candidate))
+        lines.append(_series_continue_candidate_line(start + offset, candidate, state))
         lines.append("")
     if total_pages > 1:
         lines.append(f"Страница {page + 1}/{total_pages}")
@@ -11253,7 +11296,7 @@ def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> Inline
     return InlineKeyboardMarkup(rows)
 
 
-def _series_continue_detail_text(candidate: SeriesCatchUpCandidate) -> str:
+def _series_continue_detail_text(candidate: SeriesCatchUpCandidate, state: dict | None = None) -> str:
     title = html_module.escape(_series_continue_candidate_title(candidate))
     completeness = resolve_series_completeness(candidate)
     lines = [
@@ -11266,6 +11309,10 @@ def _series_continue_detail_text(candidate: SeriesCatchUpCandidate) -> str:
     profile = _series_continue_profile_line(candidate)
     if profile:
         lines.extend(["", html_module.escape(profile)])
+    if state:
+        sub = _series_continue_subscription_for_candidate(state, candidate)
+        if sub:
+            lines.extend(["", html_module.escape(_series_continue_subscription_line(sub))])
     if candidate.topic_id:
         lines.append(f"Тема: {html_module.escape(candidate.topic_id)}")
         lines.extend([
@@ -11915,7 +11962,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         state["scope"] = scope
         state["page"] = page
         await query.edit_message_text(
-            _series_continue_detail_text(candidates[index]),
+            _series_continue_detail_text(candidates[index], state),
             parse_mode="HTML",
             reply_markup=_series_continue_detail_keyboard(candidates[index], scope, index, page),
         )
