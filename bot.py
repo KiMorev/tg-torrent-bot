@@ -449,6 +449,7 @@ rutracker_client = app_context.rutracker_client
 jackett_client = app_context.jackett_client
 kinopoisk_client = app_context.kinopoisk_client
 tmdb_client = app_context.tmdb_client
+tvmaze_client = app_context.tvmaze_client
 plex_client = app_context.plex_client
 
 
@@ -10794,6 +10795,22 @@ async def _series_continue_known_totals_by_show(
                     _series_continue_store_cached_total(cache, cache_keys, season_number, total)
                     changed = True
             if total > 0:
+                tvmaze_total, tvmaze_changed = await _series_continue_tvmaze_validated_total(
+                    cache,
+                    identity,
+                    season_number,
+                )
+                changed = changed or tvmaze_changed
+                if tvmaze_total > 0 and tvmaze_total != total:
+                    logger.info(
+                        "Series continue total conflict show=%r season=%s tmdb=%s tvmaze=%s",
+                        identity.title,
+                        season_number,
+                        total,
+                        tvmaze_total,
+                    )
+                    continue
+            if total > 0:
                 totals.setdefault(show.rating_key, {})[season_number] = int(total)
     if changed:
         _series_continue_save_totals_cache(cache)
@@ -10818,6 +10835,37 @@ async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int
         )
         return 0
     return int(total or 0)
+
+
+async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_number: int) -> tuple[int, bool]:
+    cache_keys = _series_continue_tvmaze_cache_keys(identity)
+    if not cache_keys:
+        return 0, False
+    total = _series_continue_cached_total(cache, cache_keys, season_number)
+    if total > 0:
+        return total, False
+    if tvmaze_client is None or not (identity.imdb_id or identity.tvdb_id):
+        return 0, False
+    try:
+        total = await asyncio.to_thread(
+            tvmaze_client.season_episode_count,
+            season_number=season_number,
+            imdb_id=identity.imdb_id,
+            tvdb_id=identity.tvdb_id,
+        )
+    except Exception:
+        logger.warning(
+            "TVmaze season total lookup failed show=%r season=%s",
+            identity.title,
+            season_number,
+            exc_info=True,
+        )
+        return 0, False
+    total = int(total or 0)
+    if total > 0:
+        _series_continue_store_cached_total(cache, cache_keys, season_number, total)
+        return total, True
+    return 0, False
 
 
 def _series_continue_load_totals_cache() -> dict:
@@ -10850,6 +10898,18 @@ def _series_continue_total_cache_keys(identity) -> tuple[str, ...]:
         ("imdb", identity.imdb_id),
         ("plex_rating", identity.plex_rating_key),
         ("plex_guid", identity.plex_guid),
+    ):
+        text = str(value or "").strip()
+        if text:
+            keys.append(f"{prefix}:{text}")
+    return tuple(dict.fromkeys(keys))
+
+
+def _series_continue_tvmaze_cache_keys(identity) -> tuple[str, ...]:
+    keys: list[str] = []
+    for prefix, value in (
+        ("tvmaze:tvdb", identity.tvdb_id),
+        ("tvmaze:imdb", identity.imdb_id),
     ):
         text = str(value or "").strip()
         if text:

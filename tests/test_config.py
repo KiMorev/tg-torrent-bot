@@ -237,6 +237,7 @@ class AppContextTests(unittest.TestCase):
         self.assertEqual(context.jackett_client._search_timeout, 90.0)
         self.assertIsNotNone(context.kinopoisk_client)
         self.assertIsNotNone(context.tmdb_client)
+        self.assertIsNotNone(context.tvmaze_client)
         self.assertEqual(context.state_store.series_continue_totals_file, settings.series_continue_totals_file)
 
     def test_build_app_context_leaves_optional_clients_disabled(self) -> None:
@@ -246,6 +247,7 @@ class AppContextTests(unittest.TestCase):
         self.assertIsNone(context.jackett_client)
         self.assertIsNone(context.kinopoisk_client)
         self.assertIsNone(context.tmdb_client)
+        self.assertIsNotNone(context.tvmaze_client)
 
 
 def _dockerfile_copied_files() -> set[str]:

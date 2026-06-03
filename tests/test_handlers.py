@@ -6833,11 +6833,13 @@ class SeriesContinueCommandTests(unittest.TestCase):
         )
         tmdb = MagicMock()
         tmdb.season_episode_count.return_value = 8
+        tvmaze = MagicMock()
         state = MagicMock()
         state.load_series_continue_totals.return_value = {}
 
         with (
             patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
             patch.object(bot, "state_store", state),
         ):
             totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
@@ -6849,6 +6851,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
             imdb_id="",
             tvdb_id="",
         )
+        tvmaze.season_episode_count.assert_not_called()
         state.save_series_continue_totals.assert_called_once()
         saved = state.save_series_continue_totals.call_args.args[0]
         self.assertEqual(saved["tmdb:119550"]["5"], 8)
@@ -6878,12 +6881,15 @@ class SeriesContinueCommandTests(unittest.TestCase):
         plex.get_show_details.return_value = detailed
         tmdb = MagicMock()
         tmdb.season_episode_count.return_value = 8
+        tvmaze = MagicMock()
+        tvmaze.season_episode_count.return_value = 8
         state = MagicMock()
         state.load_series_continue_totals.return_value = {}
 
         with (
             patch.object(bot, "plex_client", plex),
             patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
             patch.object(bot, "state_store", state),
         ):
             totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
@@ -6896,6 +6902,55 @@ class SeriesContinueCommandTests(unittest.TestCase):
             imdb_id="",
             tvdb_id="402960",
         )
+        tvmaze.season_episode_count.assert_called_once_with(
+            season_number=5,
+            imdb_id="",
+            tvdb_id="402960",
+        )
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertEqual(saved["tvmaze:tvdb:402960"]["5"], 8)
+
+    def test_continue_known_totals_skips_tmdb_total_when_tvmaze_conflicts(self):
+        from plex import PlexShow, PlexSeason
+
+        season = PlexSeason("season-key-1", 1, episode_count=5, file_paths=[], resolution="1080")
+        show = PlexShow(
+            "Lupin",
+            2021,
+            "show-key-lupin",
+            seasons={1: season},
+            guid="plex://show/lupin",
+            external_guids=["tmdb://96677", "tvdb://367178"],
+        )
+        tmdb = MagicMock()
+        tmdb.season_episode_count.return_value = 10
+        tvmaze = MagicMock()
+        tvmaze.season_episode_count.return_value = 5
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {}
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
+
+        self.assertEqual(totals, {})
+        tmdb.season_episode_count.assert_called_once_with(
+            season_number=1,
+            tmdb_id="96677",
+            imdb_id="",
+            tvdb_id="367178",
+        )
+        tvmaze.season_episode_count.assert_called_once_with(
+            season_number=1,
+            imdb_id="",
+            tvdb_id="367178",
+        )
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertEqual(saved["tmdb:96677"]["1"], 10)
+        self.assertEqual(saved["tvmaze:tvdb:367178"]["1"], 5)
 
     def test_continue_known_totals_uses_local_cache_before_tmdb(self):
         from plex import PlexShow, PlexSeason
@@ -6910,17 +6965,20 @@ class SeriesContinueCommandTests(unittest.TestCase):
             external_guids=["tmdb://119550"],
         )
         tmdb = MagicMock()
+        tvmaze = MagicMock()
         state = MagicMock()
         state.load_series_continue_totals.return_value = {"tmdb:119550": {"5": 8}}
 
         with (
             patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
             patch.object(bot, "state_store", state),
         ):
             totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
 
         self.assertEqual(totals, {"show-key-cf": {5: 8}})
         tmdb.season_episode_count.assert_not_called()
+        tvmaze.season_episode_count.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
 
     @contextmanager

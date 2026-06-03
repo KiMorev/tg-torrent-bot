@@ -8,6 +8,7 @@ from plex import PlexClient
 from rutracker import RutrackerClient
 from state_store import JsonStateStore
 from tmdb import TMDBClient
+from tvmaze import TVmazeClient
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class AppContext:
     jackett_client: JackettClient | None
     kinopoisk_client: KinopoiskClient | None
     tmdb_client: TMDBClient | None
+    tvmaze_client: TVmazeClient
     plex_client: PlexClient | None
 
 
@@ -82,6 +84,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         if settings.tmdb_enabled
         else None
     )
+    tvmaze_client = TVmazeClient()
     plex_client = (
         PlexClient(
             settings.plex_url,
@@ -100,5 +103,6 @@ def build_app_context(settings: AppSettings) -> AppContext:
         jackett_client=jackett_client,
         kinopoisk_client=kinopoisk_client,
         tmdb_client=tmdb_client,
+        tvmaze_client=tvmaze_client,
         plex_client=plex_client,
     )

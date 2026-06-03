@@ -318,7 +318,7 @@ DS_VERIFY_SSL=false
 | `JACKETT_WARMUP_INDEXERS` | `auto` берёт `JACKETT_INDEXERS`, а при `all` ротирует все настроенные индексеры пачками. Можно задать список через запятую. |
 | `JACKETT_WARMUP_BATCH_SIZE` | Сколько индексеров греть за один цикл. По умолчанию `3`. |
 | `KINOPOISK_API_KEY` | Включает поиск по ссылкам Кинопоиска и обогащение `/new`. |
-| `TMDB_API_TOKEN` | Включает точное определение количества серий в сезоне для `/continue` по Plex external ids. Нужен верхний TMDB `API Read Access Token`. |
+| `TMDB_API_TOKEN` | Включает точное определение количества серий в сезоне для `/continue` по Plex external ids. TVmaze без ключа дополнительно проверяет `imdb`/`tvdb` совпадения и отсекает конфликтующие totals. Нужен верхний TMDB `API Read Access Token`. |
 
 Для комфортной работы достаточно включить Rutracker или Jackett. Лучше включить оба: Jackett даёт широкий поиск, прямой Rutracker используется как fallback. Если Jackett включён, бот периодически делает короткий фоновый запрос к небольшой пачке индексеров, чтобы первый пользовательский поиск после простоя реже попадал в холодный старт.
 
@@ -333,7 +333,7 @@ DS_VERIFY_SSL=false
 
 Для будущего установщика лучший путь — официальный Plex auth flow: пользователь открывает ссылку Plex, подтверждает доступ, а установщик получает token сам. Ручной fallback: в Plex Web откройте карточку любого фильма, выберите `Get Info` → `View XML` и возьмите параметр `X-Plex-Token` из открывшегося URL. Если пункт меню отличается в вашей версии Plex Web, можно открыть DevTools → Network и найти `X-Plex-Token` в запросах к Plex.
 
-Для `/continue` нужен `TMDB_API_TOKEN`: Plex даёт external ids сериала, а TMDB по ним возвращает точное количество эпизодов в конкретном сезоне. Без TMDB бот не считает Plex `leafCount` общим размером сезона и не показывает сезон как уверенно неполный.
+Для `/continue` нужен `TMDB_API_TOKEN`: Plex даёт external ids сериала, а TMDB по ним возвращает точное количество эпизодов в конкретном сезоне. Если у Plex есть `imdb`/`tvdb`, бот дополнительно сверяет сезон с TVmaze и скрывает Plex-only кандидат при конфликте нумерации сезонов. Без TMDB бот не считает Plex `leafCount` общим размером сезона и не показывает сезон как уверенно неполный.
 
 ### `/new`
 
@@ -408,7 +408,7 @@ DS_VERIFY_SSL=false
 | `MOVIE_DISCOVERY_SETTINGS_FILE` | Runtime-настройки `/new`: выбранные трекеры, подписки на unmatched и т.п. |
 | `MOVIE_DISCOVERY_DEBUG_FILE` | Debug-снимок последнего обновления `/new`. |
 | `SERIES_BULK_JOBS_FILE` | JSON-файл планов массового скачивания сезонов. |
-| `SERIES_CONTINUE_TOTALS_FILE` | JSON-кэш количества эпизодов сезона из TMDB для `/continue`. |
+| `SERIES_CONTINUE_TOTALS_FILE` | JSON-кэш количества эпизодов сезона из TMDB/TVmaze для `/continue`. |
 
 В `compose.yaml` уже есть volume `tg_torrent_drop_state:/data`. Для блока `📀 Хранилище` в `/admin` нужен bind-mount медиапапки:
 
