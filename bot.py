@@ -11328,6 +11328,7 @@ def _series_continue_action_keyboard(
     page: int,
     *,
     retry: bool = False,
+    retry_action: str = "update_topic",
     subscribe: bool = False,
     search_alt: bool = False,
 ) -> InlineKeyboardMarkup:
@@ -11336,7 +11337,7 @@ def _series_continue_action_keyboard(
         rows.append([
             InlineKeyboardButton(
                 "🔄 Повторить",
-                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:update_topic:{scope}:{index}",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:{retry_action}:{scope}:{index}",
             )
         ])
     if subscribe:
@@ -11636,7 +11637,13 @@ async def _series_continue_search_alternatives(
         await query.edit_message_text(
             _friendly_error("rutracker", str(exc), include_detail=False),
             parse_mode="HTML",
-            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+            reply_markup=_series_continue_action_keyboard(
+                scope,
+                index,
+                page,
+                retry=True,
+                retry_action="search_alt",
+            ),
         )
         return
 
@@ -11660,7 +11667,14 @@ async def _series_continue_search_alternatives(
         await query.edit_message_text(
             f"📺 <b>{title}</b>\n\nПохожих раздач для этого сезона не нашёл.",
             parse_mode="HTML",
-            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True, subscribe=True),
+            reply_markup=_series_continue_action_keyboard(
+                scope,
+                index,
+                page,
+                retry=True,
+                retry_action="search_alt",
+                subscribe=bool(candidate.topic_id),
+            ),
         )
         return
 
@@ -11798,7 +11812,7 @@ async def _series_continue_download_same_topic(
         await query.edit_message_text(
             f"📺 <b>{title}</b>\n\nТема Rutracker больше недоступна или удалена.",
             parse_mode="HTML",
-            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
         )
     except RutrackerError as exc:
         await query.edit_message_text(

@@ -7337,6 +7337,50 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("Похожие раздачи", text)
         self.assertIn("cont:alt_dl:all:0:0", self._callbacks(keyboard))
 
+    def test_continue_plex_only_empty_alternatives_retry_search_without_subscribe(self):
+        candidate = self._candidate(topic_id="", source="plex")
+        state = {"mine": [], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:search_alt:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        rt_client = MagicMock()
+        rt_client.search.return_value = []
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "rutracker_client", rt_client),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        callbacks = self._callbacks(update.callback_query.edit_message_text.await_args.kwargs["reply_markup"])
+        self.assertIn("cont:search_alt:all:0", callbacks)
+        self.assertNotIn("cont:update_topic:all:0", callbacks)
+        self.assertNotIn("cont:subscribe_topic:all:0", callbacks)
+
+    def test_continue_unavailable_same_topic_offers_alternative_search(self):
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:update_topic:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        rt_client = MagicMock()
+        rt_client.get_topic_title.side_effect = bot.RutrackerTopicUnavailable("deleted")
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "rutracker_client", rt_client),
+                patch.object(bot, "_series_continue_active_task", AsyncMock(return_value=None)),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        callbacks = self._callbacks(update.callback_query.edit_message_text.await_args.kwargs["reply_markup"])
+        self.assertIn("cont:search_alt:all:0", callbacks)
+        self.assertNotIn("cont:update_topic:all:0", callbacks)
+
     def test_continue_download_alternative_uses_updated_release_wording_and_subscription(self):
         candidate = self._candidate()
         alt = {
