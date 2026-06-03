@@ -741,11 +741,28 @@ class AdminPanelTests(unittest.TestCase):
         ):
             text = bot._format_admin_search_facts_line()
 
-        self.assertIn("Факты ожидания: runtime", text)
+        self.assertIn("Факты ожидания: GPT-каталог", text)
         self.assertIn("100 фактов", text)
         self.assertIn("показано 3/100 (3%)", text)
         self.assertIn("ожидает GPT-refresh", text)
-        self.assertIn("invalid_catalog", text)
+        self.assertIn("обновление: invalid_catalog", text)
+
+    def test_admin_search_facts_line_labels_bundled_catalog_in_russian(self):
+        fake_store = MagicMock()
+        fake_store.load_search_facts_state.return_value = {"catalog": {"total_facts": 80}}
+
+        with (
+            patch.object(bot, "state_store", fake_store),
+            patch.object(
+                bot,
+                "load_search_fact_catalog",
+                return_value=([object()] * 80, {}, {"source": "bundled"}),
+            ),
+        ):
+            text = bot._format_admin_search_facts_line()
+
+        self.assertIn("Факты ожидания: встроенный", text)
+        self.assertNotIn("bundled", text)
 
     def test_reset_notify_failures_callback_clears_all(self):
         """Tapping «🔄 Сбросить счётчики» wipes failures across all entries."""

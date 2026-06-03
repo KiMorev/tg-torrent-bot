@@ -1395,7 +1395,7 @@ def _format_admin_search_facts_line() -> str:
     if not isinstance(catalog_state, dict):
         catalog_state = {}
 
-    source = "runtime" if markers.get("source") != "bundled" else "bundled"
+    source = "встроенный" if markers.get("source") == "bundled" else "GPT-каталог"
     total = int(catalog_state.get("total_facts") or len(facts) or 0)
     shown_ids = catalog_state.get("shown_unique_ids")
     shown = len(shown_ids) if isinstance(shown_ids, list) else 0
@@ -1414,7 +1414,8 @@ def _format_admin_search_facts_line() -> str:
     last_success = _short_admin_datetime(catalog_state.get("last_refresh_success_at"))
     last_error = str(catalog_state.get("last_refresh_error") or "").strip()
     if last_error:
-        parts.append(f"ошибка {html_module.escape(last_error)}")
+        label = "обновление" if facts else "ошибка"
+        parts.append(f"{label}: {html_module.escape(last_error)}")
     elif last_success:
         parts.append(f"GPT успех {last_success}")
     return " · ".join(parts)
