@@ -125,6 +125,23 @@ class SearchFactCatalogGenerationTests(unittest.TestCase):
         self.assertEqual(len(catalog["facts"]), 60)
         self.assertEqual(usage_sink[0]["input_tokens"], 10)
 
+    def test_generate_search_fact_catalog_uses_long_timeout(self) -> None:
+        with patch.object(
+            gpt_features,
+            "chat_completion",
+            return_value=(
+                {"text": self._catalog_text(), "input_tokens": 10, "output_tokens": 20, "model": "gpt-4o-mini"},
+                None,
+            ),
+        ) as chat:
+            gpt_features.generate_search_fact_catalog(
+                existing_facts=[SearchFact(id="local:1", text="старый факт", tags=("cinema",))],
+                existing_aliases={"кино": ("cinema",)},
+                api_key="key",
+            )
+
+        self.assertEqual(chat.call_args.kwargs["timeout"], 90)
+
     def test_generate_search_fact_catalog_rejects_invalid_catalog(self) -> None:
         with patch.object(
             gpt_features,

@@ -802,6 +802,7 @@ def generate_search_fact_catalog(
     api_key: str,
     model: str = "gpt-4o-mini",
     target_count: int = 100,
+    timeout: int = 90,
     usage_sink: list | None = None,
 ) -> tuple[dict | None, str | None]:
     """Generate a refreshed waiting-screen fact catalog.
@@ -853,6 +854,7 @@ def generate_search_fact_catalog(
         model=model,
         max_tokens=5000,
         temperature=0.7,
+        timeout=timeout,
         response_format={"type": "json_object"},
     )
     _record_usage(usage_sink, result)

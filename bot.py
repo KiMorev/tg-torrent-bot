@@ -414,6 +414,15 @@ _next_subscription_check_at: float | None = None
 # Unix timestamp of next scheduled pending-downloads check (set by the loop)
 _next_pending_check_at: float | None = None
 _next_search_facts_catalog_check_at: float | None = None
+_SEARCH_FACTS_REFRESH_RETRY_ERRORS = {
+    "timeout",
+    "network",
+    "rate_limit",
+    "server_error",
+    "parse",
+    "invalid_catalog",
+    "empty",
+}
 _next_jackett_warmup_at: float | None = None
 _jackett_warmup_cursor: int = 0
 _JACKETT_WARMUP_STATUS: dict[str, object] = {}
@@ -1068,7 +1077,13 @@ async def _run_search_facts_catalog_refresh_once() -> None:
         state["catalog"] = catalog_state
 
     if error or catalog is None:
-        catalog_state["last_refresh_error"] = error or "empty"
+        error_label = error or "empty"
+        catalog_state["last_refresh_error"] = error_label
+        if error_label in _SEARCH_FACTS_REFRESH_RETRY_ERRORS:
+            catalog_state["refresh_requested_at"] = (
+                catalog_state.get("refresh_requested_at")
+                or catalog_state.get("last_refresh_attempt_at")
+            )
         state_store.save_search_facts_state(state)
         logger.warning("search_facts: GPT catalog refresh failed error=%s", error)
         return

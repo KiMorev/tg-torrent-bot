@@ -764,6 +764,24 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Факты ожидания: встроенный", text)
         self.assertNotIn("bundled", text)
 
+    def test_search_facts_refresh_timeout_keeps_retry_requested(self):
+        state = {"catalog": {}}
+        fake_store = MagicMock()
+        fake_store.load_search_facts_state.return_value = state
+
+        with (
+            patch.object(bot, "GPT_ENABLED", True),
+            patch.object(bot, "state_store", fake_store),
+            patch.object(bot, "load_search_fact_catalog", return_value=([object()], {}, {"source": "bundled"})),
+            patch.object(bot, "gpt_generate_search_fact_catalog", return_value=(None, "timeout")),
+            patch.object(bot, "_gpt_record_usage"),
+        ):
+            asyncio.run(bot._run_search_facts_catalog_refresh_once())
+
+        catalog = state["catalog"]
+        self.assertEqual(catalog["last_refresh_error"], "timeout")
+        self.assertTrue(catalog["refresh_requested_at"])
+
     def test_reset_notify_failures_callback_clears_all(self):
         """Tapping «🔄 Сбросить счётчики» wipes failures across all entries."""
         update = _make_callback_update(chat_id=300, callback_data="admin:reset_notify_failures")
