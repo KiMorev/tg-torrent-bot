@@ -1104,6 +1104,59 @@ class BackgroundMonitorResilienceTests(unittest.TestCase):
             asyncio.run(_run_background_step("cancel", cancel))
 
 
+class TaskNotificationFastWakeTests(unittest.TestCase):
+    def test_fast_wake_coalesces_multiple_reasons_into_one_task(self) -> None:
+        async def run() -> None:
+            created = []
+            mock_app = MagicMock()
+
+            def create_task(coro):
+                task = asyncio.create_task(coro)
+                created.append(task)
+                return task
+
+            mock_app.create_task.side_effect = create_task
+            with (
+                patch.object(bot, "_TASK_NOTIFICATION_FAST_WAKE_DELAYS", (60.0,)),
+                patch.object(bot, "_TASK_NOTIFICATION_FAST_WAKE_TASK", None),
+                patch.object(bot, "_TASK_NOTIFICATION_FAST_WAKE_REASONS", set()),
+            ):
+                bot._schedule_task_notification_fast_wake(mock_app, "download_added:t1")
+                bot._schedule_task_notification_fast_wake(mock_app, "download_added:t2")
+
+                self.assertEqual(len(created), 1)
+                self.assertEqual(
+                    bot._TASK_NOTIFICATION_FAST_WAKE_REASONS,
+                    {"download_added:t1", "download_added:t2"},
+                )
+                created[0].cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await created[0]
+
+        asyncio.run(run())
+
+    def test_fast_wake_runs_notification_scans_and_clears_state(self) -> None:
+        async def run() -> None:
+            mock_app = MagicMock()
+            mock_app.create_task.side_effect = asyncio.create_task
+            with (
+                patch.object(bot, "_TASK_NOTIFICATION_FAST_WAKE_DELAYS", (0.0, 0.0, 0.0)),
+                patch.object(bot, "_TASK_NOTIFICATION_FAST_WAKE_TASK", None),
+                patch.object(bot, "_TASK_NOTIFICATION_FAST_WAKE_REASONS", set()),
+                patch.object(bot, "_run_task_notifications_once", AsyncMock()) as scan,
+            ):
+                bot._schedule_task_notification_fast_wake(mock_app, "download_added:t1")
+                task = bot._TASK_NOTIFICATION_FAST_WAKE_TASK
+                self.assertIsNotNone(task)
+                await task
+
+                self.assertEqual(scan.await_count, 3)
+                self.assertIsNone(bot._TASK_NOTIFICATION_FAST_WAKE_TASK)
+                self.assertEqual(bot._TASK_NOTIFICATION_FAST_WAKE_REASONS, set())
+
+        asyncio.run(run())
+
+
 class SubscriptionCheckTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

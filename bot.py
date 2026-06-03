@@ -490,6 +490,9 @@ _PLEX_WEBHOOK_STATE = PlexWebhookState(
     port=PLEX_WEBHOOK_PORT,
 )
 _PLEX_WEBHOOK_SERVER: PlexWebhookServer | None = None
+_TASK_NOTIFICATION_FAST_WAKE_DELAYS = (5.0, 15.0, 30.0)
+_TASK_NOTIFICATION_FAST_WAKE_TASK: "asyncio.Task[None] | None" = None
+_TASK_NOTIFICATION_FAST_WAKE_REASONS: set[str] = set()
 
 # Single-flight refresh: serialise concurrent `_refresh_plex_library` calls so
 # the 30-min background loop + N polling loops don't hit Plex API in parallel.
@@ -1003,6 +1006,45 @@ async def _run_task_maintenance_cycle(app: Application) -> None:
     await _run_background_step("pending downloads", lambda: _run_pending_downloads_gated(app))
     await _run_background_step("storage snapshot", lambda: _run_storage_snapshot_gated(app))
     await _run_background_step("stale state pruning", _run_prune_stale_state_once)
+
+
+def _schedule_task_notification_fast_wake(app: Application | None, reason: str) -> None:
+    """Coalesce short task-notification scans after new DS tasks are created."""
+    global _TASK_NOTIFICATION_FAST_WAKE_TASK
+    if app is None:
+        return
+    reason = str(reason or "").strip()
+    if reason:
+        _TASK_NOTIFICATION_FAST_WAKE_REASONS.add(reason)
+    task = _TASK_NOTIFICATION_FAST_WAKE_TASK
+    if task is not None and not task.done():
+        return
+    coro = _task_notification_fast_wake_loop(app)
+    created_task = app.create_task(coro)
+    if not isinstance(created_task, asyncio.Future):
+        coro.close()
+        _TASK_NOTIFICATION_FAST_WAKE_REASONS.clear()
+        return
+    _TASK_NOTIFICATION_FAST_WAKE_TASK = created_task
+
+
+async def _task_notification_fast_wake_loop(app: Application) -> None:
+    global _TASK_NOTIFICATION_FAST_WAKE_TASK
+    try:
+        for delay in _TASK_NOTIFICATION_FAST_WAKE_DELAYS:
+            await asyncio.sleep(delay)
+            reasons = sorted(_TASK_NOTIFICATION_FAST_WAKE_REASONS)
+            logger.info("Task notification fast wake scan reasons=%s", reasons)
+            await _run_background_step(
+                "task notifications fast wake",
+                lambda: _run_task_notifications_once(app),
+            )
+    except asyncio.CancelledError:
+        logger.info("Task notification fast wake stopped")
+        raise
+    finally:
+        _TASK_NOTIFICATION_FAST_WAKE_REASONS.clear()
+        _TASK_NOTIFICATION_FAST_WAKE_TASK = None
 
 
 async def _tracker_background_loop() -> None:
@@ -6732,6 +6774,7 @@ async def _notify_pending_success(
             notify_policy=entry.get("notify_policy"),
             download_policy=entry.get("download_policy"),
         )
+        _schedule_task_notification_fast_wake(app, f"pending_download:{task_id}")
 
 
 async def _notify_pending_dropped(app: Application, entry: dict) -> None:
@@ -12870,6 +12913,8 @@ async def _download_and_add(
             notify_policy=notify_policy if subscribe else None,
             download_policy=download_policy if subscribe else None,
         )
+        if task_id:
+            _schedule_task_notification_fast_wake(context.application, f"download_added:{task_id}")
         if chat_id and _movie_handled_cards:
             _mark_user_handled_in_new(chat_id, _movie_handled_cards)
 
@@ -15951,6 +15996,7 @@ async def _series_bulk_add_download(
             method=method,
             meta_source=meta_source,
         )
+        _schedule_task_notification_fast_wake(context.application, f"series_bulk:{task_id}")
     return task_id, method
 
 
@@ -18552,7 +18598,11 @@ async def _check_jackett_sub_via_rutracker_direct(
     return True
 
 
-async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id: int | None) -> str:
+async def _jackett_subscription_auto_download(
+    candidate: JackettResult,
+    chat_id: int | None,
+    app: Application | None = None,
+) -> str:
     """Try to download the subscription update and add it to Download Station.
 
     Returns a non-empty task_id. Raises when DS accepts the request but does not
@@ -18603,6 +18653,7 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                         method="torrent-файл",
                         meta_source="jackett_sub",
                     )
+                    _schedule_task_notification_fast_wake(app, f"jackett_sub:{task_id}")
                 # Add public trackers unless private torrent
                 if not _torrent_file_is_private(temp_path):
                     await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
@@ -18623,6 +18674,7 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                         method="magnet",
                         meta_source="jackett_sub",
                     )
+                    _schedule_task_notification_fast_wake(app, f"jackett_sub:{task_id}")
                 return task_id
             except MissingTaskIdError:
                 raise
@@ -18641,6 +18693,7 @@ async def _jackett_subscription_auto_download(candidate: JackettResult, chat_id:
                     method="magnet",
                     meta_source="jackett_sub",
                 )
+                _schedule_task_notification_fast_wake(app, f"jackett_sub:{task_id}")
             return task_id
 
         raise JackettError("Нет torrent_url и magnet_url у кандидата")
@@ -18713,7 +18766,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             task_id: str | None = None
             if wants_download:
                 try:
-                    task_id = await _jackett_subscription_auto_download(candidate, chat_id)
+                    task_id = await _jackett_subscription_auto_download(candidate, chat_id, app)
                     logger.info(
                         "Subscription auto-download: key=%s task_id=%s title=%s",
                         key, task_id, candidate.title,
@@ -19084,6 +19137,7 @@ async def _check_subscriptions(app: Application) -> None:
                             method="torrent-файл",
                             meta_source="rutracker_sub",
                         )
+                        _schedule_task_notification_fast_wake(app, f"rutracker_sub:{task_id}")
                 except (RutrackerError, DownloadStationError) as e:
                     logger.warning("Failed to update subscription %s: %s", topic_id, e)
                     # Bug A (1.2) — don't advance state when download fails,
@@ -20130,6 +20184,8 @@ async def movie_new_notification_bulk_run(update: Update, context: ContextTypes.
                 meta_source="movie_discovery",
                 subscribe=False,
             )
+            if task_id:
+                _schedule_task_notification_fast_wake(context.application, f"movie_discovery:{task_id}")
             if chat_id:
                 _mark_user_handled_in_new(chat_id, [card])
             successes.append({"title": title, "task_id": task_id, "method": method})
@@ -20862,6 +20918,7 @@ async def _do_process_magnet(
                 meta_source="magnet",
                 meta=meta,
             )
+            _schedule_task_notification_fast_wake(context.application, f"magnet:{task_id}")
             await asyncio.sleep(_TRACKER_INJECT_INITIAL_DELAY)
             tracker_result = await asyncio.to_thread(_add_public_trackers_to_download_task, task_id)
             _mark_tracker_processed_if_final(task_id, tracker_result)
@@ -20946,6 +21003,7 @@ async def _do_process_torrent(
             meta_source="torrent_file",
             meta=meta,
         )
+        _schedule_task_notification_fast_wake(context.application, f"torrent_file:{task_id}")
         if _torrent_file_is_private(temp_path):
             tracker_result = TrackerApplyResult(skipped_reason="приватный torrent, не добавляю")
             _mark_tracker_processed_if_final(task_id, tracker_result)
