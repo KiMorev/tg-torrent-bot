@@ -7365,6 +7365,43 @@ class TaskAddedMessageTests(unittest.TestCase):
         self.assertIn("Public-трекеры: приватный torrent, не добавляю", text)
 
 
+class TorrentFileProcessingTests(unittest.TestCase):
+    def test_torrent_file_without_task_id_is_not_reported_as_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_path = Path(tmp) / "movie.torrent"
+            temp_path.write_bytes(b"d4:infod4:name5:movieee")
+            message = MagicMock()
+            message.edit_text = AsyncMock()
+            context = MagicMock()
+            context.application = MagicMock()
+            mock_ds = MagicMock()
+            mock_ds.create_torrent_file.return_value = ""
+
+            with (
+                patch.object(bot, "ds_client", mock_ds),
+                patch.object(bot, "_add_public_trackers_to_download_task") as trackers,
+                patch.object(bot, "_remember_task_owner") as remember_owner,
+            ):
+                asyncio.run(
+                    bot._do_process_torrent(
+                        message,
+                        context,
+                        temp_path,
+                        "movie.torrent",
+                        chat_id=100,
+                    )
+                )
+
+            self.assertEqual(message.edit_text.await_count, 2)
+            final_text = message.edit_text.await_args.args[0]
+            self.assertIn("Torrent-файл отправлен в очередь скачивания", final_text)
+            self.assertIn("бот пока не видит созданную задачу", final_text)
+            self.assertNotIn("Не удалось обработать .torrent", final_text)
+            trackers.assert_not_called()
+            remember_owner.assert_not_called()
+            self.assertFalse(temp_path.exists())
+
+
 class TaskCallbackErrorKeyboardTests(unittest.TestCase):
     def _buttons(self, keyboard) -> dict[str, str]:
         return {button.text: button.callback_data for row in keyboard.inline_keyboard for button in row}

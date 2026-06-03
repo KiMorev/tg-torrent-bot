@@ -7207,11 +7207,14 @@ def _task_added_message(
     tracker_result: TrackerApplyResult | None = None,
     accepted_without_task_id: bool = False,
 ) -> str:
-    intro = (
-        "✅ Magnet отправлен в очередь скачивания"
-        if accepted_without_task_id
-        else "✅ Задача добавлена в очередь скачивания"
-    )
+    if accepted_without_task_id:
+        intro = (
+            "✅ Magnet отправлен в очередь скачивания"
+            if "magnet" in task_type.lower()
+            else "✅ Torrent-файл отправлен в очередь скачивания"
+        )
+    else:
+        intro = "✅ Задача добавлена в очередь скачивания"
     lines = [intro]
 
     if title:
@@ -7248,14 +7251,20 @@ def _missing_task_id_error(method: str) -> MissingTaskIdError:
     )
 
 
-def _magnet_without_task_id_note() -> str:
+def _accepted_without_task_id_note(task_type: str = "magnet") -> str:
+    item = "Ссылка" if "magnet" in task_type.lower() else "Torrent-файл"
+    retry_item = "magnet" if "magnet" in task_type.lower() else "torrent-файл"
     return (
-        "Ссылка принята, но бот пока не видит созданную задачу. "
+        f"{item} принят, но бот пока не видит созданную задачу. "
         "Иногда Download Station показывает такие задачи с задержкой.\n\n"
         "Что можно сделать:\n"
         "через минуту откройте список загрузок и нажмите «Обновить». "
-        "Если задачи там нет, проверьте Download Station или попробуйте добавить magnet ещё раз."
+        f"Если задачи там нет, проверьте Download Station или попробуйте добавить {retry_item} ещё раз."
     )
+
+
+def _magnet_without_task_id_note() -> str:
+    return _accepted_without_task_id_note("magnet")
 
 
 def _is_message_not_modified(error: BadRequest) -> bool:
@@ -20444,7 +20453,18 @@ async def _do_process_torrent(
         await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
         task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
         if not task_id:
-            raise _missing_task_id_error("для torrent-файла")
+            msg_text = _task_added_message(
+                "torrent-файл",
+                title=safe_name,
+                accepted_without_task_id=True,
+            )
+            msg_text += f"\n\n{_accepted_without_task_id_note('torrent-файл')}"
+            await _safe_edit_message(
+                progress_message,
+                msg_text,
+                reply_markup=_task_reply_markup(task_id),
+            )
+            return
         _remember_task_owner(task_id, chat_id)
         meta_title = _normalize_torrent_filename_for_match(safe_name)
         meta = await _build_task_meta_from_title_with_gpt(meta_title, source="torrent_file") if meta_title else None
