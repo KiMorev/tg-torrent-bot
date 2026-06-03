@@ -19,6 +19,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         pending_downloads_file=d / "pending_downloads.json",
         series_bulk_jobs_file=d / "series_bulk_jobs.json",
         series_continue_totals_file=d / "series_continue_totals.json",
+        series_continue_hidden_file=d / "series_continue_hidden.json",
         download_history_file=d / "download_history.jsonl",
     )
 
@@ -162,6 +163,13 @@ class StateStoreTests(unittest.TestCase):
         self.store.save_series_continue_totals(totals)
 
         self.assertEqual(self.store.load_series_continue_totals(), totals)
+
+    def test_series_continue_hidden_roundtrip(self) -> None:
+        hidden = {"100": ["show-1:S05", "show-2:S01"], "200": ["show-3:S02"]}
+
+        self.store.save_series_continue_hidden(hidden)
+
+        self.assertEqual(self.store.load_series_continue_hidden(), hidden)
 
     def test_download_history_append_load_filter_and_limit(self) -> None:
         self.store.append_download_history({"event": "download_added", "chat_id": 100, "title": "A"})

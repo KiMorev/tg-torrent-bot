@@ -47,6 +47,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         pending_downloads_file=settings.pending_downloads_file,
         series_bulk_jobs_file=settings.series_bulk_jobs_file,
         series_continue_totals_file=settings.series_continue_totals_file,
+        series_continue_hidden_file=settings.series_continue_hidden_file,
         storage_history_file=settings.storage_history_file,
         voice_usage_file=settings.voice_usage_file,
         user_search_defaults_file=settings.user_search_defaults_file,

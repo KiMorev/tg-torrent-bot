@@ -7063,6 +7063,69 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("cont:open:all:10", second_callbacks)
         self.assertIn("cont:list:all:0", second_callbacks)
 
+    def test_continue_list_shows_hidden_count_and_toggle(self):
+        candidate = self._candidate()
+        state = {"raw_mine": [], "raw_all": [candidate]}
+        bot._series_continue_refresh_hidden_views(state, {bot._series_continue_candidate_key(candidate)})
+
+        text = bot._series_continue_list_text(state, "all", 0)
+        keyboard = bot._series_continue_list_keyboard(state, "all", 0)
+
+        self.assertIn("Скрыто: 1", text)
+        self.assertIn("cont:list:hidden_all:0", self._callbacks(keyboard))
+
+    def test_continue_callback_hides_candidate_for_current_chat(self):
+        candidate = self._candidate()
+        state = {"raw_mine": [], "raw_all": [candidate], "scope": "all", "page": 0}
+        bot._series_continue_refresh_hidden_views(state, set())
+        update = _make_callback_update(chat_id=100, callback_data="cont:hide:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_series_continue_hidden.return_value = {}
+
+        async def run():
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        store.save_series_continue_hidden.assert_called_once_with({
+            "100": [bot._series_continue_candidate_key(candidate)]
+        })
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Скрыто: 1", text)
+        self.assertIn("cont:list:hidden_all:0", self._callbacks(update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]))
+
+    def test_continue_callback_unhides_candidate_for_current_chat(self):
+        candidate = self._candidate()
+        key = bot._series_continue_candidate_key(candidate)
+        state = {"raw_mine": [], "raw_all": [candidate], "scope": "hidden_all", "page": 0}
+        bot._series_continue_refresh_hidden_views(state, {key})
+        update = _make_callback_update(chat_id=100, callback_data="cont:unhide:hidden_all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_series_continue_hidden.return_value = {"100": [key]}
+
+        async def run():
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        store.save_series_continue_hidden.assert_called_once_with({})
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("В скрытых сезонах пока пусто", text)
+
     def test_continue_callback_opens_candidate_detail(self):
         candidate = self._candidate()
         state = {"mine": [candidate], "all": [candidate], "scope": "all", "page": 0}
@@ -7081,6 +7144,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         callbacks = self._callbacks(keyboard)
         self.assertIn("The Rookie", text)
         self.assertIn("Сезон: 8", text)
+        self.assertIn("cont:hide:all:0", callbacks)
         self.assertIn("cont:list:all:0", callbacks)
         self.assertIn("task:close:", callbacks)
 

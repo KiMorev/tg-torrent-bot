@@ -384,6 +384,7 @@ DOWNLOAD_PANEL_HAD_ACTIVE: dict[int, bool] = {}
 CONTINUE_CALLBACK_PREFIX = "cont"
 CONTINUE_PAGE_SIZE = 10
 CONTINUE_STATE_KEY = "continue_state"
+CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all"}
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
@@ -10967,14 +10968,14 @@ async def _series_continue_build_state(
     history = load_history() if callable(load_history) else []
     known_totals = await _series_continue_known_totals_by_show(shows, history)
     state = {
-        "mine": build_series_catch_up_candidates(
+        "raw_mine": build_series_catch_up_candidates(
             shows,
             history,
             chat_id=chat_id,
             scope="mine",
             known_totals_by_show=known_totals,
         ),
-        "all": build_series_catch_up_candidates(
+        "raw_all": build_series_catch_up_candidates(
             shows,
             history,
             chat_id=chat_id,
@@ -10984,18 +10985,119 @@ async def _series_continue_build_state(
         "scope": "mine",
         "page": 0,
     }
+    _series_continue_refresh_hidden_views(state, _series_continue_hidden_keys_for_chat(chat_id))
     context.user_data[CONTINUE_STATE_KEY] = state
     return state
 
 
 def _series_continue_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
     state = context.user_data.get(CONTINUE_STATE_KEY)
-    return state if isinstance(state, dict) else {"mine": [], "all": [], "scope": "mine", "page": 0}
+    return state if isinstance(state, dict) else {
+        "mine": [],
+        "all": [],
+        "hidden_mine": [],
+        "hidden_all": [],
+        "scope": "mine",
+        "page": 0,
+    }
 
 
 def _series_continue_candidates(state: dict, scope: str) -> list[SeriesCatchUpCandidate]:
     candidates = state.get(scope)
     return candidates if isinstance(candidates, list) else []
+
+
+def _series_continue_base_scope(scope: str) -> str:
+    return scope.removeprefix("hidden_") if scope.startswith("hidden_") else scope
+
+
+def _series_continue_hidden_scope(scope: str) -> str:
+    base = _series_continue_base_scope(scope)
+    return f"hidden_{base}" if base in {"mine", "all"} else "hidden_mine"
+
+
+def _series_continue_normal_scope(scope: str) -> str:
+    base = _series_continue_base_scope(scope)
+    return base if base in {"mine", "all"} else "mine"
+
+
+def _series_continue_is_hidden_scope(scope: str) -> bool:
+    return scope.startswith("hidden_")
+
+
+def _series_continue_scope_part(parts: list[str], index: int, default: str = "mine") -> str:
+    scope = parts[index] if len(parts) > index else default
+    return scope if scope in CONTINUE_SCOPES else default
+
+
+def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate) -> str:
+    identity = candidate.identity
+    show_key = (
+        identity.plex_rating_key
+        or identity.plex_guid
+        or identity.tmdb_id
+        or identity.tvdb_id
+        or identity.imdb_id
+        or title_match_key(identity.title)
+    )
+    return f"{show_key}:S{candidate.season_number:02d}"
+
+
+def _series_continue_hidden_keys_for_chat(chat_id: int | None) -> set[str]:
+    if chat_id is None:
+        return set()
+    load = getattr(state_store, "load_series_continue_hidden", None)
+    if not callable(load):
+        return set()
+    try:
+        payload = load()
+    except Exception:
+        logger.warning("Failed to load series continue hidden state", exc_info=True)
+        return set()
+    keys = payload.get(str(chat_id)) if isinstance(payload, dict) else None
+    if not isinstance(keys, list):
+        return set()
+    return {str(key) for key in keys if str(key or "").strip()}
+
+
+def _series_continue_save_hidden_keys_for_chat(chat_id: int | None, keys: set[str]) -> None:
+    if chat_id is None:
+        return
+    load = getattr(state_store, "load_series_continue_hidden", None)
+    save = getattr(state_store, "save_series_continue_hidden", None)
+    if not callable(load) or not callable(save):
+        return
+    try:
+        payload = load()
+        if not isinstance(payload, dict):
+            payload = {}
+        if keys:
+            payload[str(chat_id)] = sorted(keys)
+        else:
+            payload.pop(str(chat_id), None)
+        save(payload)
+    except Exception:
+        logger.warning("Failed to save series continue hidden state", exc_info=True)
+
+
+def _series_continue_refresh_hidden_views(state: dict, hidden_keys: set[str]) -> None:
+    state["hidden_keys"] = sorted(hidden_keys)
+    for scope in ("mine", "all"):
+        raw = state.get(f"raw_{scope}")
+        if not isinstance(raw, list):
+            raw = state.get(scope)
+        if not isinstance(raw, list):
+            raw = []
+        state[f"raw_{scope}"] = raw
+        visible: list[SeriesCatchUpCandidate] = []
+        hidden: list[SeriesCatchUpCandidate] = []
+        for candidate in raw:
+            if _series_continue_candidate_key(candidate) in hidden_keys:
+                hidden.append(candidate)
+            else:
+                visible.append(candidate)
+        state[scope] = visible
+        state[f"hidden_{scope}"] = hidden
 
 
 def _series_continue_candidate_title(candidate: SeriesCatchUpCandidate) -> str:
@@ -11047,9 +11149,19 @@ def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidat
 
 def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     candidates = _series_continue_candidates(state, scope)
+    base_scope = _series_continue_normal_scope(scope)
+    hidden_scope = _series_continue_hidden_scope(scope)
+    hidden_count = len(_series_continue_candidates(state, hidden_scope))
     all_count = len(_series_continue_candidates(state, "all"))
-    mode = "🙋 Моё" if scope == "mine" else "🌐 Всё"
+    hidden_view = _series_continue_is_hidden_scope(scope)
+    mode = "🙈 Скрытые" if hidden_view else ("🙋 Моё" if base_scope == "mine" else "🌐 Всё")
     if not candidates:
+        if hidden_view:
+            return (
+                "📺 <b>Докачать сезон</b>\n\n"
+                "В скрытых сезонах пока пусто."
+            )
+        hidden_line = f"\n\nСкрыто: {hidden_count}" if hidden_count else ""
         if scope == "mine" and all_count:
             return (
                 "📺 <b>Докачать сезон</b>\n\n"
@@ -11057,6 +11169,7 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
                 "Здесь появляются сезоны Plex, которые можно продолжить по вашим загрузкам.\n\n"
                 "В общей медиатеке есть варианты. Переключитесь на «Всё», "
                 "если хотите посмотреть их."
+                f"{hidden_line}"
             )
         return (
             "📺 <b>Докачать сезон</b>\n\n"
@@ -11066,6 +11179,7 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
             "Почему может быть пусто: бот показывает только уверенные варианты. "
             "Если данных недостаточно, сезон не попадёт в список.\n\n"
             "Что можно сделать: нажать «Обновить» позже или найти продолжение обычным поиском."
+            f"{hidden_line}"
         )
 
     total_pages = max(1, (len(candidates) + CONTINUE_PAGE_SIZE - 1) // CONTINUE_PAGE_SIZE)
@@ -11077,6 +11191,8 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
         f"Режим: {mode} · найдено: {len(candidates)}",
         "",
     ]
+    if not hidden_view and hidden_count:
+        lines.extend([f"Скрыто: {hidden_count}", ""])
     for offset, candidate in enumerate(visible, start=1):
         lines.append(_series_continue_candidate_line(start + offset, candidate))
         lines.append("")
@@ -11087,6 +11203,10 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
 
 def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> InlineKeyboardMarkup:
     candidates = _series_continue_candidates(state, scope)
+    base_scope = _series_continue_normal_scope(scope)
+    hidden_scope = _series_continue_hidden_scope(scope)
+    hidden_view = _series_continue_is_hidden_scope(scope)
+    hidden_count = len(_series_continue_candidates(state, hidden_scope))
     total_pages = max(1, (len(candidates) + CONTINUE_PAGE_SIZE - 1) // CONTINUE_PAGE_SIZE)
     page = min(max(page, 0), total_pages - 1)
     start = page * CONTINUE_PAGE_SIZE
@@ -11106,6 +11226,17 @@ def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> Inline
         InlineKeyboardButton("🙋 Моё", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:mine:0"),
         InlineKeyboardButton("🌐 Всё", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:all:0"),
     ])
+    if hidden_view:
+        rows.append([
+            InlineKeyboardButton("👁️ К обычному списку", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{base_scope}:0"),
+        ])
+    elif hidden_count:
+        rows.append([
+            InlineKeyboardButton(
+                f"🙈 Показать скрытые ({hidden_count})",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{hidden_scope}:0",
+            ),
+        ])
     if total_pages > 1:
         prev_page = max(0, page - 1)
         next_page = min(total_pages - 1, page + 1)
@@ -11157,11 +11288,26 @@ def _series_continue_detail_keyboard(
     page: int,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if candidate.topic_id:
+    hidden_view = _series_continue_is_hidden_scope(scope)
+    if hidden_view:
+        rows.append([
+            InlineKeyboardButton(
+                "👁️ Вернуть в список",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:unhide:{scope}:{index}",
+            )
+        ])
+    elif candidate.topic_id:
         rows.append([
             InlineKeyboardButton(
                 "⬇️ Докачать и следить",
                 callback_data=f"{CONTINUE_CALLBACK_PREFIX}:update_topic:{scope}:{index}",
+            )
+        ])
+    if not hidden_view:
+        rows.append([
+            InlineKeyboardButton(
+                "🙈 Скрыть",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:hide:{scope}:{index}",
             )
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
@@ -11704,7 +11850,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
     state = _series_continue_state(context)
 
     if action == "refresh":
-        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        scope = _series_continue_scope_part(parts, 2)
         state = await _series_continue_build_state(context, chat_id)
         page = 0
         state["scope"] = scope
@@ -11717,7 +11863,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action == "list":
-        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        scope = _series_continue_scope_part(parts, 2)
         try:
             page = int(parts[3]) if len(parts) > 3 else 0
         except ValueError:
@@ -11732,7 +11878,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action == "open":
-        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        scope = _series_continue_scope_part(parts, 2)
         try:
             index = int(parts[3]) if len(parts) > 3 else -1
         except ValueError:
@@ -11754,8 +11900,44 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
+    if action in {"hide", "unhide"}:
+        scope = _series_continue_scope_part(parts, 2)
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        candidates = _series_continue_candidates(state, scope)
+        if index < 0 or index >= len(candidates):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        candidate = candidates[index]
+        hidden_keys = set(state.get("hidden_keys") or [])
+        candidate_key = _series_continue_candidate_key(candidate)
+        if action == "hide":
+            hidden_keys.add(candidate_key)
+            next_scope = _series_continue_normal_scope(scope)
+        else:
+            hidden_keys.discard(candidate_key)
+            next_scope = scope
+        _series_continue_save_hidden_keys_for_chat(chat_id, hidden_keys)
+        _series_continue_refresh_hidden_views(state, hidden_keys)
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        if page * CONTINUE_PAGE_SIZE >= len(_series_continue_candidates(state, next_scope)):
+            page = max(0, page - 1)
+        state["scope"] = next_scope
+        state["page"] = page
+        await query.edit_message_text(
+            _series_continue_list_text(state, next_scope, page),
+            parse_mode="HTML",
+            reply_markup=_series_continue_list_keyboard(state, next_scope, page),
+        )
+        return
+
     if action == "update_topic":
-        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        scope = _series_continue_scope_part(parts, 2)
         try:
             index = int(parts[3]) if len(parts) > 3 else -1
         except ValueError:
@@ -11781,7 +11963,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action in {"subscribe_topic", "search_alt", "alt_dl"}:
-        scope = parts[2] if len(parts) > 2 and parts[2] in {"mine", "all"} else "mine"
+        scope = _series_continue_scope_part(parts, 2)
         try:
             index = int(parts[3]) if len(parts) > 3 else -1
         except ValueError:

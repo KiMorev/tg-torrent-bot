@@ -30,6 +30,7 @@ class JsonStateStore:
         pending_downloads_file: Path | None = None,
         series_bulk_jobs_file: Path | None = None,
         series_continue_totals_file: Path | None = None,
+        series_continue_hidden_file: Path | None = None,
         storage_history_file: Path | None = None,
         voice_usage_file: Path | None = None,
         user_search_defaults_file: Path | None = None,
@@ -49,6 +50,7 @@ class JsonStateStore:
         self.pending_downloads_file = pending_downloads_file
         self.series_bulk_jobs_file = series_bulk_jobs_file
         self.series_continue_totals_file = series_continue_totals_file
+        self.series_continue_hidden_file = series_continue_hidden_file
         self.storage_history_file = storage_history_file
         self.voice_usage_file = voice_usage_file
         self.user_search_defaults_file = user_search_defaults_file
@@ -489,6 +491,31 @@ class JsonStateStore:
         if not self.series_continue_totals_file:
             return
         self.save_json_file(self.series_continue_totals_file, payload, "series continue totals")
+
+    def load_series_continue_hidden(self) -> dict[str, list[str]]:
+        if not self.series_continue_hidden_file:
+            return {}
+        payload = self.load_json_file(self.series_continue_hidden_file, {})
+        if not isinstance(payload, dict):
+            return {}
+        hidden: dict[str, list[str]] = {}
+        for chat_id, keys in payload.items():
+            if not isinstance(keys, list):
+                continue
+            clean = [str(key) for key in keys if str(key or "").strip()]
+            if clean:
+                hidden[str(chat_id)] = sorted(set(clean))
+        return hidden
+
+    def save_series_continue_hidden(self, payload: dict[str, list[str]]) -> None:
+        if not self.series_continue_hidden_file:
+            return
+        clean = {
+            str(chat_id): sorted({str(key) for key in keys if str(key or "").strip()})
+            for chat_id, keys in payload.items()
+            if isinstance(keys, list)
+        }
+        self.save_json_file(self.series_continue_hidden_file, clean, "series continue hidden")
 
     def load_movie_discovery_cache(self) -> dict:
         if not self.movie_discovery_cache_file:

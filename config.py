@@ -159,6 +159,7 @@ class AppSettings:
     pending_downloads_file: Path
     series_bulk_jobs_file: Path
     series_continue_totals_file: Path
+    series_continue_hidden_file: Path
     storage_alert_percent: int
     storage_history_file: Path
     openai_api_key: str
@@ -299,6 +300,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         ),
         series_continue_totals_file=Path(
             env.get("SERIES_CONTINUE_TOTALS_FILE", str(state_dir / "series_continue_totals.json"))
+        ),
+        series_continue_hidden_file=Path(
+            env.get("SERIES_CONTINUE_HIDDEN_FILE", str(state_dir / "series_continue_hidden.json"))
         ),
         storage_alert_percent=max(1, min(100, env_int(env, "STORAGE_ALERT_PERCENT", 90))),
         storage_history_file=Path(
