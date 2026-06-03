@@ -6831,17 +6831,16 @@ class SeriesContinueCommandTests(unittest.TestCase):
             guid="plex://show/cf",
             external_guids=["tmdb://119550"],
         )
-        history = [{
-            "event": "plex_found",
-            "kind": "series",
-            "series_query": "Clarksons Farm",
-            "season": 5,
-        }]
         tmdb = MagicMock()
         tmdb.season_episode_count.return_value = 8
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {}
 
-        with patch.object(bot, "tmdb_client", tmdb):
-            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], history))
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
 
         self.assertEqual(totals, {"show-key-cf": {5: 8}})
         tmdb.season_episode_count.assert_called_once_with(
@@ -6850,6 +6849,10 @@ class SeriesContinueCommandTests(unittest.TestCase):
             imdb_id="",
             tvdb_id="",
         )
+        state.save_series_continue_totals.assert_called_once()
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertEqual(saved["tmdb:119550"]["5"], 8)
+        self.assertEqual(saved["plex_rating:show-key-cf"]["5"], 8)
 
     def test_continue_known_totals_fetches_plex_external_guids(self):
         from plex import PlexShow, PlexSeason
@@ -6871,22 +6874,19 @@ class SeriesContinueCommandTests(unittest.TestCase):
             guid="plex://show/cf",
             external_guids=["tvdb://402960"],
         )
-        history = [{
-            "event": "plex_found",
-            "kind": "series",
-            "series_query": "Clarksons Farm",
-            "season": 5,
-        }]
         plex = MagicMock()
         plex.get_show_details.return_value = detailed
         tmdb = MagicMock()
         tmdb.season_episode_count.return_value = 8
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {}
 
         with (
             patch.object(bot, "plex_client", plex),
             patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "state_store", state),
         ):
-            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], history))
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
 
         self.assertEqual(totals, {"show-key-cf": {5: 8}})
         plex.get_show_details.assert_called_once_with("show-key-cf")
@@ -6896,6 +6896,32 @@ class SeriesContinueCommandTests(unittest.TestCase):
             imdb_id="",
             tvdb_id="402960",
         )
+
+    def test_continue_known_totals_uses_local_cache_before_tmdb(self):
+        from plex import PlexShow, PlexSeason
+
+        season = PlexSeason("season-key-5", 5, episode_count=4, file_paths=[], resolution="1080")
+        show = PlexShow(
+            "Clarkson's Farm",
+            2021,
+            "show-key-cf",
+            seasons={5: season},
+            guid="plex://show/cf",
+            external_guids=["tmdb://119550"],
+        )
+        tmdb = MagicMock()
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {"tmdb:119550": {"5": 8}}
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
+
+        self.assertEqual(totals, {"show-key-cf": {5: 8}})
+        tmdb.season_episode_count.assert_not_called()
+        state.save_series_continue_totals.assert_not_called()
 
     @contextmanager
     def _allowed_context(self):

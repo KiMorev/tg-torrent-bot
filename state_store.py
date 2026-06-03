@@ -29,6 +29,7 @@ class JsonStateStore:
         task_meta_file: Path | None = None,
         pending_downloads_file: Path | None = None,
         series_bulk_jobs_file: Path | None = None,
+        series_continue_totals_file: Path | None = None,
         storage_history_file: Path | None = None,
         voice_usage_file: Path | None = None,
         user_search_defaults_file: Path | None = None,
@@ -47,6 +48,7 @@ class JsonStateStore:
         self.task_meta_file = task_meta_file
         self.pending_downloads_file = pending_downloads_file
         self.series_bulk_jobs_file = series_bulk_jobs_file
+        self.series_continue_totals_file = series_continue_totals_file
         self.storage_history_file = storage_history_file
         self.voice_usage_file = voice_usage_file
         self.user_search_defaults_file = user_search_defaults_file
@@ -476,6 +478,17 @@ class JsonStateStore:
             if isinstance(jobs[job_id], dict) and job_id
         }
         self.save_json_file(self.series_bulk_jobs_file, ordered, "series bulk jobs")
+
+    def load_series_continue_totals(self) -> dict:
+        if not self.series_continue_totals_file:
+            return {}
+        payload = self.load_json_file(self.series_continue_totals_file, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def save_series_continue_totals(self, payload: dict) -> None:
+        if not self.series_continue_totals_file:
+            return
+        self.save_json_file(self.series_continue_totals_file, payload, "series continue totals")
 
     def load_movie_discovery_cache(self) -> dict:
         if not self.movie_discovery_cache_file:

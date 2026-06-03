@@ -10770,34 +10770,114 @@ async def _series_continue_known_totals_by_show(
     shows: list["PlexShow"],
     history: list[dict],
 ) -> dict[str, dict[int, int]]:
-    if tmdb_client is None:
-        return {}
+    del history
     totals: dict[str, dict[int, int]] = {}
+    cache = _series_continue_load_totals_cache()
+    changed = False
     for show in shows:
         identity = await _series_continue_identity_with_external_guids(show)
-        if not (identity.tmdb_id or identity.imdb_id or identity.tvdb_id):
+        cache_keys = _series_continue_total_cache_keys(identity)
+        if not cache_keys:
             continue
-        seasons = _series_continue_history_seasons_for_show(show, history)
+        seasons = {
+            int(season_number)
+            for season_number in (show.seasons or {})
+            if int(season_number) > 0
+        }
         for season_number in sorted(seasons):
-            try:
-                total = await asyncio.to_thread(
-                    tmdb_client.season_episode_count,
-                    season_number=season_number,
-                    tmdb_id=identity.tmdb_id,
-                    imdb_id=identity.imdb_id,
-                    tvdb_id=identity.tvdb_id,
-                )
-            except Exception:
-                logger.warning(
-                    "TMDB season total lookup failed show=%r season=%s",
-                    identity.title,
-                    season_number,
-                    exc_info=True,
-                )
-                continue
-            if total and total > 0:
+            total = _series_continue_cached_total(cache, cache_keys, season_number)
+            if total <= 0 and tmdb_client is not None and (
+                identity.tmdb_id or identity.imdb_id or identity.tvdb_id
+            ):
+                total = await _series_continue_fetch_tmdb_total(identity, season_number)
+                if total > 0:
+                    _series_continue_store_cached_total(cache, cache_keys, season_number, total)
+                    changed = True
+            if total > 0:
                 totals.setdefault(show.rating_key, {})[season_number] = int(total)
+    if changed:
+        _series_continue_save_totals_cache(cache)
     return totals
+
+
+async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int:
+    try:
+        total = await asyncio.to_thread(
+            tmdb_client.season_episode_count,
+            season_number=season_number,
+            tmdb_id=identity.tmdb_id,
+            imdb_id=identity.imdb_id,
+            tvdb_id=identity.tvdb_id,
+        )
+    except Exception:
+        logger.warning(
+            "TMDB season total lookup failed show=%r season=%s",
+            identity.title,
+            season_number,
+            exc_info=True,
+        )
+        return 0
+    return int(total or 0)
+
+
+def _series_continue_load_totals_cache() -> dict:
+    load = getattr(state_store, "load_series_continue_totals", None)
+    if not callable(load):
+        return {}
+    try:
+        payload = load()
+    except Exception:
+        logger.warning("Failed to load series continue totals cache", exc_info=True)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _series_continue_save_totals_cache(cache: dict) -> None:
+    save = getattr(state_store, "save_series_continue_totals", None)
+    if not callable(save):
+        return
+    try:
+        save(cache)
+    except Exception:
+        logger.warning("Failed to save series continue totals cache", exc_info=True)
+
+
+def _series_continue_total_cache_keys(identity) -> tuple[str, ...]:
+    keys: list[str] = []
+    for prefix, value in (
+        ("tmdb", identity.tmdb_id),
+        ("tvdb", identity.tvdb_id),
+        ("imdb", identity.imdb_id),
+        ("plex_rating", identity.plex_rating_key),
+        ("plex_guid", identity.plex_guid),
+    ):
+        text = str(value or "").strip()
+        if text:
+            keys.append(f"{prefix}:{text}")
+    return tuple(dict.fromkeys(keys))
+
+
+def _series_continue_cached_total(cache: dict, keys: tuple[str, ...], season_number: int) -> int:
+    for key in keys:
+        by_season = cache.get(key)
+        if not isinstance(by_season, dict):
+            continue
+        total = _series_continue_int(by_season.get(str(season_number)))
+        if total > 0:
+            return total
+    return 0
+
+
+def _series_continue_store_cached_total(
+    cache: dict,
+    keys: tuple[str, ...],
+    season_number: int,
+    total: int,
+) -> None:
+    for key in keys:
+        by_season = cache.setdefault(key, {})
+        if isinstance(by_season, dict):
+            by_season[str(season_number)] = int(total)
 
 
 async def _series_continue_identity_with_external_guids(show: "PlexShow"):

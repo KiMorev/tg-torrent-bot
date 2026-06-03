@@ -408,6 +408,7 @@ DS_VERIFY_SSL=false
 | `MOVIE_DISCOVERY_SETTINGS_FILE` | Runtime-настройки `/new`: выбранные трекеры, подписки на unmatched и т.п. |
 | `MOVIE_DISCOVERY_DEBUG_FILE` | Debug-снимок последнего обновления `/new`. |
 | `SERIES_BULK_JOBS_FILE` | JSON-файл планов массового скачивания сезонов. |
+| `SERIES_CONTINUE_TOTALS_FILE` | JSON-кэш количества эпизодов сезона из TMDB для `/continue`. |
 
 В `compose.yaml` уже есть volume `tg_torrent_drop_state:/data`. Для блока `📀 Хранилище` в `/admin` нужен bind-mount медиапапки:
 
