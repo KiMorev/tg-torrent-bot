@@ -158,6 +158,7 @@ from series_continue import (
     build_series_catch_up_candidates,
     resolve_series_completeness,
     resolve_same_topic_update,
+    title_match_key,
 )
 from kinopoisk import KinopoiskError, KinopoiskInfo, KP_URL_RE, extract_kp_id
 from plex import (
@@ -10996,13 +10997,13 @@ def _series_continue_task_matches_candidate(task: dict, candidate: SeriesCatchUp
     if season != candidate.season_number:
         return False
     task_series = _extract_series_base_query(title) or title
-    task_norm = _normalize_movie_title(task_series).lower()
+    task_norm = title_match_key(task_series)
     names = [
         candidate.identity.title,
         candidate.identity.original_title,
     ]
     for name in names:
-        target = _normalize_movie_title(name or "").lower()
+        target = title_match_key(name)
         if target and target in task_norm:
             return True
     return False

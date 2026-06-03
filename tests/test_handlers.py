@@ -6753,6 +6753,25 @@ class SeriesContinueCommandTests(unittest.TestCase):
             seeders=10,
         )
 
+    def test_continue_active_task_matches_possessive_apostrophe_title(self):
+        from series_continue import PlexSeriesIdentity, SeriesCatchUpCandidate
+
+        candidate = SeriesCatchUpCandidate(
+            identity=PlexSeriesIdentity(
+                plex_rating_key="show-cf",
+                plex_guid="plex://show/cf",
+                title="Clarkson's Farm",
+                year=2021,
+            ),
+            season_number=5,
+        )
+        task = {
+            "status": "downloading",
+            "title": "Clarksons.Farm.S05E01.1080p.HEVC.x265-MeGusta[EZTVx.to].mkv",
+        }
+
+        self.assertTrue(bot._series_continue_task_matches_candidate(task, candidate))
+
     @contextmanager
     def _allowed_context(self):
         with (

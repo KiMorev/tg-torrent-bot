@@ -6,6 +6,7 @@ without depending on Telegram handlers, tracker clients, or Download Station.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -314,12 +315,12 @@ def _history_entry_matches_show(entry: dict, show: PlexShow) -> bool:
         return True
 
     names = {
-        _normalise_name(getattr(show, "title", "")),
-        _normalise_name(getattr(show, "original_title", "")),
+        title_match_key(getattr(show, "title", "")),
+        title_match_key(getattr(show, "original_title", "")),
     }
     names.discard("")
     for field in ("series_query", "canonical_title", "title"):
-        candidate = _normalise_name(entry.get(field))
+        candidate = title_match_key(entry.get(field))
         if candidate in names:
             return True
     return False
@@ -408,3 +409,14 @@ def _safe_int(value: object) -> int:
 
 def _normalise_name(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
+
+
+_APOSTROPHE_RE = re.compile(r"['’‘`´ʼ]")
+_TITLE_KEY_SEPARATORS_RE = re.compile(r"[^0-9a-zа-яеё]+", re.IGNORECASE)
+
+
+def title_match_key(value: object) -> str:
+    text = str(value or "").casefold().replace("ё", "е")
+    text = _APOSTROPHE_RE.sub("", text)
+    text = _TITLE_KEY_SEPARATORS_RE.sub(" ", text)
+    return " ".join(text.split())

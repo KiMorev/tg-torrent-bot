@@ -8,10 +8,17 @@ from series_continue import (
     identity_from_plex_show,
     resolve_same_topic_update,
     resolve_series_completeness,
+    title_match_key,
 )
 
 
 class PlexSeriesIdentityTests(unittest.TestCase):
+    def test_title_match_key_handles_possessive_apostrophe(self):
+        self.assertEqual(title_match_key("Clarkson's Farm"), "clarksons farm")
+        self.assertEqual(title_match_key("Clarksons.Farm"), "clarksons farm")
+        self.assertEqual(title_match_key("Schitt's Creek"), "schitts creek")
+        self.assertEqual(title_match_key("Schitts Creek"), "schitts creek")
+
     def test_identity_from_plex_show_uses_external_guids(self):
         show = PlexShow(
             title="Belgravia",
@@ -121,6 +128,42 @@ class SeriesCatchUpCandidateBuilderTests(unittest.TestCase):
         self.assertEqual(candidates[0].known_total, 18)
         self.assertEqual(candidates[0].topic_id, "12345")
         self.assertEqual(candidates[0].history_chat_ids, (100,))
+
+    def test_history_matches_plex_show_with_possessive_apostrophe(self):
+        show = PlexShow(
+            title="Clarkson's Farm",
+            original_title="",
+            year=2021,
+            rating_key="show-cf",
+            seasons={
+                5: PlexSeason(
+                    rating_key="season-5",
+                    season_number=5,
+                    episode_count=4,
+                    resolution="1080",
+                )
+            },
+        )
+        history = [{
+            "event": "download_completed",
+            "chat_id": 100,
+            "kind": "series",
+            "series_query": "Clarksons Farm",
+            "season": 5,
+            "topic_id": "12345",
+            "total_episodes": 8,
+        }]
+
+        candidates = build_series_catch_up_candidates(
+            [show],
+            history,
+            chat_id=100,
+            scope="mine",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].season_number, 5)
+        self.assertEqual(candidates[0].known_total, 8)
 
     def test_history_full_season_is_not_candidate(self):
         history = [{
