@@ -224,6 +224,19 @@ class SeriesBulkPlannerTests(unittest.TestCase):
         self.assertEqual(plan.seasons[0].status, STATUS_MISSING)
         self.assertEqual(len(plan.pack_candidates), 1)
 
+    def test_title_match_handles_possessive_apostrophe(self) -> None:
+        plan = build_series_bulk_plan(
+            series_title="Clarksons Farm",
+            seasons=[5],
+            profile=_base_profile(require_original=False),
+            results=[
+                _result("Clarkson's Farm / S05 / WEB-DL 1080p / LostFilm"),
+            ],
+        )
+
+        self.assertEqual(plan.seasons[0].status, STATUS_EXACT)
+        self.assertIsNotNone(plan.seasons[0].selected)
+
 
 if __name__ == "__main__":
     unittest.main()

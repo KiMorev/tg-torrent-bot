@@ -4479,9 +4479,9 @@ class SearchClusterKindTests(unittest.TestCase):
 class PlexPreDownloadCheckTests(unittest.TestCase):
     """Tests for _plex_is_series, _plex_pre_check, _plex_confirm_text."""
 
-    def _make_movie(self, resolution: str = "1080"):
+    def _make_movie(self, resolution: str = "1080", title: str = "Dune"):
         m = MagicMock()
-        m.title = "Dune"
+        m.title = title
         m.year = 2021
         m.resolution = resolution
         return m
@@ -4526,7 +4526,7 @@ class PlexPreDownloadCheckTests(unittest.TestCase):
     def test_pre_check_returns_none_when_not_found(self):
         with (
             patch.object(bot, "PLEX_ENABLED", True),
-            patch.object(bot, "_plex_library", {("other movie", 2020): self._make_movie()}),
+            patch.object(bot, "_plex_library", {("other movie", 2020): self._make_movie(title="Other Movie")}),
         ):
             result = _plex_pre_check("Dune", 2021, "1080")
         self.assertIsNone(result)
@@ -5135,6 +5135,13 @@ class PlexPollingTests(unittest.TestCase):
             # year=1 still uses ±1 tolerance
             self.assertIs(bot._plex_library_find("foo", 1), movie_one)
 
+    def test_plex_library_find_handles_possessive_apostrophe(self):
+        movie = MagicMock()
+        movie.title = "Clarkson's Farm"
+        library = {("clarkson s farm", 2021): movie}
+        with patch.object(bot, "_plex_library", library):
+            self.assertIs(bot._plex_library_find("Clarksons Farm", 2021), movie)
+
     def test_plex_poll_is_done_blocks_restart_after_reboot(self):
         """plex_poll_is_done() must return True when the persisted marker is present,
         preventing a second poll from starting after a bot restart."""
@@ -5642,6 +5649,12 @@ class PlexShowFindTests(unittest.TestCase):
         show = self._make_show("Schitt's Creek", 2015)
         with patch.object(bot, "_plex_shows_library", {("schitt s creek", 2015): show}):
             self.assertIs(_plex_show_find("Schitt's Creek", 2015), show)
+
+    def test_finds_show_with_possessive_apostrophe_variant(self):
+        from bot import _plex_show_find
+        show = self._make_show("Clarkson's Farm", 2021)
+        with patch.object(bot, "_plex_shows_library", {("clarkson s farm", 2021): show}):
+            self.assertIs(_plex_show_find("Clarksons Farm", 2021), show)
 
     def test_year_tolerance_plus_minus_one(self):
         from bot import _plex_show_find
@@ -6793,6 +6806,18 @@ class SeriesContinueCommandTests(unittest.TestCase):
         }
 
         self.assertTrue(bot._series_continue_task_matches_candidate(task, candidate))
+
+    def test_series_bulk_downloading_seasons_matches_possessive_apostrophe_title(self):
+        ds = MagicMock()
+        ds.list_tasks.return_value = [{
+            "status": "downloading",
+            "title": "Clarksons.Farm.S05E01.1080p.HEVC.x265-MeGusta[EZTVx.to].mkv",
+        }]
+
+        with patch.object(bot, "ds_client", ds):
+            seasons = asyncio.run(bot._series_bulk_downloading_seasons("Clarkson's Farm"))
+
+        self.assertEqual(seasons, {5})
 
     def test_continue_known_totals_uses_tmdb_external_id(self):
         from plex import PlexShow, PlexSeason

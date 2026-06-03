@@ -12,6 +12,7 @@ from typing import Iterable
 
 from formatters import _extract_season_from_query, _parse_episode_info
 from movie_discovery import detect_quality, parse_size_gb
+from series_continue import title_match_key
 
 
 VOICE_ANY_FROM_REFERENCE = "any_from_reference"
@@ -555,7 +556,11 @@ def _detect_season_pack(title: str) -> tuple[int, int] | None:
 def _title_matches_series(series_title: str, title: str) -> bool:
     series_norm = _normalize_title(series_title)
     title_norm = _normalize_title(title)
-    return bool(series_norm and series_norm in title_norm)
+    if series_norm and series_norm in title_norm:
+        return True
+    series_key = title_match_key(series_title)
+    title_key = title_match_key(title)
+    return bool(series_key and series_key in title_key)
 
 
 def _normalize_title(value: str) -> str:

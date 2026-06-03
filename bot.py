@@ -4017,11 +4017,38 @@ def _plex_library_find(title: str, year: int) -> "PlexMovie | None":
         return None
     if year == 0:
         # Unknown year: only consider entries that are also year=0 in Plex.
-        return _plex_library.get((norm, 0))
+        hit = _plex_library.get((norm, 0))
+        if hit is not None:
+            return hit
+        return _plex_library_find_by_title_match_key(title, 0)
     for dy in (0, 1, -1):
         hit = _plex_library.get((norm, year + dy))
         if hit is not None:
             return hit
+    title_key = title_match_key(title)
+    if title_key:
+        for dy in (0, 1, -1):
+            hit = _plex_library_find_by_title_match_key(title, year + dy, title_key=title_key)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _plex_library_find_by_title_match_key(
+    title: str,
+    year: int,
+    *,
+    title_key: str | None = None,
+) -> "PlexMovie | None":
+    target = title_key if title_key is not None else title_match_key(title)
+    if not target:
+        return None
+    for (cached_title, cached_year), movie in _plex_library.items():
+        if cached_year != year:
+            continue
+        movie_title = getattr(movie, "title", "")
+        if title_match_key(cached_title) == target or title_match_key(movie_title) == target:
+            return movie
     return None
 
 
@@ -4046,10 +4073,44 @@ def _plex_show_find(series_query: str, year: int = 0) -> "PlexShow | None":
             hit = _plex_shows_library.get((norm, year + dy))
             if hit is not None:
                 return hit
+        query_key = title_match_key(series_query)
+        if query_key:
+            for dy in (0, 1, -1):
+                hit = _plex_show_find_by_title_match_key(series_query, year + dy, query_key=query_key)
+                if hit is not None:
+                    return hit
         # Fall through to title-only — series years frequently disagree with
         # Plex's premiere year, so we don't return None here.
+    query_key = title_match_key(series_query)
     for (cached_title, _cached_year), show in _plex_shows_library.items():
         if cached_title == norm:
+            return show
+        if query_key and (
+            title_match_key(cached_title) == query_key
+            or title_match_key(getattr(show, "title", "")) == query_key
+            or title_match_key(getattr(show, "original_title", "")) == query_key
+        ):
+            return show
+    return None
+
+
+def _plex_show_find_by_title_match_key(
+    series_query: str,
+    year: int,
+    *,
+    query_key: str | None = None,
+) -> "PlexShow | None":
+    target = query_key if query_key is not None else title_match_key(series_query)
+    if not target:
+        return None
+    for (cached_title, cached_year), show in _plex_shows_library.items():
+        if cached_year != year:
+            continue
+        if (
+            title_match_key(cached_title) == target
+            or title_match_key(getattr(show, "title", "")) == target
+            or title_match_key(getattr(show, "original_title", "")) == target
+        ):
             return show
     return None
 
@@ -14542,7 +14603,7 @@ async def _series_bulk_downloading_seasons(series_query: str) -> set[int]:
         logger.debug("Series bulk plan: Download Station task lookup failed", exc_info=True)
         return set()
 
-    target = _normalize_movie_title(series_query).lower()
+    target = title_match_key(series_query)
     found: set[int] = set()
     for task in tasks:
         if str(task.get("status") or "").lower() not in _ACTIVE_STATUSES:
@@ -14552,7 +14613,7 @@ async def _series_bulk_downloading_seasons(series_query: str) -> set[int]:
         if not season:
             continue
         task_series = _extract_series_base_query(title) or title
-        if target and target in _normalize_movie_title(task_series).lower():
+        if target and target in title_match_key(task_series):
             found.add(season)
     return found
 

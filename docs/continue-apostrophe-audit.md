@@ -19,6 +19,10 @@ Current findings:
   episode filename fallback.
 - `/continue` uses TMDB via Plex external ids to get exact season episode
   totals when `TMDB_API_TOKEN` is configured.
+- Series bulk active-task detection and planner title matching now use the
+  same apostrophe-insensitive title key.
+- General Plex movie/show cache lookup now falls back to the same title key
+  for possessive apostrophe variants.
 
 Real apostrophe-sensitive spots found:
 
@@ -38,7 +42,4 @@ Done:
   `Schitt's Creek` as the same title key.
 - Plex-found season history is enriched with canonical series fields.
 - TMDB season totals are used as `known_totals_by_show` for `/continue`.
-
-Remaining scoped fixes:
-
-- Leave series bulk and general Plex lookup for separate follow-up steps.
+- Series bulk and general Plex lookup apostrophe matching are fixed.
