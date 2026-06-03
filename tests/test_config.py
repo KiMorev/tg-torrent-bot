@@ -100,6 +100,11 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.plex_url, "")
         self.assertEqual(settings.plex_token, "")
         self.assertEqual(settings.plex_movie_section, "")
+        self.assertFalse(settings.plex_webhook_enabled)
+        self.assertEqual(settings.plex_webhook_host, "0.0.0.0")
+        self.assertEqual(settings.plex_webhook_port, 8099)
+        self.assertEqual(settings.plex_webhook_token, "")
+        self.assertEqual(settings.plex_webhook_debounce_seconds, 10.0)
         self.assertFalse(settings.tmdb_enabled)
         self.assertEqual(settings.tmdb_api_token, "")
 
@@ -139,6 +144,11 @@ class ConfigParsingTests(unittest.TestCase):
             "MOVIE_DISCOVERY_QUALITIES": "2160p",
             "PLEX_URL": "https://example.com/plex",
             "PLEX_TOKEN": "myplextoken",
+            "PLEX_WEBHOOK_ENABLED": "true",
+            "PLEX_WEBHOOK_HOST": "127.0.0.1",
+            "PLEX_WEBHOOK_PORT": "70000",
+            "PLEX_WEBHOOK_TOKEN": "hook-token",
+            "PLEX_WEBHOOK_DEBOUNCE_SECONDS": "-1",
             "TMDB_API_TOKEN": "tmdb-token",
         }
 
@@ -178,6 +188,11 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "https://example.com/plex")
         self.assertEqual(settings.plex_token, "myplextoken")
+        self.assertTrue(settings.plex_webhook_enabled)
+        self.assertEqual(settings.plex_webhook_host, "127.0.0.1")
+        self.assertEqual(settings.plex_webhook_port, 65535)
+        self.assertEqual(settings.plex_webhook_token, "hook-token")
+        self.assertEqual(settings.plex_webhook_debounce_seconds, 0.0)
         self.assertTrue(settings.tmdb_enabled)
         self.assertEqual(settings.tmdb_api_token, "tmdb-token")
 

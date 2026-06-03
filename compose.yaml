@@ -17,6 +17,8 @@ services:
       # feature — bot will simply skip the block.
       # If your movies live in another path, change the LEFT side only.
       - /volume1/video:/storage:ro
+    ports:
+      - "${PLEX_WEBHOOK_PORT:-8099}:${PLEX_WEBHOOK_PORT:-8099}"
     environment:
       BOT_TOKEN: "${BOT_TOKEN}"
       ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS}"
@@ -68,6 +70,11 @@ services:
       PLEX_TOKEN: "${PLEX_TOKEN:-}"
       PLEX_MOVIE_SECTION: "${PLEX_MOVIE_SECTION:-}"
       PLEX_DEEPLINK_BASE_URL: "${PLEX_DEEPLINK_BASE_URL:-}"
+      PLEX_WEBHOOK_ENABLED: "${PLEX_WEBHOOK_ENABLED:-false}"
+      PLEX_WEBHOOK_HOST: "${PLEX_WEBHOOK_HOST:-0.0.0.0}"
+      PLEX_WEBHOOK_PORT: "${PLEX_WEBHOOK_PORT:-8099}"
+      PLEX_WEBHOOK_TOKEN: "${PLEX_WEBHOOK_TOKEN:-}"
+      PLEX_WEBHOOK_DEBOUNCE_SECONDS: "${PLEX_WEBHOOK_DEBOUNCE_SECONDS:-10}"
       SUBSCRIPTION_CHECK_INTERVAL_HOURS: "${SUBSCRIPTION_CHECK_INTERVAL_HOURS:-6}"
       JACKETT_URL: "${JACKETT_URL:-}"
       JACKETT_API_KEY: "${JACKETT_API_KEY:-}"

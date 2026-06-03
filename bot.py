@@ -177,6 +177,7 @@ from plex import (
     is_unmatched as _plex_is_unmatched,
     _normalise_resolution as _plex_normalise_resolution,
 )
+from plex_webhooks import PlexWebhookServer, PlexWebhookState
 from storage import (
     STORAGE_MOUNT_PATH, StorageInfo, format_bytes, get_storage_info,
     get_unified_disk_info,
@@ -318,6 +319,11 @@ PLEX_ENABLED = settings.plex_enabled
 PLEX_URL = settings.plex_url
 PLEX_TOKEN = settings.plex_token
 PLEX_DEEPLINK_BASE_URL = settings.plex_deeplink_base_url
+PLEX_WEBHOOK_ENABLED = settings.plex_webhook_enabled
+PLEX_WEBHOOK_HOST = settings.plex_webhook_host
+PLEX_WEBHOOK_PORT = settings.plex_webhook_port
+PLEX_WEBHOOK_TOKEN = settings.plex_webhook_token
+PLEX_WEBHOOK_DEBOUNCE_SECONDS = settings.plex_webhook_debounce_seconds
 TOPIC_SUBSCRIPTIONS_FILE = settings.topic_subscriptions_file
 SUBSCRIPTION_CHECK_INTERVAL_HOURS = settings.subscription_check_interval_hours
 JACKETT_URL = settings.jackett_url
@@ -477,6 +483,13 @@ _plex_machine_id: str = ""
 # task_id → asyncio.Task while polling is active; → None after polling completed.
 # Keeping the key (even as None) prevents re-launching a second poll after the first finishes.
 _PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
+_PLEX_WEBHOOK_WAKE_EVENT: "asyncio.Event | None" = None
+_PLEX_WEBHOOK_STATE = PlexWebhookState(
+    enabled=PLEX_WEBHOOK_ENABLED,
+    host=PLEX_WEBHOOK_HOST,
+    port=PLEX_WEBHOOK_PORT,
+)
+_PLEX_WEBHOOK_SERVER: PlexWebhookServer | None = None
 
 # Single-flight refresh: serialise concurrent `_refresh_plex_library` calls so
 # the 30-min background loop + N polling loops don't hit Plex API in parallel.
@@ -4380,6 +4393,50 @@ def _plex_cache_info() -> dict:
     }
 
 
+def _plex_webhook_info() -> dict:
+    return _PLEX_WEBHOOK_STATE.snapshot()
+
+
+def _plex_webhook_wake_event() -> asyncio.Event:
+    global _PLEX_WEBHOOK_WAKE_EVENT
+    if _PLEX_WEBHOOK_WAKE_EVENT is None:
+        _PLEX_WEBHOOK_WAKE_EVENT = asyncio.Event()
+    return _PLEX_WEBHOOK_WAKE_EVENT
+
+
+async def _plex_wait_for_poll_interval(interval_seconds: float) -> None:
+    event = _plex_webhook_wake_event()
+    try:
+        await asyncio.wait_for(event.wait(), timeout=interval_seconds)
+    except asyncio.TimeoutError:
+        return
+    event.clear()
+
+
+async def _handle_plex_webhook_trigger(event: dict) -> None:
+    if not PLEX_ENABLED:
+        logger.info("Plex webhook ignored: Plex integration disabled")
+        return
+    active = [
+        task_id for task_id, task in _PLEX_POLLING_TASKS.items()
+        if task is not None and not task.done()
+    ]
+    if not active:
+        logger.info(
+            "Plex webhook accepted but no active Plex polling tasks are waiting event=%s title=%r",
+            event.get("event", ""),
+            event.get("title", ""),
+        )
+        return
+    _plex_webhook_wake_event().set()
+    logger.info(
+        "Plex webhook woke %d active Plex polling task(s) event=%s title=%r",
+        len(active),
+        event.get("event", ""),
+        event.get("title", ""),
+    )
+
+
 def _classify_plex_exception(exc: BaseException) -> tuple[str, str]:
     """Return (error_kind, short_message) for an exception raised during a Plex call."""
     if isinstance(exc, PlexAPIError):
@@ -5174,7 +5231,7 @@ async def _plex_poll_after_finish(
     try:
         for attempt in range(max_attempts):
             if attempt > 0:
-                await asyncio.sleep(interval_seconds)
+                await _plex_wait_for_poll_interval(interval_seconds)
 
             # Refresh Plex library, then look for the file. Unmatched admin radar
             # stays on the regular cache loop so Plex has time to finish matching.
@@ -7748,6 +7805,7 @@ async def _build_diagnostics_report():
         plex_client=plex_client,
         plex_cache_info=_plex_cache_info() if plex_client else None,
         plex_deeplink_base_url=PLEX_DEEPLINK_BASE_URL,
+        plex_webhook_info=_plex_webhook_info(),
         voice_search_enabled=VOICE_SEARCH_ENABLED,
         openai_api_key=OPENAI_API_KEY,
         voice_usage=state_store.load_voice_usage(),
@@ -22202,6 +22260,7 @@ def _run_polling(app: Application) -> None:
 async def setup_bot_commands(app: Application) -> None:
     global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK, MOVIE_DISCOVERY_TASK
     global SUBSCRIPTION_MONITOR_TASK, JACKETT_WARMUP_TASK
+    global _PLEX_WEBHOOK_SERVER
 
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
@@ -22245,12 +22304,35 @@ async def setup_bot_commands(app: Application) -> None:
         app.create_task(_plex_cache_loop(app))
         logger.info("Plex library cache loop started, interval=%ss", _PLEX_CACHE_INTERVAL)
 
+    if PLEX_WEBHOOK_ENABLED:
+        if not PLEX_ENABLED:
+            _PLEX_WEBHOOK_STATE.last_error = "Plex integration disabled"
+            logger.warning("Plex webhook server not started: Plex integration disabled")
+        else:
+            _PLEX_WEBHOOK_SERVER = PlexWebhookServer(
+                host=PLEX_WEBHOOK_HOST,
+                port=PLEX_WEBHOOK_PORT,
+                token=PLEX_WEBHOOK_TOKEN,
+                debounce_seconds=PLEX_WEBHOOK_DEBOUNCE_SECONDS,
+                trigger=_handle_plex_webhook_trigger,
+                state=_PLEX_WEBHOOK_STATE,
+            )
+            await _PLEX_WEBHOOK_SERVER.start()
+
+
+async def shutdown_background_services(app: Application) -> None:
+    global _PLEX_WEBHOOK_SERVER
+    if _PLEX_WEBHOOK_SERVER is not None:
+        await _PLEX_WEBHOOK_SERVER.stop()
+        _PLEX_WEBHOOK_SERVER = None
+
 
 def main() -> None:
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(setup_bot_commands)
+        .post_shutdown(shutdown_background_services)
         .connect_timeout(30)
         .read_timeout(30)
         .write_timeout(30)

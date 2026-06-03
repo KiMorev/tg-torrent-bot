@@ -26,7 +26,7 @@
 | История загрузок | `bot.py`: `_record_download_history`, `_record_download_added_history`, `_record_task_notification_history`, `_plex_poll_after_finish`; `state_store.py`: `download_history.jsonl`; подробности в `docs/download-history.md` | `tests/test_state_store.py`, `tests/test_handlers.py`, `tests/test_background.py` |
 | Сериалы и подписки | `bot.py`: `search_subscribe_*`, `_check_subscriptions`, `_check_jackett_subscriptions`; `jackett_subscriptions.py`; `subscription_policy.py`; `series_bulk_planner.py`; `formatters.py` | `tests/test_subscription_policy.py`, `tests/test_subscription_picker_ui.py`, `tests/test_jackett_subscriptions.py`, `tests/test_series_bulk_planner.py`, `tests/test_background.py` |
 | `/new` и подбор новинок | `bot.py`: `_refresh_movie_discovery_cache*`, `_run_movie_discovery_notifications`, `movie_new_*`; `movie_discovery.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_movie_discovery.py`, `tests/test_handlers.py`, `tests/test_kinopoisk.py`, `tests/test_gpt_features.py` |
-| Plex-проверки и уведомления | `bot.py`: `_plex_*`, `_run_task_notifications_once`; `plex.py`; `diagnostics.py`; `keyboards.py` | `tests/test_plex.py`, `tests/test_plex_series_context.py`, `tests/test_background.py`, `tests/test_keyboards.py` |
+| Plex-проверки и уведомления | `bot.py`: `_plex_*`, `_run_task_notifications_once`; `plex.py`; `plex_webhooks.py`; `diagnostics.py`; `keyboards.py` | `tests/test_plex.py`, `tests/test_plex_series_context.py`, `tests/test_plex_webhooks.py`, `tests/test_background.py`, `tests/test_keyboards.py` |
 | `/status`, карточки задач, автообновление | `bot.py`: `status`, `task_callback`, `_task_card_refresh_loop`; `task_views.py`; `task_policies.py`; `formatters.py` | `tests/test_task_views.py`, `tests/test_task_policies.py`, `tests/test_handlers.py` |
 | Админ-панель и диагностика | `bot.py`: `admin_command`, `admin_callback`; `diagnostics.py`; `keyboards.py`; `storage.py` | `tests/test_handlers.py`, `tests/test_diagnostics.py`, `tests/test_storage.py`, `tests/test_keyboards.py` |
 | Фоновые циклы | `bot.py`: `setup_bot_commands`, `_tracker_background_loop`, `_task_maintenance_loop`, `_subscription_check_loop`, `_movie_discovery_loop`, `_jackett_warmup_loop`, `_plex_cache_loop`; профильная логика в отдельных модулях | `tests/test_background.py`, профильные тесты блока |
@@ -40,6 +40,7 @@
 |---|---|
 | `bot.py::main` | Создаёт Telegram `Application`, регистрирует команды, callback handlers, `ConversationHandler`, обработчики документов и реакций. |
 | `bot.py::setup_bot_commands` | Обновляет меню команд, чистит temp-dir, запускает фоновые задачи. |
+| `plex_webhooks.py` | Optional `aiohttp` endpoint `POST /plex/webhook` и `GET /plex/webhook/health`; webhook будит активные Plex polling tasks, но не заменяет lookup. |
 | `config.py::load_settings` | Единственная точка чтения переменных окружения и дефолтов. |
 | `app_context.py::build_app_context` | Создаёт клиентов внешних сервисов из `AppSettings`. |
 | `install.sh` | Bootstrap для Synology: скачивает compose/wizard, генерирует `.env`, поднимает контейнер. |

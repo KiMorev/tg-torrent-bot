@@ -128,6 +128,11 @@ class AppSettings:
     plex_token: str
     plex_movie_section: str
     plex_deeplink_base_url: str
+    plex_webhook_enabled: bool
+    plex_webhook_host: str
+    plex_webhook_port: int
+    plex_webhook_token: str
+    plex_webhook_debounce_seconds: float
     topic_subscriptions_file: Path
     subscription_check_interval_hours: int
     jackett_url: str
@@ -256,6 +261,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         plex_enabled=bool(env.get("PLEX_URL", "").strip() and env.get("PLEX_TOKEN", "").strip()),
         plex_movie_section=env.get("PLEX_MOVIE_SECTION", "").strip(),
         plex_deeplink_base_url=env.get("PLEX_DEEPLINK_BASE_URL", "").strip(),
+        plex_webhook_enabled=env_bool(env, "PLEX_WEBHOOK_ENABLED", False),
+        plex_webhook_host=(env.get("PLEX_WEBHOOK_HOST", "0.0.0.0").strip() or "0.0.0.0"),
+        plex_webhook_port=max(1, min(65535, env_int(env, "PLEX_WEBHOOK_PORT", 8099))),
+        plex_webhook_token=env.get("PLEX_WEBHOOK_TOKEN", "").strip(),
+        plex_webhook_debounce_seconds=max(0.0, env_float(env, "PLEX_WEBHOOK_DEBOUNCE_SECONDS", 10.0)),
         topic_subscriptions_file=Path(
             env.get("TOPIC_SUBSCRIPTIONS_FILE", str(state_dir / "topic_subscriptions.json"))
         ),

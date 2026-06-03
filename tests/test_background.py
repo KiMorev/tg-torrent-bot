@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import tempfile
 import time
@@ -268,6 +269,7 @@ class NotificationDeduplicationTests(unittest.TestCase):
         self.assertIn("сообщим, когда он появится", first_text)
         self.assertIn("сообщим, как только появится", hint_text)
         self.assertEqual(self._store.load_notified_tasks()["tid1"]["status"], "done")
+
         history = self._store.load_download_history(chat_id=999)
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["event"], "download_soft_completed")
@@ -277,6 +279,24 @@ class NotificationDeduplicationTests(unittest.TestCase):
         self.assertTrue(history[0]["plex_polling_started"])
         poll.assert_called_once()
         self.assertEqual(len(created_coroutines), 1)
+
+    def test_plex_webhook_trigger_wakes_active_polling_task(self) -> None:
+        async def run() -> None:
+            sleeper = asyncio.create_task(asyncio.sleep(60))
+            try:
+                with (
+                    patch.object(bot, "PLEX_ENABLED", True),
+                    patch.object(bot, "_PLEX_POLLING_TASKS", {"tid1": sleeper}),
+                    patch.object(bot, "_PLEX_WEBHOOK_WAKE_EVENT", None),
+                ):
+                    await bot._handle_plex_webhook_trigger({"event": "library.new", "title": "Movie"})
+                    self.assertTrue(bot._plex_webhook_wake_event().is_set())
+            finally:
+                sleeper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sleeper
+
+        asyncio.run(run())
 
     def test_complete_error_then_finished_does_not_duplicate_notification(self) -> None:
         error_task = {

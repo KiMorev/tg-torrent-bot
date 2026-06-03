@@ -37,7 +37,7 @@ DIAGNOSTICS_SECTIONS = {
     "downloads": ("🧲 <b>Загрузки</b>", ("Download Station", "Rutracker")),
     "jackett": ("🌐 <b>Jackett</b>", ("Jackett",)),
     "trackers": ("➕ <b>Public-трекеры</b>", ("Public trackers",)),
-    "plex": ("🎬 <b>Plex</b>", ("Plex", "Plex deep-link")),
+    "plex": ("🎬 <b>Plex</b>", ("Plex", "Plex deep-link", "Plex webhook")),
     "ai": ("🤖 <b>GPT / Voice</b>", ("Голосовой поиск", "GPT chat")),
 }
 
@@ -468,6 +468,50 @@ def _plex_deeplink_diagnostic(deeplink_base_url: str) -> ServiceDiagnostic:
     )
 
 
+def _plex_webhook_diagnostic(webhook_info: dict | None) -> ServiceDiagnostic:
+    name = "Plex webhook"
+    icon = "🔔"
+    info = webhook_info or {}
+    if not info.get("enabled"):
+        return ServiceDiagnostic(
+            name, "disabled",
+            _summary("disabled", icon, name, "не включён"),
+            ["   PLEX_WEBHOOK_ENABLED=false. Plex polling работает как раньше."],
+        )
+
+    details = [
+        f"   URL: http://<NAS_IP>:{int(info.get('port') or 0)}/plex/webhook?token=***",
+    ]
+    if info.get("last_received_at"):
+        details.append(f"   Последний webhook: {_short_datetime(info.get('last_received_at'))}")
+    if info.get("last_accepted_at"):
+        details.append(f"   Последний принятый: {_short_datetime(info.get('last_accepted_at'))}")
+    if info.get("last_event"):
+        details.append(f"   Последнее событие: {html.escape(str(info.get('last_event')))}")
+    if info.get("trigger_count") is not None:
+        details.append(
+            f"   Триггеров: {int(info.get('trigger_count') or 0)} · "
+            f"debounce: {int(info.get('debounced_count') or 0)}"
+        )
+    invalid = int(info.get("invalid_token_count") or 0)
+    if invalid:
+        details.append(f"   Неверных token: {invalid}")
+    if info.get("last_error"):
+        details.append(_raw_detail(str(info.get("last_error"))))
+
+    if info.get("listening"):
+        return ServiceDiagnostic(
+            name, "ok",
+            _summary("ok", icon, name, f"слушает порт {int(info.get('port') or 0)}"),
+            details,
+        )
+    return ServiceDiagnostic(
+        name, "error",
+        _summary("error", icon, name, "включён, но endpoint не слушает"),
+        details,
+    )
+
+
 def _plural_ru(n: int, one: str, few: str, many: str) -> str:
     """Russian plural picker: 1 фильм / 2 фильма / 5 фильмов."""
     n_abs = abs(n) % 100
@@ -722,6 +766,7 @@ def run_diagnostics(
     plex_client=None,
     plex_cache_info: dict | None = None,
     plex_deeplink_base_url: str = "",
+    plex_webhook_info: dict | None = None,
     voice_search_enabled: bool = False,
     openai_api_key: str = "",
     voice_usage: dict | None = None,
@@ -737,6 +782,7 @@ def run_diagnostics(
             _public_trackers_diagnostic(tracker_service, display_timezone),
             _plex_diagnostic(plex_client, plex_cache_info),
             _plex_deeplink_diagnostic(plex_deeplink_base_url),
+            _plex_webhook_diagnostic(plex_webhook_info),
             _voice_search_diagnostic(
                 enabled=voice_search_enabled,
                 api_key=openai_api_key,
