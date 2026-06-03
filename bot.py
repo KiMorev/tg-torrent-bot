@@ -5089,6 +5089,22 @@ def _plex_other_seasons_context(
     )
 
 
+def _plex_file_path_matches_ds_title(file_path: str, ds_title: str) -> bool:
+    name = ds_title.strip()
+    if not name:
+        return False
+
+    parts = [p for p in re.split(r"[\\/]", file_path) if p]
+    if not parts:
+        return False
+    if name in parts:
+        return True
+
+    file_part = parts[-1]
+    file_stem = re.sub(r"\.[^.]+$", "", file_part)
+    return name == file_stem
+
+
 def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
     """Find a Plex movie whose file path has *ds_title* as a complete component.
 
@@ -5110,21 +5126,24 @@ def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
     library_snapshot = _plex_library
     for movie in library_snapshot.values():
         for fp in movie.file_paths:
-            # Split on both POSIX and Windows separators so behaviour is the same
-            # whether Plex is on Linux/Synology or running on Windows.
-            parts = [p for p in re.split(r"[\\/]", fp) if p]
-            if not parts:
-                continue
-            # Full-component match anywhere in the path (folder or file name).
-            if name in parts:
+            if _plex_file_path_matches_ds_title(fp, name):
                 return movie
-            # Also allow matching the filename with extension stripped — but ONLY
-            # for the last component (the file), since folder names like
-            # "Movie.2024.backup" must not be reduced to "Movie.2024".
-            file_part = parts[-1]
-            file_stem = re.sub(r"\.[^.]+$", "", file_part)
-            if name == file_stem:
-                return movie
+    return None
+
+
+async def _plex_find_series_by_ds_title(ds_title: str) -> tuple["PlexSeason", "PlexShow"] | None:
+    """Find a TV season whose episode file path matches a DS task title."""
+    name = ds_title.strip()
+    if not name:
+        return None
+
+    shows_snapshot = list(_plex_shows_library.values())
+    for show in shows_snapshot:
+        seasons = show.seasons or await _plex_ensure_show_seasons(show)
+        for season in seasons.values():
+            for fp in season.file_paths:
+                if _plex_file_path_matches_ds_title(fp, name):
+                    return season, show
     return None
 
 
@@ -5176,6 +5195,11 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
                 "Plex lookup: series meta incomplete query=%r season_num=%s",
                 series_query, season_num,
             )
+        fallback = await _plex_find_series_by_ds_title(task_title)
+        if fallback is not None:
+            season, show = fallback
+            found_title = f"Сезон {season.season_number} «{show.title or series_query or task_title}»"
+            return season, "3", found_title
         # Series meta is present but couldn't find a match — no fallback to movies.
         return None, "1", found_title
 

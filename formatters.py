@@ -300,8 +300,14 @@ def _extract_series_base_query(title: str) -> str | None:
     if not re.search(r"сезон|\bS\d{1,2}(?:E\d|\b)", title, re.IGNORECASE):
         return None
 
-    parts = [p.strip() for p in title.split("/")]
-    ru_title = parts[0].strip() if parts else ""
+    if "/" in title:
+        parts = [p.strip() for p in title.split("/")]
+        ru_title = parts[0].strip() if parts else ""
+    else:
+        marker = re.search(r"сезон|\bS\d{1,2}(?:E\d|\b)", title, re.IGNORECASE)
+        ru_title = title[: marker.start()].strip(" ._-–—") if marker else title.strip()
+        ru_title = re.sub(r"[._]+", " ", ru_title)
+        ru_title = re.sub(r"\s{2,}", " ", ru_title).strip()
 
     # Sanity: must be at least 2 chars and not start with a digit
     if len(ru_title) < 2 or ru_title[0].isdigit():

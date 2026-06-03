@@ -4985,6 +4985,48 @@ class PlexPollingTests(unittest.TestCase):
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
         self.assertIn("✖️ Закрыть", labels)
 
+    def test_poll_after_finish_finds_series_by_episode_file_path(self):
+        """Scene-style DS title should match Plex episode file paths for series."""
+        from plex import PlexShow, PlexSeason
+        task_title = "Clarksons.Farm.S05E01.1080p.HEVC.x265-MeGusta[EZTVx.to].mkv"
+        season = PlexSeason(
+            "season-key-5",
+            5,
+            episode_count=4,
+            file_paths=[f"/volume1/video/{task_title}"],
+            resolution="1080",
+        )
+        show = PlexShow("Clarkson's Farm", 2021, "show-key-cf", seasons={5: season})
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        meta = {
+            "kind": "series",
+            "title": task_title,
+            "year": 0,
+            "quality": "1080",
+            "series_query": task_title,
+            "season_num": 5,
+        }
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_show_find", return_value=None),
+            patch.object(bot, "_plex_shows_library", {("clarkson s farm", 2021): show}),
+            patch.object(bot, "_plex_machine_id", "machine-1"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", task_title, [100],
+                meta=meta, max_attempts=1, interval_seconds=0,
+            ))
+
+        fake_app.bot.send_message.assert_awaited_once()
+        kwargs = fake_app.bot.send_message.call_args.kwargs
+        self.assertIn("Сезон 5", kwargs["text"])
+        self.assertIn("Clarkson&#x27;s Farm", kwargs["text"])
+        btn = kwargs["reply_markup"].inline_keyboard[0][0]
+        self.assertIn("season-key-5", btn.url)
+
     def test_poll_after_finish_series_without_meta_falls_back_via_legacy_path(self):
         """A legacy task (no meta) whose DS title looks like a series should still
         try the series path by reconstructing meta from the title."""
@@ -5408,6 +5450,10 @@ class EnglishSeriesFormatTests(unittest.TestCase):
             _extract_series_base_query("Шоу / Show / S01E03 / 1080p"),
             "Шоу",
         )
+        self.assertEqual(
+            _extract_series_base_query("Clarksons.Farm.S05E01.1080p.HEVC.x265-MeGusta[EZTVx.to].mkv"),
+            "Clarksons Farm",
+        )
         self.assertIsNone(_extract_series_base_query("Movie 2024 1080p"))
 
     def test_parse_episode_info_recognises_english_with_of(self):
@@ -5492,7 +5538,7 @@ class BuildTaskMetaTests(unittest.TestCase):
         from bot import _build_task_meta_from_title
         meta = _build_task_meta_from_title("Schitts.Creek.S03E05.1080p", source="magnet")
         self.assertEqual(meta["kind"], "series")
-        # series_query falls back to the title itself when no slash structure exists
+        self.assertEqual(meta["series_query"], "Schitts Creek")
         self.assertEqual(meta["quality"], "1080")
         self.assertEqual(meta["source"], "magnet")
 
