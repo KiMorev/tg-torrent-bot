@@ -65,7 +65,7 @@
 | Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
 | Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`; BT-задача `error` без конкретного `error_detail` (`unknown` считается неконкретным) и с прогрессом >=99.9% считается мягко завершённой для уведомлений/Plex polling; итоговые события пишутся в `download_history.jsonl`. |
 | `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`; admin-view берёт владельцев из `task_owners.json` и подписи из `approved_users.json`. |
-| `/admin` | `admin_command` / `admin_callback` -> короткая диагностика и drill-down `admin:diag_*`, настройки `/new`, пользователи, подписки, статус search facts, сброс счётчиков. |
+| `/admin` | `admin_command` / `admin_callback` -> короткая диагностика и drill-down `admin:diag_*`, настройки `/new`, пользователи, подписки, сброс счётчиков. |
 
 ## Callback namespaces
 
@@ -109,10 +109,9 @@
 | `tracker_service.py` | Публичные BT-трекеры: загрузка списка, cache, применение к задачам. |
 | `storage.py` | Информация о диске и history для storage alerts. |
 | `voice_transcription.py` | Whisper transcription, проверки ключа, расчёт стоимости. |
-| `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break, фоновое обновление каталога search facts. |
+| `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break. |
 | `access_control.py` | Проверка разрешённых/admin chat ids и подпись заявки на доступ. |
 | `progressive_status.py` | Прогрессивные сообщения ожидания для поиска и голосового ввода. |
-| `search_facts.py` | Локальные кинофакты для экрана ожидания поиска: bundled/runtime-каталог, alias-теги запроса, ротация пула, общий прогресс каталога и защита от повторов по `chat_id`. |
 | `scripts/setup_wizard.py` | Wizard установки и генерация `.env`. |
 | `tests/conftest.py` | Bootstrap тестового окружения: изолированные `TMP_DIR`/`STATE_DIR` до импорта `bot.py`. |
 
@@ -139,8 +138,6 @@
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `user_search_defaults.json` | Личные предпочтения поиска по `chat_id`: качество, Original, субтитры и preferred voices. |
-| `search_facts_state.json` | История показанных кинофактов по `chat_id`: текущий пул, показанные в пуле, recent-history, общий прогресс каталога и флаги фонового GPT-refresh. |
-| `search_facts_catalog.json` | Runtime-каталог кинофактов и aliases, созданный фоновым GPT-refresh; при ошибке или отсутствии бот использует bundled `data/search_facts.json` / `data/search_fact_aliases.json`. |
 | `gpt_usage.json` | Использование GPT-функций; `last_error` очищается успешным GPT-вызовом, transient-ошибки старше 24 ч не желтят диагностику. |
 | `torrent_titles_cache.json` | Кэш GPT-разбора заголовков torrent/magnet для бейджей, task metadata и повторных ручных загрузок. |
 | `public_trackers.txt` | Текстовый кэш публичных BT-трекеров. |

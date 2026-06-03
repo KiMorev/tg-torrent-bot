@@ -35,7 +35,6 @@ class JsonStateStore:
         gpt_usage_file: Path | None = None,
         torrent_titles_cache_file: Path | None = None,
         download_history_file: Path | None = None,
-        search_facts_state_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -54,7 +53,6 @@ class JsonStateStore:
         self.gpt_usage_file = gpt_usage_file
         self.torrent_titles_cache_file = torrent_titles_cache_file
         self.download_history_file = download_history_file
-        self.search_facts_state_file = search_facts_state_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -603,17 +601,6 @@ class JsonStateStore:
             return
         payload.pop(str(chat_id), None)
         self.save_json_file(self.user_search_defaults_file, payload, "user search defaults")
-
-    def load_search_facts_state(self) -> dict:
-        if not self.search_facts_state_file:
-            return {}
-        payload = self.load_json_file(self.search_facts_state_file, {})
-        return payload if isinstance(payload, dict) else {}
-
-    def save_search_facts_state(self, state: dict) -> None:
-        if not self.search_facts_state_file:
-            return
-        self.save_json_file(self.search_facts_state_file, state, "search facts state")
 
     # ---- GPT chat usage stats (per-feature: kp_confidence, did_you_mean, ...) ----
 

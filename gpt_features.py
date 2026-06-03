@@ -16,7 +16,6 @@ import logging
 from typing import Any
 
 from gpt_client import chat_completion
-from search_facts import SearchFact, validate_search_fact_catalog
 
 logger = logging.getLogger("tg_torrent_drop")
 
@@ -793,90 +792,3 @@ def choose_movie_notification_release(
         title, pick_raw, confidence,
     )
     return (pick_raw - 1, reason, None)
-
-
-def generate_search_fact_catalog(
-    *,
-    existing_facts: list[SearchFact],
-    existing_aliases: dict[str, tuple[str, ...]],
-    api_key: str,
-    model: str = "gpt-4o-mini",
-    target_count: int = 100,
-    timeout: int = 90,
-    usage_sink: list | None = None,
-) -> tuple[dict | None, str | None]:
-    """Generate a refreshed waiting-screen fact catalog.
-
-    This is an offline/background helper: callers must validate and persist the
-    result, and search handlers should keep using local catalog data only.
-    """
-    target_count = max(60, min(120, int(target_count or 100)))
-    seed_facts = [
-        {"text": fact.text, "tags": list(fact.tags)}
-        for fact in existing_facts[:80]
-    ]
-    seed_aliases = {
-        alias: list(tags)
-        for alias, tags in list(existing_aliases.items())[:80]
-    }
-    system_prompt = (
-        "Ты обновляешь локальный каталог коротких кинофактов для Telegram-бота. "
-        "Каталог показывается пользователю во время ожидания поиска торрентов. "
-        "Нужен автономный JSON без markdown.\n\n"
-        "Правила:\n"
-        f"- Верни {target_count} фактов на русском языке.\n"
-        "- Каждый факт: 45-160 символов, одна фраза, без текущих новостей и дат, которые могут устареть.\n"
-        "- Не повторяй существующие факты дословно.\n"
-        "- Добавь теги для тематического подбора: cinema, horror, sci-fi, fantasy, animation, comedy, action, superhero и франшизные маркеры когда уместно.\n"
-        "- aliases должны связывать короткие запросы пользователя с существующими тегами.\n"
-        "- Не добавляй персональные данные, ссылки, цены, расписания, рейтинги и факты, требующие свежей проверки.\n"
-        "- markers кратко объясняют, что это за обновление.\n\n"
-        "Ответ строго JSON формы: "
-        '{"facts":[{"id":"gpt:cinema_001","text":"...","tags":["cinema"]}],'
-        '"aliases":{"пила":["horror","saw"]},'
-        '"markers":{"generated_for":"search_waiting_facts","version_note":"..."}}'
-    )
-    user_prompt = json.dumps(
-        {
-            "target_count": target_count,
-            "existing_facts": seed_facts,
-            "existing_aliases": seed_aliases,
-        },
-        ensure_ascii=False,
-    )
-
-    result, error = chat_completion(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        api_key=api_key,
-        model=model,
-        max_tokens=5000,
-        temperature=0.7,
-        timeout=timeout,
-        response_format={"type": "json_object"},
-    )
-    _record_usage(usage_sink, result)
-    if error or not result:
-        return (None, error)
-
-    try:
-        data = json.loads(result["text"])
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return (None, "parse")
-
-    catalog = validate_search_fact_catalog(
-        {
-            "facts": data.get("facts"),
-            "aliases": data.get("aliases"),
-            "markers": data.get("markers"),
-        },
-        min_facts=60,
-        strict_quality=True,
-    )
-    if catalog is None:
-        return (None, "invalid_catalog")
-
-    logger.info("GPT search_fact_catalog generated facts=%d aliases=%d", len(catalog["facts"]), len(catalog["aliases"]))
-    return (catalog, None)
