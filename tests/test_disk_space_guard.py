@@ -1,4 +1,4 @@
-"""Tests for the disk-space guard (R.1 in improvements-roadmap.md).
+"""Tests for the disk-space guard.
 
 Three layers:
 1. DownloadStationClient.get_volume_info() — parsing DSM response into

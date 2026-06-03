@@ -719,7 +719,7 @@ UI:
   - Статус: `done`
   - Коммит: `a8e87cd`
   - Тесты: полный `python -m pytest tests/ -v`
-  - Хвосты: README, `docs/bot-structure.md`, `docs/download-history-roadmap.md` и ограничения Plex-only fallback синхронизированы с текущей реализацией.
+  - Хвосты: README, `docs/bot-structure.md` и ограничения Plex-only fallback синхронизированы с текущей реализацией.
 
 ## Реализация по коммитам
 
@@ -848,7 +848,6 @@ UI:
 
 - обновить README: команда `/continue`, пользовательский сценарий;
 - обновить `docs/bot-structure.md`;
-- связать этот документ с `docs/download-history-roadmap.md`.
 
 Проверки:
 
