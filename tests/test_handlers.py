@@ -6935,8 +6935,8 @@ class SeriesContinueCommandTests(unittest.TestCase):
     def test_continue_progress_text_explains_sources_and_confidence(self):
         text = bot._series_continue_progress_text()
         self.assertIn("Ищу сезоны для докачки", text)
-        self.assertIn("неполные сезоны", text)
-        self.assertIn("историей загрузок", text)
+        self.assertIn("Plex", text)
+        self.assertIn("точным количеством эпизодов", text)
         self.assertIn("уверенно продолжить", text)
 
     def test_continue_command_renders_mine_list(self):
@@ -6963,7 +6963,8 @@ class SeriesContinueCommandTests(unittest.TestCase):
         text = progress.edit_text.await_args.args[0]
         keyboard = progress.edit_text.await_args.kwargs["reply_markup"]
         self.assertIn("The Rookie", text)
-        self.assertIn("Plex: 8 из 18", text)
+        self.assertIn("S08 · Plex 8/18", text)
+        self.assertIn("прошлая тема есть", text)
         self.assertIn("cont:open:mine:0", self._callbacks(keyboard))
         self.assertIn("task:close:", self._callbacks(keyboard))
 

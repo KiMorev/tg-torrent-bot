@@ -10714,7 +10714,7 @@ def _series_continue_close_keyboard() -> InlineKeyboardMarkup:
 def _series_continue_progress_text() -> str:
     return (
         "📺 <b>Ищу сезоны для докачки</b>\n\n"
-        "Сверяю неполные сезоны в Plex с историей загрузок.\n"
+        "Сверяю сезоны в Plex с точным количеством эпизодов.\n"
         "Покажу только варианты, которые можно уверенно продолжить."
     )
 
@@ -10954,6 +10954,12 @@ def _series_continue_plex_line(candidate: SeriesCatchUpCandidate) -> str:
     return f"Plex: {candidate.present_count} сер."
 
 
+def _series_continue_plex_badge(candidate: SeriesCatchUpCandidate) -> str:
+    if candidate.known_total > 0:
+        return f"Plex {candidate.present_count}/{candidate.known_total}"
+    return f"Plex {candidate.present_count} сер."
+
+
 def _series_continue_profile_line(candidate: SeriesCatchUpCandidate) -> str:
     parts = [part for part in (candidate.quality, candidate.tracker) if part]
     if not parts:
@@ -10964,16 +10970,18 @@ def _series_continue_profile_line(candidate: SeriesCatchUpCandidate) -> str:
 def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidate) -> str:
     title = html_module.escape(_series_continue_candidate_title(candidate))
     lines = [
-        f"{index}. <b>{title}</b> — сезон {candidate.season_number}",
-        f"   {_series_continue_plex_line(candidate)}",
+        f"{index}. <b>{title}</b> · S{candidate.season_number:02d} · {_series_continue_plex_badge(candidate)}",
     ]
+    details: list[str] = []
     profile = _series_continue_profile_line(candidate)
     if profile:
-        lines.append(f"   {html_module.escape(profile)}")
+        details.append(html_module.escape(profile.replace("Профиль: ", "")))
     if candidate.topic_id:
-        lines.append("   Есть прошлая тема раздачи")
+        details.append("прошлая тема есть")
     elif candidate.source == "plex":
-        lines.append("   Прошлая раздача неизвестна")
+        details.append("без прошлой темы")
+    if details:
+        lines.append("   " + " · ".join(details))
     return "\n".join(lines)
 
 
@@ -11006,9 +11014,7 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     visible = candidates[start:start + CONTINUE_PAGE_SIZE]
     lines = [
         "📺 <b>Докачать сезон</b>",
-        "",
-        "Нашёл сезоны, где есть сигнал неполноты или прошлой раздачи.",
-        f"Режим: {mode}",
+        f"Режим: {mode} · найдено: {len(candidates)}",
         "",
     ]
     for offset, candidate in enumerate(visible, start=1):
