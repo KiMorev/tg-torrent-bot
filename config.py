@@ -121,6 +121,8 @@ class AppSettings:
     rutracker_max_results: int
     kinopoisk_api_key: str
     kinopoisk_enabled: bool
+    tmdb_api_token: str
+    tmdb_enabled: bool
     plex_enabled: bool
     plex_url: str
     plex_token: str
@@ -245,6 +247,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         rutracker_max_results=max(1, min(50, env_int(env, "RUTRACKER_MAX_RESULTS", 50))),
         kinopoisk_api_key=env.get("KINOPOISK_API_KEY", "").strip(),
         kinopoisk_enabled=bool(env.get("KINOPOISK_API_KEY", "").strip()),
+        tmdb_api_token=env.get("TMDB_API_TOKEN", "").strip(),
+        tmdb_enabled=bool(env.get("TMDB_API_TOKEN", "").strip()),
         plex_token=env.get("PLEX_TOKEN", "").strip(),
         plex_url=(env.get("PLEX_URL", "").strip() or ""),
         plex_enabled=bool(env.get("PLEX_URL", "").strip() and env.get("PLEX_TOKEN", "").strip()),

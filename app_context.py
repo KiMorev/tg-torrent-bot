@@ -7,6 +7,7 @@ from kinopoisk import KinopoiskClient
 from plex import PlexClient
 from rutracker import RutrackerClient
 from state_store import JsonStateStore
+from tmdb import TMDBClient
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class AppContext:
     rutracker_client: RutrackerClient | None
     jackett_client: JackettClient | None
     kinopoisk_client: KinopoiskClient | None
+    tmdb_client: TMDBClient | None
     plex_client: PlexClient | None
 
 
@@ -74,6 +76,11 @@ def build_app_context(settings: AppSettings) -> AppContext:
         if settings.kinopoisk_enabled
         else None
     )
+    tmdb_client = (
+        TMDBClient(settings.tmdb_api_token)
+        if settings.tmdb_enabled
+        else None
+    )
     plex_client = (
         PlexClient(
             settings.plex_url,
@@ -91,5 +98,6 @@ def build_app_context(settings: AppSettings) -> AppContext:
         rutracker_client=rutracker_client,
         jackett_client=jackett_client,
         kinopoisk_client=kinopoisk_client,
+        tmdb_client=tmdb_client,
         plex_client=plex_client,
     )

@@ -156,6 +156,7 @@ from search_intent import (
 from series_continue import (
     SeriesCatchUpCandidate,
     build_series_catch_up_candidates,
+    identity_from_plex_show,
     resolve_series_completeness,
     resolve_same_topic_update,
     title_match_key,
@@ -447,6 +448,7 @@ state_store = app_context.state_store
 rutracker_client = app_context.rutracker_client
 jackett_client = app_context.jackett_client
 kinopoisk_client = app_context.kinopoisk_client
+tmdb_client = app_context.tmdb_client
 plex_client = app_context.plex_client
 
 
@@ -10675,6 +10677,86 @@ async def _series_continue_plex_shows_with_seasons() -> list["PlexShow"]:
     return shows
 
 
+def _series_continue_history_seasons_for_show(show: "PlexShow", history: list[dict]) -> set[int]:
+    names = {
+        title_match_key(getattr(show, "title", "")),
+        title_match_key(getattr(show, "original_title", "")),
+    }
+    names.discard("")
+    seasons: set[int] = set()
+    for entry in history:
+        if str(entry.get("kind") or "").lower() != "series":
+            continue
+        season = _series_continue_int(entry.get("season")) or _series_continue_int(entry.get("season_num"))
+        if not season:
+            continue
+        for field in ("series_query", "canonical_title", "title"):
+            if title_match_key(entry.get(field)) in names:
+                seasons.add(season)
+                break
+    return seasons
+
+
+def _series_continue_int(value: object) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+async def _series_continue_known_totals_by_show(
+    shows: list["PlexShow"],
+    history: list[dict],
+) -> dict[str, dict[int, int]]:
+    if tmdb_client is None:
+        return {}
+    totals: dict[str, dict[int, int]] = {}
+    for show in shows:
+        identity = await _series_continue_identity_with_external_guids(show)
+        if not (identity.tmdb_id or identity.imdb_id or identity.tvdb_id):
+            continue
+        seasons = _series_continue_history_seasons_for_show(show, history)
+        for season_number in sorted(seasons):
+            try:
+                total = await asyncio.to_thread(
+                    tmdb_client.season_episode_count,
+                    season_number=season_number,
+                    tmdb_id=identity.tmdb_id,
+                    imdb_id=identity.imdb_id,
+                    tvdb_id=identity.tvdb_id,
+                )
+            except Exception:
+                logger.warning(
+                    "TMDB season total lookup failed show=%r season=%s",
+                    identity.title,
+                    season_number,
+                    exc_info=True,
+                )
+                continue
+            if total and total > 0:
+                totals.setdefault(show.rating_key, {})[season_number] = int(total)
+    return totals
+
+
+async def _series_continue_identity_with_external_guids(show: "PlexShow"):
+    identity = identity_from_plex_show(show)
+    if identity.tmdb_id or identity.imdb_id or identity.tvdb_id or plex_client is None:
+        return identity
+    try:
+        detailed = await asyncio.to_thread(plex_client.get_show_details, show.rating_key)
+    except Exception:
+        logger.warning(
+            "Plex show details lookup failed show=%r",
+            getattr(show, "title", ""),
+            exc_info=True,
+        )
+        return identity
+    if detailed is None:
+        return identity
+    return identity_from_plex_show(detailed)
+
+
 async def _series_continue_build_state(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int | None,
@@ -10682,18 +10764,21 @@ async def _series_continue_build_state(
     shows = await _series_continue_plex_shows_with_seasons()
     load_history = getattr(state_store, "load_download_history", None)
     history = load_history() if callable(load_history) else []
+    known_totals = await _series_continue_known_totals_by_show(shows, history)
     state = {
         "mine": build_series_catch_up_candidates(
             shows,
             history,
             chat_id=chat_id,
             scope="mine",
+            known_totals_by_show=known_totals,
         ),
         "all": build_series_catch_up_candidates(
             shows,
             history,
             chat_id=chat_id,
             scope="all",
+            known_totals_by_show=known_totals,
         ),
         "scope": "mine",
         "page": 0,

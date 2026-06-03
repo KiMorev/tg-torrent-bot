@@ -6794,6 +6794,84 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         self.assertTrue(bot._series_continue_task_matches_candidate(task, candidate))
 
+    def test_continue_known_totals_uses_tmdb_external_id(self):
+        from plex import PlexShow, PlexSeason
+
+        season = PlexSeason("season-key-5", 5, episode_count=4, file_paths=[], resolution="1080")
+        show = PlexShow(
+            "Clarkson's Farm",
+            2021,
+            "show-key-cf",
+            seasons={5: season},
+            guid="plex://show/cf",
+            external_guids=["tmdb://119550"],
+        )
+        history = [{
+            "event": "plex_found",
+            "kind": "series",
+            "series_query": "Clarksons Farm",
+            "season": 5,
+        }]
+        tmdb = MagicMock()
+        tmdb.season_episode_count.return_value = 8
+
+        with patch.object(bot, "tmdb_client", tmdb):
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], history))
+
+        self.assertEqual(totals, {"show-key-cf": {5: 8}})
+        tmdb.season_episode_count.assert_called_once_with(
+            season_number=5,
+            tmdb_id="119550",
+            imdb_id="",
+            tvdb_id="",
+        )
+
+    def test_continue_known_totals_fetches_plex_external_guids(self):
+        from plex import PlexShow, PlexSeason
+
+        season = PlexSeason("season-key-5", 5, episode_count=4, file_paths=[], resolution="1080")
+        show = PlexShow(
+            "Clarkson's Farm",
+            2021,
+            "show-key-cf",
+            seasons={5: season},
+            guid="plex://show/cf",
+            external_guids=[],
+        )
+        detailed = PlexShow(
+            "Clarkson's Farm",
+            2021,
+            "show-key-cf",
+            seasons={},
+            guid="plex://show/cf",
+            external_guids=["tvdb://402960"],
+        )
+        history = [{
+            "event": "plex_found",
+            "kind": "series",
+            "series_query": "Clarksons Farm",
+            "season": 5,
+        }]
+        plex = MagicMock()
+        plex.get_show_details.return_value = detailed
+        tmdb = MagicMock()
+        tmdb.season_episode_count.return_value = 8
+
+        with (
+            patch.object(bot, "plex_client", plex),
+            patch.object(bot, "tmdb_client", tmdb),
+        ):
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], history))
+
+        self.assertEqual(totals, {"show-key-cf": {5: 8}})
+        plex.get_show_details.assert_called_once_with("show-key-cf")
+        tmdb.season_episode_count.assert_called_once_with(
+            season_number=5,
+            tmdb_id="",
+            imdb_id="",
+            tvdb_id="402960",
+        )
+
     @contextmanager
     def _allowed_context(self):
         with (

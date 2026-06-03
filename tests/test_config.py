@@ -98,6 +98,8 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.plex_url, "")
         self.assertEqual(settings.plex_token, "")
         self.assertEqual(settings.plex_movie_section, "")
+        self.assertFalse(settings.tmdb_enabled)
+        self.assertEqual(settings.tmdb_api_token, "")
 
     def test_load_settings_accepts_overrides_and_clamps_values(self) -> None:
         env = {
@@ -133,6 +135,7 @@ class ConfigParsingTests(unittest.TestCase):
             "MOVIE_DISCOVERY_QUALITIES": "2160p",
             "PLEX_URL": "https://example.com/plex",
             "PLEX_TOKEN": "myplextoken",
+            "TMDB_API_TOKEN": "tmdb-token",
         }
 
         settings = load_settings(env)
@@ -169,6 +172,8 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertTrue(settings.plex_enabled)
         self.assertEqual(settings.plex_url, "https://example.com/plex")
         self.assertEqual(settings.plex_token, "myplextoken")
+        self.assertTrue(settings.tmdb_enabled)
+        self.assertEqual(settings.tmdb_api_token, "tmdb-token")
 
     def test_load_settings_enables_jackett_only_with_complete_credentials(self) -> None:
         settings = load_settings({
@@ -217,6 +222,7 @@ class AppContextTests(unittest.TestCase):
             "JACKETT_URL": "http://jackett.local:9117",
             "JACKETT_API_KEY": "secret",
             "KINOPOISK_API_KEY": "kp-secret",
+            "TMDB_API_TOKEN": "tmdb-secret",
         })
 
         context = build_app_context(settings)
@@ -227,6 +233,7 @@ class AppContextTests(unittest.TestCase):
         self.assertIsNotNone(context.jackett_client)
         self.assertEqual(context.jackett_client._search_timeout, 90.0)
         self.assertIsNotNone(context.kinopoisk_client)
+        self.assertIsNotNone(context.tmdb_client)
 
     def test_build_app_context_leaves_optional_clients_disabled(self) -> None:
         context = build_app_context(load_settings(BASE_ENV))
@@ -234,6 +241,7 @@ class AppContextTests(unittest.TestCase):
         self.assertIsNone(context.rutracker_client)
         self.assertIsNone(context.jackett_client)
         self.assertIsNone(context.kinopoisk_client)
+        self.assertIsNone(context.tmdb_client)
 
 
 def _dockerfile_copied_files() -> set[str]:
