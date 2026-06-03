@@ -4628,6 +4628,19 @@ class PlexPollingTests(unittest.TestCase):
         with patch.object(bot, "_plex_library", {("movie 2024 backup collection", 2024): other_movie}):
             self.assertIsNone(_plex_find_by_ds_title("Movie.2024"))
 
+    def test_plex_found_history_extra_marks_series(self):
+        season = MagicMock()
+        season.season_number = 5
+
+        extra = bot._plex_found_history_extra(season, "3", "Сезон 5 «Clarkson's Farm»")
+
+        self.assertEqual(extra, {
+            "kind": "series",
+            "canonical_title": "Clarkson's Farm",
+            "series_query": "Clarkson's Farm",
+            "season": 5,
+        })
+
     def test_find_by_ds_title_matches_filename_without_extension(self):
         """Task title without extension should match Plex file `Title.mkv`."""
         movie = self._make_plex_movie(
@@ -4934,6 +4947,7 @@ class PlexPollingTests(unittest.TestCase):
         show = PlexShow("Clarkson's Farm", 2021, "show-key-cf", seasons={5: season})
         fake_app = MagicMock()
         fake_app.bot.send_message = AsyncMock()
+        store = MagicMock()
         meta = {
             "kind": "series",
             "title": task_title,
@@ -4949,6 +4963,7 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_plex_shows_library", {("clarkson s farm", 2021): show}),
             patch.object(bot, "_plex_machine_id", "machine-1"),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "state_store", store),
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "task1", task_title, [100],
@@ -4961,6 +4976,13 @@ class PlexPollingTests(unittest.TestCase):
         self.assertIn("Clarkson&#x27;s Farm", kwargs["text"])
         btn = kwargs["reply_markup"].inline_keyboard[0][0]
         self.assertIn("season-key-5", btn.url)
+        history_entry = store.append_download_history.call_args.args[0]
+        self.assertEqual(history_entry["event"], "plex_found")
+        self.assertEqual(history_entry["kind"], "series")
+        self.assertEqual(history_entry["series_query"], "Clarkson's Farm")
+        self.assertEqual(history_entry["canonical_title"], "Clarkson's Farm")
+        self.assertEqual(history_entry["season"], 5)
+        self.assertEqual(history_entry["plex_rating_key"], "season-key-5")
 
     def test_poll_after_finish_series_without_meta_falls_back_via_legacy_path(self):
         """A legacy task (no meta) whose DS title looks like a series should still

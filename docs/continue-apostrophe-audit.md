@@ -12,8 +12,11 @@ Current findings:
   not enough for `/continue` to show a candidate.
 - With history using canonical `Clarkson's Farm`, `/continue` can show a
   candidate such as `Plex: 4 из 8`.
-- With history or DS titles using `Clarksons Farm`, matching fails against
+- With history or DS titles using `Clarksons Farm`, matching now works against
   Plex title `Clarkson's Farm`.
+- Plex-found history for found seasons now stores canonical series fields
+  (`kind=series`, `series_query`, `season`) even when the match came from an
+  episode filename fallback.
 
 Real apostrophe-sensitive spots found:
 
@@ -26,9 +29,15 @@ Real apostrophe-sensitive spots found:
   title.
 - `bot._plex_show_find` and `_plex_library_find`: canonical Plex title lookup.
 
-Next scoped fix:
+Done:
 
-- First fix only `/continue`: make history matching and active DS-task matching
+- `/continue` history matching and active DS-task matching
   treat `Clarksons Farm`, `Clarkson's Farm`, `Schitts Creek`, and
   `Schitt's Creek` as the same title key.
+- Plex-found season history is enriched with canonical series fields.
+
+Remaining scoped fixes:
+
+- Decide where `/continue` gets known `total_episodes` for no-id/no-topic
+  history entries.
 - Leave series bulk and general Plex lookup for separate follow-up steps.

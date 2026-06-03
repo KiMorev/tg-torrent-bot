@@ -134,7 +134,7 @@
 | `movie_discovery_debug.json` | Debug snapshot последнего refresh `/new`. |
 | `pending_downloads.json` | Очередь отложенных скачиваний и retry-state; bulk-записи могут содержать `series_bulk: {job_id, season}`. |
 | `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам. |
-| `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки и результат Plex polling. |
+| `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки и результат Plex polling; для найденных Plex-сезонов сохраняет series-поля для `/continue`. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `user_search_defaults.json` | Личные предпочтения поиска по `chat_id`: качество, Original, субтитры и preferred voices. |

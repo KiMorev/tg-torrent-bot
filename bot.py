@@ -5141,6 +5141,7 @@ async def _plex_poll_after_finish(
                 else:
                     keyboard = InlineKeyboardMarkup([[close_btn]])
                 await _delete_hint_messages()
+                history_extra = _plex_found_history_extra(target, metadata_type, found_title)
                 _record_download_history(
                     "plex_found",
                     chat_ids=chat_ids,
@@ -5149,6 +5150,7 @@ async def _plex_poll_after_finish(
                     title=found_title,
                     plex_rating_key=rating_key,
                     plex_metadata_type=metadata_type,
+                    **history_extra,
                 )
                 for cid in chat_ids:
                     try:
@@ -5621,6 +5623,23 @@ def _history_fields_from_meta(meta: dict | None) -> dict:
         "release": meta.get("release"),
     }
     return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {}, -1)}
+
+
+def _plex_found_history_extra(target: object, metadata_type: str, found_title: str) -> dict:
+    if metadata_type != "3":
+        return {}
+    season_number = getattr(target, "season_number", None)
+    series_title = ""
+    match = re.match(r"^Сезон\s+\d+\s+«(.+)»$", str(found_title or "").strip())
+    if match:
+        series_title = match.group(1).strip()
+    fields = {
+        "kind": "series",
+        "canonical_title": series_title,
+        "series_query": series_title,
+        "season": season_number,
+    }
+    return {k: v for k, v in fields.items() if v not in (None, "", [], {}, -1)}
 
 
 def _history_fields_from_task(task: dict | None) -> dict:
