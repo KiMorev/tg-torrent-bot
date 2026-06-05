@@ -283,7 +283,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         jackett_warmup_indexers=(env.get("JACKETT_WARMUP_INDEXERS", "auto").strip() or "auto"),
         jackett_warmup_batch_size=max(1, min(20, env_int(env, "JACKETT_WARMUP_BATCH_SIZE", 3))),
         movie_discovery_enabled=env_bool(env, "MOVIE_DISCOVERY_ENABLED", True),
-        movie_discovery_interval_hours=max(1, env_int(env, "MOVIE_DISCOVERY_INTERVAL_HOURS", 12)),
+        movie_discovery_interval_hours=max(1, env_int(env, "MOVIE_DISCOVERY_INTERVAL_HOURS", 6)),
         movie_discovery_cache_file=Path(
             env.get("MOVIE_DISCOVERY_CACHE_FILE", str(state_dir / "movie_discovery.json"))
         ),

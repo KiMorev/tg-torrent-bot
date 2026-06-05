@@ -83,7 +83,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.jackett_warmup_indexers, "auto")
         self.assertEqual(settings.jackett_warmup_batch_size, 3)
         self.assertTrue(settings.movie_discovery_enabled)
-        self.assertEqual(settings.movie_discovery_interval_hours, 12)
+        self.assertEqual(settings.movie_discovery_interval_hours, 6)
         self.assertEqual(settings.movie_discovery_cache_file, Path("/tmp/tg_torrent_drop/movie_discovery.json"))
         self.assertEqual(settings.movie_discovery_settings_file, Path("/tmp/tg_torrent_drop/movie_discovery_settings.json"))
         self.assertEqual(settings.movie_discovery_debug_file, Path("/tmp/tg_torrent_drop/movie_discovery_debug.json"))

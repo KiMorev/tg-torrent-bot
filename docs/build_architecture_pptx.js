@@ -337,7 +337,7 @@ function addTitle(slide, title, subtitle) {
     fontSize: 16, bold: true, color: "2563EB", fontFace: FONT_HEAD,
   });
   const loops = [
-    ["12h", "_movie_discovery_loop", "обновляет top-N + KP + push новинок"],
+    ["6h", "_movie_discovery_loop", "обновляет top-N + KP + push новинок"],
     ["180s", "_tracker_background_loop", "публичные трекеры для BT-задач"],
     ["180s", "_task_maintenance_loop", "уведомления + auto-delete + pending + prune"],
     ["per task", "_plex_poll_after_finish", "Plex polling 30с × 20 (до 10 мин)"],

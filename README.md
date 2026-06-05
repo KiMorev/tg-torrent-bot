@@ -361,7 +361,7 @@ http://<NAS_IP>:8099/plex/webhook/health?token=<PLEX_WEBHOOK_TOKEN>
 | Переменная | Что делает |
 |---|---|
 | `MOVIE_DISCOVERY_ENABLED` | Включает `/new`. Нужен хотя бы Rutracker или Jackett. |
-| `MOVIE_DISCOVERY_INTERVAL_HOURS` | Интервал фонового обновления. |
+| `MOVIE_DISCOVERY_INTERVAL_HOURS` | Интервал фонового обновления, по умолчанию 6 ч. |
 | `MOVIE_DISCOVERY_RUTRACKER_TM` | Диапазон Rutracker: `1`, `3`, `7`, `14`, `32`, `-1`. |
 | `MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE` | Требовать дату публикации от Jackett. |
 | `MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS` | Максимальный возраст Jackett-раздачи. |
