@@ -1853,6 +1853,37 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertEqual(buttons["🔄 Обновить"], "new:refresh")
         self.assertEqual(buttons["✖️ Закрыть"], "new:close")
 
+    def test_unconfirmed_consensus_card_is_hidden_from_new_list(self):
+        cache = {
+            "updated_at": "2026-06-05 12:12",
+            "prev_top10_kp_ids": [1, 2],
+            "cards": [
+                {"title": "Confirmed A", "year": 2026, "kp_id": 1},
+                {"title": "Transient", "year": 2026, "kp_id": 99},
+                {"title": "Confirmed B", "year": 2026, "kp_id": 2},
+            ],
+        }
+
+        text = _format_movie_discovery_cache(cache)
+
+        self.assertIn("Confirmed A", text)
+        self.assertIn("Confirmed B", text)
+        self.assertNotIn("Transient", text)
+
+    def test_confirmed_cards_fill_from_below_raw_top10(self):
+        cache = {
+            "prev_top10_kp_ids": [1, 11],
+            "cards": [
+                {"title": "Confirmed A", "kp_id": 1},
+                {"title": "Transient", "kp_id": 99},
+                {"title": "Confirmed From Below", "kp_id": 11},
+            ],
+        }
+
+        visible = bot._movie_discovery_confirmed_cards(cache)
+
+        self.assertEqual([card["kp_id"] for card in visible], [1, 11])
+
     def test_movie_discovery_text_lists_unique_tracker_abbreviations(self):
         text = _format_movie_discovery_cache({
             "updated_at": "2026-05-12 13:00",
@@ -2995,6 +3026,28 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             await _run_movie_discovery_notifications(cache, app, skip_push=True)
         app.bot.send_message.assert_not_called()
 
+    async def test_skip_push_allows_confirmed_cards_when_prev_top10_exists(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "cards": [
+                self._make_card("Confirmed", kp_id=1),
+                self._make_card("Transient", kp_id=99),
+            ],
+            "prev_top10_kp_ids": [1],
+        }
+
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app, skip_push=True)
+
+        kwargs = app.bot.send_message.call_args.kwargs
+        self.assertIn("Confirmed", kwargs["text"])
+        self.assertNotIn("Transient", kwargs["text"])
+
     async def test_degraded_refresh_signal_suppresses_notification_entirely(self):
         settings = {
             "movie_subscriptions": {"100": {}},
@@ -3099,6 +3152,23 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         kwargs = app.bot.send_message.call_args.kwargs
         self.assertIn("Confirmed-A", kwargs["text"])
         self.assertNotIn("Transient", kwargs["text"])
+
+    async def test_consensus_only_card_is_not_pushed_or_marked_seen(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {
+            "cards": [self._make_card("Transient", kp_id=99)],
+            "prev_top10_kp_ids": [1, 2, 3],
+        }
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        app.bot.send_message.assert_not_called()
+        self.assertEqual(settings.get("movie_seen_by_user", {}).get("100", {}), {})
 
     async def test_consensus_disabled_when_no_prev_top10(self):
         """If `prev_top10_kp_ids` is absent (e.g. first refresh ever, fresh

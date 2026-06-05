@@ -2282,6 +2282,21 @@ def _movie_discovery_keyboard(cards: list[dict], chat_id: int | None = None) -> 
     return InlineKeyboardMarkup(rows)
 
 
+def _movie_discovery_confirmed_cards(cache: dict, limit: int = 10) -> list[dict]:
+    """Return cards stable enough to show in /new and notify about.
+
+    When previous top-10 data exists, a card must survive one refresh cycle
+    before it becomes visible. Without previous data (fresh install / migration)
+    keep the historical behavior.
+    """
+    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    prev_top10_set = {kp for kp in (cache.get("prev_top10_kp_ids") or []) if kp}
+    if not prev_top10_set:
+        return cards[:limit]
+    confirmed = [card for card in cards if card.get("kp_id") in prev_top10_set]
+    return confirmed[:limit]
+
+
 def _movie_card_tracker_labels(card: dict) -> str:
     labels = []
     seen = set()
@@ -2327,7 +2342,7 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
     ``chat_id`` is None (legacy or system callers without a user context) the
     badge is omitted.
     """
-    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    cards = _movie_discovery_confirmed_cards(cache)
     updated_at = cache.get("updated_at") or "—"
     qualities = ", ".join(_movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES))
     years = ", ".join(str(year) for year in sorted(_movie_discovery_years(datetime.now(DISPLAY_TIMEZONE)), reverse=True))
@@ -3657,8 +3672,9 @@ async def _run_movie_discovery_notifications(
          skip push even when the cache still has cards from the previous state.
 
       B. ``skip_push=True`` — caller (the movie discovery loop) sets this on the
-         very first refresh after startup. Cold Jackett can't be trusted; we
-         still write the cache so `/new` works, but don't notify anyone.
+         very first refresh after startup. Cold Jackett can't be trusted when
+         there is no previous top-10 to confirm against; with previous top-10
+         data we still notify only confirmed cards.
 
       C. Regression guard — if removed_pct from the previous top-10 exceeds
          60%, the refresh is "unstable" (likely the same Jackett warm-up
@@ -3670,21 +3686,33 @@ async def _run_movie_discovery_notifications(
          ``cache.prev_top10_kp_ids``). A genuinely-new film waits one cycle for
          confirmation; a transient dies before reaching the user.
     """
-    top_cards = (cache.get("cards") or [])[:10]
+    raw_cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    raw_top_cards = raw_cards[:10]
+    top_cards = _movie_discovery_confirmed_cards(cache)
     if not top_cards:
-        logger.info("movie_discovery: notify skipped — no cards in cache")
+        if raw_top_cards:
+            logger.info(
+                "movie_discovery: notify skipped — no confirmed cards "
+                "raw_top10_kp=[%s] prev_top10_kp=[%s]",
+                ",".join(str(c.get("kp_id") or "-") for c in raw_top_cards),
+                ",".join(str(kp) for kp in (cache.get("prev_top10_kp_ids") or [])) or "-",
+            )
+        else:
+            logger.info("movie_discovery: notify skipped — no cards in cache")
         return
 
     if _movie_discovery_cache_has_gating_degradation(cache):
         logger.info("movie_discovery: notify skipped — degraded refresh")
         return
 
-    if skip_push:
-        # Layer B: first refresh after startup. The cache is now updated and
-        # available via /new, but we don't push — the next regular refresh
-        # will reconfirm what's actually stable.
+    if skip_push and not (cache.get("prev_top10_kp_ids") or []):
+        # Layer B: first refresh after startup without previous top-10 data.
+        # The cache is available via /new, but no push is sent until another
+        # refresh confirms the first snapshot.
         logger.info("movie_discovery: notify skipped — first refresh after startup")
         return
+    if skip_push:
+        logger.info("movie_discovery: first refresh after startup — notifying confirmed cards only")
 
     settings = _load_movie_discovery_settings()
     subs = settings.get("movie_subscriptions") or {}
@@ -3706,7 +3734,7 @@ async def _run_movie_discovery_notifications(
     prev_top10_kp_ids: list[int] = list(cache.get("prev_top10_kp_ids") or [])
     prev_top10_set = {kp for kp in prev_top10_kp_ids if kp}
     if prev_top10_set:
-        current_kp_set = {c.get("kp_id") for c in top_cards if c.get("kp_id")}
+        current_kp_set = {c.get("kp_id") for c in raw_top_cards if c.get("kp_id")}
         common = prev_top10_set & current_kp_set
         removed_pct = (len(prev_top10_set) - len(common)) / len(prev_top10_set) * 100
         if removed_pct > 60:
@@ -3720,8 +3748,10 @@ async def _run_movie_discovery_notifications(
     _enrich_cards_with_plex(top_cards)
 
     logger.info(
-        "movie_discovery: notify start subscribers=%d top10_kp=[%s] prev_top10_kp=[%s]",
+        "movie_discovery: notify start subscribers=%d top10_kp=[%s] "
+        "confirmed_top10_kp=[%s] prev_top10_kp=[%s]",
         len(subs),
+        ",".join(str(c.get("kp_id") or "-") for c in raw_top_cards),
         ",".join(str(c.get("kp_id") or "-") for c in top_cards),
         ",".join(str(kp) for kp in prev_top10_kp_ids) or "-",
     )
@@ -3748,7 +3778,6 @@ async def _run_movie_discovery_notifications(
             and not _is_card_notified_in_entries(c, user_entries)
             and not _is_card_shown_in_new_in_entries(c, user_entries)
             and not _is_card_handled_in_new_in_entries(c, user_entries)
-            and (not prev_top10_set or c.get("kp_id") in prev_top10_set)
         ]
         if not new_for_user:
             logger.info(
@@ -19768,14 +19797,15 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         progress = await update.message.reply_text(progress_text)
         cache = await _refresh_movie_discovery_cache()
+        visible_cards = _movie_discovery_confirmed_cards(cache)
         await _safe_edit_message(
             progress,
             _format_movie_discovery_cache(cache, chat_id=chat_id),
-            reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+            reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
-        _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+        _mark_user_shown_in_new(chat_id, visible_cards)
         await _delete_command_message_safely(update, context, "new command")
         return
 
@@ -19787,16 +19817,17 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # `score` snapshotted at last refresh — formula or year boundary changes
     # leave the order stale until the next refresh. Pure CPU, no network.
     _recompute_and_resort_cards(cache.get("cards") or [])
+    visible_cards = _movie_discovery_confirmed_cards(cache)
 
     await update.message.reply_text(
         _format_movie_discovery_cache(cache, chat_id=chat_id),
-        reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+        reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     # Mark the displayed top-10 as 'seen' for this user — the «🆕» badge will
     # disappear next time they open /new (until a new film appears).
-    _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+    _mark_user_shown_in_new(chat_id, visible_cards)
     await _delete_command_message_safely(update, context, "new command")
 
 
@@ -19825,14 +19856,15 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
         len(cache.get("cards") or []),
         ",".join(str(c.get("kp_id") or "-") for c in (cache.get("cards") or [])[:10]),
     )
+    visible_cards = _movie_discovery_confirmed_cards(cache)
     await _safe_edit_callback(
         query,
         _format_movie_discovery_cache(cache, chat_id=chat_id),
-        reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+        reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
-    _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+    _mark_user_shown_in_new(chat_id, visible_cards)
 
 
 async def movie_new_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -19867,9 +19899,10 @@ async def movie_new_subscribe_callback(update: Update, context: ContextTypes.DEF
     await query.answer("Подписан на обновления 🔔")
     # Redraw keyboard so the button reflects the new state
     cache = _load_movie_discovery_cache()
+    visible_cards = _movie_discovery_confirmed_cards(cache)
     try:
         await query.edit_message_reply_markup(
-            reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+            reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
         )
     except Exception:
         pass
@@ -19887,9 +19920,10 @@ async def movie_new_unsubscribe_callback(update: Update, context: ContextTypes.D
         _set_movie_subscription(chat_id, False)
     await query.answer("Отписан от обновлений")
     cache = _load_movie_discovery_cache()
+    visible_cards = _movie_discovery_confirmed_cards(cache)
     try:
         await query.edit_message_reply_markup(
-            reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+            reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
         )
     except Exception:
         pass
@@ -19914,14 +19948,15 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
     )
     _enrich_cards_with_plex(cache.get("cards") or [])
     _recompute_and_resort_cards(cache.get("cards") or [])
+    visible_cards = _movie_discovery_confirmed_cards(cache)
     await _safe_edit_callback(
         query,
         _format_movie_discovery_cache(cache, chat_id=chat_id),
-        reply_markup=_movie_discovery_keyboard(cache.get("cards", []), chat_id=chat_id),
+        reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
-    _mark_user_shown_in_new(chat_id, (cache.get("cards") or [])[:10])
+    _mark_user_shown_in_new(chat_id, visible_cards)
 
 
 def _movie_notification_stale_keyboard() -> InlineKeyboardMarkup:
@@ -20250,7 +20285,7 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     chat_id = query.message.chat.id if query.message else None
     cache = _load_movie_discovery_cache()
-    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    cards = _movie_discovery_confirmed_cards(cache)
     try:
         parts = (query.data or "").split(":")
         index = int(parts[2])
