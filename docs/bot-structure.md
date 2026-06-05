@@ -128,7 +128,7 @@
 | `approved_chat_ids.json` | Динамически одобренные пользователи. |
 | `task_owners.json` | Владелец Download Station task id. |
 | `task_meta.json` | Метаданные задачи: тип, title, year, quality, series query, season, optional release-поля из GPT-разбора. |
-| `notified_tasks.json` | Состояние delivery уведомлений, failures, subscribers, Plex polling done. |
+| `notified_tasks.json` | Состояние delivery уведомлений, failures, subscribers, Plex polling done; запись уведомлений сохраняет уже выставленный `plex_done`. |
 | `auto_delete_tasks.json` | Задачи-кандидаты на автоудаление и timestamp. |
 | `trackers_processed_v2.json` | Задачи, куда уже добавляли публичные трекеры. |
 | `topic_subscriptions.json` | Rutracker/Jackett подписки на новые серии. |

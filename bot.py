@@ -493,6 +493,8 @@ _PLEX_WEBHOOK_SERVER: PlexWebhookServer | None = None
 _TASK_NOTIFICATION_FAST_WAKE_DELAYS = (5.0, 15.0, 30.0)
 _TASK_NOTIFICATION_FAST_WAKE_TASK: "asyncio.Task[None] | None" = None
 _TASK_NOTIFICATION_FAST_WAKE_REASONS: set[str] = set()
+_TASK_NOTIFICATIONS_LOCK: "asyncio.Lock | None" = None
+_TASK_NOTIFICATIONS_LOCK_LOOP: "asyncio.AbstractEventLoop | None" = None
 
 # Single-flight refresh: serialise concurrent `_refresh_plex_library` calls so
 # the 30-min background loop + N polling loops don't hit Plex API in parallel.
@@ -1045,6 +1047,15 @@ async def _task_notification_fast_wake_loop(app: Application) -> None:
     finally:
         _TASK_NOTIFICATION_FAST_WAKE_REASONS.clear()
         _TASK_NOTIFICATION_FAST_WAKE_TASK = None
+
+
+def _task_notifications_lock_for_current_loop() -> asyncio.Lock:
+    global _TASK_NOTIFICATIONS_LOCK, _TASK_NOTIFICATIONS_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _TASK_NOTIFICATIONS_LOCK is None or _TASK_NOTIFICATIONS_LOCK_LOOP is not loop:
+        _TASK_NOTIFICATIONS_LOCK = asyncio.Lock()
+        _TASK_NOTIFICATIONS_LOCK_LOOP = loop
+    return _TASK_NOTIFICATIONS_LOCK
 
 
 async def _tracker_background_loop() -> None:
@@ -5959,6 +5970,22 @@ def _load_notified_tasks() -> dict[str, object]:
 
 
 def _save_notified_tasks(tasks: dict[str, object]) -> None:
+    current = state_store.load_notified_tasks()
+    for task_id, current_entry in current.items():
+        if not (isinstance(current_entry, dict) and current_entry.get("plex_done")):
+            continue
+        next_entry = tasks.get(task_id)
+        if isinstance(next_entry, dict):
+            next_entry["plex_done"] = True
+        elif next_entry is not None:
+            tasks[task_id] = {
+                "status": str(next_entry),
+                "sent": [],
+                "failures": {},
+                "plex_done": True,
+            }
+        else:
+            tasks[task_id] = current_entry
     state_store.save_notified_tasks(tasks)
 
 
@@ -6396,6 +6423,12 @@ async def _classify_send_error(exc: Exception) -> tuple[str, bool]:
 
 
 async def _run_task_notifications_once(app: Application) -> None:
+    lock = _task_notifications_lock_for_current_loop()
+    async with lock:
+        await _run_task_notifications_once_locked(app)
+
+
+async def _run_task_notifications_once_locked(app: Application) -> None:
     if not _task_notifications_enabled():
         return
 

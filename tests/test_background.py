@@ -101,6 +101,77 @@ class NotificationDeduplicationTests(unittest.TestCase):
 
         self.assertEqual(mock_app.bot.send_message.call_count, 1)
 
+    def test_concurrent_notification_scans_are_serialized(self) -> None:
+        async def run() -> None:
+            task = {"id": "tid1", "status": "finished", "type": "bt", "title": "TestFile", "size": 0}
+            mock_app = MagicMock()
+            first_send_started = asyncio.Event()
+            release_first_send = asyncio.Event()
+            send_calls = 0
+
+            async def send_message(*, chat_id, **kwargs):
+                nonlocal send_calls
+                send_calls += 1
+                if send_calls == 1:
+                    first_send_started.set()
+                    await release_first_send.wait()
+
+            mock_app.bot.send_message = AsyncMock(side_effect=send_message)
+            mock_app.bot.delete_message = AsyncMock()
+            mock_ds = MagicMock()
+            mock_ds.list_tasks.return_value = [task]
+
+            with (
+                patch.object(bot, "ds_client", mock_ds),
+                patch.object(bot, "state_store", self._store),
+                patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+                patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+                patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+                patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+                patch.object(bot, "PLEX_ENABLED", False),
+                patch.object(bot, "_TASK_NOTIFICATIONS_LOCK", None),
+                patch.object(bot, "_TASK_NOTIFICATIONS_LOCK_LOOP", None),
+            ):
+                first = asyncio.create_task(_run_task_notifications_once(mock_app))
+                await first_send_started.wait()
+                second = asyncio.create_task(_run_task_notifications_once(mock_app))
+                await asyncio.sleep(0)
+                self.assertEqual(send_calls, 1)
+                release_first_send.set()
+                await asyncio.gather(first, second)
+
+            self.assertEqual(send_calls, 1)
+
+        asyncio.run(run())
+
+    def test_notification_save_preserves_concurrent_plex_done(self) -> None:
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "TestFile", "size": 0}
+
+        async def send_message(*, chat_id, **kwargs):
+            bot._mark_plex_poll_done("tid1")
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=send_message)
+        mock_app.bot.delete_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["status"], "done")
+        self.assertIn("999", notified["sent"])
+        self.assertTrue(notified["plex_done"])
+
     def test_notification_deletes_registered_task_card_for_notified_chat(self) -> None:
         task = {"id": "tid1", "status": "finished", "type": "bt", "title": "TestFile", "size": 0}
         mock_app = MagicMock()
