@@ -2070,12 +2070,50 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         ):
             asyncio.run(bot.movie_new_open_callback(update, context))
 
-        text = update.callback_query.edit_message_text.call_args.args[0]
+        context.bot.send_message.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+        update.callback_query.message.delete.assert_awaited_once()
+        call_kwargs = context.bot.send_message.call_args.kwargs
+        text = call_kwargs["text"]
+        lpo = call_kwargs.get("link_preview_options")
+        self.assertIsNotNone(lpo)
+        self.assertTrue(lpo.is_disabled)
         pos_fresh = text.find("Fresh From Push")
         pos_old = text.find("Old From Push")
         self.assertGreater(pos_fresh, 0)
         self.assertGreater(pos_old, 0)
         self.assertLess(pos_fresh, pos_old)
+
+    def test_movie_new_open_from_photo_notification_sends_message_and_deletes_notification(self):
+        """Photo notifications have caption, not text, so /new must be sent as a new message."""
+        update = _make_callback_update(chat_id=100, callback_data="new:open")
+        update.callback_query.message.text = None
+        update.callback_query.message.caption = "New movie notification"
+        context = _make_context()
+        fake_cache = {
+            "updated_at": "2026-05-14 22:00",
+            "cards": [{
+                "title": "Photo Push Movie",
+                "year": 2026,
+                "score": 0.8,
+                "rating": 7.5,
+                "best_seeders": 50,
+                "best_quality": "1080p",
+                "releases": [{"title": "x", "score": 1}],
+            }],
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_discovery_cache", return_value=fake_cache),
+        ):
+            asyncio.run(bot.movie_new_open_callback(update, context))
+
+        context.bot.send_message.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+        update.callback_query.message.delete.assert_awaited_once()
+        self.assertIn("Photo Push Movie", context.bot.send_message.call_args.kwargs["text"])
 
     def test_recompute_and_resort_resorts_in_place(self):
         """_recompute_and_resort_cards: cards with stale wrong-order scores get re-sorted."""

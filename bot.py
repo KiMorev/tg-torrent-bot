@@ -19982,14 +19982,21 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
     _enrich_cards_with_plex(cache.get("cards") or [])
     _recompute_and_resort_cards(cache.get("cards") or [])
     visible_cards = _movie_discovery_confirmed_cards(cache)
-    await _safe_edit_callback(
-        query,
-        _format_movie_discovery_cache(cache, chat_id=chat_id),
+    if not chat_id:
+        return
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=_format_movie_discovery_cache(cache, chat_id=chat_id),
         reply_markup=_movie_discovery_keyboard(visible_cards, chat_id=chat_id),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     _mark_user_shown_in_new(chat_id, visible_cards)
+    try:
+        if query.message:
+            await query.message.delete()
+    except Exception:
+        logger.debug("Failed to delete movie discovery notification", exc_info=True)
 
 
 def _movie_notification_stale_keyboard() -> InlineKeyboardMarkup:
