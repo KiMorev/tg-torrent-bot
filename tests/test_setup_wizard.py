@@ -6,15 +6,21 @@ from unittest.mock import patch
 from config import load_settings
 from scripts.setup_wizard import (
     InstallerConfig,
+    PlexPin,
     ProbeError,
+    build_plex_auth_url,
+    configure_plex,
+    create_plex_pin,
     destination_share_name,
     extract_chat_candidates,
     format_env_value,
     installer_probe_url,
     normalize_ds_url,
+    poll_plex_pin,
     probe_download_destination,
     probe_jackett,
     probe_plex,
+    probe_plex_resources,
     read_env_file,
     render_env,
     run_interactive,
@@ -91,6 +97,7 @@ class SetupWizardEnvTests(unittest.TestCase):
             plex_url="http://plex.local:32400",
             plex_token="plex-token",
             plex_movie_section="1",
+            plex_auth_client_id="client-1",
             openai_api_key="sk-test",
             voice_search_enabled=True,
             gpt_enabled=True,
@@ -105,6 +112,7 @@ class SetupWizardEnvTests(unittest.TestCase):
         self.assertIn("TMDB_API_TOKEN=tmdb-token", text)
         self.assertIn("MOVIE_DISCOVERY_ENABLED=true", text)
         self.assertIn("PLEX_MOVIE_SECTION=1", text)
+        self.assertIn("PLEX_AUTH_CLIENT_ID=client-1", text)
         self.assertIn("VOICE_SEARCH_ENABLED=true", text)
         self.assertIn("GPT_ENABLED=true", text)
 
@@ -283,6 +291,111 @@ class SetupWizardProbeTests(unittest.TestCase):
                 {"key": "1", "title": "Movies", "type": "movie"},
                 {"key": "2", "title": "Shows", "type": "show"},
             ],
+        )
+
+    def test_build_plex_auth_url_contains_client_code_and_product(self) -> None:
+        url = build_plex_auth_url("client-1", "pin-code")
+
+        self.assertTrue(url.startswith("https://app.plex.tv/auth#?"))
+        self.assertIn("clientID=client-1", url)
+        self.assertIn("code=pin-code", url)
+        self.assertIn("context%5Bdevice%5D%5Bproduct%5D=PlexLoader", url)
+
+    def test_create_plex_pin_returns_pin_with_auth_url(self) -> None:
+        with patch(
+            "scripts.setup_wizard._read_json_url",
+            return_value={"id": 123, "code": "pin-code"},
+        ) as read_json:
+            pin = create_plex_pin("client-1")
+
+        self.assertEqual(pin.pin_id, "123")
+        self.assertEqual(pin.code, "pin-code")
+        self.assertEqual(pin.auth_url, build_plex_auth_url("client-1", "pin-code"))
+        self.assertEqual(read_json.call_args.kwargs["data"]["X-Plex-Client-Identifier"], "client-1")
+
+    def test_poll_plex_pin_waits_until_auth_token(self) -> None:
+        console = FakeConsole()
+        pin = PlexPin(pin_id="123", code="pin-code", auth_url="https://example.test")
+        with patch("scripts.setup_wizard.check_plex_pin", side_effect=["", "plex-token"]):
+            with patch("scripts.setup_wizard.time.sleep") as sleep:
+                token = poll_plex_pin(
+                    pin,
+                    "client-1",
+                    console,
+                    timeout_seconds=5,
+                    interval_seconds=0.01,
+                )
+
+        self.assertEqual(token, "plex-token")
+        self.assertEqual(console.output, ["Жду подтверждения Plex..."])
+        sleep.assert_called_once_with(0.01)
+
+    def test_probe_plex_resources_returns_server_connections(self) -> None:
+        import xml.etree.ElementTree as ET
+
+        resources_xml = ET.fromstring(
+            "<MediaContainer>"
+            "<Device name='NAS Plex' provides='server' accessToken='server-token'>"
+            "<Connection uri='http://192.168.1.10:32400' local='1' relay='0' />"
+            "</Device>"
+            "<Device name='Plexamp' provides='player'>"
+            "<Connection uri='http://ignored.local' />"
+            "</Device>"
+            "</MediaContainer>"
+        )
+        with patch("scripts.setup_wizard._read_xml_url", return_value=resources_xml):
+            resources = probe_plex_resources("account-token", "client-1")
+
+        self.assertEqual(
+            resources,
+            [
+                {
+                    "name": "NAS Plex",
+                    "uri": "http://192.168.1.10:32400",
+                    "token": "server-token",
+                    "local": "1",
+                    "relay": "0",
+                }
+            ],
+        )
+
+    def test_configure_plex_auth_flow_uses_reachable_account_resource(self) -> None:
+        console = FakeConsole(
+            booleans=[True, True],
+            answers=[""],
+        )
+        with patch("scripts.setup_wizard.run_plex_pin_auth", return_value="account-token"):
+            with patch(
+                "scripts.setup_wizard.probe_plex_resources",
+                return_value=[
+                    {
+                        "name": "NAS Plex",
+                        "uri": "http://192.168.1.10:32400",
+                        "token": "server-token",
+                        "local": "1",
+                        "relay": "0",
+                    }
+                ],
+            ):
+                with patch(
+                    "scripts.setup_wizard.probe_plex",
+                    return_value=[{"key": "1", "title": "Movies", "type": "movie"}],
+                ):
+                    result = configure_plex(
+                        console,
+                        {"PLEX_AUTH_CLIENT_ID": "client-1"},
+                        skip_checks=False,
+                    )
+
+        self.assertEqual(
+            result,
+            (
+                "http://192.168.1.10:32400",
+                "server-token",
+                "1",
+                "",
+                "client-1",
+            ),
         )
 
 

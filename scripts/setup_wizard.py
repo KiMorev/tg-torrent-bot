@@ -15,9 +15,11 @@ import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,10 @@ DEFAULT_DS_URL = "https://host.docker.internal:5001"
 DEFAULT_DS_DESTINATION = "video"
 DEFAULT_JACKETT_URL = "http://host.docker.internal:9117"
 DEFAULT_PLEX_URL = "http://host.docker.internal:32400"
+PLEX_PRODUCT = "PlexLoader"
+PLEX_PINS_URL = "https://plex.tv/api/v2/pins"
+PLEX_AUTH_URL = "https://app.plex.tv/auth#?"
+PLEX_RESOURCES_URL = "https://plex.tv/api/resources"
 
 SAFE_ENV_RE = re.compile(r"^[A-Za-z0-9_./:@,+-]*$")
 ENV_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
@@ -49,6 +55,13 @@ class ProbeError(RuntimeError):
 class ChatCandidate:
     chat_id: int
     label: str
+
+
+@dataclass(frozen=True)
+class PlexPin:
+    pin_id: str
+    code: str
+    auth_url: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +89,7 @@ class InstallerConfig:
     plex_token: str = ""
     plex_movie_section: str = ""
     plex_deeplink_base_url: str = ""
+    plex_auth_client_id: str = ""
     openai_api_key: str = ""
     voice_search_enabled: bool = False
     gpt_enabled: bool = False
@@ -415,6 +429,7 @@ def render_env(config: InstallerConfig, previous_env: dict[str, str] | None = No
         ("PLEX_TOKEN", config.plex_token),
         ("PLEX_MOVIE_SECTION", config.plex_movie_section),
         ("PLEX_DEEPLINK_BASE_URL", config.plex_deeplink_base_url),
+        ("PLEX_AUTH_CLIENT_ID", config.plex_auth_client_id),
         ("OPENAI_API_KEY", config.openai_api_key),
         ("VOICE_SEARCH_ENABLED", str(bool(config.openai_api_key and config.voice_search_enabled)).lower()),
         ("GPT_ENABLED", str(bool(config.openai_api_key and config.gpt_enabled)).lower()),
@@ -723,6 +738,112 @@ def probe_plex(url: str, token: str) -> list[dict[str, str]]:
     return sections
 
 
+def plex_auth_client_id(env: dict[str, str]) -> str:
+    existing = env.get("PLEX_AUTH_CLIENT_ID", "").strip()
+    return existing or str(uuid.uuid4())
+
+
+def plex_auth_fields(client_id: str) -> dict[str, str]:
+    return {
+        "X-Plex-Product": PLEX_PRODUCT,
+        "X-Plex-Client-Identifier": client_id,
+    }
+
+
+def build_plex_auth_url(client_id: str, code: str) -> str:
+    return PLEX_AUTH_URL + urllib.parse.urlencode({
+        "clientID": client_id,
+        "code": code,
+        "context[device][product]": PLEX_PRODUCT,
+    })
+
+
+def create_plex_pin(client_id: str) -> PlexPin:
+    payload = _read_json_url(
+        PLEX_PINS_URL,
+        data={"strong": "true", **plex_auth_fields(client_id)},
+        headers={"accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
+    )
+    if not isinstance(payload, dict):
+        raise ProbeError("Plex вернул неожиданный ответ при создании PIN", kind="parse")
+    pin_id = str(payload.get("id") or "").strip()
+    code = str(payload.get("code") or "").strip()
+    if not pin_id or not code:
+        raise ProbeError("Plex не вернул PIN id/code", kind="parse")
+    return PlexPin(pin_id=pin_id, code=code, auth_url=build_plex_auth_url(client_id, code))
+
+
+def check_plex_pin(pin: PlexPin, client_id: str) -> str:
+    payload = _read_json_url(
+        url_with_query(
+            f"{PLEX_PINS_URL}/{urllib.parse.quote(pin.pin_id)}",
+            {"code": pin.code, "X-Plex-Client-Identifier": client_id},
+        ),
+        headers={"accept": "application/json", **plex_auth_fields(client_id)},
+        timeout=10,
+    )
+    if not isinstance(payload, dict):
+        raise ProbeError("Plex вернул неожиданный ответ при проверке PIN", kind="parse")
+    return str(payload.get("authToken") or "").strip()
+
+
+def poll_plex_pin(
+    pin: PlexPin,
+    client_id: str,
+    console: Console,
+    *,
+    timeout_seconds: int = 90,
+    interval_seconds: float = 2.0,
+) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        token = check_plex_pin(pin, client_id)
+        if token:
+            return token
+        if time.monotonic() >= deadline:
+            raise ProbeError("Plex auth не завершён: token не появился до timeout", kind="timeout")
+        console.write("Жду подтверждения Plex...")
+        time.sleep(interval_seconds)
+
+
+def run_plex_pin_auth(console: Console, client_id: str) -> str:
+    pin = create_plex_pin(client_id)
+    console.write("")
+    console.write("Plex auth")
+    console.write("Откройте ссылку в браузере, войдите в Plex и подтвердите доступ:")
+    console.write(pin.auth_url)
+    console.ask("После подтверждения нажмите Enter")
+    return poll_plex_pin(pin, client_id, console)
+
+
+def probe_plex_resources(token: str, client_id: str) -> list[dict[str, str]]:
+    root = _read_xml_url(
+        url_with_query(PLEX_RESOURCES_URL, {"includeHttps": "1", "includeRelay": "1"}),
+        headers={"X-Plex-Token": token, **plex_auth_fields(client_id)},
+        timeout=15,
+    )
+    resources: list[dict[str, str]] = []
+    for device in root.findall("Device"):
+        provides = str(device.get("provides") or "")
+        if "server" not in {part.strip() for part in provides.split(",")}:
+            continue
+        server_token = str(device.get("accessToken") or token).strip()
+        server_name = str(device.get("name") or device.get("clientIdentifier") or "Plex Server").strip()
+        for connection in device.findall("Connection"):
+            uri = str(connection.get("uri") or "").strip().rstrip("/")
+            if not uri:
+                continue
+            resources.append({
+                "name": server_name,
+                "uri": uri,
+                "token": server_token,
+                "local": str(connection.get("local") or ""),
+                "relay": str(connection.get("relay") or ""),
+            })
+    return resources
+
+
 def probe_kinopoisk(api_key: str) -> None:
     _read_json_url(
         "https://kinopoiskapiunofficial.tech/api/v2.2/films/301",
@@ -863,25 +984,107 @@ def configure_jackett(
                 return "", "", "all"
 
 
-def configure_plex(
+def choose_plex_movie_section(
+    console: Console,
+    sections: list[dict[str, str]],
+) -> str:
+    movie_sections = [s for s in sections if s["type"] == "movie"]
+    if not movie_sections:
+        console.write("Plex подключен, но movie-секция не найдена. Оставляю автоопределение пустым.")
+        return ""
+    if len(movie_sections) == 1:
+        section = movie_sections[0]
+        console.write(f"Plex movie-секция найдена: {section['title']} ({section['key']}).")
+        return section["key"]
+    console.write("Найдено несколько movie-секций:")
+    for idx, section in enumerate(movie_sections, start=1):
+        console.write(f"{idx}. {section['title']} ({section['key']})")
+    while True:
+        answer = console.ask("Выберите номер movie-секции", default="1")
+        try:
+            index = int(answer)
+        except ValueError:
+            index = 0
+        if 1 <= index <= len(movie_sections):
+            return movie_sections[index - 1]["key"]
+        console.write("Введите номер из списка.")
+
+
+def resolve_plex_from_account(
+    console: Console,
+    token: str,
+    client_id: str,
+) -> tuple[str, str, str] | None:
+    try:
+        resources = probe_plex_resources(token, client_id)
+    except ProbeError as exc:
+        console.write(f"Не удалось получить список Plex-серверов из аккаунта: {exc}")
+        return None
+    if not resources:
+        console.write("Plex account не вернул доступных серверов.")
+        return None
+
+    reachable: list[tuple[dict[str, str], list[dict[str, str]]]] = []
+    for resource in resources:
+        try:
+            sections = probe_plex(resource["uri"], resource["token"])
+            reachable.append((resource, sections))
+        except ProbeError:
+            continue
+    if not reachable:
+        console.write("Не нашёл Plex URL из аккаунта, доступный из мастера. Попрошу URL вручную.")
+        return None
+
+    selected_resource: dict[str, str]
+    selected_sections: list[dict[str, str]]
+    if len(reachable) == 1:
+        selected_resource, selected_sections = reachable[0]
+        console.write(
+            f"Нашёл доступный Plex server: {selected_resource['name']} — {selected_resource['uri']}"
+        )
+        if not console.ask_yes_no("Использовать этот Plex URL?", default=True):
+            return None
+    else:
+        console.write("Найдено несколько доступных Plex URL:")
+        for idx, (resource, _sections) in enumerate(reachable, start=1):
+            flags = []
+            if resource.get("local") == "1":
+                flags.append("local")
+            if resource.get("relay") == "1":
+                flags.append("relay")
+            suffix = f" ({', '.join(flags)})" if flags else ""
+            console.write(f"{idx}. {resource['name']} — {resource['uri']}{suffix}")
+        while True:
+            answer = console.ask("Выберите Plex URL", default="1")
+            try:
+                index = int(answer)
+            except ValueError:
+                index = 0
+            if 1 <= index <= len(reachable):
+                selected_resource, selected_sections = reachable[index - 1]
+                break
+            console.write("Введите номер из списка.")
+
+    section = choose_plex_movie_section(console, selected_sections)
+    return selected_resource["uri"], selected_resource["token"], section
+
+
+def configure_plex_manual(
     console: Console,
     env: dict[str, str],
     *,
+    token_default: str = "",
     skip_checks: bool,
 ) -> tuple[str, str, str, str]:
-    write_hint(
-        console,
-        "Plex",
-        why="проверка дублей, ожидание появления файла в библиотеке и кнопка «Смотреть в Plex».",
-        where="URL — адрес Plex Media Server; token — Plex Web → Get Info → View XML → X-Plex-Token в URL.",
-        example="PLEX_URL=http://192.168.1.10:32400",
-        skip="да, бот продолжит скачивать, но без Plex-проверок и кнопки просмотра.",
-    )
     while True:
         url = normalize_service_url(
             console.ask_required("Plex URL", default=env.get("PLEX_URL", DEFAULT_PLEX_URL))
         )
-        token = ask_optional_key(console, "Plex token", default=env.get("PLEX_TOKEN", ""))
+        token = ask_optional_key(
+            console,
+            "Plex token",
+            default=token_default or env.get("PLEX_TOKEN", ""),
+        )
         deeplink = console.ask(
             "PLEX_DEEPLINK_BASE_URL для мобильного redirect",
             default=env.get("PLEX_DEEPLINK_BASE_URL", ""),
@@ -891,26 +1094,8 @@ def configure_plex(
             return url, token, section, deeplink
         try:
             sections = probe_plex(url, token)
-            movie_sections = [s for s in sections if s["type"] == "movie"]
-            if not movie_sections:
-                console.write("Plex подключен, но movie-секция не найдена. Оставляю автоопределение пустым.")
-                return url, token, "", deeplink
-            if len(movie_sections) == 1:
-                section = movie_sections[0]
-                console.write(f"Plex movie-секция найдена: {section['title']} ({section['key']}).")
-                return url, token, section["key"], deeplink
-            console.write("Найдено несколько movie-секций:")
-            for idx, section in enumerate(movie_sections, start=1):
-                console.write(f"{idx}. {section['title']} ({section['key']})")
-            while True:
-                answer = console.ask("Выберите номер movie-секции", default="1")
-                try:
-                    index = int(answer)
-                except ValueError:
-                    index = 0
-                if 1 <= index <= len(movie_sections):
-                    return url, token, movie_sections[index - 1]["key"], deeplink
-                console.write("Введите номер из списка.")
+            section = choose_plex_movie_section(console, sections)
+            return url, token, section, deeplink
         except ProbeError as exc:
             action = keep_or_retry(console, "Plex", exc)
             if action == "keep":
@@ -918,6 +1103,60 @@ def configure_plex(
                 return url, token, section, deeplink
             if action == "disable":
                 return "", "", "", ""
+
+
+def configure_plex(
+    console: Console,
+    env: dict[str, str],
+    *,
+    skip_checks: bool,
+) -> tuple[str, str, str, str, str]:
+    write_hint(
+        console,
+        "Plex",
+        why="проверка дублей, ожидание появления файла в библиотеке и кнопка «Смотреть в Plex».",
+        where="лучший путь — вход через Plex в браузере; fallback — Plex Web → Get Info → View XML → X-Plex-Token.",
+        example="PLEX_URL=http://192.168.1.10:32400",
+        skip="да, бот продолжит скачивать, но без Plex-проверок и кнопки просмотра.",
+    )
+    client_id = plex_auth_client_id(env)
+    if skip_checks:
+        url, token, section, deeplink = configure_plex_manual(
+            console, env, skip_checks=True
+        )
+        return url, token, section, deeplink, client_id
+
+    token_default = env.get("PLEX_TOKEN", "")
+    use_auth = console.ask_yes_no(
+        "Получить Plex token через браузерный вход?",
+        default=not bool(token_default.strip()),
+    )
+    if use_auth:
+        try:
+            token = run_plex_pin_auth(console, client_id)
+        except ProbeError as exc:
+            console.write(f"Plex auth не прошёл: {exc}")
+            if not console.ask_yes_no("Вставить Plex token вручную?", default=True):
+                return "", "", "", "", client_id
+            return (*configure_plex_manual(console, env, skip_checks=False), client_id)
+
+        resolved = resolve_plex_from_account(console, token, client_id)
+        if resolved is not None:
+            url, resolved_token, section = resolved
+            deeplink = console.ask(
+                "PLEX_DEEPLINK_BASE_URL для мобильного redirect",
+                default=env.get("PLEX_DEEPLINK_BASE_URL", ""),
+            )
+            return url, resolved_token, section, deeplink, client_id
+        url, manual_token, section, deeplink = configure_plex_manual(
+            console,
+            env,
+            token_default=token,
+            skip_checks=False,
+        )
+        return url, manual_token, section, deeplink, client_id
+
+    return (*configure_plex_manual(console, env, skip_checks=False), client_id)
 
 
 def configure_simple_api_key(
@@ -1063,9 +1302,15 @@ def run_interactive(
                 console, previous_env, skip_checks=skip_checks
             )
 
-        plex_url = plex_token = plex_movie_section = plex_deeplink_base_url = ""
+        plex_url = plex_token = plex_movie_section = plex_deeplink_base_url = plex_auth_client_id = ""
         if features["plex"]:
-            plex_url, plex_token, plex_movie_section, plex_deeplink_base_url = configure_plex(
+            (
+                plex_url,
+                plex_token,
+                plex_movie_section,
+                plex_deeplink_base_url,
+                plex_auth_client_id,
+            ) = configure_plex(
                 console, previous_env, skip_checks=skip_checks
             )
 
@@ -1141,6 +1386,7 @@ def run_interactive(
             plex_token=plex_token,
             plex_movie_section=plex_movie_section,
             plex_deeplink_base_url=plex_deeplink_base_url,
+            plex_auth_client_id=plex_auth_client_id,
             openai_api_key=openai_api_key,
             voice_search_enabled=bool(openai_api_key),
             gpt_enabled=bool(openai_api_key),

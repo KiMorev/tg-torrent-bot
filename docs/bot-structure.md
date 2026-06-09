@@ -45,7 +45,7 @@
 | `config.py::load_settings` | Единственная точка чтения переменных окружения и дефолтов. |
 | `app_context.py::build_app_context` | Создаёт клиентов внешних сервисов из `AppSettings`. |
 | `install.sh` | Bootstrap для Synology: скачивает compose/wizard, генерирует `.env`, поднимает контейнер. |
-| `scripts/setup_wizard.py` | Интерактивный capability-first мастер установки: Telegram, Download Station, выбранные интеграции и генерация `.env`. |
+| `scripts/setup_wizard.py` | Интерактивный capability-first мастер установки: Telegram, Download Station, Plex PIN auth, выбранные интеграции и генерация `.env`. |
 
 ## Основные пользовательские флоу
 
@@ -117,7 +117,7 @@
 | `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break. |
 | `access_control.py` | Проверка разрешённых/admin chat ids и подпись заявки на доступ. |
 | `progressive_status.py` | Прогрессивные сообщения ожидания для поиска и голосового ввода. |
-| `scripts/setup_wizard.py` | Capability-first wizard установки, подсказки по ключам, read-only проверки сервисов и генерация `.env`. |
+| `scripts/setup_wizard.py` | Capability-first wizard установки, подсказки по ключам, Plex PIN auth, read-only проверки сервисов и генерация `.env`. |
 | `tests/conftest.py` | Bootstrap тестового окружения: изолированные `TMP_DIR`/`STATE_DIR` до импорта `bot.py`. |
 
 ## State files

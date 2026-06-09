@@ -321,8 +321,8 @@ docker compose up -d
 | `JACKETT_URL` | Адрес Jackett в браузере. На NAS или в LAN часто `http://<NAS_IP>:9117`. | `http://192.168.1.10:9117` | Да |
 | `JACKETT_API_KEY` | Jackett → Dashboard → поле `API Key` вверху страницы. | `abc123...` | Да |
 | `JACKETT_INDEXERS` | Jackett → список настроенных indexers; мастер покажет найденные id. `all` включает все настроенные. | `all` или `rutracker,kinozal` | Да |
-| `PLEX_URL` | Адрес Plex Media Server, не Plex Web. Обычно `http://<NAS_IP>:32400`. | `http://192.168.1.10:32400` | Да |
-| `PLEX_TOKEN` | Plex Web → карточка любого фильма → `Get Info` → `View XML` → параметр `X-Plex-Token` в URL. | `xYz...` | Да |
+| `PLEX_URL` | Мастер обычно находит Plex Media Server после входа через Plex в браузере. Если не нашёл: укажите адрес сервера, не Plex Web; обычно `http://<NAS_IP>:32400`. | `http://192.168.1.10:32400` | Да |
+| `PLEX_TOKEN` | Мастер получает token через браузерный Plex auth. Ручной fallback: Plex Web → карточка любого фильма → `Get Info` → `View XML` → параметр `X-Plex-Token` в URL. | `xYz...` | Да |
 | `PLEX_MOVIE_SECTION` | Мастер получает список секций Plex и выбирает movie-секцию. При ручной настройке можно оставить пустым: бот найдёт первую movie-секцию сам. | `1` | Да |
 | `PLEX_DEEPLINK_BASE_URL` | Ваша HTTPS-страница с [`web/plex.html`](web/plex.html), если хотите открывать Plex-приложение на телефоне через redirect. | `https://nas.example.com/plex.html` | Да |
 | `PLEX_WEBHOOK_TOKEN` | Любая длинная случайная строка для webhook URL. Можно сгенерировать password manager'ом. | `long-random-token` | Да |
@@ -368,7 +368,7 @@ docker compose up -d
 | Переменная | Что делает |
 |---|---|
 | `PLEX_URL` | URL Plex Media Server, например `http://192.168.1.103:32400`. |
-| `PLEX_TOKEN` | Token Plex. |
+| `PLEX_TOKEN` | Token Plex. Мастер установки получает его через Plex auth в браузере; ручной ввод нужен только как fallback. |
 | `PLEX_MOVIE_SECTION` | ID movie-секции. Можно оставить пустым: бот найдёт первую movie-секцию сам. |
 | `PLEX_DEEPLINK_BASE_URL` | HTTPS-страница-редирект для открытия Plex-приложения с iOS/Android. Если пусто, кнопки ведут в Plex Web. |
 | `PLEX_WEBHOOK_ENABLED` | Включает LAN endpoint для Plex webhook. Webhook не заменяет polling, а будит текущую проверку появления файла в Plex. |
@@ -376,7 +376,9 @@ docker compose up -d
 | `PLEX_WEBHOOK_TOKEN` | Shared token для `POST /plex/webhook` и `GET /plex/webhook/health`. Не публикуйте endpoint наружу без отдельной защиты. |
 | `PLEX_WEBHOOK_DEBOUNCE_SECONDS` | Минимальный интервал между принятыми webhook-триггерами. По умолчанию `10`. |
 
-Мастер установки использует ручной fallback для token: в Plex Web откройте карточку любого фильма, выберите `Get Info` → `View XML` и возьмите параметр `X-Plex-Token` из открывшегося URL. Если пункт меню отличается в вашей версии Plex Web, можно открыть DevTools → Network и найти `X-Plex-Token` в запросах к Plex.
+Мастер установки по умолчанию показывает ссылку Plex auth: откройте её в браузере, войдите в Plex и подтвердите доступ. После этого мастер сам получает token, находит доступные Plex URL из аккаунта, проверяет их с NAS и предлагает movie-секцию. Служебный `PLEX_AUTH_CLIENT_ID` мастер сохраняет в `.env` сам; искать его вручную не нужно.
+
+Если браузерный auth не сработал, используйте ручной fallback для token: в Plex Web откройте карточку любого фильма, выберите `Get Info` → `View XML` и возьмите параметр `X-Plex-Token` из открывшегося URL. Если пункт меню отличается в вашей версии Plex Web, можно открыть DevTools → Network и найти `X-Plex-Token` в запросах к Plex.
 
 Чтобы включить Plex webhook, задайте `PLEX_WEBHOOK_ENABLED=true`, сгенерируйте длинный `PLEX_WEBHOOK_TOKEN` и добавьте в Plex Web → Settings → Webhooks URL:
 
