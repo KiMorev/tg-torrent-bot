@@ -201,6 +201,14 @@ from gpt_features import explain_movie_card as gpt_features_explain_movie_card
 from gpt_features import explain_series_bulk_candidates as gpt_explain_series_bulk_candidates
 from gpt_features import kp_confidence_check as gpt_kp_confidence_check
 from gpt_features import parse_torrent_title as gpt_features_parse_torrent_title
+from filename_normalizer import (
+    RenamePlan,
+    RenamePlanError,
+    apply_rename_plan,
+    build_arc_episode_rename_plan,
+    has_arc_episode_filenames,
+    is_video_file,
+)
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
     build_cards as _movie_build_cards,
@@ -5540,6 +5548,446 @@ def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") 
     return _make_task_keyboard(task_id, status, task_type)
 
 
+_NORMALIZATION_SEASON_CHOICES = tuple(range(1, 11))
+
+
+def _normalization_callback(action: str, task_id: str, season: int | None = None) -> str:
+    value = f"{TASK_CALLBACK_PREFIX}:{action}:{task_id}"
+    if season is not None:
+        value = f"{value}:{season}"
+    return value
+
+
+def _split_task_id_and_season(raw: str) -> tuple[str, int | None]:
+    task_id, sep, season_raw = (raw or "").rpartition(":")
+    if not sep:
+        return raw, None
+    try:
+        season = int(season_raw)
+    except (TypeError, ValueError):
+        return raw, None
+    if season <= 0:
+        return task_id, None
+    return task_id, season
+
+
+def _normalization_season_picker_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for offset in range(0, len(_NORMALIZATION_SEASON_CHOICES), 5):
+        rows.append([
+            InlineKeyboardButton(
+                str(season),
+                callback_data=_normalization_callback("norm_season", task_id, season),
+            )
+            for season in _NORMALIZATION_SEASON_CHOICES[offset: offset + 5]
+        ])
+    rows.append([InlineKeyboardButton(
+        "📦 Оставить как есть",
+        callback_data=_normalization_callback("norm_skip", task_id),
+    )])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _normalization_keyboard(task_id: str, decision: dict) -> InlineKeyboardMarkup:
+    plan = decision.get("plan")
+    if isinstance(plan, RenamePlan):
+        season = int(plan.season)
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "👀 Показать план",
+                callback_data=_normalization_callback("norm_plan", task_id, season),
+            )],
+            [InlineKeyboardButton(
+                "✅ Переименовать для Plex",
+                callback_data=_normalization_callback("norm_apply", task_id, season),
+            )],
+            [InlineKeyboardButton(
+                "✏️ Изменить сезон",
+                callback_data=_normalization_callback("norm_pick", task_id),
+            )],
+            [InlineKeyboardButton(
+                "📦 Оставить как есть",
+                callback_data=_normalization_callback("norm_skip", task_id),
+            )],
+            [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+        ])
+    return _normalization_season_picker_keyboard(task_id)
+
+
+def _normalization_plan_keyboard(task_id: str, plan: RenamePlan) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅ Переименовать для Plex",
+            callback_data=_normalization_callback("norm_apply", task_id, plan.season),
+        )],
+        [InlineKeyboardButton(
+            "✏️ Изменить сезон",
+            callback_data=_normalization_callback("norm_pick", task_id),
+        )],
+        [InlineKeyboardButton(
+            "📦 Оставить как есть",
+            callback_data=_normalization_callback("norm_skip", task_id),
+        )],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _normalization_show_title(task: dict, meta: dict | None) -> str:
+    if isinstance(meta, dict):
+        series_query = str(meta.get("series_query") or "").strip()
+        if series_query:
+            return series_query
+        meta_title = str(meta.get("title") or "").strip()
+        if meta_title:
+            return _extract_series_base_query(meta_title) or meta_title
+    return str(task.get("title") or "").strip()
+
+
+def _normalization_season(task: dict, meta: dict | None) -> tuple[int, str]:
+    if isinstance(meta, dict):
+        try:
+            season = int(meta.get("season_num") or 0)
+        except (TypeError, ValueError):
+            season = 0
+        if season > 0:
+            return season, "из названия раздачи"
+        for candidate in (meta.get("title"), meta.get("series_query")):
+            season = _extract_season_from_query(str(candidate or "")) or 0
+            if season > 0:
+                return season, "из названия раздачи"
+    season = _extract_season_from_query(str(task.get("title") or "")) or 0
+    if season > 0:
+        return season, "из названия раздачи"
+    return 0, ""
+
+
+def _safe_storage_child_names(task_title: str) -> list[str]:
+    names: list[str] = []
+    for value in (task_title, Path(str(task_title).replace("\\", "/")).name):
+        name = str(value or "").strip().strip("/\\")
+        if not name or name in {".", ".."} or name in names:
+            continue
+        names.append(name)
+        if name.lower().endswith(".torrent"):
+            stripped = name[:-8].strip()
+            if stripped and stripped not in names:
+                names.append(stripped)
+    return names
+
+
+def _find_completed_task_storage_root(task: dict) -> Path | None:
+    storage_root = Path(STORAGE_MOUNT_PATH)
+    if not storage_root.exists():
+        return None
+    names = _safe_storage_child_names(str(task.get("title") or ""))
+    for name in names:
+        candidate = storage_root / name
+        if candidate.exists():
+            return candidate
+    try:
+        children = list(storage_root.iterdir())
+    except OSError:
+        return None
+    wanted = {name.casefold() for name in names}
+    for child in children:
+        if child.name.casefold() in wanted:
+            return child
+    return None
+
+
+def _completed_task_video_files(task: dict) -> tuple[Path | None, list[Path]]:
+    root = _find_completed_task_storage_root(task)
+    if root is None:
+        return None, []
+    if root.is_file():
+        return root.parent, [root] if is_video_file(root) else []
+    try:
+        files = [
+            path for path in root.rglob("*")
+            if path.is_file() and is_video_file(path)
+        ]
+    except OSError:
+        return root, []
+    return root, files
+
+
+def _inspect_completed_task_normalization(
+    task: dict,
+    meta: dict | None,
+    *,
+    season_override: int | None = None,
+) -> dict:
+    source_root, files = _completed_task_video_files(task)
+    if not files:
+        return {"status": "files_unavailable"}
+
+    show_title = _normalization_show_title(task, meta)
+    if season_override is not None and season_override > 0:
+        season, season_source = season_override, "выбран вручную"
+    else:
+        season, season_source = _normalization_season(task, meta)
+
+    if season > 0 and source_root is not None:
+        plan = build_arc_episode_rename_plan(
+            show_title=show_title,
+            season=season,
+            files=files,
+            source_root=source_root,
+        )
+        if plan is not None:
+            return {
+                "status": "plan",
+                "plan": plan,
+                "season_source": season_source,
+                "file_count": len(files),
+            }
+
+    if season <= 0 and source_root is not None and has_arc_episode_filenames(files):
+        probe_plan = build_arc_episode_rename_plan(
+            show_title=show_title,
+            season=1,
+            files=files,
+            source_root=source_root,
+        )
+        if probe_plan is None:
+            return {"status": "no_action"}
+        return {
+            "status": "needs_season",
+            "show_title": show_title,
+            "file_count": len(files),
+        }
+    return {"status": "no_action"}
+
+
+def _normalization_blocks_plex(decision: dict | None) -> bool:
+    return isinstance(decision, dict) and decision.get("status") in {"plan", "needs_season"}
+
+
+def _format_normalization_notification(task: dict, decision: dict) -> str:
+    lines = [_format_task_notification(task, plex_polling_started=False), ""]
+    if decision.get("status") == "needs_season":
+        lines.extend([
+            "Похоже, эпизоды названы не в формате Plex.",
+            "Из-за этого Plex может не определить сезон и серии.",
+            "",
+            "Сезон из названия раздачи не нашёл. Выберите сезон для переименования.",
+        ])
+        return "\n".join(lines)
+
+    plan = decision.get("plan")
+    if not isinstance(plan, RenamePlan):
+        return lines[0]
+    season_source = decision.get("season_source") or "из названия раздачи"
+    lines.extend([
+        "Похоже, эпизоды названы не в формате Plex.",
+        "Из-за этого Plex может не определить сезон и серии.",
+        "",
+        f"Нашёл сезон: {plan.season} — {season_source}.",
+        f"Могу переименовать исходные файлы для Plex: {len(plan.items)} шт.",
+    ])
+    return "\n".join(lines)
+
+
+def _format_rename_plan_text(plan: RenamePlan, *, limit: int = 10) -> str:
+    lines = [
+        f"План переименования: {len(plan.items)} файлов",
+        f"Сериал: {plan.show_title}",
+        f"Сезон: {plan.season}",
+        f"Папка: {plan.target_dir}",
+        "",
+    ]
+    for item in plan.items[:limit]:
+        lines.extend([
+            item.source_path.name,
+            f"→ {item.target_path.name}",
+            "",
+        ])
+    remaining = len(plan.items) - limit
+    if remaining > 0:
+        lines.append(f"… ещё {remaining} файлов.")
+    return "\n".join(lines).strip()
+
+
+def _remember_normalized_task_meta(task_id: str, plan: RenamePlan, meta: dict | None) -> None:
+    updated = dict(meta or {})
+    updated["kind"] = "series"
+    updated["title"] = updated.get("title") or plan.show_title
+    updated["series_query"] = updated.get("series_query") or plan.show_title
+    updated["season_num"] = plan.season
+    updated["source"] = updated.get("source") or "filename_normalizer"
+    _remember_task_meta(task_id, updated)
+
+
+async def _start_plex_polling_for_completed_task(
+    app: Application,
+    task: dict,
+    chat_ids: set[int],
+) -> bool:
+    task_id = str(task.get("id") or "")
+    if not task_id or not PLEX_ENABLED:
+        return False
+    if task_id in _PLEX_POLLING_TASKS or _plex_poll_is_done(task_id, _load_notified_tasks()):
+        return False
+    _PLEX_POLLING_TASKS[task_id] = None
+    _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
+        _plex_poll_after_finish(
+            app,
+            task_id,
+            task.get("title") or "",
+            sorted(chat_ids),
+            meta=_get_task_meta(task_id),
+            hint_msg_ids={},
+        )
+    )
+    return True
+
+
+def _normalization_poll_recipients(task_id: str, chat_id: int | None) -> set[int]:
+    recipients = set(_notification_recipients(task_id))
+    if chat_id is not None:
+        recipients.add(chat_id)
+    return recipients
+
+
+async def _handle_normalization_callback(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    action: str,
+    raw_task_id: str,
+    chat_id: int | None,
+) -> None:
+    task_id, season = _split_task_id_and_season(raw_task_id)
+    if not _can_access_task_id(chat_id, task_id):
+        await query.edit_message_text(
+            "Эта задача не относится к вашим загрузкам.",
+            reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
+        return
+
+    if action == "norm_pick":
+        await query.edit_message_text(
+            "Выберите сезон для переименования файлов.",
+            reply_markup=_normalization_season_picker_keyboard(task_id),
+        )
+        return
+
+    try:
+        tasks = await asyncio.to_thread(ds_client.list_tasks)
+    except DownloadStationError:
+        await query.edit_message_text(
+            _download_station_user_error_text("Не удалось получить задачу.", task_id=task_id),
+            reply_markup=_task_error_keyboard(retry_callback=query.data or None),
+        )
+        return
+
+    task = _find_task(tasks, task_id)
+    if not task:
+        await query.edit_message_text(
+            f"Задача не найдена.\nID: {task_id}",
+            reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
+        return
+
+    if action == "norm_skip":
+        recipients = _normalization_poll_recipients(task_id, chat_id)
+        started = await _start_plex_polling_for_completed_task(context.application, task, recipients)
+        suffix = "\n🔄 Проверяю Plex." if started else ""
+        await query.edit_message_text(
+            f"Оставил файлы как есть.{suffix}",
+            reply_markup=_final_notification_keyboard(task_id, show_plex=False),
+        )
+        return
+
+    meta = _get_task_meta(task_id)
+    decision = await asyncio.to_thread(
+        _inspect_completed_task_normalization,
+        task,
+        meta,
+        season_override=season,
+    )
+    plan = decision.get("plan")
+
+    if action == "norm_season":
+        if isinstance(plan, RenamePlan):
+            await query.edit_message_text(
+                _format_rename_plan_text(plan),
+                reply_markup=_normalization_plan_keyboard(task_id, plan),
+            )
+        else:
+            await query.edit_message_text(
+                "Для выбранного сезона не удалось построить безопасный план переименования.",
+                reply_markup=_normalization_season_picker_keyboard(task_id),
+            )
+        return
+
+    if action == "norm_plan":
+        if isinstance(plan, RenamePlan):
+            await query.edit_message_text(
+                _format_rename_plan_text(plan),
+                reply_markup=_normalization_plan_keyboard(task_id, plan),
+            )
+        elif decision.get("status") == "needs_season":
+            await query.edit_message_text(
+                "Выберите сезон для переименования файлов.",
+                reply_markup=_normalization_season_picker_keyboard(task_id),
+            )
+        else:
+            await query.edit_message_text(
+                "План переименования больше не актуален.",
+                reply_markup=_final_notification_keyboard(task_id, show_plex=False),
+            )
+        return
+
+    if action == "norm_apply":
+        if not isinstance(plan, RenamePlan):
+            await query.edit_message_text(
+                "Не удалось построить безопасный план переименования.",
+                reply_markup=_normalization_season_picker_keyboard(task_id),
+            )
+            return
+        try:
+            await asyncio.to_thread(apply_rename_plan, plan)
+        except RenamePlanError as exc:
+            logger.warning("Filename normalization failed task_id=%s: %s", task_id, exc)
+            await query.edit_message_text(
+                f"Не удалось переименовать файлы: {exc}",
+                reply_markup=_normalization_plan_keyboard(task_id, plan),
+            )
+            return
+        except OSError as exc:
+            logger.warning("Filename normalization filesystem error task_id=%s: %s", task_id, exc)
+            await query.edit_message_text(
+                "Не удалось переименовать файлы. Проверьте, что /storage смонтирован с правом записи.",
+                reply_markup=_normalization_plan_keyboard(task_id, plan),
+            )
+            return
+
+        _remember_normalized_task_meta(task_id, plan, meta)
+        _record_download_history(
+            "files_normalized",
+            chat_id=chat_id,
+            task_id=task_id,
+            meta=_get_task_meta(task_id),
+            renamed_count=len(plan.items),
+            season=plan.season,
+            target_dir=str(plan.target_dir),
+        )
+        recipients = _normalization_poll_recipients(task_id, chat_id)
+        started = await _start_plex_polling_for_completed_task(context.application, task, recipients)
+        suffix = "\n🔄 Проверяю появление в Plex." if started else ""
+        await query.edit_message_text(
+            f"✅ Файлы переименованы для Plex.{suffix}",
+            reply_markup=_final_notification_keyboard(task_id, show_plex=False),
+        )
+        return
+
+    await query.edit_message_text(
+        "Неизвестное действие с переименованием.",
+        reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+    )
+
+
 def _format_task_card(task: dict, chat_id: int | None = None) -> str:
     auto_delete_enabled = _auto_delete_finished_enabled()
     return _view_format_task_card(
@@ -6524,6 +6972,16 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
             )
             continue
 
+        task_meta = _get_task_meta(task_id)
+        normalization_decision: dict = {"status": "no_action"}
+        if PLEX_ENABLED and notification_status in {"finished", "seeding"}:
+            normalization_decision = await asyncio.to_thread(
+                _inspect_completed_task_normalization,
+                task,
+                task_meta,
+            )
+        normalization_blocks_plex = _normalization_blocks_plex(normalization_decision)
+
         # Determine if Plex polling should start for this task. We must atomically
         # reserve the _PLEX_POLLING_TASKS slot BEFORE the first await below — otherwise
         # two overlapping _run_task_notifications_once() invocations could both see
@@ -6535,6 +6993,7 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
         plex_should_poll = (
             PLEX_ENABLED
             and notification_status in {"finished", "seeding"}
+            and not normalization_blocks_plex
             and task_id not in _PLEX_POLLING_TASKS
             and not _plex_poll_is_done(task_id, notified)
         )
@@ -6560,10 +7019,16 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
                 continue
 
             try:
+                if normalization_blocks_plex:
+                    notification_text = _format_normalization_notification(task, normalization_decision)
+                    notification_keyboard = _normalization_keyboard(task_id, normalization_decision)
+                else:
+                    notification_text = _format_task_notification(task, plex_polling_started=plex_should_poll)
+                    notification_keyboard = _notification_keyboard(task_id, notification_status, task.get("type", ""))
                 await app.bot.send_message(
                     chat_id=chat_id,
-                    text=_format_task_notification(task, plex_polling_started=plex_should_poll),
-                    reply_markup=_notification_keyboard(task_id, notification_status, task.get("type", "")),
+                    text=notification_text,
+                    reply_markup=notification_keyboard,
                 )
                 await _delete_task_card_messages(app, task_id, chat_id=chat_id)
                 sent_recipients.add(recipient_key)
@@ -6626,7 +7091,6 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
 
         # Start Plex polling after sending notifications so hint_msg_ids are available.
         if plex_should_poll:
-            task_meta = _get_task_meta(task_id)
             _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
                 _plex_poll_after_finish(
                     app,
@@ -20595,6 +21059,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Cancel any running auto-refresh for this card before handling the action
     if chat_id and message_id:
         _cancel_task_card_refresh(chat_id, message_id)
+
+    if action.startswith("norm_"):
+        await _handle_normalization_callback(query, context, action, task_id, chat_id)
+        return
 
     if action == "list":
         scope = _normalize_list_scope(task_id, chat_id)

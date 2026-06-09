@@ -23,6 +23,7 @@
 | Кнопки и callback-data | `keyboards.py`; регистрация обработчиков в `bot.py::main`; правила в `AGENTS.md` | `tests/test_keyboards.py`, `tests/test_handlers.py` |
 | Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `search_intent.py`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_intent.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
 | Скачивание и очередь | `bot.py`: `_download_and_add`, `search_direct_download`, `_do_process_magnet`, `_do_process_torrent`, `_run_pending_downloads_once`; `download_station.py`; `torrent_utils.py` | `tests/test_handlers.py`, `tests/test_background.py`, `tests/test_download_station_locking.py`, `tests/test_disk_space_guard.py`, `tests/test_torrent_utils.py` |
+| Нормализация имён файлов сериалов | `bot.py`: `_inspect_completed_task_normalization`, `_handle_normalization_callback`; `filename_normalizer.py`; `storage.py` | `tests/test_filename_normalizer.py`, `tests/test_background.py` |
 | История загрузок | `bot.py`: `_record_download_history`, `_record_download_added_history`, `_record_task_notification_history`, `_plex_poll_after_finish`; `state_store.py`: `download_history.jsonl`; подробности в `docs/download-history.md` | `tests/test_state_store.py`, `tests/test_handlers.py`, `tests/test_background.py` |
 | Сериалы и подписки | `bot.py`: `search_subscribe_*`, `_check_subscriptions`, `_check_jackett_subscriptions`; `jackett_subscriptions.py`; `subscription_policy.py`; `series_bulk_planner.py`; `formatters.py` | `tests/test_subscription_policy.py`, `tests/test_subscription_picker_ui.py`, `tests/test_jackett_subscriptions.py`, `tests/test_series_bulk_planner.py`, `tests/test_background.py` |
 | `/new` и подбор новинок | `bot.py`: `_refresh_movie_discovery_cache*`, `_run_movie_discovery_notifications`, `movie_new_*`; `movie_discovery.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_movie_discovery.py`, `tests/test_handlers.py`, `tests/test_kinopoisk.py`, `tests/test_gpt_features.py` |
@@ -64,7 +65,7 @@
 | Проверка подписок | `_subscription_check_loop` -> `_check_jackett_subscriptions` и `_check_subscriptions`. |
 | `/new` | `movie_new_command` -> чтение cache/settings -> `movie_new_*` callbacks; refresh делает `_refresh_movie_discovery_cache`; при деградации источников сохраняет прежний хороший кэш и не отправляет push; перед показом и push карточки фильтруются через подтверждение прошлым top-10; карточки показывают KP-метаданные включая страну; push подписчикам делает `_run_movie_discovery_notifications`, отправляет до 3 KP-обогащённых карточек не из Plex, сохраняет `movie_notification_snapshots`, даёт `new:dl:*` / `new:bulk:*` для скачивания из snapshot, при близких score может вызвать GPT tie-break для выбора release, может отправить постер топовой карточки через `send_photo` с fallback на текст и отключает подписку после лимита permanent-ошибок доставки. |
 | Прогрев Jackett | `_jackett_warmup_loop` -> `_run_jackett_warmup_once` -> `JackettClient.warmup`; индексеры прогреваются ротационными пачками и статус виден в диагностике. |
-| Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён может стартовать `_plex_poll_after_finish`; BT-задача `error` без конкретного `error_detail` (`unknown` считается неконкретным) и с прогрессом >=99.9% считается мягко завершённой для уведомлений/Plex polling; итоговые события пишутся в `download_history.jsonl`. |
+| Уведомление о завершении | `_task_maintenance_loop` -> `_run_task_notifications_once` -> Telegram push; при Plex включён сначала проверяет реальные файлы в `/storage`: если `filename_normalizer.py` строит безопасный план или нужен выбор сезона, показывает `task:norm_*` кнопки и не стартует `_plex_poll_after_finish` до решения пользователя; иначе запускает обычный Plex polling. BT-задача `error` без конкретного `error_detail` (`unknown` считается неконкретным) и с прогрессом >=99.9% считается мягко завершённой для уведомлений/Plex polling; итоговые события пишутся в `download_history.jsonl`. |
 | `/status` и список задач | `status` / `task_callback` -> `task_views.py` + `keyboards.py`; admin-view берёт владельцев из `task_owners.json` и подписи из `approved_users.json`. |
 | `/admin` | `admin_command` / `admin_callback` -> короткая диагностика и drill-down `admin:diag_*`, настройки `/new`, пользователи, подписки, сброс счётчиков. |
 
@@ -74,7 +75,7 @@
 |---|---|---|
 | `srch:*` | `keyboards.py`, локально в search-блоке `bot.py`; `srch:mode:*` переключает настройку `Что скачать` без отдельного меню | `ConversationHandler` в `bot.py::main` |
 | `settings:*` | `bot.py::_settings_keyboard` | `settings_callback`: quality/audio/subs/preferred voices/reset для `/settings` |
-| `task:*` | `keyboards.py` | `task_callback` |
+| `task:*` | `keyboards.py`, локально в `bot.py` для `task:norm_*` | `task_callback`: задачи Download Station, закрытие сообщений и post-download переименование сериалов (`norm_plan`, `norm_apply`, `norm_pick`, `norm_season`, `norm_skip`) |
 | `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
 | `access:*` | `keyboards.py` | `access_callback`: approve/deny заявок, `/users` refresh, подтверждение и удаление доступа |
 | `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
@@ -107,6 +108,7 @@
 | `state_store.py` | Atomic JSON load/save через `JsonStateStore`, append-only JSONL для истории загрузок. |
 | `task_views.py` | Форматирование списка задач и карточки задачи. |
 | `task_policies.py` | Получатели уведомлений, дедуп статусов, текст финального push, автоудаление. |
+| `filename_normalizer.py` | Чистый планировщик переименования сериалов в Plex-формат: детект русских арок `N. Название (M сер.)`, dry-run план и безопасное применение. |
 | `formatters.py` | Общие форматтеры, progress, качество, сериал/сезон, короткие названия. |
 | `torrent_utils.py` | Magnet, bencode, `.torrent`, private torrent detection, matching DS task id. |
 | `tracker_service.py` | Публичные BT-трекеры: загрузка списка, cache, применение к задачам. |
@@ -127,7 +129,7 @@
 |---|---|
 | `approved_chat_ids.json` | Динамически одобренные пользователи. |
 | `task_owners.json` | Владелец Download Station task id. |
-| `task_meta.json` | Метаданные задачи: тип, title, year, quality, series query, season, optional release-поля из GPT-разбора. |
+| `task_meta.json` | Метаданные задачи: тип, title, year, quality, series query, season, optional release-поля из GPT-разбора; после ручного выбора сезона при переименовании сезон сохраняется сюда для последующего Plex lookup. |
 | `notified_tasks.json` | Состояние delivery уведомлений, failures, subscribers, Plex polling done; запись уведомлений сохраняет уже выставленный `plex_done`. |
 | `auto_delete_tasks.json` | Задачи-кандидаты на автоудаление и timestamp. |
 | `trackers_processed_v2.json` | Задачи, куда уже добавляли публичные трекеры. |
@@ -139,7 +141,7 @@
 | `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам. |
 | `series_continue_totals.json` | Кэш количества эпизодов сезона из TMDB/TVmaze для `/continue`, keyed by Plex/external id. |
 | `series_continue_hidden.json` | Персонально скрытые сезоны `/continue`, keyed by chat id. |
-| `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки и результат Plex polling; для найденных Plex-сезонов сохраняет series-поля для `/continue`. |
+| `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки, переименование файлов (`files_normalized`) и результат Plex polling; для найденных Plex-сезонов сохраняет series-поля для `/continue`. |
 | `storage_history.json` | История свободного места. |
 | `voice_usage.json` | Использование voice transcription. |
 | `user_search_defaults.json` | Личные предпочтения поиска по `chat_id`: качество, Original, субтитры и preferred voices. |

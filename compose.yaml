@@ -11,12 +11,12 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - tg_torrent_drop_state:/data
-      # Optional: read-only bind-mount of the NAS movie volume.
+      # Optional bind-mount of the NAS movie volume.
       # Enables the «📀 Хранилище» block in /admin (free/used GB + forecast +
-      # alert at STORAGE_ALERT_PERCENT). Remove this line to disable the
-      # feature — bot will simply skip the block.
+      # alert at STORAGE_ALERT_PERCENT) and post-download Plex filename
+      # normalization. Remove this line to disable these filesystem features.
       # If your movies live in another path, change the LEFT side only.
-      - /volume1/video:/storage:ro
+      - /volume1/video:/storage:rw
     ports:
       - "${PLEX_WEBHOOK_PORT:-8099}:${PLEX_WEBHOOK_PORT:-8099}"
     environment:

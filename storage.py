@@ -2,8 +2,8 @@
 
 The bot runs inside a Docker container that has no filesystem visibility
 into the NAS video volume by default. To enable this feature the admin
-bind-mounts `/volume1/video` (or wherever movies live) read-only into the
-container at `/storage`. We use `shutil.disk_usage()` on that path.
+bind-mounts `/volume1/video` (or wherever movies live) into the container
+at `/storage`. We use `shutil.disk_usage()` on that path.
 
 The feature gracefully degrades: if the `/storage` mount isn't present
 (`Path.exists()` is False), `get_storage_info()` returns None and the

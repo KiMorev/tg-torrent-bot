@@ -16,6 +16,7 @@
 - `download_completed` - Download Station сообщил обычное завершение;
 - `download_soft_completed` - DS показал `error`, но BT-задача скачана >=99.9% и без конкретного `error_detail`;
 - `download_failed` - добавление или финальный статус завершились ошибкой;
+- `files_normalized` - исходные файлы сериала переименованы в Plex-формат после подтверждения пользователя;
 - `plex_found` - Plex нашёл фильм или сезон после скачивания;
 - `plex_not_found` - Plex не подтвердил появление за окно ожидания.
 
@@ -62,6 +63,7 @@
 - `_do_process_magnet()` и `_do_process_torrent()` - ручные magnet/`.torrent`;
 - `_check_subscriptions()` и Jackett subscription paths - автоскачивание по подпискам;
 - `_run_task_notifications_once()` - финальные статусы DS;
+- `_handle_normalization_callback()` - подтверждённое переименование файлов сериала;
 - `_plex_poll_after_finish()` - итог поиска в Plex.
 
 Перед добавлением новых точек записи проверь, что событие не дублируется при повторном фоне и что в payload не попали секретные ссылки.
