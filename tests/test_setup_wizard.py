@@ -1,15 +1,54 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from config import load_settings
 from scripts.setup_wizard import (
     InstallerConfig,
+    ProbeError,
+    destination_share_name,
     extract_chat_candidates,
     format_env_value,
     installer_probe_url,
     normalize_ds_url,
+    probe_download_destination,
+    probe_jackett,
+    probe_plex,
+    read_env_file,
     render_env,
+    run_interactive,
 )
+
+
+class FakeConsole:
+    def __init__(self, *, answers=None, booleans=None) -> None:
+        self.answers = list(answers or [])
+        self.booleans = list(booleans or [])
+        self.output: list[str] = []
+
+    def write(self, text: str = "") -> None:
+        self.output.append(text)
+
+    def ask(self, prompt: str, *, default: str = "", secret: bool = False) -> str:
+        if not self.answers:
+            raise AssertionError(f"No answer left for prompt: {prompt}")
+        value = self.answers.pop(0)
+        return default if value == "" else value
+
+    def ask_required(self, prompt: str, *, default: str = "", secret: bool = False) -> str:
+        value = self.ask(prompt, default=default, secret=secret)
+        if not value:
+            raise AssertionError(f"Required prompt got empty answer: {prompt}")
+        return value
+
+    def ask_yes_no(self, prompt: str, *, default: bool = False) -> bool:
+        if not self.booleans:
+            raise AssertionError(f"No boolean left for prompt: {prompt}")
+        return self.booleans.pop(0)
+
+    def close(self) -> None:
+        pass
 
 
 class SetupWizardEnvTests(unittest.TestCase):
@@ -37,6 +76,51 @@ class SetupWizardEnvTests(unittest.TestCase):
         self.assertIn("MOVIE_DISCOVERY_ENABLED=false", text)
         self.assertIn("VOICE_SEARCH_ENABLED=false", text)
         self.assertIn("GPT_ENABLED=false", text)
+
+    def test_render_env_contains_selected_integrations(self) -> None:
+        values = self._config().__dict__.copy()
+        values.update(
+            rutracker_username="rt_user",
+            rutracker_password="rt_pass",
+            jackett_url="http://jackett.local:9117",
+            jackett_api_key="jackett-key",
+            jackett_indexers="rutracker,kinozal",
+            kinopoisk_api_key="kp-key",
+            tmdb_api_token="tmdb-token",
+            movie_discovery_enabled=True,
+            plex_url="http://plex.local:32400",
+            plex_token="plex-token",
+            plex_movie_section="1",
+            openai_api_key="sk-test",
+            voice_search_enabled=True,
+            gpt_enabled=True,
+        )
+        config = InstallerConfig(**values)
+
+        text = render_env(config)
+
+        self.assertIn("RUTRACKER_USERNAME=rt_user", text)
+        self.assertIn("JACKETT_INDEXERS=rutracker,kinozal", text)
+        self.assertIn("KINOPOISK_API_KEY=kp-key", text)
+        self.assertIn("TMDB_API_TOKEN=tmdb-token", text)
+        self.assertIn("MOVIE_DISCOVERY_ENABLED=true", text)
+        self.assertIn("PLEX_MOVIE_SECTION=1", text)
+        self.assertIn("VOICE_SEARCH_ENABLED=true", text)
+        self.assertIn("GPT_ENABLED=true", text)
+
+    def test_render_env_preserves_existing_unmanaged_values(self) -> None:
+        text = render_env(
+            self._config(),
+            {
+                "BOT_TOKEN": "old",
+                "TRACKERS_MAX": "12",
+                "CUSTOM_VALUE": "keep me",
+            },
+        )
+
+        self.assertIn("BOT_TOKEN=123:token", text)
+        self.assertIn("TRACKERS_MAX=12", text)
+        self.assertIn("CUSTOM_VALUE='keep me'", text)
 
     def test_rendered_env_loads_as_bot_settings(self) -> None:
         env = {}
@@ -75,6 +159,16 @@ class SetupWizardEnvTests(unittest.TestCase):
         self.assertEqual(format_env_value("simple-token_123"), "simple-token_123")
         self.assertEqual(format_env_value("pa ss#word$1"), "'pa ss#word$1'")
         self.assertEqual(format_env_value("let's go"), "'let\\'s go'")
+
+    def test_read_env_file_parses_single_quoted_values(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("BOT_TOKEN=123:token\nDS_PASSWORD='pa ss#word$1'\n", encoding="utf-8")
+
+            values = read_env_file(path)
+
+        self.assertEqual(values["BOT_TOKEN"], "123:token")
+        self.assertEqual(values["DS_PASSWORD"], "pa ss#word$1")
 
 
 class SetupWizardParsingTests(unittest.TestCase):
@@ -142,6 +236,94 @@ class SetupWizardParsingTests(unittest.TestCase):
         self.assertEqual([c.chat_id for c in candidates], [100, -200])
         self.assertEqual(candidates[0].label, "Ivan @ivan")
         self.assertEqual(candidates[1].label, "Family")
+
+    def test_destination_share_name_handles_relative_and_volume_paths(self) -> None:
+        self.assertEqual(destination_share_name("video"), "video")
+        self.assertEqual(destination_share_name("video/movies"), "video")
+        self.assertEqual(destination_share_name("/volume1/video/movies"), "video")
+
+
+class SetupWizardProbeTests(unittest.TestCase):
+    def test_probe_download_destination_rejects_missing_share(self) -> None:
+        with patch(
+            "scripts.setup_wizard._read_json_url",
+            return_value={"success": True, "data": {"shares": [{"name": "downloads"}]}},
+        ):
+            with self.assertRaisesRegex(ProbeError, "video"):
+                probe_download_destination("https://nas.local:5001", "sid", "video", verify_ssl=False)
+
+    def test_probe_jackett_returns_configured_indexers(self) -> None:
+        with patch(
+            "scripts.setup_wizard._read_json_url",
+            return_value=[
+                {"id": "rutracker", "name": "Rutracker", "configured": True},
+                {"id": "disabled", "name": "Disabled", "configured": False},
+            ],
+        ):
+            indexers = probe_jackett("http://jackett.local:9117", "secret")
+
+        self.assertEqual(indexers, [{"id": "rutracker", "name": "Rutracker"}])
+
+    def test_probe_plex_returns_movie_and_show_sections(self) -> None:
+        import xml.etree.ElementTree as ET
+
+        identity = ET.fromstring("<MediaContainer machineIdentifier='m1' />")
+        sections = ET.fromstring(
+            "<MediaContainer>"
+            "<Directory key='1' type='movie' title='Movies' />"
+            "<Directory key='2' type='show' title='Shows' />"
+            "</MediaContainer>"
+        )
+        with patch("scripts.setup_wizard._read_xml_url", side_effect=[identity, sections]):
+            result = probe_plex("http://plex.local:32400", "token")
+
+        self.assertEqual(
+            result,
+            [
+                {"key": "1", "title": "Movies", "type": "movie"},
+                {"key": "2", "title": "Shows", "type": "show"},
+            ],
+        )
+
+
+class SetupWizardInteractiveTests(unittest.TestCase):
+    def test_run_interactive_skip_checks_collects_only_selected_integrations(self) -> None:
+        console = FakeConsole(
+            booleans=[True, False, True, True, False, False, True],
+            answers=[
+                "123:token",
+                "100",
+                "",
+                "tg_bot",
+                "secret",
+                "video",
+                "rt_user",
+                "rt_pass",
+                "",
+                "plex-token",
+                "",
+                "",
+                "sk-test",
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            result = run_interactive(Path(tmp), skip_checks=True, console=console)
+            text = (Path(tmp) / ".env").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertIn("RUTRACKER_USERNAME=rt_user", text)
+        self.assertIn("JACKETT_URL=", text)
+        self.assertIn("PLEX_URL=http://host.docker.internal:32400", text)
+        self.assertIn("MOVIE_DISCOVERY_ENABLED=true", text)
+        self.assertIn("OPENAI_API_KEY=sk-test", text)
+        self.assertIn("VOICE_SEARCH_ENABLED=true", text)
+
+    def test_install_script_removes_current_storage_mount_mode(self) -> None:
+        install_text = Path("install.sh").read_text(encoding="utf-8")
+        compose_text = Path("compose.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("/volume1/video:/storage:rw", compose_text)
+        self.assertIn("/volume1/video:/storage:r[ow]", install_text)
 
 
 if __name__ == "__main__":

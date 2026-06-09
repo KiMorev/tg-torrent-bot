@@ -18,6 +18,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,11 @@ DEFAULT_INSTALL_DIR = "/volume1/docker/plexloader"
 DEFAULT_TIMEZONE = "Europe/Moscow"
 DEFAULT_DS_URL = "https://host.docker.internal:5001"
 DEFAULT_DS_DESTINATION = "video"
+DEFAULT_JACKETT_URL = "http://host.docker.internal:9117"
+DEFAULT_PLEX_URL = "http://host.docker.internal:32400"
 
 SAFE_ENV_RE = re.compile(r"^[A-Za-z0-9_./:@,+-]*$")
+ENV_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 class WizardError(RuntimeError):
@@ -60,6 +64,21 @@ class InstallerConfig:
     timezone: str = DEFAULT_TIMEZONE
     state_dir: str = "/data"
     access_approvals_enabled: bool = True
+    rutracker_username: str = ""
+    rutracker_password: str = ""
+    jackett_url: str = ""
+    jackett_api_key: str = ""
+    jackett_indexers: str = "all"
+    kinopoisk_api_key: str = ""
+    tmdb_api_token: str = ""
+    movie_discovery_enabled: bool = False
+    plex_url: str = ""
+    plex_token: str = ""
+    plex_movie_section: str = ""
+    plex_deeplink_base_url: str = ""
+    openai_api_key: str = ""
+    voice_search_enabled: bool = False
+    gpt_enabled: bool = False
 
     def validate(self) -> None:
         required = {
@@ -74,6 +93,16 @@ class InstallerConfig:
         missing = [name for name, value in required.items() if not str(value).strip()]
         if missing:
             raise WizardError("Не заполнены обязательные поля: " + ", ".join(missing))
+        if bool(self.rutracker_username.strip()) != bool(self.rutracker_password.strip()):
+            raise WizardError("Rutracker: задайте и логин, и пароль, либо оставьте оба пустыми")
+        if bool(self.jackett_url.strip()) != bool(self.jackett_api_key.strip()):
+            raise WizardError("Jackett: задайте и URL, и API key, либо оставьте оба пустыми")
+        if bool(self.plex_url.strip()) != bool(self.plex_token.strip()):
+            raise WizardError("Plex: задайте и URL, и token, либо оставьте оба пустыми")
+        if self.movie_discovery_enabled and not (
+            self.rutracker_username.strip() or self.jackett_url.strip()
+        ):
+            raise WizardError("/new: нужен хотя бы Rutracker или Jackett")
 
 
 class Console:
@@ -96,7 +125,7 @@ class Console:
         print(text, file=self._out, flush=True)
 
     def ask(self, prompt: str, *, default: str = "", secret: bool = False) -> str:
-        suffix = f" [{default}]" if default else ""
+        suffix = " [оставить прежнее]" if secret and default else (f" [{default}]" if default else "")
         full_prompt = f"{prompt}{suffix}: "
         if secret:
             try:
@@ -135,12 +164,49 @@ class Console:
             self.write("Ответьте yes/no.")
 
 
+def env_bool_value(value: str | None, default: bool = False) -> bool:
+    if value is None or not str(value).strip():
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def parse_env_value(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == "'":
+        inner = text[1:-1]
+        return inner.replace("\\'", "'").replace("\\\\", "\\")
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        return text[1:-1]
+    return text
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = ENV_LINE_RE.match(line)
+        if not match:
+            continue
+        values[match.group(1)] = parse_env_value(match.group(2))
+    return values
+
+
 def normalize_ds_url(value: str) -> str:
     url = value.strip().rstrip("/")
     if not url:
         return ""
     if not re.match(r"^https?://", url, flags=re.IGNORECASE):
         url = "https://" + url
+    return url
+
+
+def normalize_service_url(value: str, *, default_scheme: str = "http") -> str:
+    url = value.strip().rstrip("/")
+    if not url:
+        return ""
+    if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+        url = f"{default_scheme}://" + url
     return url
 
 
@@ -233,6 +299,77 @@ def extract_chat_candidates(updates_payload: dict[str, Any]) -> list[ChatCandida
     return candidates
 
 
+def write_hint(
+    console: Console,
+    title: str,
+    *,
+    why: str,
+    where: str,
+    example: str,
+    skip: str,
+) -> None:
+    console.write("")
+    console.write(title)
+    console.write(f"Зачем: {why}")
+    console.write(f"Где взять: {where}")
+    console.write(f"Пример: {example}")
+    console.write(f"Можно пропустить: {skip}")
+
+
+def default_enabled(env: dict[str, str], *keys: str, flag: str = "") -> bool:
+    if flag and flag in env:
+        return env_bool_value(env.get(flag), False)
+    return any(env.get(key, "").strip() for key in keys)
+
+
+def ask_optional_features(console: Console, env: dict[str, str]) -> dict[str, bool]:
+    console.write("Что включить")
+    console.write("Базовый бот, Telegram-доступ и Download Station обязательны.")
+    features = {
+        "rutracker": console.ask_yes_no(
+            "Включить прямой Rutracker-поиск и fallback скачивания?",
+            default=default_enabled(env, "RUTRACKER_USERNAME", "RUTRACKER_PASSWORD"),
+        ),
+        "jackett": console.ask_yes_no(
+            "Включить Jackett для широкого поиска по индексерам?",
+            default=default_enabled(env, "JACKETT_URL", "JACKETT_API_KEY"),
+        ),
+        "plex": console.ask_yes_no(
+            "Включить Plex-проверки дублей и кнопку просмотра?",
+            default=default_enabled(env, "PLEX_URL", "PLEX_TOKEN"),
+        ),
+        "movie_discovery": console.ask_yes_no(
+            "Включить /new — подборку свежих фильмов?",
+            default=default_enabled(env, flag="MOVIE_DISCOVERY_ENABLED"),
+        ),
+        "kinopoisk": console.ask_yes_no(
+            "Включить Кинопоиск API для ссылок и обогащения карточек?",
+            default=default_enabled(env, "KINOPOISK_API_KEY"),
+        ),
+        "tmdb": console.ask_yes_no(
+            "Включить TMDB API для точных эпизодов в /continue?",
+            default=default_enabled(env, "TMDB_API_TOKEN"),
+        ),
+        "openai": console.ask_yes_no(
+            "Включить OpenAI для голосового поиска и GPT-подсказок?",
+            default=default_enabled(env, "OPENAI_API_KEY"),
+        ),
+    }
+    if features["movie_discovery"] and not (features["rutracker"] or features["jackett"]):
+        console.write("/new нужен хотя бы один источник релизов: Rutracker или Jackett.")
+        features["rutracker"] = console.ask_yes_no(
+            "Включить Rutracker как источник для /new?", default=True
+        )
+        if not features["rutracker"]:
+            features["jackett"] = console.ask_yes_no(
+                "Включить Jackett как источник для /new?", default=True
+            )
+        if not (features["rutracker"] or features["jackett"]):
+            console.write("/new отключён: источник релизов не выбран.")
+            features["movie_discovery"] = False
+    return features
+
+
 def format_env_value(value: object) -> str:
     text = str(value)
     if text == "":
@@ -242,7 +379,7 @@ def format_env_value(value: object) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def render_env(config: InstallerConfig) -> str:
+def render_env(config: InstallerConfig, previous_env: dict[str, str] | None = None) -> str:
     config.validate()
     entries: list[tuple[str, object]] = [
         ("BOT_TOKEN", config.bot_token),
@@ -266,30 +403,42 @@ def render_env(config: InstallerConfig) -> str:
         ("PENDING_DOWNLOADS_ENABLED", "true"),
         ("PENDING_DOWNLOADS_INTERVAL_SECONDS", "300"),
         ("PENDING_DOWNLOADS_TTL_HOURS", "24"),
-        ("MOVIE_DISCOVERY_ENABLED", "false"),
-        ("RUTRACKER_USERNAME", ""),
-        ("RUTRACKER_PASSWORD", ""),
-        ("JACKETT_URL", ""),
-        ("JACKETT_API_KEY", ""),
-        ("KINOPOISK_API_KEY", ""),
-        ("PLEX_URL", ""),
-        ("PLEX_TOKEN", ""),
-        ("PLEX_MOVIE_SECTION", ""),
-        ("PLEX_DEEPLINK_BASE_URL", ""),
-        ("OPENAI_API_KEY", ""),
-        ("VOICE_SEARCH_ENABLED", "false"),
-        ("GPT_ENABLED", "false"),
+        ("MOVIE_DISCOVERY_ENABLED", str(config.movie_discovery_enabled).lower()),
+        ("RUTRACKER_USERNAME", config.rutracker_username),
+        ("RUTRACKER_PASSWORD", config.rutracker_password),
+        ("JACKETT_URL", config.jackett_url),
+        ("JACKETT_API_KEY", config.jackett_api_key),
+        ("JACKETT_INDEXERS", config.jackett_indexers or "all"),
+        ("KINOPOISK_API_KEY", config.kinopoisk_api_key),
+        ("TMDB_API_TOKEN", config.tmdb_api_token),
+        ("PLEX_URL", config.plex_url),
+        ("PLEX_TOKEN", config.plex_token),
+        ("PLEX_MOVIE_SECTION", config.plex_movie_section),
+        ("PLEX_DEEPLINK_BASE_URL", config.plex_deeplink_base_url),
+        ("OPENAI_API_KEY", config.openai_api_key),
+        ("VOICE_SEARCH_ENABLED", str(bool(config.openai_api_key and config.voice_search_enabled)).lower()),
+        ("GPT_ENABLED", str(bool(config.openai_api_key and config.gpt_enabled)).lower()),
     ]
     lines = [
         "# Generated by PlexLoader setup wizard.",
-        "# Optional integrations can be enabled later by rerunning the wizard or editing this file.",
+        "# Rerun the wizard to enable integrations without rebuilding the image.",
     ]
     lines.extend(f"{key}={format_env_value(value)}" for key, value in entries)
+    generated_keys = {key for key, _ in entries}
+    preserved = [
+        (key, value)
+        for key, value in (previous_env or {}).items()
+        if key not in generated_keys
+    ]
+    if preserved:
+        lines.append("")
+        lines.append("# Preserved existing values not managed by the wizard.")
+        lines.extend(f"{key}={format_env_value(value)}" for key, value in preserved)
     return "\n".join(lines) + "\n"
 
 
-def write_env_file(path: Path, config: InstallerConfig) -> None:
-    path.write_text(render_env(config), encoding="utf-8", newline="\n")
+def write_env_file(path: Path, config: InstallerConfig, previous_env: dict[str, str] | None = None) -> None:
+    path.write_text(render_env(config, previous_env), encoding="utf-8", newline="\n")
 
 
 def _ssl_context(verify_ssl: bool) -> ssl.SSLContext | None:
@@ -300,16 +449,25 @@ def _read_json_url(
     url: str,
     *,
     data: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
     verify_ssl: bool = True,
     timeout: int = 15,
-) -> dict[str, Any]:
+) -> Any:
     body = urllib.parse.urlencode(data).encode("utf-8") if data is not None else None
-    request = urllib.request.Request(url, data=body, method="POST" if data else "GET")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST" if data else "GET",
+        headers=headers or {},
+    )
     try:
         with urllib.request.urlopen(
             request, timeout=timeout, context=_ssl_context(verify_ssl)
         ) as response:
             raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        kind = "auth" if exc.code in {401, 403} else "http"
+        raise ProbeError(f"HTTP {exc.code}", kind=kind) from exc
     except urllib.error.URLError as exc:
         reason = str(getattr(exc, "reason", exc))
         kind = "ssl" if "CERTIFICATE_VERIFY_FAILED" in reason else "network"
@@ -321,9 +479,36 @@ def _read_json_url(
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ProbeError("Сервис вернул не JSON-ответ", kind="parse") from exc
-    if not isinstance(payload, dict):
-        raise ProbeError("Сервис вернул неожиданный ответ", kind="parse")
     return payload
+
+
+def _read_xml_url(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    verify_ssl: bool = True,
+    timeout: int = 15,
+) -> ET.Element:
+    request = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(
+            request, timeout=timeout, context=_ssl_context(verify_ssl)
+        ) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        kind = "auth" if exc.code in {401, 403} else "http"
+        raise ProbeError(f"HTTP {exc.code}", kind=kind) from exc
+    except urllib.error.URLError as exc:
+        reason = str(getattr(exc, "reason", exc))
+        kind = "ssl" if "CERTIFICATE_VERIFY_FAILED" in reason else "network"
+        raise ProbeError(reason, kind=kind) from exc
+    except ssl.SSLError as exc:
+        raise ProbeError(str(exc), kind="ssl") from exc
+
+    try:
+        return ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ProbeError("Сервис вернул не XML-ответ", kind="parse") from exc
 
 
 def telegram_api(token: str, method: str, params: dict[str, str] | None = None) -> dict[str, Any]:
@@ -332,6 +517,8 @@ def telegram_api(token: str, method: str, params: dict[str, str] | None = None) 
         query = "?" + urllib.parse.urlencode(params)
     url = f"https://api.telegram.org/bot{urllib.parse.quote(token, safe=':')}/{method}{query}"
     payload = _read_json_url(url)
+    if not isinstance(payload, dict):
+        raise ProbeError("Telegram API вернул неожиданный ответ", kind="parse")
     if not payload.get("ok"):
         description = payload.get("description") or "Telegram API вернул ошибку"
         raise ProbeError(str(description), kind="auth")
@@ -346,10 +533,73 @@ def validate_bot_token(token: str) -> str:
     return str(user["username"])
 
 
+def url_with_query(url: str, params: dict[str, str]) -> str:
+    separator = "&" if "?" in url else "?"
+    return url + separator + urllib.parse.urlencode(params)
+
+
+def destination_share_name(destination: str) -> str:
+    value = destination.strip().strip("/")
+    if not value:
+        return ""
+    parts = [part for part in value.split("/") if part]
+    if len(parts) >= 2 and re.fullmatch(r"volume\d+", parts[0], flags=re.IGNORECASE):
+        return parts[1]
+    return parts[0]
+
+
+def probe_download_destination(
+    base: str,
+    sid: str,
+    destination: str,
+    *,
+    verify_ssl: bool,
+) -> None:
+    share_name = destination_share_name(destination)
+    if not share_name:
+        raise ProbeError("Папка назначения Download Station пустая", kind="destination")
+    try:
+        payload = _read_json_url(
+            url_with_query(
+                f"{base}/webapi/entry.cgi",
+                {
+                    "api": "SYNO.FileStation.List",
+                    "version": "2",
+                    "method": "list_share",
+                    "_sid": sid,
+                },
+            ),
+            verify_ssl=verify_ssl,
+            timeout=10,
+        )
+    except ProbeError as exc:
+        if exc.kind in {"auth", "http"}:
+            return
+        raise
+    if not isinstance(payload, dict):
+        return
+    if not payload.get("success"):
+        return
+    shares = (payload.get("data") or {}).get("shares")
+    if not isinstance(shares, list):
+        return
+    names = {
+        str(share.get("name") or "").strip()
+        for share in shares
+        if isinstance(share, dict)
+    }
+    if names and share_name not in names:
+        raise ProbeError(
+            f"Папка назначения '{destination}' не найдена среди shared folders DSM",
+            kind="destination",
+        )
+
+
 def probe_download_station(
     ds_url: str,
     account: str,
     password: str,
+    destination: str,
     *,
     verify_ssl: bool,
 ) -> None:
@@ -367,6 +617,8 @@ def probe_download_station(
         },
         verify_ssl=verify_ssl,
     )
+    if not isinstance(login_payload, dict):
+        raise ProbeError("DSM вернул неожиданный ответ", kind="parse")
     if not login_payload.get("success"):
         code = (login_payload.get("error") or {}).get("code", "unknown")
         raise ProbeError(f"DSM не принял логин или пароль (код {code})", kind="auth")
@@ -386,12 +638,15 @@ def probe_download_station(
             })
         )
         tasks_payload = _read_json_url(tasks_url, verify_ssl=verify_ssl)
+        if not isinstance(tasks_payload, dict):
+            raise ProbeError("Download Station вернул неожиданный ответ", kind="parse")
         if not tasks_payload.get("success"):
             code = (tasks_payload.get("error") or {}).get("code", "unknown")
             raise ProbeError(
                 f"Логин работает, но Download Station недоступен этому пользователю (код {code})",
                 kind="auth",
             )
+        probe_download_destination(base, sid, destination, verify_ssl=verify_ssl)
     finally:
         logout_url = (
             f"{base}/webapi/auth.cgi?"
@@ -413,10 +668,11 @@ def resolve_download_station_ssl(
     ds_url: str,
     account: str,
     password: str,
+    destination: str,
     console: Console,
 ) -> bool:
     try:
-        probe_download_station(ds_url, account, password, verify_ssl=True)
+        probe_download_station(ds_url, account, password, destination, verify_ssl=True)
         console.write("Download Station доступен, SSL-сертификат принят.")
         return True
     except ProbeError as exc:
@@ -424,9 +680,71 @@ def resolve_download_station_ssl(
             raise
         console.write("DSM использует сертификат, которому эта система не доверяет.")
         console.write("Пробую безопасный для домашней сети fallback: DS_VERIFY_SSL=false.")
-        probe_download_station(ds_url, account, password, verify_ssl=False)
+        probe_download_station(ds_url, account, password, destination, verify_ssl=False)
         console.write("Download Station доступен без проверки SSL.")
         return False
+
+
+def probe_jackett(url: str, api_key: str) -> list[dict[str, str]]:
+    payload = _read_json_url(
+        url_with_query(
+            f"{normalize_service_url(url)}/api/v2.0/indexers",
+            {"apikey": api_key, "configured": "true"},
+        ),
+        timeout=10,
+    )
+    if not isinstance(payload, list):
+        raise ProbeError("Jackett вернул неожиданный ответ", kind="parse")
+    indexers: list[dict[str, str]] = []
+    for item in payload:
+        if not isinstance(item, dict) or not item.get("configured"):
+            continue
+        indexer_id = str(item.get("id") or "").strip()
+        name = str(item.get("name") or indexer_id).strip()
+        if indexer_id:
+            indexers.append({"id": indexer_id, "name": name})
+    return indexers
+
+
+def probe_plex(url: str, token: str) -> list[dict[str, str]]:
+    base = normalize_service_url(url)
+    headers = {"X-Plex-Token": token}
+    _read_xml_url(f"{base}/identity", headers=headers, timeout=10)
+    root = _read_xml_url(f"{base}/library/sections", headers=headers, timeout=10)
+    sections: list[dict[str, str]] = []
+    for directory in root.findall("Directory"):
+        section_type = str(directory.get("type") or "").strip()
+        if section_type not in {"movie", "show"}:
+            continue
+        key = str(directory.get("key") or "").strip()
+        title = str(directory.get("title") or key).strip()
+        if key:
+            sections.append({"key": key, "title": title, "type": section_type})
+    return sections
+
+
+def probe_kinopoisk(api_key: str) -> None:
+    _read_json_url(
+        "https://kinopoiskapiunofficial.tech/api/v2.2/films/301",
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        timeout=10,
+    )
+
+
+def probe_tmdb(api_token: str) -> None:
+    _read_json_url(
+        "https://api.themoviedb.org/3/configuration",
+        headers={"Accept": "application/json", "Authorization": f"Bearer {api_token}"},
+        timeout=10,
+    )
+
+
+def probe_openai(api_key: str) -> None:
+    _read_json_url(
+        "https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=10,
+    )
 
 
 def choose_chat_id(token: str, bot_username: str, console: Console) -> str:
@@ -465,24 +783,206 @@ def choose_chat_id(token: str, bot_username: str, console: Console) -> str:
         console.write("Введите номер из списка.")
 
 
-def run_interactive(install_dir: Path, *, skip_checks: bool = False) -> int:
-    console = Console()
+def ask_optional_key(
+    console: Console,
+    prompt: str,
+    *,
+    default: str = "",
+    secret: bool = True,
+) -> str:
+    return console.ask_required(prompt, default=default, secret=secret).strip()
+
+
+def keep_or_retry(console: Console, service: str, exc: ProbeError) -> str:
+    console.write(f"{service} не прошёл проверку: {exc}")
+    if console.ask_yes_no("Сохранить настройки всё равно?", default=False):
+        return "keep"
+    if console.ask_yes_no("Ввести настройки заново?", default=True):
+        return "retry"
+    return "disable"
+
+
+def configure_rutracker(console: Console, env: dict[str, str]) -> tuple[str, str]:
+    write_hint(
+        console,
+        "Rutracker",
+        why="прямой поиск, скачивание .torrent и fallback, если Jackett не отдал файл.",
+        where="логин и пароль обычного аккаунта rutracker.org.",
+        example="RUTRACKER_USERNAME=my_login",
+        skip="да, но прямой Rutracker-поиск будет недоступен.",
+    )
+    username = console.ask_required("Rutracker login", default=env.get("RUTRACKER_USERNAME", ""))
+    password = console.ask_required(
+        "Rutracker password",
+        default=env.get("RUTRACKER_PASSWORD", ""),
+        secret=True,
+    )
+    console.write("Rutracker сохранён. Авторизацию бот проверит при первом запросе и в /admin.")
+    return username, password
+
+
+def configure_jackett(
+    console: Console,
+    env: dict[str, str],
+    *,
+    skip_checks: bool,
+) -> tuple[str, str, str]:
+    write_hint(
+        console,
+        "Jackett",
+        why="широкий поиск по вашим индексерам и fallback, когда один трекер недоступен.",
+        where="Jackett → Dashboard: URL в адресной строке, API Key вверху страницы.",
+        example="JACKETT_URL=http://192.168.1.10:9117",
+        skip="да, если хотите использовать только Rutracker или magnet/torrent вручную.",
+    )
+    while True:
+        url = normalize_service_url(
+            console.ask_required("Jackett URL", default=env.get("JACKETT_URL", DEFAULT_JACKETT_URL))
+        )
+        api_key = ask_optional_key(console, "Jackett API key", default=env.get("JACKETT_API_KEY", ""))
+        indexers_default = env.get("JACKETT_INDEXERS", "all") or "all"
+        if skip_checks:
+            indexers = console.ask_required("Jackett indexers", default=indexers_default)
+            return url, api_key, indexers
+        try:
+            indexers_list = probe_jackett(url, api_key)
+            console.write(f"Jackett подключен, настроено индексеров: {len(indexers_list)}.")
+            if indexers_list:
+                preview = ", ".join(i["id"] for i in indexers_list[:8])
+                if len(indexers_list) > 8:
+                    preview += f", +{len(indexers_list) - 8}"
+                console.write(f"Доступные indexer id: {preview}")
+            indexers = console.ask_required("Jackett indexers", default=indexers_default)
+            return url, api_key, indexers
+        except ProbeError as exc:
+            action = keep_or_retry(console, "Jackett", exc)
+            if action == "keep":
+                indexers = console.ask_required("Jackett indexers", default=indexers_default)
+                return url, api_key, indexers
+            if action == "disable":
+                return "", "", "all"
+
+
+def configure_plex(
+    console: Console,
+    env: dict[str, str],
+    *,
+    skip_checks: bool,
+) -> tuple[str, str, str, str]:
+    write_hint(
+        console,
+        "Plex",
+        why="проверка дублей, ожидание появления файла в библиотеке и кнопка «Смотреть в Plex».",
+        where="URL — адрес Plex Media Server; token — Plex Web → Get Info → View XML → X-Plex-Token в URL.",
+        example="PLEX_URL=http://192.168.1.10:32400",
+        skip="да, бот продолжит скачивать, но без Plex-проверок и кнопки просмотра.",
+    )
+    while True:
+        url = normalize_service_url(
+            console.ask_required("Plex URL", default=env.get("PLEX_URL", DEFAULT_PLEX_URL))
+        )
+        token = ask_optional_key(console, "Plex token", default=env.get("PLEX_TOKEN", ""))
+        deeplink = console.ask(
+            "PLEX_DEEPLINK_BASE_URL для мобильного redirect",
+            default=env.get("PLEX_DEEPLINK_BASE_URL", ""),
+        )
+        if skip_checks:
+            section = console.ask("PLEX_MOVIE_SECTION", default=env.get("PLEX_MOVIE_SECTION", ""))
+            return url, token, section, deeplink
+        try:
+            sections = probe_plex(url, token)
+            movie_sections = [s for s in sections if s["type"] == "movie"]
+            if not movie_sections:
+                console.write("Plex подключен, но movie-секция не найдена. Оставляю автоопределение пустым.")
+                return url, token, "", deeplink
+            if len(movie_sections) == 1:
+                section = movie_sections[0]
+                console.write(f"Plex movie-секция найдена: {section['title']} ({section['key']}).")
+                return url, token, section["key"], deeplink
+            console.write("Найдено несколько movie-секций:")
+            for idx, section in enumerate(movie_sections, start=1):
+                console.write(f"{idx}. {section['title']} ({section['key']})")
+            while True:
+                answer = console.ask("Выберите номер movie-секции", default="1")
+                try:
+                    index = int(answer)
+                except ValueError:
+                    index = 0
+                if 1 <= index <= len(movie_sections):
+                    return url, token, movie_sections[index - 1]["key"], deeplink
+                console.write("Введите номер из списка.")
+        except ProbeError as exc:
+            action = keep_or_retry(console, "Plex", exc)
+            if action == "keep":
+                section = console.ask("PLEX_MOVIE_SECTION", default=env.get("PLEX_MOVIE_SECTION", ""))
+                return url, token, section, deeplink
+            if action == "disable":
+                return "", "", "", ""
+
+
+def configure_simple_api_key(
+    console: Console,
+    env: dict[str, str],
+    *,
+    name: str,
+    env_key: str,
+    why: str,
+    where: str,
+    example: str,
+    skip: str,
+    probe,
+    skip_checks: bool,
+) -> str:
+    write_hint(console, name, why=why, where=where, example=example, skip=skip)
+    while True:
+        value = ask_optional_key(console, env_key, default=env.get(env_key, ""))
+        if skip_checks:
+            return value
+        try:
+            probe(value)
+            console.write(f"{name}: ключ принят.")
+            return value
+        except ProbeError as exc:
+            action = keep_or_retry(console, name, exc)
+            if action == "keep":
+                return value
+            if action == "disable":
+                return ""
+
+
+def run_interactive(
+    install_dir: Path,
+    *,
+    skip_checks: bool = False,
+    console: Console | None = None,
+) -> int:
+    own_console = console is None
+    console = console or Console()
     try:
         console.write("PlexLoader setup wizard")
-        console.write("Первая версия настраивает ядро: Telegram + Synology Download Station.")
-        console.write("Rutracker, Jackett, Plex, /new и OpenAI можно будет включить следующим шагом.")
+        console.write("Сначала выберем возможности, потом мастер спросит только нужные данные.")
         console.write("")
 
         env_path = install_dir / ".env"
-        if env_path.exists() and not console.ask_yes_no(
-            f"{env_path} уже существует. Перезаписать?", default=False
-        ):
-            console.write("Оставляю существующий .env без изменений.")
-            return 0
+        previous_env = read_env_file(env_path)
+        if previous_env:
+            console.write(f"Найден существующий .env: {env_path}")
+            if not console.ask_yes_no("Запустить мастер обновления настроек?", default=True):
+                console.write("Оставляю существующий .env без изменений.")
+                return 0
+
+        features = ask_optional_features(console, previous_env)
 
         console.write("1. Telegram")
-        console.write("Откройте @BotFather, создайте бота командой /newbot и скопируйте BOT_TOKEN.")
-        bot_token = console.ask_required("Вставьте BOT_TOKEN")
+        write_hint(
+            console,
+            "Telegram BOT_TOKEN",
+            why="бот получает сообщения и отправляет ответы в Telegram.",
+            where="@BotFather → /newbot → скопируйте token после создания бота.",
+            example="123456789:AAExampleToken",
+            skip="нет, без token бот не запустится.",
+        )
+        bot_token = console.ask_required("Вставьте BOT_TOKEN", default=previous_env.get("BOT_TOKEN", ""), secret=True)
         if skip_checks:
             bot_username = "your_bot"
         else:
@@ -495,24 +995,36 @@ def run_interactive(install_dir: Path, *, skip_checks: bool = False) -> int:
                     console.write(f"Telegram token не прошёл проверку: {exc}")
                     if not console.ask_yes_no("Попробовать ввести token ещё раз?", default=True):
                         return 1
-                    bot_token = console.ask_required("Вставьте BOT_TOKEN")
+                    bot_token = console.ask_required("Вставьте BOT_TOKEN", secret=True)
 
         chat_id = (
-            console.ask_required("Введите ваш Telegram chat_id")
+            console.ask_required(
+                "Введите ваш Telegram chat_id",
+                default=previous_env.get("ALLOWED_CHAT_IDS", ""),
+            )
             if skip_checks
             else choose_chat_id(bot_token, bot_username, console)
         )
         if not parse_chat_ids(chat_id):
             raise WizardError("chat_id должен быть числом или списком чисел через запятую")
+        admin_chat_ids = previous_env.get("ADMIN_CHAT_IDS", "").strip() or chat_id
 
         console.write("")
         console.write("2. Download Station")
-        console.write("Нужен DSM-пользователь с доступом к Download Station и папке загрузки.")
-        ds_url = normalize_ds_url(console.ask_required("DSM URL", default=DEFAULT_DS_URL))
-        ds_account = console.ask_required("DSM account")
-        ds_password = console.ask_required("DSM password", secret=True)
+        write_hint(
+            console,
+            "DSM / Download Station",
+            why="бот добавляет magnet и .torrent в Synology Download Station.",
+            where="DSM URL — адрес NAS; account/password — DSM-пользователь с правами Download Station.",
+            example="DS_DESTINATION=video",
+            skip="нет, это базовая функция PlexLoader.",
+        )
+        ds_url = normalize_ds_url(console.ask_required("DSM URL", default=previous_env.get("DS_URL", DEFAULT_DS_URL)))
+        ds_account = console.ask_required("DSM account", default=previous_env.get("DS_ACCOUNT", ""))
+        ds_password = console.ask_required("DSM password", default=previous_env.get("DS_PASSWORD", ""), secret=True)
         ds_destination = console.ask_required(
-            "Папка назначения Download Station", default=DEFAULT_DS_DESTINATION
+            "Папка назначения Download Station",
+            default=previous_env.get("DS_DESTINATION", DEFAULT_DS_DESTINATION),
         )
 
         ds_verify_ssl = False
@@ -522,7 +1034,7 @@ def run_interactive(install_dir: Path, *, skip_checks: bool = False) -> int:
             while True:
                 try:
                     ds_verify_ssl = resolve_download_station_ssl(
-                        ds_url, ds_account, ds_password, console
+                        ds_url, ds_account, ds_password, ds_destination, console
                     )
                     break
                 except ProbeError as exc:
@@ -540,24 +1052,107 @@ def run_interactive(install_dir: Path, *, skip_checks: bool = False) -> int:
                     )
 
         timezone = detect_timezone()
+        rutracker_username = rutracker_password = ""
+        if features["rutracker"]:
+            rutracker_username, rutracker_password = configure_rutracker(console, previous_env)
+
+        jackett_url = jackett_api_key = ""
+        jackett_indexers = previous_env.get("JACKETT_INDEXERS", "all") or "all"
+        if features["jackett"]:
+            jackett_url, jackett_api_key, jackett_indexers = configure_jackett(
+                console, previous_env, skip_checks=skip_checks
+            )
+
+        plex_url = plex_token = plex_movie_section = plex_deeplink_base_url = ""
+        if features["plex"]:
+            plex_url, plex_token, plex_movie_section, plex_deeplink_base_url = configure_plex(
+                console, previous_env, skip_checks=skip_checks
+            )
+
+        kinopoisk_api_key = ""
+        if features["kinopoisk"]:
+            kinopoisk_api_key = configure_simple_api_key(
+                console,
+                previous_env,
+                name="Кинопоиск API",
+                env_key="KINOPOISK_API_KEY",
+                why="поиск по ссылкам Кинопоиска и обогащение карточек /new.",
+                where="kinopoiskapiunofficial.tech → личный кабинет → API key.",
+                example="KINOPOISK_API_KEY=01234567-89ab-cdef-0123-456789abcdef",
+                skip="да, ссылки KP и часть обогащения будут недоступны.",
+                probe=probe_kinopoisk,
+                skip_checks=skip_checks,
+            )
+
+        tmdb_api_token = ""
+        if features["tmdb"]:
+            tmdb_api_token = configure_simple_api_key(
+                console,
+                previous_env,
+                name="TMDB API",
+                env_key="TMDB_API_TOKEN",
+                why="точное число эпизодов сезона для /continue.",
+                where="themoviedb.org → Settings → API → API Read Access Token.",
+                example="TMDB_API_TOKEN=eyJhbGciOi...",
+                skip="да, /continue будет работать менее уверенно.",
+                probe=probe_tmdb,
+                skip_checks=skip_checks,
+            )
+
+        openai_api_key = ""
+        if features["openai"]:
+            openai_api_key = configure_simple_api_key(
+                console,
+                previous_env,
+                name="OpenAI",
+                env_key="OPENAI_API_KEY",
+                why="голосовой поиск, did-you-mean, пояснения и GPT-подсказки.",
+                where="platform.openai.com → API keys; лимит расходов — Settings → Limits.",
+                example="OPENAI_API_KEY=sk-...",
+                skip="да, voice/GPT функции будут выключены.",
+                probe=probe_openai,
+                skip_checks=skip_checks,
+            )
+
+        movie_discovery_enabled = features["movie_discovery"]
+        if movie_discovery_enabled and not (rutracker_username or jackett_url):
+            console.write("/new отключён: после проверки не осталось ни Rutracker, ни Jackett.")
+            movie_discovery_enabled = False
+
         config = InstallerConfig(
             bot_token=bot_token,
             allowed_chat_ids=chat_id,
-            admin_chat_ids=chat_id,
+            admin_chat_ids=admin_chat_ids,
             ds_url=ds_url,
             ds_account=ds_account,
             ds_password=ds_password,
             ds_destination=ds_destination,
             ds_verify_ssl=ds_verify_ssl,
             timezone=timezone,
+            rutracker_username=rutracker_username,
+            rutracker_password=rutracker_password,
+            jackett_url=jackett_url,
+            jackett_api_key=jackett_api_key,
+            jackett_indexers=jackett_indexers,
+            kinopoisk_api_key=kinopoisk_api_key,
+            tmdb_api_token=tmdb_api_token,
+            movie_discovery_enabled=movie_discovery_enabled,
+            plex_url=plex_url,
+            plex_token=plex_token,
+            plex_movie_section=plex_movie_section,
+            plex_deeplink_base_url=plex_deeplink_base_url,
+            openai_api_key=openai_api_key,
+            voice_search_enabled=bool(openai_api_key),
+            gpt_enabled=bool(openai_api_key),
         )
-        write_env_file(env_path, config)
+        write_env_file(env_path, config, previous_env)
         console.write("")
         console.write(f".env создан: {env_path}")
-        console.write("Базовая конфигурация готова.")
+        console.write("Конфигурация готова.")
         return 0
     finally:
-        console.close()
+        if own_console:
+            console.close()
 
 
 def main(argv: list[str] | None = None) -> int:

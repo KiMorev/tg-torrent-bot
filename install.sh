@@ -105,7 +105,7 @@ download_file "$RAW_URL/scripts/setup_wizard.py" "$INSTALL_DIR/scripts/setup_wiz
 
 if [ ! -d /volume1/video ]; then
   say "Медиапапка /volume1/video не найдена — отключаю необязательный /storage mount."
-  grep -v '^[[:space:]]*- /volume1/video:/storage:ro[[:space:]]*$' \
+  grep -v '^[[:space:]]*- /volume1/video:/storage:r[ow][[:space:]]*$' \
     "$INSTALL_DIR/compose.yaml" > "$INSTALL_DIR/compose.yaml.tmp"
   mv "$INSTALL_DIR/compose.yaml.tmp" "$INSTALL_DIR/compose.yaml"
 fi
