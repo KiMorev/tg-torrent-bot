@@ -532,7 +532,7 @@ https://app.plex.tv/desktop/#!/server/{machineId}/details?key=/library/metadata/
 PLEX_DEEPLINK_BASE_URL=https://nas.example.com/plex.html
 ```
 
-Готовый файл лежит в [`web/plex.html`](web/plex.html). Если открыть его с параметрами `key` и `server`, он попробует открыть нативное приложение Plex и оставит fallback в Plex Web. Если открыть без параметров, он покажет служебный экран и ссылку на [`web/index.html`](web/index.html) — компактную страницу установки PlexLoader для новичка.
+Готовый файл лежит в [`web/plex.html`](web/plex.html). Если открыть его с параметрами `key` и `server`, он попробует открыть нативное приложение Plex и оставит fallback в Plex Web. Если открыть без параметров, он покажет экран проверки redirect и кнопку Plex Web.
 
 Важно: открытие самого приложения через `plex://` работает только через промежуточную HTTPS-страницу. Переход точно в нужную карточку зависит от версии Plex-приложения, авторизации и доступа к серверу; поэтому fallback в Plex Web оставлен намеренно.
 

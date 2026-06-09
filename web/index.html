@@ -3,12 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PlexLoader - установка</title>
+  <title>PlexLoader - старт</title>
   <style>
     :root {
       color-scheme: light dark;
       --bg: #f7f8fb;
-      --panel: #ffffff;
       --text: #17202a;
       --muted: #5b6675;
       --line: #dfe4ec;
@@ -21,7 +20,6 @@
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #111418;
-        --panel: #181d23;
         --text: #f3f6fa;
         --muted: #b7c0ca;
         --line: #303842;
@@ -44,31 +42,25 @@
     }
 
     main {
-      width: min(960px, calc(100% - 32px));
+      width: min(760px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 40px 0 56px;
+      padding: 56px 0;
     }
 
     header {
-      padding: 28px 0 20px;
+      padding-bottom: 28px;
     }
 
     h1 {
       margin: 0 0 12px;
-      font-size: clamp(34px, 6vw, 58px);
+      font-size: clamp(38px, 8vw, 64px);
       line-height: 1;
       letter-spacing: 0;
     }
 
     h2 {
-      margin: 0 0 14px;
+      margin: 0 0 12px;
       font-size: 24px;
-      letter-spacing: 0;
-    }
-
-    h3 {
-      margin: 0 0 10px;
-      font-size: 18px;
       letter-spacing: 0;
     }
 
@@ -83,7 +75,7 @@
     }
 
     .lead {
-      max-width: 760px;
+      max-width: 680px;
       color: var(--muted);
       font-size: 19px;
     }
@@ -102,7 +94,6 @@
       padding: 10px 14px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--panel);
       color: var(--text);
       font-weight: 650;
       text-decoration: none;
@@ -114,36 +105,12 @@
       color: #fff;
     }
 
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-      margin: 24px 0 18px;
+    section {
+      padding: 26px 0;
+      border-top: 1px solid var(--line);
     }
 
-    .two {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 14px;
-    }
-
-    .card,
-    .section {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-    }
-
-    .card {
-      padding: 18px;
-    }
-
-    .section {
-      margin-top: 18px;
-      padding: 24px;
-    }
-
-    .tag {
+    .eyebrow {
       display: inline-block;
       margin-bottom: 10px;
       padding: 3px 8px;
@@ -154,19 +121,9 @@
       font-weight: 700;
     }
 
-    ul,
-    ol {
-      margin: 0;
-      padding-left: 22px;
-    }
-
-    li + li {
-      margin-top: 7px;
-    }
-
     pre {
       overflow-x: auto;
-      margin: 12px 0 0;
+      margin: 16px 0 0;
       padding: 16px;
       border-radius: 8px;
       background: var(--code);
@@ -180,64 +137,33 @@
     }
 
     .note {
-      margin-top: 14px;
       color: var(--muted);
       font-size: 14px;
     }
 
-    .steps {
-      counter-reset: step;
-      list-style: none;
-      padding-left: 0;
-    }
-
-    .steps > li {
-      counter-increment: step;
-      position: relative;
-      padding-left: 40px;
-    }
-
-    .steps > li::before {
-      content: counter(step);
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 26px;
-      height: 26px;
-      border-radius: 50%;
-      background: var(--accent-soft);
-      color: var(--accent);
+    .split {
       display: grid;
-      place-items: center;
-      font-weight: 800;
-      font-size: 14px;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
     }
 
-    .kbd {
-      display: inline-block;
-      padding: 1px 6px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--bg);
-      font-size: 0.92em;
+    ul {
+      margin: 0;
+      padding-left: 20px;
     }
 
-    @media (max-width: 780px) {
+    li + li {
+      margin-top: 7px;
+    }
+
+    @media (max-width: 640px) {
       main {
-        width: min(100% - 24px, 960px);
-        padding-top: 18px;
+        width: min(100% - 24px, 760px);
+        padding: 32px 0;
       }
 
-      .grid {
+      .split {
         grid-template-columns: 1fr;
-      }
-
-      .two {
-        grid-template-columns: 1fr;
-      }
-
-      .section {
-        padding: 18px;
       }
     }
   </style>
@@ -246,159 +172,42 @@
   <main>
     <header>
       <h1>PlexLoader</h1>
-      <p class="lead">Telegram-бот для домашнего медиасервера на Synology + Plex: ищет раздачи, добавляет их в Download Station, следит за загрузкой и сообщает, когда контент появился в Plex.</p>
+      <p class="lead">Telegram-бот для домашнего медиасервера на Synology + Plex: ищет раздачи, добавляет их в Download Station и сообщает, когда контент появился в Plex.</p>
       <div class="actions">
-        <a class="button primary" href="#start">Начать установку</a>
-        <a class="button" href="#after">Подключить интеграции</a>
-        <a class="button" href="https://github.com/KiMorev/tg-torrent-bot">GitHub</a>
-        <a class="button" href="plex.html">Проверить Plex redirect</a>
+        <a class="button primary" href="https://github.com/KiMorev/tg-torrent-bot#readme">README на GitHub</a>
+        <a class="button" href="https://github.com/KiMorev/tg-torrent-bot">Репозиторий</a>
       </div>
     </header>
 
-    <section class="grid" aria-label="Главные возможности">
-      <article class="card">
-        <span class="tag">Поиск</span>
-        <p>Пишите название фильма или сериала, отправляйте magnet, torrent-файл, ссылку Кинопоиска или голосовое сообщение.</p>
-      </article>
-      <article class="card">
-        <span class="tag">Plex</span>
-        <p>Бот проверяет дубли, ждёт появления контента в библиотеке и даёт кнопку открытия в Plex.</p>
-      </article>
-      <article class="card">
-        <span class="tag">Сериалы</span>
-        <p>Можно следить за новыми сериями, ждать финал сезона или собрать план скачивания недостающих сезонов.</p>
-      </article>
-    </section>
-
-    <section class="section" id="start">
-      <h2>Перед установкой</h2>
-      <p>PlexLoader ставится в Docker на Synology. Базовый мастер настраивает Telegram-бота и Synology Download Station. Rutracker, Jackett, Plex, <code>/new</code> и OpenAI подключаются после первого запуска через <code>.env</code>.</p>
-      <div class="two">
-        <article>
-          <h3>На Synology</h3>
-          <ol>
-            <li>Откройте DSM → <span class="kbd">Package Center</span> и установите <span class="kbd">Container Manager</span>.</li>
-            <li>Убедитесь, что установлен и запущен <span class="kbd">Download Station</span>.</li>
-            <li>Включите SSH: DSM → <span class="kbd">Панель управления</span> → <span class="kbd">Терминал и SNMP</span> → <span class="kbd">Включить SSH</span>.</li>
-          </ol>
-        </article>
-        <article>
-          <h3>Доступы</h3>
-          <ol>
-            <li>Создайте Telegram-бота в <a href="https://t.me/BotFather">@BotFather</a>.</li>
-            <li>Подготовьте DSM-пользователя для PlexLoader, например <code>tg_bot_ds</code>.</li>
-            <li>Дайте этому пользователю доступ к Download Station и папке загрузки, например <code>video</code>.</li>
-          </ol>
-        </article>
-      </div>
-    </section>
-
-    <section class="section">
-      <h2>1. Получить Telegram token</h2>
-      <ol class="steps">
-        <li>Откройте <a href="https://t.me/BotFather">@BotFather</a> в Telegram.</li>
-        <li>Отправьте команду <code>/newbot</code>.</li>
-        <li>Введите имя бота, например <code>PlexLoader Home</code>.</li>
-        <li>Введите username, который заканчивается на <code>bot</code>, например <code>my_plexloader_bot</code>.</li>
-        <li>Скопируйте token вида <code>123456789:AA...</code>. Его попросит мастер установки.</li>
-      </ol>
-      <p class="note">Token нельзя публиковать. Если token утёк, в BotFather используйте <code>/revoke</code>.</p>
-    </section>
-
-    <section class="section">
-      <h2>2. Подключиться к NAS</h2>
-      <p>На компьютере откройте терминал и подключитесь к Synology по SSH:</p>
-      <pre><code>ssh your_user@192.168.1.10</code></pre>
-      <p class="note">Замените <code>your_user</code> и IP-адрес на свои. Пользователь должен иметь право запускать Docker.</p>
-    </section>
-
-    <section class="section" id="install">
-      <h2>3. Запустить установщик</h2>
-      <p>В SSH-сессии выполните:</p>
+    <section>
+      <span class="eyebrow">Установка</span>
+      <h2>Быстрый старт</h2>
+      <p>Запустите установщик на Synology по SSH. Полная инструкция с настройкой интеграций, переменными окружения и диагностикой находится в README.</p>
       <pre><code>curl -fsSL https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code></pre>
-      <p>Если на NAS нет <code>curl</code>, используйте:</p>
-      <pre><code>wget -qO- https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.sh | sh</code></pre>
-      <p class="note">Установщик создаст папку <code>/volume1/docker/plexloader</code>, скачает <code>compose.yaml</code> и мастер настройки, создаст <code>.env</code>, запустит контейнер и покажет логи при ошибке.</p>
+      <p class="note">Если на NAS нет <code>curl</code>, в README есть вариант с <code>wget</code>.</p>
     </section>
 
-    <section class="section">
-      <h2>4. Что спросит мастер</h2>
-      <ol class="steps">
-        <li><strong>BOT_TOKEN.</strong> Вставьте token из BotFather.</li>
-        <li><strong>Telegram chat_id.</strong> Мастер попросит написать <code>/start</code> вашему боту и попробует сам найти chat_id. Ручной ввод нужен только если Telegram не отдаст update.</li>
-        <li><strong>DSM URL.</strong> Обычно можно оставить <code>https://host.docker.internal:5001</code>. Это адрес DSM из контейнера.</li>
-        <li><strong>DSM account/password.</strong> Введите пользователя Synology, которого подготовили для PlexLoader.</li>
-        <li><strong>Папка назначения.</strong> Обычно <code>video</code> или другая папка, настроенная в Download Station.</li>
-      </ol>
-      <p class="note">Если DSM использует самоподписанный сертификат, мастер сам попробует безопасный fallback <code>DS_VERIFY_SSL=false</code>. Если Download Station не проходит проверку, мастер покажет причину и предложит ввести данные заново.</p>
-    </section>
-
-    <section class="section">
-      <h2>5. Проверить запуск</h2>
-      <p>После завершения установки откройте своего Telegram-бота:</p>
-      <ul>
-        <li><code>/ping</code> должен ответить <code>pong</code>.</li>
-        <li><code>/status</code> должен показать задачи Download Station.</li>
-        <li><code>/admin</code> должен открыть панель диагностики.</li>
-        <li><code>/help</code> покажет доступные функции с учётом включённых интеграций.</li>
-      </ul>
-      <p>Если бот не отвечает, посмотрите логи на NAS:</p>
-      <pre><code>cd /volume1/docker/plexloader
-docker compose logs --tail=100 tg_torrent_drop</code></pre>
-    </section>
-
-    <section class="section" id="after">
-      <h2>Что подключить после базовой установки</h2>
-      <p>Откройте файл <code>/volume1/docker/plexloader/.env</code> и добавьте только те интеграции, которые нужны. После изменения <code>.env</code> примените настройки командой <code>docker compose up -d</code> из папки установки.</p>
-      <div class="two">
-        <article>
-          <h3>Rutracker</h3>
-          <p>Нужны логин и пароль аккаунта Rutracker.</p>
-          <pre><code>RUTRACKER_USERNAME=login
-RUTRACKER_PASSWORD=password</code></pre>
-        </article>
-        <article>
-          <h3>Jackett</h3>
-          <p>В Jackett откройте главную страницу и скопируйте API Key. URL обычно выглядит как <code>http://host:9117</code>.</p>
-          <pre><code>JACKETT_URL=http://192.168.1.10:9117
-JACKETT_API_KEY=replace_me</code></pre>
-        </article>
-        <article>
-          <h3>Plex</h3>
-          <p>Укажите URL Plex Media Server и token. Без Plex бот всё равно скачивает, но не проверяет дубли и не присылает кнопку просмотра.</p>
-          <pre><code>PLEX_URL=http://192.168.1.10:32400
-PLEX_TOKEN=replace_me</code></pre>
-        </article>
-        <article>
-          <h3>OpenAI</h3>
-          <p>Нужен API key из личного кабинета OpenAI. Он включает голосовой поиск и GPT-подсказки.</p>
-          <pre><code>OPENAI_API_KEY=sk-...</code></pre>
-        </article>
+    <section>
+      <h2>Что понадобится</h2>
+      <div class="split">
+        <ul>
+          <li>Telegram-бот из <a href="https://t.me/BotFather">@BotFather</a></li>
+          <li>Synology Download Station</li>
+          <li>DSM-пользователь для PlexLoader</li>
+        </ul>
+        <ul>
+          <li>Опционально: Rutracker или Jackett</li>
+          <li>Опционально: Plex Media Server</li>
+          <li>Опционально: OpenAI API key</li>
+        </ul>
       </div>
-      <p class="note">Подробный список переменных и сценариев — в <a href="https://github.com/KiMorev/tg-torrent-bot#readme">README на GitHub</a>.</p>
     </section>
 
-    <section class="section">
-      <h2>Plex redirect для телефона</h2>
-      <p>Файл <code>plex.html</code> нужен для кнопки <code>Смотреть в Plex</code>. Если бот откроет его с параметрами <code>key</code> и <code>server</code>, страница попробует открыть приложение Plex и оставит fallback в Plex Web.</p>
-      <p>Если сайт <code>plex.example.com</code> уже смотрит в папку <code>/web/plex-redirect</code>, положите файлы так:</p>
-      <pre><code>/web/plex-redirect/plex.html
-/web/plex-redirect/index.html</code></pre>
-      <p>В <code>.env</code> укажите базовый адрес без параметров:</p>
-      <pre><code>PLEX_DEEPLINK_BASE_URL=https://plex.example.com/plex.html</code></pre>
-      <p class="note">Параметры <code>key</code> и <code>server</code> бот добавляет сам, когда Plex нашёл конкретный фильм или сезон.</p>
+    <section>
+      <span class="eyebrow">Plex redirect</span>
+      <h2>Открытие Plex</h2>
+      <p><a href="plex.html">plex.html</a> помогает кнопке «Смотреть в Plex» открыть приложение или Plex Web. Для перехода к конкретному фильму бот добавляет параметры <code>key</code> и <code>server</code>.</p>
     </section>
-
-    <section class="section">
-      <h2>Обновление</h2>
-      <p>Если используется стандартный <code>compose.yaml</code>, Watchtower проверяет новый образ и обновляет PlexLoader автоматически. Для ручного обновления:</p>
-      <pre><code>cd /volume1/docker/plexloader
-docker compose pull
-docker compose up -d</code></pre>
-      <p class="note">Если менялись только файлы <code>index.html</code> или <code>plex.html</code> на Web Station, контейнер бота перезапускать не нужно.</p>
-    </section>
-
-    <p class="note">Не размещайте на публичной странице токены, пароли, <code>.env</code>, chat_id, внутренние адреса NAS или Plex token. Эта страница содержит только общую инструкцию.</p>
   </main>
 </body>
 </html>
