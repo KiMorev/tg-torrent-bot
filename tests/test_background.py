@@ -391,7 +391,7 @@ class NotificationDeduplicationTests(unittest.TestCase):
         poll.assert_called_once()
         self.assertEqual(len(created_coroutines), 1)
 
-    def test_unsafe_arc_episode_names_keep_polling(self) -> None:
+    def test_unsafe_arc_episode_names_block_polling(self) -> None:
         task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Show", "size": 0}
         storage_root = Path(self._tmp.name) / "storage"
         show_dir = storage_root / "Show"
@@ -432,9 +432,147 @@ class NotificationDeduplicationTests(unittest.TestCase):
             asyncio.run(_run_task_notifications_once(mock_app))
 
         first_message = mock_app.bot.send_message.await_args_list[0].kwargs["text"]
-        self.assertNotIn("эпизоды названы не в формате Plex", first_message)
-        poll.assert_called_once()
-        self.assertEqual(len(created_coroutines), 1)
+        self.assertIn("Автопереименование небезопасно", first_message)
+        labels = [
+            button.text
+            for row in mock_app.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("👀 Показать файлы", labels)
+        self.assertIn("📦 Оставить как есть", labels)
+        poll.assert_not_called()
+        self.assertEqual(len(created_coroutines), 0)
+
+    def test_mixed_plex_and_arc_episode_names_block_polling(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Show", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Show"
+        show_dir.mkdir(parents=True)
+        for name in [
+            "Show - S01E01 - Pilot.mkv",
+            "1. Case (2 сер.) - hdtv1080p.mkv",
+        ]:
+            (show_dir / name).write_bytes(b"")
+        created_coroutines = []
+
+        def fake_create_task(coro):
+            created_coroutines.append(coro)
+            coro.close()
+            return MagicMock()
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"seeding"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_plex_poll_is_done", return_value=False),
+            patch.object(bot, "_get_task_meta", return_value={"kind": "series", "title": "Show", "season_num": 1}),
+            patch.object(bot, "_plex_poll_after_finish", AsyncMock()) as poll,
+            patch.object(bot.asyncio, "create_task", side_effect=fake_create_task),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Автопереименование небезопасно", text)
+        poll.assert_not_called()
+        self.assertEqual(len(created_coroutines), 0)
+
+    def test_single_arc_episode_name_blocks_polling(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Show", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Show"
+        show_dir.mkdir(parents=True)
+        (show_dir / "1. Case (1 сер.) - hdtv1080p.mkv").write_bytes(b"")
+        created_coroutines = []
+
+        def fake_create_task(coro):
+            created_coroutines.append(coro)
+            coro.close()
+            return MagicMock()
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"seeding"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_plex_poll_is_done", return_value=False),
+            patch.object(bot, "_get_task_meta", return_value={"kind": "series", "title": "Show", "season_num": 1}),
+            patch.object(bot, "_plex_poll_after_finish", AsyncMock()) as poll,
+            patch.object(bot.asyncio, "create_task", side_effect=fake_create_task),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Автопереименование небезопасно", text)
+        poll.assert_not_called()
+        self.assertEqual(len(created_coroutines), 0)
+
+    def test_unknown_episode_like_name_blocks_polling(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Show", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Show"
+        show_dir.mkdir(parents=True)
+        for name in [
+            "Episode 01 - Pilot.mkv",
+            "01 серия - Next.mkv",
+        ]:
+            (show_dir / name).write_bytes(b"")
+        created_coroutines = []
+
+        def fake_create_task(coro):
+            created_coroutines.append(coro)
+            coro.close()
+            return MagicMock()
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"seeding"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_plex_poll_is_done", return_value=False),
+            patch.object(bot, "_get_task_meta", return_value={"kind": "series", "title": "Show", "season_num": 1}),
+            patch.object(bot, "_plex_poll_after_finish", AsyncMock()) as poll,
+            patch.object(bot.asyncio, "create_task", side_effect=fake_create_task),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Автопереименование небезопасно", text)
+        poll.assert_not_called()
+        self.assertEqual(len(created_coroutines), 0)
 
     def test_complete_error_status_notifies_as_done_and_starts_plex_polling(self) -> None:
         task = {

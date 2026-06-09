@@ -202,11 +202,15 @@ from gpt_features import explain_series_bulk_candidates as gpt_explain_series_bu
 from gpt_features import kp_confidence_check as gpt_kp_confidence_check
 from gpt_features import parse_torrent_title as gpt_features_parse_torrent_title
 from filename_normalizer import (
+    NAMING_MIXED,
+    NAMING_RENAMABLE_ARC,
+    NAMING_UNSAFE_ARC,
+    NAMING_UNKNOWN_NON_PLEX,
     RenamePlan,
     RenamePlanError,
     apply_rename_plan,
     build_arc_episode_rename_plan,
-    has_arc_episode_filenames,
+    inspect_series_filenames,
     is_video_file,
 )
 from movie_discovery import (
@@ -5184,6 +5188,16 @@ async def _plex_find_series_by_ds_title(ds_title: str) -> tuple["PlexSeason", "P
     return None
 
 
+def _plex_season_matches_ds_title(season: object, ds_title: str) -> bool:
+    name = ds_title.strip()
+    if not name:
+        return False
+    for fp in getattr(season, "file_paths", None) or []:
+        if _plex_file_path_matches_ds_title(fp, name):
+            return True
+    return False
+
+
 async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[object, str, str]:
     """Attempt to locate the just-finished task in the Plex library.
 
@@ -5216,12 +5230,18 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
                 seasons = await _plex_ensure_show_seasons(show)
                 season = seasons.get(season_num)
                 if season is not None:
-                    found_title = f"Сезон {season_num} «{show.title or series_query}»"
-                    return season, "3", found_title
-                logger.info(
-                    "Plex lookup: show %r found but season %d missing (have: %s)",
-                    show.title, season_num, sorted(seasons.keys()),
-                )
+                    if _plex_season_matches_ds_title(season, task_title):
+                        found_title = f"Сезон {season_num} «{show.title or series_query}»"
+                        return season, "3", found_title
+                    logger.info(
+                        "Plex lookup: show %r season %d exists but has no file path for task_title=%r",
+                        show.title, season_num, task_title,
+                    )
+                else:
+                    logger.info(
+                        "Plex lookup: show %r found but season %d missing (have: %s)",
+                        show.title, season_num, sorted(seasons.keys()),
+                    )
             else:
                 logger.info(
                     "Plex lookup: series show not found query=%r year=%s shows_cached=%d",
@@ -5612,6 +5632,8 @@ def _normalization_keyboard(task_id: str, decision: dict) -> InlineKeyboardMarku
             )],
             [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
         ])
+    if decision.get("status") == "unsafe":
+        return _normalization_issue_keyboard(task_id)
     return _normalization_season_picker_keyboard(task_id)
 
 
@@ -5624,6 +5646,20 @@ def _normalization_plan_keyboard(task_id: str, plan: RenamePlan) -> InlineKeyboa
         [InlineKeyboardButton(
             "✏️ Изменить сезон",
             callback_data=_normalization_callback("norm_pick", task_id),
+        )],
+        [InlineKeyboardButton(
+            "📦 Оставить как есть",
+            callback_data=_normalization_callback("norm_skip", task_id),
+        )],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _normalization_issue_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "👀 Показать файлы",
+            callback_data=_normalization_callback("norm_plan", task_id),
         )],
         [InlineKeyboardButton(
             "📦 Оставить как есть",
@@ -5722,6 +5758,10 @@ def _inspect_completed_task_normalization(
     if not files:
         return {"status": "files_unavailable"}
 
+    naming = inspect_series_filenames(files)
+    if naming.status in {"no_action", "plex_ready"}:
+        return {"status": "no_action"}
+
     show_title = _normalization_show_title(task, meta)
     if season_override is not None and season_override > 0:
         season, season_source = season_override, "выбран вручную"
@@ -5742,8 +5782,15 @@ def _inspect_completed_task_normalization(
                 "season_source": season_source,
                 "file_count": len(files),
             }
+        if naming.status == NAMING_RENAMABLE_ARC:
+            return {
+                "status": "unsafe",
+                "reason": "не удалось построить безопасный план переименования",
+                "file_count": len(files),
+                "files": [str(path) for path in naming.files],
+            }
 
-    if season <= 0 and source_root is not None and has_arc_episode_filenames(files):
+    if season <= 0 and source_root is not None and naming.status == NAMING_RENAMABLE_ARC:
         probe_plan = build_arc_episode_rename_plan(
             show_title=show_title,
             season=1,
@@ -5751,17 +5798,29 @@ def _inspect_completed_task_normalization(
             source_root=source_root,
         )
         if probe_plan is None:
-            return {"status": "no_action"}
+            return {
+                "status": "unsafe",
+                "reason": "не удалось построить безопасный план переименования",
+                "file_count": len(files),
+                "files": [str(path) for path in naming.files],
+            }
         return {
             "status": "needs_season",
             "show_title": show_title,
             "file_count": len(files),
         }
+    if naming.status in {NAMING_UNSAFE_ARC, NAMING_MIXED, NAMING_UNKNOWN_NON_PLEX, NAMING_RENAMABLE_ARC}:
+        return {
+            "status": "unsafe",
+            "reason": naming.reason or "в именах эпизодов нет надёжного Plex-маркера SxxEyy",
+            "file_count": len(files),
+            "files": [str(path) for path in naming.suspicious_files or naming.files],
+        }
     return {"status": "no_action"}
 
 
 def _normalization_blocks_plex(decision: dict | None) -> bool:
-    return isinstance(decision, dict) and decision.get("status") in {"plan", "needs_season"}
+    return isinstance(decision, dict) and decision.get("status") in {"plan", "needs_season", "unsafe"}
 
 
 def _format_normalization_notification(task: dict, decision: dict) -> str:
@@ -5772,6 +5831,16 @@ def _format_normalization_notification(task: dict, decision: dict) -> str:
             "Из-за этого Plex может не определить сезон и серии.",
             "",
             "Сезон из названия раздачи не нашёл. Выберите сезон для переименования.",
+        ])
+        return "\n".join(lines)
+
+    if decision.get("status") == "unsafe":
+        reason = str(decision.get("reason") or "в именах эпизодов нет надёжного Plex-маркера SxxEyy")
+        lines.extend([
+            "Похоже, часть файлов сериала названа не в формате Plex.",
+            f"Автопереименование небезопасно: {reason}.",
+            "",
+            "Plex-проверка не запущена автоматически. Проверьте файлы вручную или явно оставьте как есть.",
         ])
         return "\n".join(lines)
 
@@ -5786,6 +5855,24 @@ def _format_normalization_notification(task: dict, decision: dict) -> str:
         f"Нашёл сезон: {plan.season} — {season_source}.",
         f"Могу переименовать исходные файлы для Plex: {len(plan.items)} шт.",
     ])
+    return "\n".join(lines)
+
+
+def _format_normalization_issue_text(task: dict, decision: dict, *, limit: int = 12) -> str:
+    reason = str(decision.get("reason") or "в именах эпизодов нет SxxEyy")
+    files = [str(path) for path in decision.get("files") or []]
+    lines = [
+        _format_task_notification(task, plex_polling_started=False),
+        "",
+        f"Автопереименование небезопасно: {reason}.",
+        "",
+        "Файлы для проверки:",
+    ]
+    for item in files[:limit]:
+        lines.append(f"• {Path(item).name}")
+    remaining = len(files) - limit
+    if remaining > 0:
+        lines.append(f"… ещё {remaining} файлов.")
     return "\n".join(lines)
 
 
@@ -5927,6 +6014,11 @@ async def _handle_normalization_callback(
                 _format_rename_plan_text(plan),
                 reply_markup=_normalization_plan_keyboard(task_id, plan),
             )
+        elif decision.get("status") == "unsafe":
+            await query.edit_message_text(
+                _format_normalization_issue_text(task, decision),
+                reply_markup=_normalization_issue_keyboard(task_id),
+            )
         elif decision.get("status") == "needs_season":
             await query.edit_message_text(
                 "Выберите сезон для переименования файлов.",
@@ -5941,6 +6033,12 @@ async def _handle_normalization_callback(
 
     if action == "norm_apply":
         if not isinstance(plan, RenamePlan):
+            if decision.get("status") == "unsafe":
+                await query.edit_message_text(
+                    _format_normalization_issue_text(task, decision),
+                    reply_markup=_normalization_issue_keyboard(task_id),
+                )
+                return
             await query.edit_message_text(
                 "Не удалось построить безопасный план переименования.",
                 reply_markup=_normalization_season_picker_keyboard(task_id),

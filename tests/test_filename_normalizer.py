@@ -3,9 +3,13 @@ import unittest
 from pathlib import Path
 
 from filename_normalizer import (
+    NAMING_MIXED,
+    NAMING_UNSAFE_ARC,
+    NAMING_UNKNOWN_NON_PLEX,
     apply_rename_plan,
     build_arc_episode_rename_plan,
     has_arc_episode_filenames,
+    inspect_series_filenames,
 )
 
 
@@ -85,6 +89,44 @@ class FilenameNormalizerTests(unittest.TestCase):
 
             self.assertIsNone(plan)
             self.assertTrue(has_arc_episode_filenames(files))
+
+    def test_inspection_marks_missing_arc_parts_unsafe(self):
+        files = [
+            Path("1. Дело (1 сер.) - hdtv1080p.mkv"),
+            Path("1. Дело (3 сер.) - hdtv1080p.mkv"),
+        ]
+
+        inspection = inspect_series_filenames(files)
+
+        self.assertEqual(inspection.status, NAMING_UNSAFE_ARC)
+
+    def test_inspection_marks_mixed_plex_and_arc_files(self):
+        files = [
+            Path("Show - S01E01 - Pilot.mkv"),
+            Path("1. Case (2 сер.) - hdtv1080p.mkv"),
+        ]
+
+        inspection = inspect_series_filenames(files)
+
+        self.assertEqual(inspection.status, NAMING_MIXED)
+
+    def test_inspection_marks_single_arc_file_unsafe(self):
+        files = [Path("1. Case (1 сер.) - hdtv1080p.mkv")]
+
+        inspection = inspect_series_filenames(files)
+
+        self.assertEqual(inspection.status, NAMING_UNSAFE_ARC)
+
+    def test_inspection_marks_unknown_episode_like_names(self):
+        for name in [
+            "Episode 01 - Pilot.mkv",
+            "01 серия - Pilot.mkv",
+            "01.mkv",
+        ]:
+            with self.subTest(name=name):
+                inspection = inspect_series_filenames([Path(name)])
+
+                self.assertEqual(inspection.status, NAMING_UNKNOWN_NON_PLEX)
 
     def test_arc_detector_ignores_already_plex_compatible_files(self):
         files = [

@@ -5003,7 +5003,13 @@ class PlexPollingTests(unittest.TestCase):
     def test_poll_after_finish_uses_meta_for_series(self):
         """For meta.kind=='series' poll must look up the show and find the season."""
         from plex import PlexShow, PlexSeason
-        season = PlexSeason("season-key-77", 3, episode_count=10, file_paths=[], resolution="1080")
+        season = PlexSeason(
+            "season-key-77",
+            3,
+            episode_count=10,
+            file_paths=["/volume1/video/Klinika S03/Klinika S03E01.mkv"],
+            resolution="1080",
+        )
         show = PlexShow("Клиника", 2001, "show-key-99", seasons={3: season})
         fake_app = MagicMock()
         fake_app.bot.send_message = AsyncMock()
@@ -5021,7 +5027,7 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
         ):
             asyncio.run(_plex_poll_after_finish(
-                fake_app, "task1", "Клиника / Сезон: 3", [100],
+                fake_app, "task1", "Klinika S03", [100],
                 meta=meta, max_attempts=1, interval_seconds=0,
             ))
 
@@ -5040,6 +5046,34 @@ class PlexPollingTests(unittest.TestCase):
         # the notification once seen.
         labels = [b.text for row in keyboard.inline_keyboard for b in row]
         self.assertIn("✖️ Закрыть", labels)
+
+    def test_series_meta_match_requires_current_task_file_path(self):
+        from plex import PlexShow, PlexSeason
+        season = PlexSeason(
+            "season-key-77",
+            3,
+            episode_count=10,
+            file_paths=["/volume1/video/Old.Klinika.S03/Old.Klinika.S03E01.mkv"],
+            resolution="1080",
+        )
+        show = PlexShow("Клиника", 2001, "show-key-99", seasons={3: season})
+        meta = {"kind": "series", "title": "Klinika S03", "year": 0,
+                "quality": "1080", "series_query": "Клиника", "season_num": 3}
+
+        async def fake_ensure(show_arg):
+            return show_arg.seasons
+
+        with (
+            patch.object(bot, "_plex_show_find", return_value=show),
+            patch.object(bot, "_plex_ensure_show_seasons", AsyncMock(side_effect=fake_ensure)),
+            patch.object(bot, "_plex_shows_library", {}),
+        ):
+            target, metadata_type, _found_title = asyncio.run(
+                bot._plex_poll_lookup_target("New.Klinika.S03", meta)
+            )
+
+        self.assertIsNone(target)
+        self.assertEqual(metadata_type, "1")
 
     def test_poll_after_finish_finds_series_by_episode_file_path(self):
         """Scene-style DS title should match Plex episode file paths for series."""
@@ -5096,7 +5130,7 @@ class PlexPollingTests(unittest.TestCase):
         """A legacy task (no meta) whose DS title looks like a series should still
         try the series path by reconstructing meta from the title."""
         from plex import PlexShow, PlexSeason
-        season = PlexSeason("sk2", 4, 10, [], "720")
+        season = PlexSeason("sk2", 4, 10, ["/volume1/video/Show.X.S04E01/Show.X.S04E01.mkv"], "720")
         show = PlexShow("Show X", 2018, "show2", seasons={4: season})
         fake_app = MagicMock()
         fake_app.bot.send_message = AsyncMock()
@@ -5112,7 +5146,7 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
         ):
             asyncio.run(_plex_poll_after_finish(
-                fake_app, "legacy_task", "Show.X / Сезон: 4", [100],
+                fake_app, "legacy_task", "Show.X.S04E01", [100],
                 meta=None, max_attempts=1, interval_seconds=0,
             ))
 
