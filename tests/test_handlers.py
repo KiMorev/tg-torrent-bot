@@ -7168,6 +7168,56 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("cont:open:mine:0", self._callbacks(keyboard))
         self.assertIn("task:close:", self._callbacks(keyboard))
 
+    def test_continue_command_retries_final_render_network_error(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        progress = MagicMock()
+        progress.edit_text = AsyncMock(side_effect=[bot.NetworkError("temporary"), None])
+        update.message.reply_text.return_value = progress
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "mine", "page": 0}
+        build_state = AsyncMock(return_value=state)
+        sleep = AsyncMock()
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "_series_continue_build_state", build_state),
+                patch.object(bot.asyncio, "sleep", sleep),
+            ):
+                await bot.series_continue_command(update, context)
+
+        asyncio.run(run())
+
+        self.assertEqual(progress.edit_text.await_count, 2)
+        sleep.assert_awaited_once_with(1.0)
+
+    def test_continue_command_does_not_crash_when_final_render_keeps_failing(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        progress = MagicMock()
+        progress.edit_text = AsyncMock(side_effect=bot.NetworkError("telegram down"))
+        update.message.reply_text.return_value = progress
+        candidate = self._candidate()
+        state = {"mine": [candidate], "all": [candidate], "scope": "mine", "page": 0}
+        build_state = AsyncMock(return_value=state)
+        sleep = AsyncMock()
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "_series_continue_build_state", build_state),
+                patch.object(bot.asyncio, "sleep", sleep),
+            ):
+                await bot.series_continue_command(update, context)
+
+        asyncio.run(run())
+
+        self.assertEqual(progress.edit_text.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+
     def test_continue_list_marks_own_exact_topic_subscription(self):
         candidate = self._candidate()
         sub = {
