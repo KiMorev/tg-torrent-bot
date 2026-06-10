@@ -168,6 +168,57 @@ def _make_context(user_data: dict | None = None):
 # ---------------------------------------------------------------------------
 
 
+class SafeEditMessageTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        bot._TELEGRAM_EDIT_GENERATIONS.clear()
+
+    async def asyncTearDown(self):
+        bot._TELEGRAM_EDIT_GENERATIONS.clear()
+
+    async def test_safe_edit_message_retries_network_error(self):
+        message = MagicMock()
+        message.chat_id = 100
+        message.message_id = 10
+        message.edit_text = AsyncMock(side_effect=[bot.NetworkError("temporary"), None])
+        sleep = AsyncMock()
+
+        with patch.object(bot.asyncio, "sleep", sleep):
+            result = await bot._safe_edit_message(message, "Готово")
+
+        self.assertTrue(result)
+        self.assertEqual(message.edit_text.await_count, 2)
+        sleep.assert_awaited_once_with(1.0)
+
+    async def test_safe_edit_callback_retries_network_error(self):
+        query = MagicMock()
+        query.message.chat_id = 100
+        query.message.message_id = 11
+        query.edit_message_text = AsyncMock(side_effect=[bot.TimedOut("temporary"), None])
+        sleep = AsyncMock()
+
+        with patch.object(bot.asyncio, "sleep", sleep):
+            result = await bot._safe_edit_callback(query, "Готово")
+
+        self.assertTrue(result)
+        self.assertEqual(query.edit_message_text.await_count, 2)
+        sleep.assert_awaited_once_with(1.0)
+
+    async def test_safe_edit_message_skips_stale_retry(self):
+        message = MagicMock()
+        message.chat_id = 100
+        message.message_id = 12
+        message.edit_text = AsyncMock(side_effect=bot.NetworkError("temporary"))
+
+        async def mark_stale(_delay):
+            bot._TELEGRAM_EDIT_GENERATIONS[(100, 12)] += 1
+
+        with patch.object(bot.asyncio, "sleep", AsyncMock(side_effect=mark_stale)):
+            result = await bot._safe_edit_message(message, "Устаревший экран")
+
+        self.assertFalse(result)
+        self.assertEqual(message.edit_text.await_count, 1)
+
+
 class IsAllowedTests(unittest.TestCase):
     def _update(self, chat_id: int):
         u = MagicMock()

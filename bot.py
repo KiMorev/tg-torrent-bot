@@ -7928,23 +7928,99 @@ def _is_message_not_modified(error: BadRequest) -> bool:
     return "message is not modified" in str(error).lower()
 
 
+_TELEGRAM_EDIT_RETRY_DELAYS = (1.0, 3.0)
+_TELEGRAM_EDIT_GENERATIONS: dict[tuple[int, int], int] = {}
+
+
+def _telegram_edit_message_key(message) -> tuple[int, int] | None:
+    chat_id = getattr(message, "chat_id", None)
+    if not isinstance(chat_id, int):
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+    message_id = getattr(message, "message_id", None)
+    if isinstance(chat_id, int) and isinstance(message_id, int):
+        return chat_id, message_id
+    return None
+
+
+def _telegram_edit_start_generation(key: tuple[int, int] | None) -> int:
+    if key is None:
+        return 0
+    generation = _TELEGRAM_EDIT_GENERATIONS.get(key, 0) + 1
+    _TELEGRAM_EDIT_GENERATIONS[key] = generation
+    return generation
+
+
+def _telegram_edit_is_current(key: tuple[int, int] | None, generation: int) -> bool:
+    if key is None:
+        return True
+    return _TELEGRAM_EDIT_GENERATIONS.get(key) == generation
+
+
+async def _retry_telegram_edit(
+    edit_call,
+    *,
+    key: tuple[int, int] | None,
+    label: str,
+) -> bool:
+    generation = _telegram_edit_start_generation(key)
+    attempts = len(_TELEGRAM_EDIT_RETRY_DELAYS) + 1
+    for attempt in range(1, attempts + 1):
+        if not _telegram_edit_is_current(key, generation):
+            logger.info("Telegram edit skipped stale retry label=%s key=%s", label, key)
+            return False
+        try:
+            await edit_call()
+            return True
+        except BadRequest as exc:
+            if _is_message_not_modified(exc):
+                return True
+            raise
+        except (TimedOut, NetworkError) as exc:
+            if attempt >= attempts:
+                logger.warning(
+                    "Telegram edit failed label=%s key=%s attempts=%s: %s",
+                    label,
+                    key,
+                    attempt,
+                    exc,
+                    exc_info=True,
+                )
+                return False
+            delay = _TELEGRAM_EDIT_RETRY_DELAYS[attempt - 1]
+            error_label = "timeout" if isinstance(exc, TimedOut) else "network"
+            logger.info(
+                "Telegram edit retry label=%s key=%s error=%s attempt=%s/%s delay=%.1fs",
+                label,
+                key,
+                error_label,
+                attempt,
+                attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    return False
+
+
 async def _safe_edit_message(
     message,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None = None,
     link_preview_options: "LinkPreviewOptions | None" = None,
-) -> None:
-    try:
+    retry_label: str = "message.edit_text",
+) -> bool:
+    key = _telegram_edit_message_key(message)
+
+    async def edit_call() -> None:
         await message.edit_text(
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             link_preview_options=link_preview_options,
         )
-    except BadRequest as e:
-        if not _is_message_not_modified(e):
-            raise
+
+    return await _retry_telegram_edit(edit_call, key=key, label=retry_label)
 
 
 async def _send_auto_delete(bot, chat_id: int, text: str, delay: float = 3.0) -> None:
@@ -8019,17 +8095,19 @@ async def _safe_edit_callback(
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None = None,
     link_preview_options: "LinkPreviewOptions | None" = None,
-) -> None:
-    try:
+    retry_label: str = "callback.edit_message_text",
+) -> bool:
+    key = _telegram_edit_message_key(getattr(query, "message", None))
+
+    async def edit_call() -> None:
         await query.edit_message_text(
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             link_preview_options=link_preview_options,
         )
-    except BadRequest as e:
-        if not _is_message_not_modified(e):
-            raise
+
+    return await _retry_telegram_edit(edit_call, key=key, label=retry_label)
 
 
 async def _delete_message_safely(
@@ -11446,9 +11524,6 @@ def _series_continue_progress_text() -> str:
     )
 
 
-_SERIES_CONTINUE_RENDER_RETRY_DELAYS = (1.0, 3.0)
-
-
 async def _series_continue_edit_progress(
     progress,
     text: str,
@@ -11456,39 +11531,13 @@ async def _series_continue_edit_progress(
     parse_mode: str | None,
     reply_markup: InlineKeyboardMarkup | None,
 ) -> bool:
-    attempts = len(_SERIES_CONTINUE_RENDER_RETRY_DELAYS) + 1
-    for attempt in range(1, attempts + 1):
-        try:
-            await progress.edit_text(
-                text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
-            )
-            return True
-        except BadRequest as exc:
-            if _is_message_not_modified(exc):
-                return True
-            raise
-        except (TimedOut, NetworkError) as exc:
-            if attempt >= attempts:
-                logger.warning(
-                    "Series continue render failed after %s attempt(s): %s",
-                    attempt,
-                    exc,
-                    exc_info=True,
-                )
-                return False
-            delay = _SERIES_CONTINUE_RENDER_RETRY_DELAYS[attempt - 1]
-            label = "timeout" if isinstance(exc, TimedOut) else "network"
-            logger.info(
-                "Series continue render retry after %s error attempt=%s/%s delay=%.1fs",
-                label,
-                attempt,
-                attempts,
-                delay,
-            )
-            await asyncio.sleep(delay)
-    return False
+    return await _safe_edit_message(
+        progress,
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+        retry_label="series_continue.render",
+    )
 
 
 async def _series_continue_plex_shows_with_seasons() -> list["PlexShow"]:
