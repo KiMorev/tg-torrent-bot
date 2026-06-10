@@ -4,6 +4,7 @@ from plex import PlexSeason, PlexShow
 from series_continue import (
     SeriesCatchUpCandidate,
     build_series_catch_up_candidates,
+    build_series_missing_season_candidates,
     external_guid_id,
     identity_from_plex_show,
     resolve_same_topic_update,
@@ -259,6 +260,45 @@ class SeriesCatchUpCandidateBuilderTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
 
+
+class SeriesMissingSeasonCandidateBuilderTests(unittest.TestCase):
+    def _show(self) -> PlexShow:
+        seasons = {
+            season_number: PlexSeason(
+                rating_key=f"season-{season_number}",
+                season_number=season_number,
+                episode_count=18 if season_number != 8 else 8,
+                resolution="1080",
+            )
+            for season_number in (1, 2, 3, 4, 5, 6, 8)
+        }
+        return PlexShow(
+            title="The Rookie",
+            original_title="The Rookie",
+            year=2018,
+            rating_key="show-1",
+            seasons=seasons,
+            guid="plex://show/rookie",
+        )
+
+    def test_metadata_seasons_absent_from_plex_become_missing_candidates(self):
+        candidates = build_series_missing_season_candidates(
+            [self._show()],
+            {"show-1": {season: 18 for season in range(1, 10)}},
+            [],
+        )
+
+        self.assertEqual([candidate.season_number for candidate in candidates], [7, 9])
+        self.assertEqual(candidates[0].present_seasons, (1, 2, 3, 4, 5, 6, 8))
+
+    def test_present_incomplete_season_does_not_become_missing_candidate(self):
+        candidates = build_series_missing_season_candidates(
+            [self._show()],
+            {"show-1": {8: 18}},
+            [],
+        )
+
+        self.assertEqual(candidates, [])
 
 class SeriesCompletenessResolverTests(unittest.TestCase):
     def _candidate(self, **overrides) -> SeriesCatchUpCandidate:

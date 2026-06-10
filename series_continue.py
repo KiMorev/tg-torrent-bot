@@ -44,6 +44,17 @@ class SeriesCatchUpCandidate:
 
 
 @dataclass(frozen=True)
+class SeriesMissingSeasonCandidate:
+    identity: PlexSeriesIdentity
+    season_number: int
+    episode_count: int = 0
+    present_seasons: tuple[int, ...] = field(default_factory=tuple)
+    quality: str = ""
+    source: str = "metadata"
+    history_chat_ids: tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class SeriesCompleteness:
     confidence: str
     reason_for_user: str
@@ -136,6 +147,71 @@ def build_series_catch_up_candidates(
                         source="plex",
                     )
                 )
+
+    return sorted(
+        candidates,
+        key=lambda c: (
+            0 if chat_id is not None and chat_id in c.history_chat_ids else 1,
+            c.identity.title.casefold(),
+            c.season_number,
+        ),
+    )
+
+
+def build_series_missing_season_candidates(
+    shows: Iterable[PlexShow],
+    metadata_totals_by_show: Mapping[str, Mapping[int | str, int]] | None,
+    history_entries: Iterable[dict],
+    *,
+    chat_id: int | None = None,
+    scope: str = "all",
+) -> list[SeriesMissingSeasonCandidate]:
+    """Build seasons absent from Plex but present in external metadata."""
+    if not metadata_totals_by_show:
+        return []
+    normal_scope = (scope or "all").strip().lower()
+    mine_only = normal_scope == "mine"
+    history = [entry for entry in history_entries if isinstance(entry, dict)]
+    candidates: list[SeriesMissingSeasonCandidate] = []
+
+    for show in shows:
+        metadata_totals = _known_totals_for_show(show, metadata_totals_by_show)
+        if not metadata_totals:
+            continue
+        matching_history = _history_entries_for_show(
+            show,
+            history,
+            chat_id=chat_id,
+            mine_only=mine_only,
+        )
+        if mine_only and not matching_history:
+            continue
+        present_seasons = tuple(sorted(
+            int(season_number)
+            for season_number in (show.seasons or {})
+            if int(season_number) > 0
+        ))
+        present_set = set(present_seasons)
+        history_chat_ids = tuple(sorted({
+            chat
+            for entry in matching_history
+            for chat in _entry_chat_ids(entry)
+        }))
+        quality = _missing_quality_for_show(show, matching_history)
+        identity = identity_from_plex_show(show)
+        for season_number, episode_count in sorted(metadata_totals.items()):
+            if season_number in present_set:
+                continue
+            candidates.append(
+                SeriesMissingSeasonCandidate(
+                    identity=identity,
+                    season_number=season_number,
+                    episode_count=episode_count,
+                    present_seasons=present_seasons,
+                    quality=quality,
+                    history_chat_ids=history_chat_ids,
+                )
+            )
 
     return sorted(
         candidates,
@@ -346,6 +422,63 @@ def _known_total_for_show(
         if total > 0:
             return total
     return 0
+
+
+def _known_totals_for_show(
+    show: PlexShow,
+    known_totals_by_show: Mapping[str, Mapping[int | str, int]] | None,
+) -> dict[int, int]:
+    if not known_totals_by_show:
+        return {}
+    totals: dict[int, int] = {}
+    for raw_key in (show.rating_key, show.guid, show.title, show.original_title):
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        by_season = known_totals_by_show.get(key)
+        if not isinstance(by_season, Mapping):
+            continue
+        for raw_season, raw_total in by_season.items():
+            season_number = _safe_int(raw_season)
+            total = _safe_int(raw_total)
+            if season_number > 0 and total > 0:
+                totals.setdefault(season_number, total)
+    return totals
+
+
+def _history_entries_for_show(
+    show: PlexShow,
+    history_entries: list[dict],
+    *,
+    chat_id: int | None,
+    mine_only: bool,
+) -> list[dict]:
+    matches: list[dict] = []
+    for entry in reversed(history_entries):
+        if str(entry.get("kind") or "").lower() != "series":
+            continue
+        if not _history_entry_matches_show(entry, show):
+            continue
+        entry_chat_ids = _entry_chat_ids(entry)
+        is_mine = chat_id is not None and chat_id in entry_chat_ids
+        if mine_only and not is_mine:
+            continue
+        matches.append(entry)
+    return matches
+
+
+def _missing_quality_for_show(show: PlexShow, history_entries: list[dict]) -> str:
+    for entry in history_entries:
+        quality = str(entry.get("quality") or "").strip()
+        if quality:
+            return quality
+    for season_number, season in sorted((show.seasons or {}).items(), reverse=True):
+        if season_number <= 0:
+            continue
+        quality = str(getattr(season, "resolution", "") or "").strip()
+        if quality:
+            return quality
+    return ""
 
 
 def _entry_season(entry: dict) -> int:

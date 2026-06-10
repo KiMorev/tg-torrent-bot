@@ -40,6 +40,19 @@ class TVmazeClient:
                 return None
             return self._season_episode_count(show_id, season)
 
+    def season_episode_counts(
+        self,
+        *,
+        imdb_id: str = "",
+        tvdb_id: str = "",
+    ) -> dict[int, int]:
+        """Return {season_number: episode_count} for a TV show."""
+        with self._lock:
+            show_id = self._lookup_show_id(imdb_id=imdb_id, tvdb_id=tvdb_id)
+            if show_id is None:
+                return {}
+            return self._season_episode_counts(show_id)
+
     def _lookup_show_id(self, *, imdb_id: str = "", tvdb_id: str = "") -> int | None:
         for param, value in (("thetvdb", tvdb_id), ("imdb", imdb_id)):
             value = str(value or "").strip()
@@ -89,6 +102,36 @@ class TVmazeClient:
                 return None
             return self._episode_count_from_season_id(season_id)
         return None
+
+    def _season_episode_counts(self, show_id: int) -> dict[int, int]:
+        try:
+            response = self._session.get(
+                f"{_API_BASE}/shows/{show_id}/seasons",
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            logger.debug("TVmaze seasons lookup failed show_id=%s: %s", show_id, exc)
+            return {}
+        if not isinstance(data, list):
+            return {}
+
+        result: dict[int, int] = {}
+        for season in data:
+            if not isinstance(season, dict):
+                continue
+            season_number = self._safe_int(season.get("number"))
+            if season_number is None:
+                continue
+            total = self._safe_int(season.get("episodeOrder"))
+            if total is None:
+                season_id = self._safe_int(season.get("id"))
+                if season_id is not None:
+                    total = self._episode_count_from_season_id(season_id)
+            if total is not None:
+                result[season_number] = total
+        return result
 
     def _episode_count_from_season_id(self, season_id: int) -> int | None:
         try:

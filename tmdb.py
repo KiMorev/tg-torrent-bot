@@ -46,6 +46,22 @@ class TMDBClient:
                 return None
             return self._season_episode_count(tv_id, season)
 
+    def season_episode_counts(
+        self,
+        *,
+        tmdb_id: str = "",
+        imdb_id: str = "",
+        tvdb_id: str = "",
+    ) -> dict[int, int]:
+        """Return {season_number: episode_count} for a TV show."""
+        with self._lock:
+            tv_id = self._safe_int(tmdb_id)
+            if tv_id is None:
+                tv_id = self._resolve_tv_id(imdb_id=imdb_id, tvdb_id=tvdb_id)
+            if tv_id is None:
+                return {}
+            return self._season_episode_counts(tv_id)
+
     def _resolve_tv_id(self, *, imdb_id: str = "", tvdb_id: str = "") -> int | None:
         for external_id, source in (
             (imdb_id, "imdb_id"),
@@ -88,6 +104,35 @@ class TMDBClient:
         if isinstance(episodes, list):
             return len(episodes) or None
         return None
+
+    def _season_episode_counts(self, tv_id: int) -> dict[int, int]:
+        try:
+            response = self._session.get(
+                f"{_API_BASE}/tv/{tv_id}",
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            logger.debug("TMDB TV seasons lookup failed tv_id=%s: %s", tv_id, exc)
+            return {}
+
+        seasons = data.get("seasons") if isinstance(data, dict) else None
+        if not isinstance(seasons, list):
+            return {}
+
+        result: dict[int, int] = {}
+        for season in seasons:
+            if not isinstance(season, dict):
+                continue
+            season_number = self._safe_int(season.get("season_number"))
+            episode_count = self._safe_int(season.get("episode_count"))
+            if season_number is None or episode_count is None:
+                continue
+            if season_number <= 0:
+                continue
+            result[season_number] = episode_count
+        return result
 
     @staticmethod
     def _safe_int(value: object) -> int | None:

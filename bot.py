@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -155,7 +156,9 @@ from search_intent import (
 )
 from series_continue import (
     SeriesCatchUpCandidate,
+    SeriesMissingSeasonCandidate,
     build_series_catch_up_candidates,
+    build_series_missing_season_candidates,
     identity_from_plex_show,
     resolve_series_completeness,
     resolve_same_topic_update,
@@ -402,7 +405,7 @@ DOWNLOAD_PANEL_HAD_ACTIVE: dict[int, bool] = {}
 CONTINUE_CALLBACK_PREFIX = "cont"
 CONTINUE_PAGE_SIZE = 10
 CONTINUE_STATE_KEY = "continue_state"
-CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all"}
+CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all", "missing", "hidden_missing"}
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
@@ -11637,6 +11640,56 @@ async def _series_continue_known_totals_by_show(
     return totals
 
 
+async def _series_continue_metadata_totals_by_show(
+    shows: list["PlexShow"],
+) -> dict[str, dict[int, int]]:
+    totals: dict[str, dict[int, int]] = {}
+    cache = _series_continue_load_totals_cache()
+    changed = False
+    for show in shows:
+        identity = await _series_continue_identity_with_external_guids(show)
+        cache_keys = _series_continue_total_cache_keys(identity)
+        if not cache_keys:
+            continue
+
+        cached_totals = _series_continue_cached_totals(cache, cache_keys)
+        tmdb_totals: dict[int, int] = {}
+        if tmdb_client is not None and (identity.tmdb_id or identity.imdb_id or identity.tvdb_id):
+            tmdb_totals = await _series_continue_fetch_tmdb_totals(identity)
+            if tmdb_totals:
+                for season_number, total in tmdb_totals.items():
+                    _series_continue_store_cached_total(cache, cache_keys, season_number, total)
+                changed = True
+
+        tvmaze_totals: dict[int, int] = {}
+        if tvmaze_client is not None and (identity.imdb_id or identity.tvdb_id):
+            tvmaze_totals = await _series_continue_fetch_tvmaze_totals(identity)
+            if tvmaze_totals:
+                for season_number, total in tvmaze_totals.items():
+                    _series_continue_store_cached_total(
+                        cache,
+                        _series_continue_tvmaze_cache_keys(identity),
+                        season_number,
+                        total,
+                    )
+                changed = True
+
+        if tmdb_totals:
+            selected = {
+                season_number: total
+                for season_number, total in tmdb_totals.items()
+                if tvmaze_totals.get(season_number, total) == total
+            }
+        else:
+            selected = tvmaze_totals or cached_totals
+        if selected:
+            totals[str(show.rating_key)] = selected
+
+    if changed:
+        _series_continue_save_totals_cache(cache)
+    return totals
+
+
 async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int:
     try:
         total = await asyncio.to_thread(
@@ -11655,6 +11708,28 @@ async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int
         )
         return 0
     return int(total or 0)
+
+
+async def _series_continue_fetch_tmdb_totals(identity) -> dict[int, int]:
+    try:
+        totals = await asyncio.to_thread(
+            tmdb_client.season_episode_counts,
+            tmdb_id=identity.tmdb_id,
+            imdb_id=identity.imdb_id,
+            tvdb_id=identity.tvdb_id,
+        )
+    except Exception:
+        logger.warning(
+            "TMDB season totals lookup failed show=%r",
+            identity.title,
+            exc_info=True,
+        )
+        return {}
+    return {
+        int(season): int(total)
+        for season, total in (totals or {}).items()
+        if _series_continue_int(season) > 0 and _series_continue_int(total) > 0
+    }
 
 
 async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_number: int) -> tuple[int, bool]:
@@ -11686,6 +11761,27 @@ async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_
         _series_continue_store_cached_total(cache, cache_keys, season_number, total)
         return total, True
     return 0, False
+
+
+async def _series_continue_fetch_tvmaze_totals(identity) -> dict[int, int]:
+    try:
+        totals = await asyncio.to_thread(
+            tvmaze_client.season_episode_counts,
+            imdb_id=identity.imdb_id,
+            tvdb_id=identity.tvdb_id,
+        )
+    except Exception:
+        logger.warning(
+            "TVmaze season totals lookup failed show=%r",
+            identity.title,
+            exc_info=True,
+        )
+        return {}
+    return {
+        int(season): int(total)
+        for season, total in (totals or {}).items()
+        if _series_continue_int(season) > 0 and _series_continue_int(total) > 0
+    }
 
 
 def _series_continue_load_totals_cache() -> dict:
@@ -11748,6 +11844,20 @@ def _series_continue_cached_total(cache: dict, keys: tuple[str, ...], season_num
     return 0
 
 
+def _series_continue_cached_totals(cache: dict, keys: tuple[str, ...]) -> dict[int, int]:
+    totals: dict[int, int] = {}
+    for key in keys:
+        by_season = cache.get(key)
+        if not isinstance(by_season, dict):
+            continue
+        for raw_season, raw_total in by_season.items():
+            season_number = _series_continue_int(raw_season)
+            total = _series_continue_int(raw_total)
+            if season_number > 0 and total > 0:
+                totals.setdefault(season_number, total)
+    return totals
+
+
 def _series_continue_store_cached_total(
     cache: dict,
     keys: tuple[str, ...],
@@ -11804,7 +11914,34 @@ async def _series_continue_build_state(
         "topic_subscriptions": _series_continue_subscription_map_for_chat(chat_id),
         "scope": "mine",
         "page": 0,
+        "raw_missing": [],
     }
+    _series_continue_refresh_hidden_views(state, _series_continue_hidden_keys_for_chat(chat_id))
+    context.user_data[CONTINUE_STATE_KEY] = state
+    return state
+
+
+async def _series_continue_build_missing_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+) -> dict:
+    shows = await _series_continue_plex_shows_with_seasons()
+    load_history = getattr(state_store, "load_download_history", None)
+    history = load_history() if callable(load_history) else []
+    metadata_totals = await _series_continue_metadata_totals_by_show(shows)
+    state = _series_continue_state(context)
+    state.setdefault("raw_mine", state.get("mine", []))
+    state.setdefault("raw_all", state.get("all", []))
+    state["raw_missing"] = build_series_missing_season_candidates(
+        shows,
+        metadata_totals,
+        history,
+        chat_id=chat_id,
+        scope="all",
+    )
+    state["topic_subscriptions"] = _series_continue_subscription_map_for_chat(chat_id)
+    state["scope"] = "missing"
+    state["page"] = 0
     _series_continue_refresh_hidden_views(state, _series_continue_hidden_keys_for_chat(chat_id))
     context.user_data[CONTINUE_STATE_KEY] = state
     return state
@@ -11813,17 +11950,22 @@ async def _series_continue_build_state(
 def _series_continue_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
     state = context.user_data.get(CONTINUE_STATE_KEY)
     return state if isinstance(state, dict) else {
+        "raw_mine": [],
+        "raw_all": [],
+        "raw_missing": [],
         "mine": [],
         "all": [],
+        "missing": [],
         "hidden_mine": [],
         "hidden_all": [],
+        "hidden_missing": [],
         "topic_subscriptions": {},
         "scope": "mine",
         "page": 0,
     }
 
 
-def _series_continue_candidates(state: dict, scope: str) -> list[SeriesCatchUpCandidate]:
+def _series_continue_candidates(state: dict, scope: str) -> list:
     candidates = state.get(scope)
     return candidates if isinstance(candidates, list) else []
 
@@ -11834,12 +11976,12 @@ def _series_continue_base_scope(scope: str) -> str:
 
 def _series_continue_hidden_scope(scope: str) -> str:
     base = _series_continue_base_scope(scope)
-    return f"hidden_{base}" if base in {"mine", "all"} else "hidden_mine"
+    return f"hidden_{base}" if base in {"mine", "all", "missing"} else "hidden_mine"
 
 
 def _series_continue_normal_scope(scope: str) -> str:
     base = _series_continue_base_scope(scope)
-    return base if base in {"mine", "all"} else "mine"
+    return base if base in {"mine", "all", "missing"} else "mine"
 
 
 def _series_continue_is_hidden_scope(scope: str) -> bool:
@@ -11851,7 +11993,7 @@ def _series_continue_scope_part(parts: list[str], index: int, default: str = "mi
     return scope if scope in CONTINUE_SCOPES else default
 
 
-def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate) -> str:
+def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate | SeriesMissingSeasonCandidate) -> str:
     identity = candidate.identity
     show_key = (
         identity.plex_rating_key
@@ -11861,7 +12003,8 @@ def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate) -> str:
         or identity.imdb_id
         or title_match_key(identity.title)
     )
-    return f"{show_key}:S{candidate.season_number:02d}"
+    kind = "missing" if isinstance(candidate, SeriesMissingSeasonCandidate) else "incomplete"
+    return f"{kind}:{show_key}:S{candidate.season_number:02d}"
 
 
 def _series_continue_hidden_keys_for_chat(chat_id: int | None) -> set[str]:
@@ -11903,7 +12046,7 @@ def _series_continue_save_hidden_keys_for_chat(chat_id: int | None, keys: set[st
 
 def _series_continue_refresh_hidden_views(state: dict, hidden_keys: set[str]) -> None:
     state["hidden_keys"] = sorted(hidden_keys)
-    for scope in ("mine", "all"):
+    for scope in ("mine", "all", "missing"):
         raw = state.get(f"raw_{scope}")
         if not isinstance(raw, list):
             raw = state.get(scope)
@@ -12009,7 +12152,292 @@ def _series_continue_candidate_line(index: int, candidate: SeriesCatchUpCandidat
     return "\n".join(lines)
 
 
+def _series_continue_format_seasons(seasons: Iterable[int]) -> str:
+    numbers = sorted({
+        _series_continue_int(season)
+        for season in seasons
+        if _series_continue_int(season) > 0
+    })
+    if not numbers:
+        return "нет"
+    ranges: list[str] = []
+    start = prev = numbers[0]
+    for number in numbers[1:]:
+        if number == prev + 1:
+            prev = number
+            continue
+        ranges.append(f"S{start:02d}" if start == prev else f"S{start:02d}-S{prev:02d}")
+        start = prev = number
+    ranges.append(f"S{start:02d}" if start == prev else f"S{start:02d}-S{prev:02d}")
+    return ", ".join(ranges)
+
+
+def _series_continue_missing_group_key(candidate: SeriesMissingSeasonCandidate) -> str:
+    identity = candidate.identity
+    return (
+        identity.plex_rating_key
+        or identity.plex_guid
+        or identity.tmdb_id
+        or identity.tvdb_id
+        or identity.imdb_id
+        or title_match_key(identity.title)
+    )
+
+
+def _series_continue_missing_groups(state: dict, scope: str) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for candidate in _series_continue_candidates(state, scope):
+        if not isinstance(candidate, SeriesMissingSeasonCandidate):
+            continue
+        key = _series_continue_missing_group_key(candidate)
+        group = groups.setdefault(key, {
+            "identity": candidate.identity,
+            "candidates": [],
+        })
+        group["candidates"].append(candidate)
+    out = list(groups.values())
+    for group in out:
+        group["candidates"].sort(key=lambda item: item.season_number)
+    out.sort(key=lambda group: _series_continue_missing_group_title(group).casefold())
+    return out
+
+
+def _series_continue_missing_group_title(group: dict) -> str:
+    identity = group.get("identity")
+    return (
+        getattr(identity, "title", "")
+        or getattr(identity, "original_title", "")
+        or getattr(identity, "plex_guid", "")
+        or getattr(identity, "plex_rating_key", "")
+        or "Без названия"
+    )
+
+
+def _series_continue_missing_group_seasons(group: dict) -> tuple[int, ...]:
+    return tuple(
+        candidate.season_number
+        for candidate in group.get("candidates", [])
+        if isinstance(candidate, SeriesMissingSeasonCandidate)
+    )
+
+
+def _series_continue_missing_group_present_seasons(group: dict) -> tuple[int, ...]:
+    seasons: set[int] = set()
+    for candidate in group.get("candidates", []):
+        if isinstance(candidate, SeriesMissingSeasonCandidate):
+            seasons.update(candidate.present_seasons)
+    return tuple(sorted(seasons))
+
+
+def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> str:
+    groups = _series_continue_missing_groups(state, scope)
+    hidden_scope = _series_continue_hidden_scope(scope)
+    hidden_count = len(_series_continue_missing_groups(state, hidden_scope))
+    hidden_view = _series_continue_is_hidden_scope(scope)
+    if not groups:
+        if hidden_view:
+            return "🧩 <b>Отсутствующие сезоны</b>\n\nВ скрытых сериалах пока пусто."
+        hidden_line = f"\n\nСкрыто: {hidden_count}" if hidden_count else ""
+        return (
+            "🧩 <b>Отсутствующие сезоны</b>\n\n"
+            "Не нашёл сезоны, которые есть в metadata, но целиком отсутствуют в Plex."
+            f"{hidden_line}"
+        )
+
+    total_pages = max(1, (len(groups) + CONTINUE_PAGE_SIZE - 1) // CONTINUE_PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    start = page * CONTINUE_PAGE_SIZE
+    visible = groups[start:start + CONTINUE_PAGE_SIZE]
+    mode = "🙈 Скрытые" if hidden_view else "🧩 Обычный список"
+    lines = [
+        "🧩 <b>Отсутствующие сезоны</b>",
+        f"Режим: {mode} · найдено сериалов: {len(groups)}",
+        "",
+    ]
+    if not hidden_view and hidden_count:
+        lines.extend([f"Скрыто: {hidden_count}", ""])
+    for offset, group in enumerate(visible, start=1):
+        title = html_module.escape(_series_continue_missing_group_title(group))
+        missing = _series_continue_format_seasons(_series_continue_missing_group_seasons(group))
+        present = _series_continue_format_seasons(_series_continue_missing_group_present_seasons(group))
+        lines.extend([
+            f"{start + offset}. <b>{title}</b>",
+            f"   Нет в Plex: {missing}",
+            f"   Plex: есть {present}",
+            "",
+        ])
+    if total_pages > 1:
+        lines.append(f"Страница {page + 1}/{total_pages}")
+    return "\n".join(lines).strip()
+
+
+def _series_continue_missing_list_keyboard(state: dict, scope: str, page: int) -> InlineKeyboardMarkup:
+    groups = _series_continue_missing_groups(state, scope)
+    base_scope = _series_continue_normal_scope(scope)
+    hidden_scope = _series_continue_hidden_scope(scope)
+    hidden_view = _series_continue_is_hidden_scope(scope)
+    hidden_count = len(_series_continue_missing_groups(state, hidden_scope))
+    total_pages = max(1, (len(groups) + CONTINUE_PAGE_SIZE - 1) // CONTINUE_PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    start = page * CONTINUE_PAGE_SIZE
+    visible = groups[start:start + CONTINUE_PAGE_SIZE]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for offset, group in enumerate(visible, start=1):
+        index = start + offset - 1
+        rows.append([InlineKeyboardButton(
+            f"🧩 {index + 1}. {_series_continue_missing_group_title(group)}",
+            callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_open:{scope}:{index}",
+        )])
+    if hidden_view:
+        rows.append([InlineKeyboardButton(
+            "👁️ К обычному списку",
+            callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{base_scope}:0",
+        )])
+    elif hidden_count:
+        rows.append([InlineKeyboardButton(
+            f"🙈 Показать скрытые ({hidden_count})",
+            callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{hidden_scope}:0",
+        )])
+    rows.append([InlineKeyboardButton(
+        "📺 Неполные сезоны",
+        callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:mine:0",
+    )])
+    if total_pages > 1:
+        prev_page = max(0, page - 1)
+        next_page = min(total_pages - 1, page + 1)
+        rows.append([
+            InlineKeyboardButton("⬅️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{prev_page}"),
+            InlineKeyboardButton("➡️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{next_page}"),
+        ])
+    rows.append([InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_refresh")])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_continue_missing_detail_text(group: dict) -> str:
+    title = html_module.escape(_series_continue_missing_group_title(group))
+    present = _series_continue_format_seasons(_series_continue_missing_group_present_seasons(group))
+    missing = _series_continue_format_seasons(_series_continue_missing_group_seasons(group))
+    return "\n".join([
+        f"🧩 <b>{title}</b>",
+        "",
+        f"В Plex есть: {present}",
+        f"Нет в Plex: {missing}",
+    ])
+
+
+def _series_continue_missing_detail_keyboard(
+    scope: str,
+    index: int,
+    page: int,
+    group: dict,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    hidden_view = _series_continue_is_hidden_scope(scope)
+    seasons = _series_continue_missing_group_seasons(group)
+    if hidden_view:
+        rows.append([InlineKeyboardButton(
+            "👁️ Вернуть в список",
+            callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_unhide:{scope}:{index}",
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "📚 Собрать план скачивания",
+            callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_bulk:{scope}:{index}:all",
+        )])
+        for season in seasons:
+            rows.append([InlineKeyboardButton(
+                f"🔎 Только S{season:02d}",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_bulk:{scope}:{index}:{season}",
+            )])
+        rows.append([InlineKeyboardButton(
+            "🙈 Скрыть",
+            callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_hide:{scope}:{index}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _series_continue_profile_quality(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"4k", "uhd", "2160", "2160p"}:
+        return "2160p"
+    if text in {"1080", "1080p", "1080i"}:
+        return "1080p"
+    if text in {"720", "720p"}:
+        return "720p"
+    return "any"
+
+
+def _series_continue_query_quality_token(profile_quality: str) -> str:
+    return {
+        "2160p": "4k",
+        "1080p": "1080",
+        "720p": "720",
+    }.get(profile_quality, "")
+
+
+def _series_continue_missing_group_quality(group: dict) -> str:
+    for candidate in group.get("candidates", []):
+        if isinstance(candidate, SeriesMissingSeasonCandidate) and candidate.quality:
+            return candidate.quality
+    return ""
+
+
+async def _series_continue_start_missing_bulk(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    group: dict,
+    seasons: list[int],
+    *,
+    scope: str,
+    page: int,
+) -> int:
+    seasons = sorted({_series_continue_int(season) for season in seasons if _series_continue_int(season) > 0})
+    if not seasons:
+        await query.edit_message_text(
+            "Не выбраны сезоны для плана скачивания.",
+            reply_markup=_series_continue_close_keyboard(),
+        )
+        return ConversationHandler.END
+
+    series_title = _series_continue_missing_group_title(group)
+    profile_quality = _series_continue_profile_quality(_series_continue_missing_group_quality(group))
+    query_quality = _series_continue_query_quality_token(profile_quality)
+    quality_suffix = _quality_to_query_suffix(query_quality)
+    title = _normalize_season_in_query(f"{series_title} Сезон {seasons[0]}{quality_suffix}")
+    result = {
+        "source": "continue_missing",
+        "title": title,
+        "series": True,
+        "quality": "" if profile_quality == "any" else profile_quality,
+    }
+
+    _clear_search_intent(context)
+    context.user_data["srch_results"] = [result]
+    context.user_data["srch_query"] = series_title
+    context.user_data["srch_search_query"] = series_title
+    context.user_data["srch_series_bulk_index"] = 0
+    context.user_data["srch_series_bulk_target_seasons"] = seasons
+    context.user_data["srch_series_bulk_origin"] = "continue_missing"
+    context.user_data["srch_series_bulk_origin_scope"] = scope
+    context.user_data["srch_series_bulk_origin_page"] = page
+    context.user_data["srch_series_bulk_base_quality"] = (
+        profile_quality if profile_quality != "any" else "1080p"
+    )
+    context.user_data["srch_series_bulk_profile_draft"] = SeriesBulkProfile(
+        quality=profile_quality,
+        source="continue_missing",
+    )
+    return await _series_bulk_build_plan_from_context(query, context)
+
+
 def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
+    if _series_continue_base_scope(scope) == "missing":
+        return _series_continue_missing_list_text(state, scope, page)
+
     candidates = _series_continue_candidates(state, scope)
     base_scope = _series_continue_normal_scope(scope)
     hidden_scope = _series_continue_hidden_scope(scope)
@@ -12064,6 +12492,9 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
 
 
 def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> InlineKeyboardMarkup:
+    if _series_continue_base_scope(scope) == "missing":
+        return _series_continue_missing_list_keyboard(state, scope, page)
+
     candidates = _series_continue_candidates(state, scope)
     base_scope = _series_continue_normal_scope(scope)
     hidden_scope = _series_continue_hidden_scope(scope)
@@ -12106,6 +12537,9 @@ def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> Inline
             InlineKeyboardButton("⬅️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{prev_page}"),
             InlineKeyboardButton("➡️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{next_page}"),
         ])
+    rows.append([
+        InlineKeyboardButton("🧩 Проверить отсутствующие сезоны", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_refresh"),
+    ])
     rows.append([
         InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{CONTINUE_CALLBACK_PREFIX}:refresh:{scope}"),
     ])
@@ -12737,9 +13171,28 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
     action = parts[1] if len(parts) > 1 else ""
     state = _series_continue_state(context)
 
+    if action == "missing_refresh":
+        await query.edit_message_text(
+            "🧩 <b>Проверяю отсутствующие сезоны</b>\n\nСверяю Plex с metadata.",
+            parse_mode="HTML",
+            reply_markup=_series_continue_close_keyboard(),
+        )
+        state = await _series_continue_build_missing_state(context, chat_id)
+        scope = "missing"
+        page = 0
+        await query.edit_message_text(
+            _series_continue_list_text(state, scope, page),
+            parse_mode="HTML",
+            reply_markup=_series_continue_list_keyboard(state, scope, page),
+        )
+        return
+
     if action == "refresh":
         scope = _series_continue_scope_part(parts, 2)
-        state = await _series_continue_build_state(context, chat_id)
+        if _series_continue_base_scope(scope) == "missing":
+            state = await _series_continue_build_missing_state(context, chat_id)
+        else:
+            state = await _series_continue_build_state(context, chat_id)
         page = 0
         state["scope"] = scope
         state["page"] = page
@@ -12762,6 +13215,99 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
             _series_continue_list_text(state, scope, page),
             parse_mode="HTML",
             reply_markup=_series_continue_list_keyboard(state, scope, page),
+        )
+        return
+
+    if action == "missing_open":
+        scope = _series_continue_scope_part(parts, 2, default="missing")
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        groups = _series_continue_missing_groups(state, scope)
+        if index < 0 or index >= len(groups):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        state["scope"] = scope
+        state["page"] = page
+        await query.edit_message_text(
+            _series_continue_missing_detail_text(groups[index]),
+            parse_mode="HTML",
+            reply_markup=_series_continue_missing_detail_keyboard(scope, index, page, groups[index]),
+        )
+        return
+
+    if action in {"missing_hide", "missing_unhide"}:
+        scope = _series_continue_scope_part(parts, 2, default="missing")
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        groups = _series_continue_missing_groups(state, scope)
+        if index < 0 or index >= len(groups):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        hidden_keys = set(state.get("hidden_keys") or [])
+        group = groups[index]
+        for candidate in group.get("candidates", []):
+            if not isinstance(candidate, SeriesMissingSeasonCandidate):
+                continue
+            candidate_key = _series_continue_candidate_key(candidate)
+            if action == "missing_hide":
+                hidden_keys.add(candidate_key)
+            else:
+                hidden_keys.discard(candidate_key)
+        next_scope = _series_continue_normal_scope(scope) if action == "missing_hide" else scope
+        _series_continue_save_hidden_keys_for_chat(chat_id, hidden_keys)
+        _series_continue_refresh_hidden_views(state, hidden_keys)
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        if page * CONTINUE_PAGE_SIZE >= len(_series_continue_missing_groups(state, next_scope)):
+            page = max(0, page - 1)
+        state["scope"] = next_scope
+        state["page"] = page
+        await query.edit_message_text(
+            _series_continue_list_text(state, next_scope, page),
+            parse_mode="HTML",
+            reply_markup=_series_continue_list_keyboard(state, next_scope, page),
+        )
+        return
+
+    if action == "missing_bulk":
+        scope = _series_continue_scope_part(parts, 2, default="missing")
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        groups = _series_continue_missing_groups(state, scope)
+        if index < 0 or index >= len(groups):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        selected = parts[4] if len(parts) > 4 else "all"
+        group = groups[index]
+        if selected == "all":
+            seasons = list(_series_continue_missing_group_seasons(group))
+        else:
+            seasons = [_series_continue_int(selected)]
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        state["scope"] = scope
+        state["page"] = page
+        await _series_continue_start_missing_bulk(
+            query,
+            context,
+            group,
+            seasons,
+            scope=scope,
+            page=page,
         )
         return
 
@@ -17589,6 +18135,10 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
 async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    return await _series_bulk_build_plan_from_context(query, context)
+
+
+async def _series_bulk_build_plan_from_context(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     build_token = _series_bulk_start_build(context)
     try:
         index = int(context.user_data.get("srch_series_bulk_index"))
@@ -17628,12 +18178,22 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
         long_notice_task = asyncio.create_task(
             _series_bulk_long_notice_loop(query, context, series_query, build_token)
         )
-        seasons, verified = await _series_bulk_known_seasons(series_query, results)
-        if _series_bulk_build_cancelled(context, build_token):
-            return ConversationHandler.END
-        clicked_season = _extract_season_from_query(str(result.get("title") or ""))
-        if clicked_season and clicked_season not in seasons:
-            seasons = sorted({*seasons, clicked_season})
+        raw_target_seasons = context.user_data.get("srch_series_bulk_target_seasons")
+        target_seasons = sorted({
+            _series_continue_int(season)
+            for season in (raw_target_seasons or [])
+            if _series_continue_int(season) > 0
+        })
+        if target_seasons:
+            seasons = target_seasons
+            verified = True
+        else:
+            seasons, verified = await _series_bulk_known_seasons(series_query, results)
+            if _series_bulk_build_cancelled(context, build_token):
+                return ConversationHandler.END
+            clicked_season = _extract_season_from_query(str(result.get("title") or ""))
+            if clicked_season and clicked_season not in seasons:
+                seasons = sorted({*seasons, clicked_season})
         profile = _series_bulk_profile_from_context(context)
         if profile is None:
             profile = _series_bulk_profile_from_result(context, result)
@@ -18065,6 +18625,20 @@ async def search_subscribe_back_to_results(
     """«⬅️ К результатам» — re-render the results keyboard from cached data."""
     query = update.callback_query
     await query.answer()
+    if context.user_data.get("srch_series_bulk_origin") == "continue_missing":
+        state = _series_continue_state(context)
+        scope = "missing"
+        try:
+            page = int(context.user_data.get("srch_series_bulk_origin_page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        await query.edit_message_text(
+            _series_continue_list_text(state, scope, page),
+            parse_mode="HTML",
+            reply_markup=_series_continue_list_keyboard(state, scope, page),
+        )
+        return ConversationHandler.END
+
     results = context.user_data.get("srch_results", [])
     if not results:
         await query.edit_message_text(
@@ -18312,7 +18886,9 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_series_bulk_result_count", "srch_series_bulk_results",
         "srch_series_bulk_review_season", "srch_series_bulk_voice_expanded",
         "srch_series_bulk_voice_manual", "srch_series_bulk_wait_stage",
-        "srch_series_bulk_warnings",
+        "srch_series_bulk_warnings", "srch_series_bulk_target_seasons",
+        "srch_series_bulk_origin", "srch_series_bulk_origin_scope",
+        "srch_series_bulk_origin_page",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
         "srch_results_full", "srch_clusters", "srch_picker_clusters",
@@ -18383,7 +18959,9 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_series_bulk_result_count", "srch_series_bulk_results",
         "srch_series_bulk_review_season", "srch_series_bulk_voice_expanded",
         "srch_series_bulk_voice_manual", "srch_series_bulk_wait_stage",
-        "srch_series_bulk_warnings",
+        "srch_series_bulk_warnings", "srch_series_bulk_target_seasons",
+        "srch_series_bulk_origin", "srch_series_bulk_origin_scope",
+        "srch_series_bulk_origin_page",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
         "srch_results_full", "srch_clusters", "srch_picker_clusters",
@@ -23182,6 +23760,23 @@ def main() -> None:
             # Re-run the last search from an error message (conversation already ended).
             CallbackQueryHandler(search_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:retry$"),
             CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
+            CallbackQueryHandler(search_series_bulk_profile_callback, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_prof:[a-z0-9_]+$"),
+            CallbackQueryHandler(search_series_bulk_build_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_build$", block=False),
+            CallbackQueryHandler(search_series_bulk_review, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_review$"),
+            CallbackQueryHandler(search_series_bulk_pack_list, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_packs$"),
+            CallbackQueryHandler(search_series_bulk_pack_confirm, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_pack_confirm:\d+$"),
+            CallbackQueryHandler(search_series_bulk_pack_run, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_pack_run:\d+$"),
+            CallbackQueryHandler(search_series_bulk_retry, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_retry$"),
+            CallbackQueryHandler(search_series_bulk_soft_search, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_soft$"),
+            CallbackQueryHandler(search_series_bulk_candidate_download, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:\d+$"),
+            CallbackQueryHandler(search_series_bulk_partial_action, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_partial:[a-z_]+$"),
+            CallbackQueryHandler(search_series_bulk_skip, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_skip$"),
+            CallbackQueryHandler(search_series_bulk_confirm, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_confirm$"),
+            CallbackQueryHandler(search_series_bulk_back_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_back_plan$"),
+            CallbackQueryHandler(search_series_bulk_rebuild, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_rebuild$"),
+            CallbackQueryHandler(search_series_bulk_run, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_run$"),
+            CallbackQueryHandler(search_subscribe_back_to_results, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:sub_back_results:0$"),
+            CallbackQueryHandler(search_cancel, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:cancel"),
         ],
             states={
                 SEARCH_OPTIONS: [

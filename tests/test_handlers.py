@@ -6963,9 +6963,35 @@ class SeriesContinueCommandTests(unittest.TestCase):
             history_last_episode_end=8,
         )
 
+    def _missing_candidate(self, *, season: int = 7, index: int = 0):
+        from series_continue import PlexSeriesIdentity, SeriesMissingSeasonCandidate
+
+        title = "The Rookie" if index == 0 else f"The Rookie {index}"
+        return SeriesMissingSeasonCandidate(
+            identity=PlexSeriesIdentity(
+                plex_rating_key=str(1000 + index),
+                plex_guid=f"plex://show/{index}",
+                title=title,
+                original_title=title,
+                year=2024,
+            ),
+            season_number=season,
+            episode_count=18,
+            present_seasons=(1, 2, 3, 4, 5, 6, 8),
+            quality="1080",
+            history_chat_ids=(100,),
+        )
+
     def _callbacks(self, keyboard) -> list[str]:
         return [
             button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+
+    def _button_texts(self, keyboard) -> list[str]:
+        return [
+            button.text
             for row in keyboard.inline_keyboard
             for button in row
         ]
@@ -7217,6 +7243,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("S08 · Plex 8/18", text)
         self.assertIn("прошлая тема есть", text)
         self.assertIn("cont:open:mine:0", self._callbacks(keyboard))
+        self.assertIn("cont:missing_refresh", self._callbacks(keyboard))
         self.assertIn("task:close:", self._callbacks(keyboard))
 
     def test_continue_command_retries_final_render_network_error(self):
@@ -7351,6 +7378,118 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         self.assertIn("Скрыто: 1", text)
         self.assertIn("cont:list:hidden_all:0", self._callbacks(keyboard))
+
+    def test_continue_missing_list_shows_hidden_toggle_and_regular_list_button(self):
+        visible = self._missing_candidate(season=7)
+        hidden = self._missing_candidate(season=9)
+        state = {"raw_mine": [], "raw_all": [], "raw_missing": [visible, hidden]}
+        bot._series_continue_refresh_hidden_views(state, {bot._series_continue_candidate_key(hidden)})
+
+        text = bot._series_continue_list_text(state, "missing", 0)
+        keyboard = bot._series_continue_list_keyboard(state, "missing", 0)
+        hidden_keyboard = bot._series_continue_list_keyboard(state, "hidden_missing", 0)
+
+        self.assertIn("Нет в Plex: S07", text)
+        self.assertIn("cont:list:hidden_missing:0", self._callbacks(keyboard))
+        self.assertIn("🙈 Показать скрытые (1)", self._button_texts(keyboard))
+        self.assertIn("👁️ К обычному списку", self._button_texts(hidden_keyboard))
+        self.assertIn("cont:list:mine:0", self._callbacks(keyboard))
+
+    def test_continue_missing_detail_offers_bulk_plan_and_single_seasons(self):
+        state = {
+            "raw_mine": [],
+            "raw_all": [],
+            "raw_missing": [
+                self._missing_candidate(season=7),
+                self._missing_candidate(season=9),
+            ],
+        }
+        bot._series_continue_refresh_hidden_views(state, set())
+        group = bot._series_continue_missing_groups(state, "missing")[0]
+
+        text = bot._series_continue_missing_detail_text(group)
+        keyboard = bot._series_continue_missing_detail_keyboard("missing", 0, 0, group)
+        callbacks = self._callbacks(keyboard)
+
+        self.assertIn("Нет в Plex: S07, S09", text)
+        self.assertIn("cont:missing_bulk:missing:0:all", callbacks)
+        self.assertIn("cont:missing_bulk:missing:0:7", callbacks)
+        self.assertIn("cont:missing_bulk:missing:0:9", callbacks)
+        self.assertNotIn("🔔 Следить за сериалом", self._button_texts(keyboard))
+
+    def test_continue_missing_bulk_all_uses_only_missing_seasons(self):
+        state = {
+            "raw_mine": [],
+            "raw_all": [],
+            "raw_missing": [
+                self._missing_candidate(season=7),
+                self._missing_candidate(season=9),
+            ],
+        }
+        bot._series_continue_refresh_hidden_views(state, set())
+        update = _make_callback_update(chat_id=100, callback_data="cont:missing_bulk:missing:0:all")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        build_plan = AsyncMock(return_value=bot.SEARCH_RESULTS)
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_series_bulk_build_plan_from_context", build_plan),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        build_plan.assert_awaited_once()
+        self.assertEqual(context.user_data["srch_series_bulk_target_seasons"], [7, 9])
+        self.assertEqual(context.user_data["srch_series_bulk_origin"], "continue_missing")
+
+    def test_continue_missing_bulk_single_uses_only_selected_season(self):
+        state = {
+            "raw_mine": [],
+            "raw_all": [],
+            "raw_missing": [
+                self._missing_candidate(season=7),
+                self._missing_candidate(season=9),
+            ],
+        }
+        bot._series_continue_refresh_hidden_views(state, set())
+        update = _make_callback_update(chat_id=100, callback_data="cont:missing_bulk:missing:0:7")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        build_plan = AsyncMock(return_value=bot.SEARCH_RESULTS)
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_series_bulk_build_plan_from_context", build_plan),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        build_plan.assert_awaited_once()
+        self.assertEqual(context.user_data["srch_series_bulk_target_seasons"], [7])
+
+    def test_continue_hidden_missing_key_does_not_hide_incomplete_candidate(self):
+        from series_continue import PlexSeriesIdentity, SeriesCatchUpCandidate, SeriesMissingSeasonCandidate
+
+        identity = PlexSeriesIdentity(
+            plex_rating_key="show-1",
+            plex_guid="plex://show/1",
+            title="The Rookie",
+            original_title="The Rookie",
+            year=2024,
+        )
+        incomplete = SeriesCatchUpCandidate(identity=identity, season_number=7, present_count=4, known_total=18)
+        missing = SeriesMissingSeasonCandidate(identity=identity, season_number=7, present_seasons=(1, 2, 3))
+        state = {"raw_mine": [], "raw_all": [incomplete], "raw_missing": [missing]}
+
+        bot._series_continue_refresh_hidden_views(state, {bot._series_continue_candidate_key(missing)})
+
+        self.assertEqual(state["all"], [incomplete])
+        self.assertEqual(state["hidden_missing"], [missing])
+        self.assertEqual(bot._series_continue_candidate_key(incomplete), "incomplete:show-1:S07")
+        self.assertEqual(bot._series_continue_candidate_key(missing), "missing:show-1:S07")
 
     def test_continue_callback_hides_candidate_for_current_chat(self):
         candidate = self._candidate()
