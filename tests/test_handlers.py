@@ -6935,7 +6935,7 @@ class SubscriptionAdvancedKeyboardTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# /continue command tests
+# /seasons command tests
 # ---------------------------------------------------------------------------
 
 
@@ -7325,10 +7325,11 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
     def test_continue_progress_text_explains_sources_and_confidence(self):
         text = bot._series_continue_progress_text()
-        self.assertIn("Ищу сезоны для докачки", text)
+        self.assertIn("Проверяю сезоны", text)
         self.assertIn("Plex", text)
-        self.assertIn("точным количеством эпизодов", text)
-        self.assertIn("уверенно продолжить", text)
+        self.assertIn("историей загрузок", text)
+        self.assertIn("каталогом сезонов", text)
+        self.assertIn("которых нет в Plex", text)
 
     def test_continue_command_renders_mine_list(self):
         update = _make_message_update(chat_id=100)
@@ -7350,15 +7351,49 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         asyncio.run(run())
 
-        build_state.assert_awaited_once_with(context, 100)
+        build_state.assert_awaited_once_with(context, 100, include_missing=True)
         text = progress.edit_text.await_args.args[0]
         keyboard = progress.edit_text.await_args.kwargs["reply_markup"]
         self.assertIn("The Rookie", text)
         self.assertIn("S08 · Plex 8/18", text)
         self.assertIn("прошлая тема есть", text)
         self.assertIn("cont:open:mine:0", self._callbacks(keyboard))
-        self.assertIn("cont:missing_refresh", self._callbacks(keyboard))
+        self.assertIn("cont:list:missing:0", self._callbacks(keyboard))
         self.assertIn("task:close:", self._callbacks(keyboard))
+
+    def test_continue_command_keeps_incomplete_list_first_when_missing_exists(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        progress = MagicMock()
+        progress.edit_text = AsyncMock()
+        update.message.reply_text.return_value = progress
+        missing = self._missing_candidate(season=7)
+        state = {
+            "mine": [],
+            "all": [],
+            "missing": [missing],
+            "hidden_missing": [],
+            "scope": "mine",
+            "page": 0,
+        }
+        build_state = AsyncMock(return_value=state)
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "_series_continue_build_state", build_state),
+            ):
+                await bot.series_continue_command(update, context)
+
+        asyncio.run(run())
+
+        build_state.assert_awaited_once_with(context, 100, include_missing=True)
+        text = progress.edit_text.await_args.args[0]
+        keyboard = progress.edit_text.await_args.kwargs["reply_markup"]
+        self.assertIn("Пока не нашёл сезоны", text)
+        self.assertNotIn("Нет в Plex: S07", text)
+        self.assertIn("cont:list:missing:0", self._callbacks(keyboard))
 
     def test_continue_command_retries_final_render_network_error(self):
         update = _make_message_update(chat_id=100)
@@ -7504,6 +7539,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         hidden_keyboard = bot._series_continue_list_keyboard(state, "hidden_missing", 0)
 
         self.assertIn("Нет в Plex: S07", text)
+        self.assertNotIn("Режим", text)
         self.assertIn("cont:list:hidden_missing:0", self._callbacks(keyboard))
         self.assertIn("🙈 Показать скрытые (1)", self._button_texts(keyboard))
         self.assertIn("👁️ К обычному списку", self._button_texts(hidden_keyboard))
@@ -8642,7 +8678,7 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
 
         public_commands = app.bot.set_my_commands.await_args_list[-1].args[0]
         self.assertIn("subs", [command.command for command in public_commands])
-        self.assertIn("continue", [command.command for command in public_commands])
+        self.assertIn("seasons", [command.command for command in public_commands])
         self.assertIn("_subscription_check_loop", created)
         self.assertIn("_jackett_warmup_loop", created)
         self.assertIn("_progress_update_loop", created)

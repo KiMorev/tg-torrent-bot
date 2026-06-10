@@ -391,7 +391,7 @@ BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
     BotCommand("settings", "Предпочтения поиска"),
-    BotCommand("continue", "Докачать сезон"),
+    BotCommand("seasons", "Сезоны Plex"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
@@ -11522,9 +11522,9 @@ def _series_continue_close_keyboard() -> InlineKeyboardMarkup:
 
 def _series_continue_progress_text() -> str:
     return (
-        "📺 <b>Ищу сезоны для докачки</b>\n\n"
-        "Сверяю сезоны в Plex с точным количеством эпизодов.\n"
-        "Покажу только варианты, которые можно уверенно продолжить."
+        "📺 <b>Проверяю сезоны</b>\n\n"
+        "Сверяю Plex с историей загрузок и каталогом сезонов.\n"
+        "Покажу неполные сезоны и сезоны, которых нет в Plex."
     )
 
 
@@ -11952,11 +11952,23 @@ async def _series_continue_identity_with_external_guids(show: "PlexShow"):
 async def _series_continue_build_state(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int | None,
+    *,
+    include_missing: bool = False,
 ) -> dict:
     shows = await _series_continue_plex_shows_with_seasons()
     load_history = getattr(state_store, "load_download_history", None)
     history = load_history() if callable(load_history) else []
     known_totals = await _series_continue_known_totals_by_show(shows, history)
+    raw_missing = []
+    if include_missing:
+        metadata_totals = await _series_continue_metadata_totals_by_show(shows)
+        raw_missing = build_series_missing_season_candidates(
+            shows,
+            metadata_totals,
+            history,
+            chat_id=chat_id,
+            scope="all",
+        )
     state = {
         "raw_mine": build_series_catch_up_candidates(
             shows,
@@ -11975,7 +11987,7 @@ async def _series_continue_build_state(
         "topic_subscriptions": _series_continue_subscription_map_for_chat(chat_id),
         "scope": "mine",
         "page": 0,
-        "raw_missing": [],
+        "raw_missing": raw_missing,
     }
     _series_continue_refresh_hidden_views(state, _series_continue_hidden_keys_for_chat(chat_id))
     context.user_data[CONTINUE_STATE_KEY] = state
@@ -12301,7 +12313,8 @@ def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> st
         hidden_line = f"\n\nСкрыто: {hidden_count}" if hidden_count else ""
         return (
             "🧩 <b>Отсутствующие сезоны</b>\n\n"
-            "Не нашёл сезоны, которые есть в metadata, но целиком отсутствуют в Plex."
+            "Не нашёл сезоны, которые есть в каталоге сезонов, но целиком отсутствуют в Plex.\n\n"
+            "Показываю только уверенные совпадения Plex с каталогом."
             f"{hidden_line}"
         )
 
@@ -12309,10 +12322,15 @@ def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> st
     page = min(max(page, 0), total_pages - 1)
     start = page * CONTINUE_PAGE_SIZE
     visible = groups[start:start + CONTINUE_PAGE_SIZE]
-    mode = "🙈 Скрытые" if hidden_view else "🧩 Обычный список"
+    summary = (
+        f"Скрытые сериалы: {len(groups)}"
+        if hidden_view
+        else f"Найдено сериалов: {len(groups)}"
+    )
     lines = [
         "🧩 <b>Отсутствующие сезоны</b>",
-        f"Режим: {mode} · найдено сериалов: {len(groups)}",
+        summary,
+        "Только уверенные совпадения Plex с каталогом сезонов.",
         "",
     ]
     if not hidden_view and hidden_count:
@@ -12505,17 +12523,25 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     hidden_count = len(_series_continue_candidates(state, hidden_scope))
     all_count = len(_series_continue_candidates(state, "all"))
     hidden_view = _series_continue_is_hidden_scope(scope)
-    mode = "🙈 Скрытые" if hidden_view else ("🙋 Моё" if base_scope == "mine" else "🌐 Всё")
+    summary = (
+        f"Скрытые сезоны: {len(candidates)}"
+        if hidden_view
+        else (
+            f"Найдено у вас: {len(candidates)}"
+            if base_scope == "mine"
+            else f"Найдено в медиатеке: {len(candidates)}"
+        )
+    )
     if not candidates:
         if hidden_view:
             return (
-                "📺 <b>Докачать сезон</b>\n\n"
+                "📺 <b>Сезоны Plex</b>\n\n"
                 "В скрытых сезонах пока пусто."
             )
         hidden_line = f"\n\nСкрыто: {hidden_count}" if hidden_count else ""
         if scope == "mine" and all_count:
             return (
-                "📺 <b>Докачать сезон</b>\n\n"
+                "📺 <b>Сезоны Plex</b>\n\n"
                 "В ваших кандидатах пока пусто.\n\n"
                 "Здесь появляются сезоны Plex, которые можно продолжить по вашим загрузкам.\n\n"
                 "В общей медиатеке есть варианты. Переключитесь на «Всё», "
@@ -12523,7 +12549,7 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
                 f"{hidden_line}"
             )
         return (
-            "📺 <b>Докачать сезон</b>\n\n"
+            "📺 <b>Сезоны Plex</b>\n\n"
             "Пока не нашёл сезоны, которые можно уверенно продолжить.\n\n"
             "Что проверяю: неполные сезоны Plex и актуальные раздачи, "
             "которые подходят для продолжения.\n\n"
@@ -12538,8 +12564,8 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     start = page * CONTINUE_PAGE_SIZE
     visible = candidates[start:start + CONTINUE_PAGE_SIZE]
     lines = [
-        "📺 <b>Докачать сезон</b>",
-        f"Режим: {mode} · найдено: {len(candidates)}",
+        "📺 <b>Сезоны Plex</b>",
+        summary,
         "",
     ]
     if not hidden_view and hidden_count:
@@ -12598,8 +12624,14 @@ def _series_continue_list_keyboard(state: dict, scope: str, page: int) -> Inline
             InlineKeyboardButton("⬅️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{prev_page}"),
             InlineKeyboardButton("➡️", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{next_page}"),
         ])
+    missing_count = len(_series_continue_missing_groups(state, "missing"))
+    missing_label = (
+        f"🧩 Отсутствующие сезоны ({missing_count})"
+        if missing_count
+        else "🧩 Отсутствующие сезоны"
+    )
     rows.append([
-        InlineKeyboardButton("🧩 Проверить отсутствующие сезоны", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_refresh"),
+        InlineKeyboardButton(missing_label, callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:missing:0"),
     ])
     rows.append([
         InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{CONTINUE_CALLBACK_PREFIX}:refresh:{scope}"),
@@ -13187,16 +13219,16 @@ async def _series_continue_download_same_topic(
 
 async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
-        logger.warning("Rejected /continue from chat_id=%s", _chat_id(update))
+        logger.warning("Rejected /seasons from chat_id=%s", _chat_id(update))
         await _reply_access_pending(update, context)
         return
     if not PLEX_ENABLED:
         await update.message.reply_text(
-            "📺 <b>Докачать сезон</b>\n\nPlex не настроен, поэтому список собрать нельзя.",
+            "📺 <b>Сезоны Plex</b>\n\nPlex не настроен, поэтому список собрать нельзя.",
             parse_mode="HTML",
             reply_markup=_series_continue_close_keyboard(),
         )
-        await _delete_command_message_safely(update, context, "continue command")
+        await _delete_command_message_safely(update, context, "seasons command")
         return
 
     progress = await update.message.reply_text(
@@ -13205,7 +13237,7 @@ async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=_series_continue_close_keyboard(),
     )
     chat_id = update.effective_chat.id if update.effective_chat else None
-    state = await _series_continue_build_state(context, chat_id)
+    state = await _series_continue_build_state(context, chat_id, include_missing=True)
     scope = "mine"
     page = 0
     state["scope"] = scope
@@ -13216,7 +13248,7 @@ async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="HTML",
         reply_markup=_series_continue_list_keyboard(state, scope, page),
     )
-    await _delete_command_message_safely(update, context, "continue command")
+    await _delete_command_message_safely(update, context, "seasons command")
 
 
 async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -13234,7 +13266,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
 
     if action == "missing_refresh":
         await query.edit_message_text(
-            "🧩 <b>Проверяю отсутствующие сезоны</b>\n\nСверяю Plex с metadata.",
+            "🧩 <b>Ищу отсутствующие сезоны</b>\n\nСверяю Plex с каталогом сезонов.",
             parse_mode="HTML",
             reply_markup=_series_continue_close_keyboard(),
         )
@@ -13253,7 +13285,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         if _series_continue_base_scope(scope) == "missing":
             state = await _series_continue_build_missing_state(context, chat_id)
         else:
-            state = await _series_continue_build_state(context, chat_id)
+            state = await _series_continue_build_state(context, chat_id, include_missing=True)
         page = 0
         state["scope"] = scope
         state["page"] = page
@@ -20588,7 +20620,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
         )
     if PLEX_ENABLED:
-        main_bullets.append("• 📺 /continue — найти сезоны, которые можно продолжить")
+        main_bullets.append("• 📺 /seasons — найти неполные и отсутствующие сезоны в Plex")
     main_bullets.append("• 📋 /status — текущие загрузки и недавняя история")
 
     auto_bullets: list[str] = ["• когда скачивание завершилось"]
@@ -20662,7 +20694,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
         )
     if PLEX_ENABLED:
-        extras.append("• /continue — найти в Plex сезоны, которые можно докачать по истории загрузок")
+        extras.append("• /seasons — найти в Plex неполные сезоны и сезоны, которых нет целиком")
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на /new — пришлю push с постером, ссылкой на КП и быстрыми кнопками скачивания")
 
@@ -23781,7 +23813,7 @@ def main() -> None:
     app.add_handler(CommandHandler("new", movie_new_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("bulk", series_bulk_command))
-    app.add_handler(CommandHandler("continue", series_continue_command))
+    app.add_handler(CommandHandler("seasons", series_continue_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
