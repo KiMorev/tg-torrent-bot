@@ -7200,6 +7200,120 @@ class SeriesContinueCommandTests(unittest.TestCase):
         tvmaze.season_episode_count.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
 
+    def test_continue_metadata_totals_uses_complete_cache_without_api(self):
+        from plex import PlexShow
+
+        show = PlexShow(
+            "The Rookie",
+            2018,
+            "show-key-rookie",
+            seasons={},
+            guid="plex://show/rookie",
+            external_guids=["tmdb://12345"],
+        )
+        tmdb = MagicMock()
+        tvmaze = MagicMock()
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {
+            "tmdb:12345": {
+                "1": 20,
+                "2": 18,
+                bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+            },
+        }
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
+
+        self.assertEqual(totals, {"show-key-rookie": {1: 20, 2: 18}})
+        tmdb.season_episode_counts.assert_not_called()
+        tvmaze.season_episode_counts.assert_not_called()
+        state.save_series_continue_totals.assert_not_called()
+
+    def test_continue_metadata_totals_skips_cached_conflicts(self):
+        from plex import PlexShow
+
+        show = PlexShow(
+            "Lupin",
+            2021,
+            "show-key-lupin",
+            seasons={},
+            guid="plex://show/lupin",
+            external_guids=["tmdb://96677", "tvdb://367178"],
+        )
+        tmdb = MagicMock()
+        tvmaze = MagicMock()
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {
+            "tmdb:96677": {
+                "1": 10,
+                "2": 8,
+                bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+            },
+            "tvmaze:tvdb:367178": {
+                "1": 5,
+                "2": 8,
+                bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+            },
+        }
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
+
+        self.assertEqual(totals, {"show-key-lupin": {2: 8}})
+        tmdb.season_episode_counts.assert_not_called()
+        tvmaze.season_episode_counts.assert_not_called()
+        state.save_series_continue_totals.assert_not_called()
+
+    def test_continue_metadata_totals_skips_live_conflicts_and_stores_complete_snapshots(self):
+        from plex import PlexShow
+
+        show = PlexShow(
+            "Lupin",
+            2021,
+            "show-key-lupin",
+            seasons={},
+            guid="plex://show/lupin",
+            external_guids=["tmdb://96677", "tvdb://367178"],
+        )
+        tmdb = MagicMock()
+        tmdb.season_episode_counts.return_value = {1: 10, 2: 8}
+        tvmaze = MagicMock()
+        tvmaze.season_episode_counts.return_value = {1: 5, 2: 8}
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {}
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
+
+        self.assertEqual(totals, {"show-key-lupin": {2: 8}})
+        tmdb.season_episode_counts.assert_called_once_with(
+            tmdb_id="96677",
+            imdb_id="",
+            tvdb_id="367178",
+        )
+        tvmaze.season_episode_counts.assert_called_once_with(
+            imdb_id="",
+            tvdb_id="367178",
+        )
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertTrue(saved["tmdb:96677"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
+        self.assertEqual(saved["tmdb:96677"]["1"], 10)
+        self.assertTrue(saved["tvmaze:tvdb:367178"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
+        self.assertEqual(saved["tvmaze:tvdb:367178"]["1"], 5)
+
     @contextmanager
     def _allowed_context(self):
         with (

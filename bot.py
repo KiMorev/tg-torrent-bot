@@ -406,6 +406,7 @@ CONTINUE_CALLBACK_PREFIX = "cont"
 CONTINUE_PAGE_SIZE = 10
 CONTINUE_STATE_KEY = "continue_state"
 CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all", "missing", "hidden_missing"}
+_SERIES_CONTINUE_TOTALS_COMPLETE_KEY = "__complete__"
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
@@ -11652,36 +11653,40 @@ async def _series_continue_metadata_totals_by_show(
         if not cache_keys:
             continue
 
-        cached_totals = _series_continue_cached_totals(cache, cache_keys)
+        tvmaze_cache_keys = _series_continue_tvmaze_cache_keys(identity)
+        cached_complete_tmdb = _series_continue_cached_complete_totals(cache, cache_keys)
+        cached_complete_tvmaze = _series_continue_cached_complete_totals(cache, tvmaze_cache_keys)
+        if cached_complete_tmdb or cached_complete_tvmaze:
+            selected = _series_continue_select_metadata_totals(
+                cached_complete_tmdb or _series_continue_cached_totals(cache, cache_keys),
+                cached_complete_tvmaze or _series_continue_cached_totals(cache, tvmaze_cache_keys),
+                show_title=identity.title,
+            )
+            if selected:
+                totals[str(show.rating_key)] = selected
+            continue
+
+        cached_tmdb_totals = _series_continue_cached_totals(cache, cache_keys)
+        cached_tvmaze_totals = _series_continue_cached_totals(cache, tvmaze_cache_keys)
         tmdb_totals: dict[int, int] = {}
         if tmdb_client is not None and (identity.tmdb_id or identity.imdb_id or identity.tvdb_id):
             tmdb_totals = await _series_continue_fetch_tmdb_totals(identity)
             if tmdb_totals:
-                for season_number, total in tmdb_totals.items():
-                    _series_continue_store_cached_total(cache, cache_keys, season_number, total)
+                _series_continue_store_cached_totals_snapshot(cache, cache_keys, tmdb_totals)
                 changed = True
 
         tvmaze_totals: dict[int, int] = {}
         if tvmaze_client is not None and (identity.imdb_id or identity.tvdb_id):
             tvmaze_totals = await _series_continue_fetch_tvmaze_totals(identity)
             if tvmaze_totals:
-                for season_number, total in tvmaze_totals.items():
-                    _series_continue_store_cached_total(
-                        cache,
-                        _series_continue_tvmaze_cache_keys(identity),
-                        season_number,
-                        total,
-                    )
+                _series_continue_store_cached_totals_snapshot(cache, tvmaze_cache_keys, tvmaze_totals)
                 changed = True
 
-        if tmdb_totals:
-            selected = {
-                season_number: total
-                for season_number, total in tmdb_totals.items()
-                if tvmaze_totals.get(season_number, total) == total
-            }
-        else:
-            selected = tvmaze_totals or cached_totals
+        selected = _series_continue_select_metadata_totals(
+            tmdb_totals or cached_tmdb_totals,
+            tvmaze_totals or cached_tvmaze_totals,
+            show_title=identity.title,
+        )
         if selected:
             totals[str(show.rating_key)] = selected
 
@@ -11856,6 +11861,62 @@ def _series_continue_cached_totals(cache: dict, keys: tuple[str, ...]) -> dict[i
             if season_number > 0 and total > 0:
                 totals.setdefault(season_number, total)
     return totals
+
+
+def _series_continue_cached_complete_totals(cache: dict, keys: tuple[str, ...]) -> dict[int, int]:
+    for key in keys:
+        by_season = cache.get(key)
+        if isinstance(by_season, dict) and by_season.get(_SERIES_CONTINUE_TOTALS_COMPLETE_KEY):
+            return _series_continue_cached_totals(cache, (key,))
+    return {}
+
+
+def _series_continue_select_metadata_totals(
+    tmdb_totals: dict[int, int],
+    tvmaze_totals: dict[int, int],
+    *,
+    show_title: str = "",
+) -> dict[int, int]:
+    if not tmdb_totals:
+        return dict(tvmaze_totals)
+    selected: dict[int, int] = {}
+    for season_number, total in sorted(tmdb_totals.items()):
+        tvmaze_total = tvmaze_totals.get(season_number)
+        if tvmaze_total is not None and tvmaze_total != total:
+            logger.info(
+                "Series continue total conflict show=%r season=%s tmdb=%s tvmaze=%s",
+                show_title,
+                season_number,
+                total,
+                tvmaze_total,
+            )
+            continue
+        selected[season_number] = total
+    return selected
+
+
+def _series_continue_store_cached_totals_snapshot(
+    cache: dict,
+    keys: tuple[str, ...],
+    totals: dict[int, int],
+) -> None:
+    clean = {
+        int(season_number): int(total)
+        for season_number, total in totals.items()
+        if _series_continue_int(season_number) > 0 and _series_continue_int(total) > 0
+    }
+    if not clean:
+        return
+    for key in keys:
+        by_season = cache.setdefault(key, {})
+        if not isinstance(by_season, dict):
+            continue
+        for existing in list(by_season):
+            if _series_continue_int(existing) > 0:
+                by_season.pop(existing, None)
+        for season_number, total in clean.items():
+            by_season[str(season_number)] = int(total)
+        by_season[_SERIES_CONTINUE_TOTALS_COMPLETE_KEY] = True
 
 
 def _series_continue_store_cached_total(

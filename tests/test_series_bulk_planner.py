@@ -211,6 +211,36 @@ class SeriesBulkPlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.seasons[0].status, STATUS_MISSING)
 
+    def test_non_downloadable_seed_result_is_not_a_candidate(self) -> None:
+        seed = {
+            "source": "continue_missing",
+            "title": "The Rookie S07 1080p",
+            "series": True,
+            "quality": "1080p",
+        }
+
+        missing_plan = build_series_bulk_plan(
+            series_title="The Rookie",
+            seasons=[7],
+            profile=SeriesBulkProfile(quality="1080p", source="continue_missing"),
+            results=[seed],
+        )
+
+        self.assertEqual(missing_plan.seasons[0].status, STATUS_MISSING)
+        self.assertEqual(missing_plan.seasons[0].candidates, ())
+
+        real = _result("The Rookie S07 1080p")
+        real_plan = build_series_bulk_plan(
+            series_title="The Rookie",
+            seasons=[7],
+            profile=SeriesBulkProfile(quality="1080p", source="continue_missing"),
+            results=[seed, real],
+        )
+
+        self.assertEqual(real_plan.seasons[0].status, STATUS_EXACT)
+        self.assertIsNotNone(real_plan.seasons[0].selected)
+        self.assertIs(real_plan.seasons[0].selected.result, real)
+
     def test_season_pack_is_collected_but_not_auto_selected_for_single_season(self) -> None:
         plan = build_series_bulk_plan(
             series_title="Клиника",

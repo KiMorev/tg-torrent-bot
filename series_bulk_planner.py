@@ -182,7 +182,8 @@ def build_series_bulk_plan(
     )
     pack_candidates = tuple(
         r for r in result_list
-        if _title_matches_series(series_title, _result_title(r))
+        if not _result_is_non_downloadable_seed(r)
+        and _title_matches_series(series_title, _result_title(r))
         and _detect_season_pack(_result_title(r)) is not None
     )
 
@@ -228,6 +229,8 @@ def _evaluate_season_candidates(
 ) -> tuple[CandidateEvaluation, ...]:
     evaluations: list[CandidateEvaluation] = []
     for result in results:
+        if _result_is_non_downloadable_seed(result):
+            continue
         title = _result_title(result)
         if not title or not _title_matches_series(series_title, title):
             continue
@@ -591,6 +594,20 @@ def _result_title(result: dict) -> str:
 
 def _result_tracker(result: dict) -> str:
     return str(result.get("tracker_name") or result.get("category") or result.get("tracker") or "")
+
+
+def _result_has_download_source(result: dict) -> bool:
+    return any(
+        str(result.get(field) or "").strip()
+        for field in ("topic_id", "url", "torrent_url", "magnet_url")
+    )
+
+
+def _result_is_non_downloadable_seed(result: dict) -> bool:
+    return (
+        str(result.get("source") or "").lower() == "continue_missing"
+        and not _result_has_download_source(result)
+    )
 
 
 def _safe_int(value: object) -> int:
