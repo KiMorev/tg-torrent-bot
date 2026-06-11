@@ -15208,6 +15208,30 @@ def _series_bulk_record_job_season(
     _series_bulk_update_job(context, _record)
 
 
+def _series_bulk_record_job_manual_selection(
+    context: ContextTypes.DEFAULT_TYPE,
+    season_plan: SeasonPlan,
+) -> None:
+    def _record(job: dict) -> None:
+        seasons = job.setdefault("seasons", {})
+        entry = seasons.setdefault(str(season_plan.season), {"season": season_plan.season})
+        entry["plan_status"] = season_plan.status
+        entry["runtime_status"] = "selected"
+        entry["reasons"] = list(season_plan.reasons)
+        entry["selected"] = (
+            _series_bulk_candidate_snapshot(season_plan.selected)
+            if season_plan.selected is not None else None
+        )
+        entry["candidates"] = [
+            _series_bulk_candidate_snapshot(candidate)
+            for candidate in season_plan.candidates[:5]
+        ]
+        for key in ("task_id", "method", "error", "summary", "pending_entry_id"):
+            entry.pop(key, None)
+
+    _series_bulk_update_job(context, _record)
+
+
 def _series_bulk_record_job_pack(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -15300,7 +15324,7 @@ def _series_bulk_plan_keyboard(
     pack_count = len(_series_bulk_pack_candidates(plan)) if plan is not None else 0
     if ready_count:
         rows.append([InlineKeyboardButton(
-            f"⬇️ Скачать уверенные ({ready_count})",
+            f"⬇️ Скачать выбранные ({ready_count})",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_confirm",
         )])
     if decision_count:
@@ -15439,13 +15463,13 @@ def _series_bulk_review_keyboard(
             if failed_key is not None and _series_bulk_result_key(candidate.result) == failed_key:
                 continue
             rows.append([InlineKeyboardButton(
-                f"⬇️ Скачать другой вариант {index + 1}",
+                f"✅ Выбрать другой вариант {index + 1}",
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:{index}",
             )])
     elif season_plan.status == STATUS_NEEDS_DECISION:
         for index, _candidate in enumerate(season_plan.candidates[:3], start=1):
             rows.append([InlineKeyboardButton(
-                f"⬇️ Скачать {index}",
+                f"✅ Выбрать {index}",
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_cand_dl:{index - 1}",
             )])
         rows.append([InlineKeyboardButton(
@@ -16774,6 +16798,7 @@ def _series_bulk_reason_for_user(reason: str) -> str:
         "no candidate passed all hard filters": "нет варианта, который прошёл все требования",
         "multiple candidates are too close to auto-select": "несколько вариантов слишком близки",
         "soft search candidates": "варианты найдены мягким поиском",
+        "manual candidate selected": "выбран вручную",
         "season is not complete yet": "сезон ещё не полный",
     }
     return mapping.get(reason, reason)
@@ -16951,6 +16976,8 @@ def _series_bulk_status_line(
         return f"✅ Сезон {season} - уже есть в Plex"
     if season_plan.status == STATUS_ALREADY_DOWNLOADING:
         return f"⏬ Сезон {season} - уже качается"
+    if season_plan.selected and "manual candidate selected" in season_plan.reasons:
+        return f"✅ Сезон {season} - выбран вручную: {_series_bulk_candidate_label(season_plan.selected)}"
     if season_plan.status == STATUS_EXACT and season_plan.selected:
         return f"✅ Сезон {season} - уверенно: {_series_bulk_candidate_label(season_plan.selected)}"
     if season_plan.status == STATUS_GOOD and season_plan.selected:
@@ -16990,7 +17017,7 @@ def _series_bulk_plan_text(
     lines = [
         f"📚 Скачать недостающие сезоны: {plan.series_title}",
         "",
-        "Перед скачиванием показываю план, чтобы не добавить лишнее.",
+        "Проверьте план перед отправкой задач в Download Station.",
         "",
         "Профиль:",
         f"• Качество: {quality}",
@@ -17032,7 +17059,7 @@ def _series_bulk_plan_text(
     decisions = len(_series_bulk_decision_seasons(plan, resolved, failed))
     lines.extend([
         "",
-        f"Можно скачать после подтверждения: {ready}",
+        f"Будет скачано после подтверждения: {ready}",
         f"Пропущу: {skipped}",
         f"Нужно решение: {decisions}",
     ])
@@ -17054,7 +17081,7 @@ def _series_bulk_plan_text(
                 "Автоматически скачивать нечего, но есть паки сезонов для ручной проверки.",
             ])
     if resolved:
-        lines.extend(["", "Решено вручную:"])
+        lines.extend(["", "Уже обработано:"])
         for season, summary in sorted(resolved.items()):
             lines.append(f"• Сезон {season} - {summary}")
     if plan.pack_candidates:
@@ -17107,12 +17134,12 @@ def _series_bulk_confirm_text(
     ready = _series_bulk_ready_seasons(plan, resolved, failed)
     if not ready:
         return (
-            "📚 Уверенных сезонов для автоскачивания нет.\n\n"
+            "📚 Выбранных сезонов для скачивания нет.\n\n"
             "Я не буду добавлять раздачи наугад. Спорные, неполные или ненайденные сезоны нужно разобрать вручную."
         )
 
     lines = [
-        f"📚 Скачать уверенные сезоны: {plan.series_title}",
+        f"📚 Скачать выбранные сезоны: {plan.series_title}",
         "",
         f"Будет создано задач: {len(ready)}",
     ]
@@ -17162,7 +17189,7 @@ def _series_bulk_done_text(
         lines.extend([
             "",
             f"Осталось разобрать сезонов: {remaining_decisions}.",
-            "Уверенные задачи добавлены, а спорные или ненайденные сезоны я не буду выбирать наугад.",
+            "Выбранные задачи добавлены, а спорные или ненайденные сезоны я не буду выбирать наугад.",
         ])
     elif successes or pending_retries:
         lines.extend(["", "Можно открыть список загрузок."])
@@ -17720,75 +17747,22 @@ async def search_series_bulk_candidate_download(update: Update, context: Context
             notice="Не нашёл выбранный вариант. Откройте разбор ещё раз.",
         )
 
-    disk_check = await asyncio.to_thread(_check_disk_space_for_download)
-    if disk_check is not None and disk_check[0] == "block":
-        await query.edit_message_text(
-            disk_check[1],
-            reply_markup=_series_bulk_review_keyboard(
-                season_plan,
-                _series_bulk_failed(context).get(season_plan.season),
-                _series_bulk_failed_candidate_index(context, season_plan.season),
-            ),
-            parse_mode="HTML",
-        )
-        return SEARCH_RESULTS
-
-    await query.edit_message_text(
-        f"⏳ Добавляю сезон {season_plan.season}: {_series_bulk_candidate_label(candidate)}",
-        reply_markup=_series_bulk_wait_keyboard(),
+    updated = replace(
+        season_plan,
+        status=STATUS_GOOD,
+        selected=candidate,
+        reasons=("manual candidate selected",),
     )
-    try:
-        chat_id = _chat_id_from_query(query)
-        task_id, method = await _series_bulk_add_download(
-            context,
-            candidate.result,
-            chat_id=chat_id,
-            meta_source="series_bulk_manual",
-        )
-    except Exception as exc:
-        logger.warning(
-            "Series bulk manual download failed: season=%s title=%s error=%s",
-            season_plan.season,
-            candidate.result.get("title"),
-            exc,
-            exc_info=True,
-        )
-        error = _format_download_error(exc)
-        _series_bulk_mark_failed(context, season_plan.season, error)
-        _series_bulk_mark_failed_candidate(context, season_plan.season, candidate_index)
-        _series_bulk_record_job_season(
-            context,
-            season_plan.season,
-            "failed",
-            error=error,
-            result=candidate.result,
-        )
-        return await _series_bulk_show_review_or_plan(
-            query,
-            context,
-            notice=f"❌ Сезон {season_plan.season}: {error}",
-        )
-
-    summary = f"скачан вручную: {task_id or method}"
+    plan = _series_bulk_plan_from_context(context)
+    if plan is not None:
+        context.user_data["srch_series_bulk_plan"] = _series_bulk_replace_season(plan, updated)
     _series_bulk_clear_failed(context, season_plan.season)
-    _series_bulk_mark_resolved(
-        context,
-        season_plan.season,
-        summary,
-    )
-    _series_bulk_record_job_season(
-        context,
-        season_plan.season,
-        "downloaded",
-        task_id=task_id or "",
-        method=method,
-        summary=summary,
-        result=candidate.result,
-    )
+    _series_bulk_record_job_manual_selection(context, updated)
+    _series_bulk_set_job_status(context, "planned")
     return await _series_bulk_show_review_or_plan(
         query,
         context,
-        notice=f"✅ Сезон {season_plan.season}: добавил задачу {task_id or method}.",
+        notice=f"✅ Сезон {season_plan.season}: выбрал вариант. Скачаю после подтверждения плана.",
     )
 
 
@@ -18221,7 +18195,7 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
     if not ready:
         await query.edit_message_text(
             _series_bulk_confirm_text(plan, resolved, failed) if plan is not None else (
-                "📚 Уверенных сезонов для автоскачивания нет.\n\n"
+                "📚 Выбранных сезонов для скачивания нет.\n\n"
                 "Я не буду добавлять раздачи наугад. Спорные, неполные или ненайденные сезоны нужно разобрать вручную."
             ),
             reply_markup=_series_bulk_plan_keyboard(plan, resolved, failed),
@@ -18252,14 +18226,14 @@ async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_T
         total = len(ready)
         _series_bulk_set_job_status(context, "batch_running")
         await query.edit_message_text(
-            f"⏳ Добавляю уверенные сезоны: 0/{total}",
+            f"⏳ Добавляю выбранные сезоны: 0/{total}",
             reply_markup=_series_bulk_wait_keyboard(),
         )
         for position, season in enumerate(ready, start=1):
             assert season.selected is not None
             result = season.selected.result
             await query.edit_message_text(
-                f"⏳ Добавляю уверенные сезоны: {position}/{total}\n"
+                f"⏳ Добавляю выбранные сезоны: {position}/{total}\n"
                 f"Сезон {season.season}: {_series_bulk_candidate_label(season.selected)}",
                 reply_markup=_series_bulk_wait_keyboard(),
             )

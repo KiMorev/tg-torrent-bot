@@ -532,7 +532,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         gif_msg.delete.assert_awaited_once()
         kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
         labels = [b.text for row in kb.inline_keyboard for b in row]
-        self.assertIn("⬇️ Скачать уверенные (1)", labels)
+        self.assertIn("⬇️ Скачать выбранные (1)", labels)
         self.assertIn("🔄 Пересобрать план", labels)
         job_id = ctx.user_data["srch_series_bulk_job_id"]
         self.assertIn(job_id, saved_jobs)
@@ -1008,7 +1008,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
-        self.assertIn("⬇️ Скачать уверенные (1)", labels)
+        self.assertIn("⬇️ Скачать выбранные (1)", labels)
         self.assertIn("⚙️ Разобрать спорные (1)", labels)
 
     def test_confirm_screen_lists_only_ready_seasons(self):
@@ -1053,7 +1053,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Уверенных сезонов", text)
+        self.assertIn("Выбранных сезонов", text)
         self.assertIn("разобрать вручную", text)
         kb = query.edit_message_text.await_args.kwargs.get("reply_markup")
         labels = [b.text for row in kb.inline_keyboard for b in row]
@@ -1076,7 +1076,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(state, bot.SEARCH_RESULTS)
         text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Уверенных сезонов", text)
+        self.assertIn("Выбранных сезонов", text)
         self.assertIn("разобрать вручную", text)
 
     def test_run_downloads_ready_seasons_and_returns_summary(self):
@@ -1464,7 +1464,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("Пак добавлен: task_pack", text)
         self.assertIn("Сезоны 1-3 пометил", text)
-        self.assertIn("Можно скачать после подтверждения: 0", text)
+        self.assertIn("Будет скачано после подтверждения: 0", text)
         job = saved_jobs["bulk_test"]
         self.assertEqual(job["status"], "pack_downloaded")
         self.assertEqual(job["seasons"]["1"]["runtime_status"], "pack_downloaded")
@@ -1553,7 +1553,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
-        self.assertIn("⬇️ Скачать 1", labels)
+        self.assertIn("✅ Выбрать 1", labels)
         self.assertIn("🔄 Искать мягче", labels)
         self.assertIn("⏭ Пропустить сезон", labels)
 
@@ -1638,7 +1638,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             for row in query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
             for b in row
         ]
-        self.assertIn("⬇️ Скачать 1", labels)
+        self.assertIn("✅ Выбрать 1", labels)
 
     def test_bulk_search_rutracker_fallback_has_timeout_warning(self):
         ctx = _make_context(results=[])
@@ -1710,7 +1710,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
 
         self.assertEqual(ctx.user_data["srch_series_bulk_resolved"], {"1": "пропущен"})
         text = query.edit_message_text.await_args.args[0]
-        self.assertIn("Решено вручную", text)
+        self.assertIn("Уже обработано", text)
         self.assertIn("Сезон 1 - пропущен", text)
         self.assertIn("Нужно решение: 0", text)
         labels = [
@@ -1721,7 +1721,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertNotIn("⚙️ Разобрать спорные (1)", labels)
         self.assertEqual(saved_jobs["bulk_test"]["seasons"]["1"]["runtime_status"], "skipped")
 
-    def test_candidate_download_marks_disputed_season_resolved(self):
+    def test_candidate_choice_selects_disputed_season_for_final_download(self):
         result = {
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub / LostFilm",
             "source": "jackett",
@@ -1763,18 +1763,37 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         ):
             asyncio.run(bot.search_series_bulk_candidate_download(update, ctx))
 
+            dl.assert_not_awaited()
+            owner.assert_not_called()
+            meta.assert_not_called()
+
+            updated_plan = ctx.user_data["srch_series_bulk_plan"]
+            updated_season = updated_plan.seasons[0]
+            self.assertEqual(updated_season.status, bot.STATUS_GOOD)
+            self.assertEqual(updated_season.selected.result["title"], result["title"])
+            self.assertEqual(updated_season.reasons, ("manual candidate selected",))
+            self.assertNotIn("1", ctx.user_data.get("srch_series_bulk_resolved", {}))
+            selection_text = query.edit_message_text.await_args.args[0]
+            self.assertIn("выбрал вариант", selection_text)
+            self.assertIn("Сезон 1 - выбран вручную", selection_text)
+            self.assertIn("Будет скачано после подтверждения: 1", selection_text)
+            selection_entry = saved_jobs["bulk_test"]["seasons"]["1"]
+            self.assertEqual(selection_entry["runtime_status"], "selected")
+            self.assertEqual(selection_entry["plan_status"], bot.STATUS_GOOD)
+            self.assertEqual(selection_entry["selected"]["result"]["title"], result["title"])
+            self.assertNotIn("task_id", selection_entry)
+
+            query.data = "srch:bulk_run"
+            state = asyncio.run(bot.search_series_bulk_run(update, ctx))
+
+        self.assertEqual(state, bot.ConversationHandler.END)
         dl.assert_awaited_once()
         self.assertEqual(dl.await_args.args[0]["title"], result["title"])
         owner.assert_called_once_with("task_1", 100)
         meta.assert_called_once()
-        self.assertIn("скачан вручную", ctx.user_data["srch_series_bulk_resolved"]["1"])
-        text = query.edit_message_text.await_args.args[0]
-        self.assertIn("добавил задачу task_1", text)
-        self.assertIn("Нужно решение: 0", text)
         entry = saved_jobs["bulk_test"]["seasons"]["1"]
         self.assertEqual(entry["runtime_status"], "downloaded")
         self.assertEqual(entry["task_id"], "task_1")
-        self.assertIn("скачан вручную", entry["summary"])
 
     def test_partial_review_offers_download_and_subscription_actions(self):
         result = {
