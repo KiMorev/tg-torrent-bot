@@ -156,6 +156,7 @@ from search_intent import (
 )
 from series_continue import (
     SeriesCatchUpCandidate,
+    SeriesMetadataSeason,
     SeriesMissingSeasonCandidate,
     build_series_catch_up_candidates,
     build_series_missing_season_candidates,
@@ -407,6 +408,8 @@ CONTINUE_PAGE_SIZE = 10
 CONTINUE_STATE_KEY = "continue_state"
 CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all", "missing", "hidden_missing"}
 _SERIES_CONTINUE_TOTALS_COMPLETE_KEY = "__complete__"
+_SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY = "__fetched_at__"
+_SERIES_CONTINUE_TOTALS_COMPLETE_TTL_SECONDS = 7 * 24 * 60 * 60
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
 BACKGROUND_MONITOR_TASK: asyncio.Task | None = None
@@ -11649,8 +11652,8 @@ async def _series_continue_known_totals_by_show(
 
 async def _series_continue_metadata_totals_by_show(
     shows: list["PlexShow"],
-) -> dict[str, dict[int, int]]:
-    totals: dict[str, dict[int, int]] = {}
+) -> dict[str, dict[int, SeriesMetadataSeason]]:
+    totals: dict[str, dict[int, SeriesMetadataSeason]] = {}
     cache = _series_continue_load_totals_cache()
     changed = False
     for show in shows:
@@ -11702,6 +11705,21 @@ async def _series_continue_metadata_totals_by_show(
         )
         if selected:
             totals[str(show.rating_key)] = selected
+            conflicts = sum(1 for item in selected.values() if item.confidence == "conflict")
+            if conflicts or (cached_complete_tvmaze and not cached_complete_tmdb and tmdb_totals):
+                logger.info(
+                    "series_continue: metadata totals show=%r rating_key=%s "
+                    "cached_tmdb=%d cached_tvmaze=%d live_tmdb=%d live_tvmaze=%d "
+                    "selected=%d conflicts=%d",
+                    identity.title,
+                    show.rating_key,
+                    len(cached_complete_tmdb),
+                    len(cached_complete_tvmaze),
+                    len(tmdb_totals),
+                    len(tvmaze_totals),
+                    len(selected),
+                    conflicts,
+                )
 
     if changed:
         _series_continue_save_totals_cache(cache)
@@ -11880,6 +11898,11 @@ def _series_continue_cached_complete_totals(cache: dict, keys: tuple[str, ...]) 
     for key in keys:
         by_season = cache.get(key)
         if isinstance(by_season, dict) and by_season.get(_SERIES_CONTINUE_TOTALS_COMPLETE_KEY):
+            fetched_at = _series_continue_int(by_season.get(_SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY))
+            if not fetched_at:
+                continue
+            if time.time() - fetched_at > _SERIES_CONTINUE_TOTALS_COMPLETE_TTL_SECONDS:
+                continue
             return _series_continue_cached_totals(cache, (key,))
     return {}
 
@@ -11889,8 +11912,8 @@ def _series_continue_select_metadata_totals(
     tvmaze_totals: dict[int, int],
     *,
     show_title: str = "",
-) -> dict[int, int]:
-    selected: dict[int, int] = {}
+) -> dict[int, SeriesMetadataSeason]:
+    selected: dict[int, SeriesMetadataSeason] = {}
     for season_number in sorted(set(tmdb_totals) | set(tvmaze_totals)):
         total = tmdb_totals.get(season_number)
         tvmaze_total = tvmaze_totals.get(season_number)
@@ -11902,8 +11925,37 @@ def _series_continue_select_metadata_totals(
                 total,
                 tvmaze_total,
             )
-            continue
-        selected[season_number] = int(total if total is not None else tvmaze_total)
+            selected[season_number] = SeriesMetadataSeason(
+                season_number=season_number,
+                episode_count=0,
+                confidence="conflict",
+                sources=("tmdb", "tvmaze"),
+                source_episode_counts=(("tmdb", int(total)), ("tvmaze", int(tvmaze_total))),
+            )
+        elif total is not None and tvmaze_total is not None:
+            selected[season_number] = SeriesMetadataSeason(
+                season_number=season_number,
+                episode_count=int(total),
+                confidence="confirmed",
+                sources=("tmdb", "tvmaze"),
+                source_episode_counts=(("tmdb", int(total)), ("tvmaze", int(tvmaze_total))),
+            )
+        elif total is not None:
+            selected[season_number] = SeriesMetadataSeason(
+                season_number=season_number,
+                episode_count=int(total),
+                confidence="single_source",
+                sources=("tmdb",),
+                source_episode_counts=(("tmdb", int(total)),),
+            )
+        elif tvmaze_total is not None:
+            selected[season_number] = SeriesMetadataSeason(
+                season_number=season_number,
+                episode_count=int(tvmaze_total),
+                confidence="single_source",
+                sources=("tvmaze",),
+                source_episode_counts=(("tvmaze", int(tvmaze_total)),),
+            )
     return selected
 
 
@@ -11929,6 +11981,7 @@ def _series_continue_store_cached_totals_snapshot(
         for season_number, total in clean.items():
             by_season[str(season_number)] = int(total)
         by_season[_SERIES_CONTINUE_TOTALS_COMPLETE_KEY] = True
+        by_season[_SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY] = int(time.time())
 
 
 def _series_continue_store_cached_total(
@@ -12314,6 +12367,58 @@ def _series_continue_missing_group_present_seasons(group: dict) -> tuple[int, ..
     return tuple(sorted(seasons))
 
 
+def _series_continue_metadata_source_label(source: str) -> str:
+    return {
+        "tmdb": "TMDB",
+        "tvmaze": "TVMaze",
+    }.get(str(source or "").strip().lower(), str(source or "").strip() or "catalog")
+
+
+def _series_continue_missing_group_catalog_note(group: dict) -> str:
+    conflicts: list[int] = []
+    single_source: list[int] = []
+    for candidate in group.get("candidates", []):
+        if not isinstance(candidate, SeriesMissingSeasonCandidate):
+            continue
+        if candidate.metadata_confidence == "conflict":
+            conflicts.append(candidate.season_number)
+        elif candidate.metadata_confidence == "single_source":
+            single_source.append(candidate.season_number)
+    if conflicts:
+        return f"   Каталог: спорное число серий {_series_continue_format_seasons(conflicts)}"
+    if single_source:
+        return f"   Каталог: один источник {_series_continue_format_seasons(single_source)}"
+    return ""
+
+
+def _series_continue_missing_group_catalog_detail_lines(group: dict) -> list[str]:
+    conflict_lines: list[str] = []
+    single_by_sources: dict[tuple[str, ...], list[int]] = {}
+    for candidate in group.get("candidates", []):
+        if not isinstance(candidate, SeriesMissingSeasonCandidate):
+            continue
+        if candidate.metadata_confidence == "conflict":
+            counts = ", ".join(
+                f"{_series_continue_metadata_source_label(source)} {total}"
+                for source, total in candidate.metadata_source_counts
+            )
+            conflict_lines.append(f"S{candidate.season_number:02d}: {counts}")
+        elif candidate.metadata_confidence == "single_source":
+            sources = candidate.metadata_sources or tuple(
+                source for source, _ in candidate.metadata_source_counts
+            )
+            single_by_sources.setdefault(sources, []).append(candidate.season_number)
+
+    lines: list[str] = []
+    if conflict_lines:
+        lines.extend(["", "Спорное количество серий:"])
+        lines.extend(conflict_lines)
+    for sources, seasons in sorted(single_by_sources.items(), key=lambda item: item[0]):
+        source_label = ", ".join(_series_continue_metadata_source_label(source) for source in sources)
+        lines.append(f"Один источник ({source_label}): {_series_continue_format_seasons(seasons)}")
+    return lines
+
+
 def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> str:
     groups = _series_continue_missing_groups(state, scope)
     hidden_scope = _series_continue_hidden_scope(scope)
@@ -12326,7 +12431,7 @@ def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> st
         return (
             "🧩 <b>Отсутствующие сезоны</b>\n\n"
             "Не нашёл сезоны, которые есть в каталоге сезонов, но целиком отсутствуют в Plex.\n\n"
-            "Показываю только уверенные совпадения Plex с каталогом."
+            "Показываю совпадения Plex с каталогом сезонов; спорные числа серий отмечаю отдельно."
             f"{hidden_line}"
         )
 
@@ -12342,7 +12447,7 @@ def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> st
     lines = [
         "🧩 <b>Отсутствующие сезоны</b>",
         summary,
-        "Только уверенные совпадения Plex с каталогом сезонов.",
+        "Спорные числа серий отмечаю отдельно.",
         "",
     ]
     if not hidden_view and hidden_count:
@@ -12351,12 +12456,15 @@ def _series_continue_missing_list_text(state: dict, scope: str, page: int) -> st
         title = html_module.escape(_series_continue_missing_group_title(group))
         missing = _series_continue_format_seasons(_series_continue_missing_group_seasons(group))
         present = _series_continue_format_seasons(_series_continue_missing_group_present_seasons(group))
+        catalog_note = _series_continue_missing_group_catalog_note(group)
         lines.extend([
             f"{start + offset}. <b>{title}</b>",
             f"   Нет в Plex: {missing}",
             f"   Plex: есть {present}",
-            "",
         ])
+        if catalog_note:
+            lines.append(catalog_note)
+        lines.append("")
     if total_pages > 1:
         lines.append(f"Страница {page + 1}/{total_pages}")
     return "\n".join(lines).strip()
@@ -12410,12 +12518,14 @@ def _series_continue_missing_detail_text(group: dict) -> str:
     title = html_module.escape(_series_continue_missing_group_title(group))
     present = _series_continue_format_seasons(_series_continue_missing_group_present_seasons(group))
     missing = _series_continue_format_seasons(_series_continue_missing_group_seasons(group))
-    return "\n".join([
+    lines = [
         f"🧩 <b>{title}</b>",
         "",
         f"В Plex есть: {present}",
         f"Нет в Plex: {missing}",
-    ])
+    ]
+    lines.extend(_series_continue_missing_group_catalog_detail_lines(group))
+    return "\n".join(lines)
 
 
 def _series_continue_missing_detail_keyboard(

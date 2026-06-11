@@ -52,6 +52,18 @@ class SeriesMissingSeasonCandidate:
     quality: str = ""
     source: str = "metadata"
     history_chat_ids: tuple[int, ...] = field(default_factory=tuple)
+    metadata_confidence: str = "confirmed"
+    metadata_sources: tuple[str, ...] = field(default_factory=tuple)
+    metadata_source_counts: tuple[tuple[str, int], ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SeriesMetadataSeason:
+    season_number: int
+    episode_count: int = 0
+    confidence: str = "single_source"
+    sources: tuple[str, ...] = field(default_factory=tuple)
+    source_episode_counts: tuple[tuple[str, int], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -160,7 +172,7 @@ def build_series_catch_up_candidates(
 
 def build_series_missing_season_candidates(
     shows: Iterable[PlexShow],
-    metadata_totals_by_show: Mapping[str, Mapping[int | str, int]] | None,
+    metadata_totals_by_show: Mapping[str, Mapping[int | str, object]] | None,
     history_entries: Iterable[dict],
     *,
     chat_id: int | None = None,
@@ -199,17 +211,20 @@ def build_series_missing_season_candidates(
         }))
         quality = _missing_quality_for_show(show, matching_history)
         identity = identity_from_plex_show(show)
-        for season_number, episode_count in sorted(metadata_totals.items()):
+        for season_number, metadata_season in sorted(metadata_totals.items()):
             if season_number in present_set:
                 continue
             candidates.append(
                 SeriesMissingSeasonCandidate(
                     identity=identity,
                     season_number=season_number,
-                    episode_count=episode_count,
+                    episode_count=metadata_season.episode_count,
                     present_seasons=present_seasons,
                     quality=quality,
                     history_chat_ids=history_chat_ids,
+                    metadata_confidence=metadata_season.confidence,
+                    metadata_sources=metadata_season.sources,
+                    metadata_source_counts=metadata_season.source_episode_counts,
                 )
             )
 
@@ -405,7 +420,7 @@ def _history_entry_matches_show(entry: dict, show: PlexShow) -> bool:
 def _known_total_for_show(
     show: PlexShow,
     season_number: int,
-    known_totals_by_show: Mapping[str, Mapping[int | str, int]] | None,
+    known_totals_by_show: Mapping[str, Mapping[int | str, object]] | None,
 ) -> int:
     if not known_totals_by_show:
         return 0
@@ -416,9 +431,9 @@ def _known_total_for_show(
         by_season = known_totals_by_show.get(key)
         if not isinstance(by_season, Mapping):
             continue
-        total = _safe_int(by_season.get(season_number))
+        total = _episode_count_from_metadata_value(by_season.get(season_number))
         if total <= 0:
-            total = _safe_int(by_season.get(str(season_number)))
+            total = _episode_count_from_metadata_value(by_season.get(str(season_number)))
         if total > 0:
             return total
     return 0
@@ -426,11 +441,11 @@ def _known_total_for_show(
 
 def _known_totals_for_show(
     show: PlexShow,
-    known_totals_by_show: Mapping[str, Mapping[int | str, int]] | None,
-) -> dict[int, int]:
+    known_totals_by_show: Mapping[str, Mapping[int | str, object]] | None,
+) -> dict[int, SeriesMetadataSeason]:
     if not known_totals_by_show:
         return {}
-    totals: dict[int, int] = {}
+    totals: dict[int, SeriesMetadataSeason] = {}
     for raw_key in (show.rating_key, show.guid, show.title, show.original_title):
         key = str(raw_key or "").strip()
         if not key:
@@ -440,10 +455,55 @@ def _known_totals_for_show(
             continue
         for raw_season, raw_total in by_season.items():
             season_number = _safe_int(raw_season)
-            total = _safe_int(raw_total)
-            if season_number > 0 and total > 0:
-                totals.setdefault(season_number, total)
+            if season_number <= 0:
+                continue
+            metadata = _metadata_season_from_value(season_number, raw_total)
+            if metadata.episode_count > 0 or metadata.sources or metadata.source_episode_counts:
+                totals.setdefault(season_number, metadata)
     return totals
+
+
+def _episode_count_from_metadata_value(value: object) -> int:
+    if isinstance(value, SeriesMetadataSeason):
+        return _safe_int(value.episode_count)
+    if isinstance(value, Mapping):
+        return _safe_int(value.get("episode_count"))
+    return _safe_int(value)
+
+
+def _metadata_season_from_value(season_number: int, value: object) -> SeriesMetadataSeason:
+    if isinstance(value, SeriesMetadataSeason):
+        return value
+    if isinstance(value, Mapping):
+        raw_sources = value.get("sources")
+        sources = tuple(str(item) for item in raw_sources) if isinstance(raw_sources, (list, tuple)) else ()
+        raw_counts = value.get("source_episode_counts")
+        source_counts: list[tuple[str, int]] = []
+        if isinstance(raw_counts, (list, tuple)):
+            for item in raw_counts:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                source, total = item
+                parsed_total = _safe_int(total)
+                if parsed_total > 0:
+                    source_counts.append((str(source), parsed_total))
+        episode_count = _safe_int(value.get("episode_count"))
+        confidence = str(value.get("confidence") or "").strip() or (
+            "single_source" if sources else "unknown_count"
+        )
+        return SeriesMetadataSeason(
+            season_number=season_number,
+            episode_count=episode_count,
+            confidence=confidence,
+            sources=sources,
+            source_episode_counts=tuple(source_counts),
+        )
+    episode_count = _safe_int(value)
+    return SeriesMetadataSeason(
+        season_number=season_number,
+        episode_count=episode_count,
+        confidence="confirmed" if episode_count > 0 else "unknown_count",
+    )
 
 
 def _history_entries_for_show(

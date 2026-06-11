@@ -3,6 +3,7 @@ import unittest
 from plex import PlexSeason, PlexShow
 from series_continue import (
     SeriesCatchUpCandidate,
+    SeriesMetadataSeason,
     build_series_catch_up_candidates,
     build_series_missing_season_candidates,
     external_guid_id,
@@ -290,6 +291,27 @@ class SeriesMissingSeasonCandidateBuilderTests(unittest.TestCase):
 
         self.assertEqual([candidate.season_number for candidate in candidates], [7, 9])
         self.assertEqual(candidates[0].present_seasons, (1, 2, 3, 4, 5, 6, 8))
+
+    def test_metadata_confidence_is_carried_to_missing_candidates(self):
+        metadata = SeriesMetadataSeason(
+            season_number=7,
+            episode_count=0,
+            confidence="conflict",
+            sources=("tmdb", "tvmaze"),
+            source_episode_counts=(("tmdb", 10), ("tvmaze", 8)),
+        )
+
+        candidates = build_series_missing_season_candidates(
+            [self._show()],
+            {"show-1": {7: metadata}},
+            [],
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].season_number, 7)
+        self.assertEqual(candidates[0].episode_count, 0)
+        self.assertEqual(candidates[0].metadata_confidence, "conflict")
+        self.assertEqual(candidates[0].metadata_source_counts, (("tmdb", 10), ("tvmaze", 8)))
 
     def test_present_incomplete_season_does_not_become_missing_candidate(self):
         candidates = build_series_missing_season_candidates(

@@ -6963,7 +6963,15 @@ class SeriesContinueCommandTests(unittest.TestCase):
             history_last_episode_end=8,
         )
 
-    def _missing_candidate(self, *, season: int = 7, index: int = 0):
+    def _missing_candidate(
+        self,
+        *,
+        season: int = 7,
+        index: int = 0,
+        metadata_confidence: str = "confirmed",
+        metadata_sources: tuple[str, ...] = (),
+        metadata_source_counts: tuple[tuple[str, int], ...] = (),
+    ):
         from series_continue import PlexSeriesIdentity, SeriesMissingSeasonCandidate
 
         title = "The Rookie" if index == 0 else f"The Rookie {index}"
@@ -6980,6 +6988,9 @@ class SeriesContinueCommandTests(unittest.TestCase):
             present_seasons=(1, 2, 3, 4, 5, 6, 8),
             quality="1080",
             history_chat_ids=(100,),
+            metadata_confidence=metadata_confidence,
+            metadata_sources=metadata_sources,
+            metadata_source_counts=metadata_source_counts,
         )
 
     def _callbacks(self, keyboard) -> list[str]:
@@ -7219,6 +7230,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
                 "1": 20,
                 "2": 18,
                 bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+                bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
             },
         }
 
@@ -7229,7 +7241,10 @@ class SeriesContinueCommandTests(unittest.TestCase):
         ):
             totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
 
-        self.assertEqual(totals, {"show-key-rookie": {1: 20, 2: 18}})
+        self.assertEqual(
+            {season: item.episode_count for season, item in totals["show-key-rookie"].items()},
+            {1: 20, 2: 18},
+        )
         tmdb.season_episode_counts.assert_not_called()
         tvmaze.season_episode_counts.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
@@ -7251,7 +7266,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
             for season in range(1, 26)
         } | {2: 12}
         tvmaze = MagicMock()
-        tvmaze.season_episode_counts.return_value = {1: 16, 2: 12, 22: 16, 23: 16, 24: 16, 25: 16}
+        tvmaze.season_episode_counts.return_value = {1: 16, 2: 12, 19: 28, 22: 16, 23: 16, 24: 16, 25: 16}
         state = MagicMock()
         state.load_series_continue_totals.return_value = {
             "tmdb:76713": {"1": 16, "2": 12},
@@ -7277,7 +7292,9 @@ class SeriesContinueCommandTests(unittest.TestCase):
             totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
 
         self.assertEqual(sorted(totals["5984"]), list(range(1, 26)))
-        self.assertEqual(totals["5984"][25], 16)
+        self.assertEqual(totals["5984"][25].episode_count, 16)
+        self.assertEqual(totals["5984"][19].confidence, "conflict")
+        self.assertEqual(totals["5984"][19].episode_count, 0)
         tmdb.season_episode_counts.assert_called_once_with(
             tmdb_id="76713",
             imdb_id="tt0442730",
@@ -7291,7 +7308,45 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertTrue(saved["tmdb:76713"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
         self.assertEqual(saved["tmdb:76713"]["25"], 16)
 
-    def test_continue_metadata_totals_skips_cached_conflicts(self):
+    def test_continue_metadata_totals_refreshes_stale_complete_tmdb_cache(self):
+        from plex import PlexShow
+
+        show = PlexShow(
+            "The Rookie",
+            2018,
+            "show-key-rookie",
+            seasons={},
+            guid="plex://show/rookie",
+            external_guids=["tmdb://12345"],
+        )
+        tmdb = MagicMock()
+        tmdb.season_episode_counts.return_value = {1: 20, 2: 18, 3: 18}
+        tvmaze = MagicMock()
+        tvmaze.season_episode_counts.return_value = {}
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {
+            "tmdb:12345": {
+                "1": 20,
+                "2": 18,
+                bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+                bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(
+                    bot.time.time() - bot._SERIES_CONTINUE_TOTALS_COMPLETE_TTL_SECONDS - 1
+                ),
+            },
+        }
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
+
+        self.assertEqual(sorted(totals["show-key-rookie"]), [1, 2, 3])
+        self.assertEqual(totals["show-key-rookie"][3].episode_count, 18)
+        tmdb.season_episode_counts.assert_called_once()
+
+    def test_continue_metadata_totals_marks_cached_conflicts(self):
         from plex import PlexShow
 
         show = PlexShow(
@@ -7310,11 +7365,13 @@ class SeriesContinueCommandTests(unittest.TestCase):
                 "1": 10,
                 "2": 8,
                 bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+                bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
             },
             "tvmaze:tvdb:367178": {
                 "1": 5,
                 "2": 8,
                 bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+                bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
             },
         }
 
@@ -7325,12 +7382,15 @@ class SeriesContinueCommandTests(unittest.TestCase):
         ):
             totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
 
-        self.assertEqual(totals, {"show-key-lupin": {2: 8}})
+        self.assertEqual(sorted(totals["show-key-lupin"]), [1, 2])
+        self.assertEqual(totals["show-key-lupin"][1].confidence, "conflict")
+        self.assertEqual(totals["show-key-lupin"][1].source_episode_counts, (("tmdb", 10), ("tvmaze", 5)))
+        self.assertEqual(totals["show-key-lupin"][2].confidence, "confirmed")
         tmdb.season_episode_counts.assert_not_called()
         tvmaze.season_episode_counts.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
 
-    def test_continue_metadata_totals_skips_live_conflicts_and_stores_complete_snapshots(self):
+    def test_continue_metadata_totals_marks_live_conflicts_and_stores_complete_snapshots(self):
         from plex import PlexShow
 
         show = PlexShow(
@@ -7355,7 +7415,10 @@ class SeriesContinueCommandTests(unittest.TestCase):
         ):
             totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
 
-        self.assertEqual(totals, {"show-key-lupin": {2: 8}})
+        self.assertEqual(sorted(totals["show-key-lupin"]), [1, 2])
+        self.assertEqual(totals["show-key-lupin"][1].confidence, "conflict")
+        self.assertEqual(totals["show-key-lupin"][1].source_episode_counts, (("tmdb", 10), ("tvmaze", 5)))
+        self.assertEqual(totals["show-key-lupin"][2].episode_count, 8)
         tmdb.season_episode_counts.assert_called_once_with(
             tmdb_id="96677",
             imdb_id="",
@@ -7368,6 +7431,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         saved = state.save_series_continue_totals.call_args.args[0]
         self.assertTrue(saved["tmdb:96677"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
         self.assertEqual(saved["tmdb:96677"]["1"], 10)
+        self.assertGreater(saved["tmdb:96677"][bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY], 0)
         self.assertTrue(saved["tvmaze:tvdb:367178"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
         self.assertEqual(saved["tvmaze:tvdb:367178"]["1"], 5)
 
@@ -7623,6 +7687,24 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("cont:missing_bulk:missing:0:7", callbacks)
         self.assertIn("cont:missing_bulk:missing:0:9", callbacks)
         self.assertNotIn("🔔 Следить за сериалом", self._button_texts(keyboard))
+
+    def test_continue_missing_detail_shows_conflicting_episode_counts(self):
+        candidate = self._missing_candidate(
+            season=7,
+            metadata_confidence="conflict",
+            metadata_sources=("tmdb", "tvmaze"),
+            metadata_source_counts=(("tmdb", 10), ("tvmaze", 8)),
+        )
+        state = {"raw_mine": [], "raw_all": [], "raw_missing": [candidate]}
+        bot._series_continue_refresh_hidden_views(state, set())
+        group = bot._series_continue_missing_groups(state, "missing")[0]
+
+        list_text = bot._series_continue_missing_list_text(state, "missing", 0)
+        detail_text = bot._series_continue_missing_detail_text(group)
+
+        self.assertIn("S07", list_text)
+        self.assertIn("Каталог: спорное число серий S07", list_text)
+        self.assertIn("S07: TMDB 10, TVMaze 8", detail_text)
 
     def test_continue_missing_bulk_all_uses_only_missing_seasons(self):
         state = {
