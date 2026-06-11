@@ -392,7 +392,7 @@ BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
     BotCommand("subs", "Подписки на обновления"),
     BotCommand("settings", "Предпочтения поиска"),
-    BotCommand("seasons", "Сезоны Plex"),
+    BotCommand("seasons", "Докачать серии и сезоны"),
     BotCommand("status", "Список загрузок"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
@@ -11533,9 +11533,9 @@ def _series_continue_close_keyboard() -> InlineKeyboardMarkup:
 
 def _series_continue_progress_text() -> str:
     return (
-        "📺 <b>Проверяю сезоны</b>\n\n"
+        "📺 <b>Проверяю, что докачать</b>\n\n"
         "Сверяю Plex с историей загрузок и каталогом сезонов.\n"
-        "Покажу неполные сезоны и сезоны, которых нет в Plex."
+        "Покажу, какие серии или сезоны можно докачать."
     )
 
 
@@ -12667,24 +12667,24 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     if not candidates:
         if hidden_view:
             return (
-                "📺 <b>Сезоны Plex</b>\n\n"
+                "📺 <b>Докачать сериалы</b>\n\n"
                 "В скрытых сезонах пока пусто."
             )
         hidden_line = f"\n\nСкрыто: {hidden_count}" if hidden_count else ""
         if scope == "mine" and all_count:
             return (
-                "📺 <b>Сезоны Plex</b>\n\n"
+                "📺 <b>Докачать сериалы</b>\n\n"
                 "В ваших кандидатах пока пусто.\n\n"
-                "Здесь появляются сезоны Plex, которые можно продолжить по вашим загрузкам.\n\n"
+                "Здесь появляются серии и сезоны, которые можно докачать по вашим загрузкам.\n\n"
                 "В общей медиатеке есть варианты. Переключитесь на «Всё», "
                 "если хотите посмотреть их."
                 f"{hidden_line}"
             )
         return (
-            "📺 <b>Сезоны Plex</b>\n\n"
-            "Пока не нашёл сезоны, которые можно уверенно продолжить.\n\n"
-            "Что проверяю: неполные сезоны Plex и актуальные раздачи, "
-            "которые подходят для продолжения.\n\n"
+            "📺 <b>Докачать сериалы</b>\n\n"
+            "Пока не нашёл серии или сезоны, которые можно уверенно докачать.\n\n"
+            "Что проверяю: неполные сезоны, уже вышедшие серии и актуальные "
+            "раздачи для докачки.\n\n"
             "Почему может быть пусто: бот показывает только уверенные варианты. "
             "Если данных недостаточно, сезон не попадёт в список.\n\n"
             "Что можно сделать: нажать «Обновить» позже или найти продолжение обычным поиском."
@@ -12696,7 +12696,7 @@ def _series_continue_list_text(state: dict, scope: str, page: int) -> str:
     start = page * CONTINUE_PAGE_SIZE
     visible = candidates[start:start + CONTINUE_PAGE_SIZE]
     lines = [
-        "📺 <b>Сезоны Plex</b>",
+        "📺 <b>Докачать сериалы</b>",
         summary,
         "",
     ]
@@ -13356,7 +13356,7 @@ async def series_continue_command(update: Update, context: ContextTypes.DEFAULT_
         return
     if not PLEX_ENABLED:
         await update.message.reply_text(
-            "📺 <b>Сезоны Plex</b>\n\nPlex не настроен, поэтому список собрать нельзя.",
+            "📺 <b>Докачать сериалы</b>\n\nPlex не настроен, поэтому список собрать нельзя.",
             parse_mode="HTML",
             reply_markup=_series_continue_close_keyboard(),
         )
@@ -20752,7 +20752,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
         )
     if PLEX_ENABLED:
-        main_bullets.append("• 📺 /seasons — найти неполные и отсутствующие сезоны в Plex")
+        main_bullets.append("• 📺 /seasons — докачать недостающие серии и сезоны")
     main_bullets.append("• 📋 /status — текущие загрузки и недавняя история")
 
     auto_bullets: list[str] = ["• когда скачивание завершилось"]
@@ -20826,7 +20826,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• Подписаться на новые серии: у неполного сериала «⬇️ N» открывает варианты скачивания, а «🔔 N» — уведомления о новых сериях или финале"
         )
     if PLEX_ENABLED:
-        extras.append("• /seasons — найти в Plex неполные сезоны и сезоны, которых нет целиком")
+        extras.append("• /seasons — докачать недостающие серии и целые сезоны")
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         extras.append("• Подписаться на /new — пришлю push с постером, ссылкой на КП и быстрыми кнопками скачивания")
 

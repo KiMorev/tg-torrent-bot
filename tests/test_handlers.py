@@ -7527,11 +7527,11 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
     def test_continue_progress_text_explains_sources_and_confidence(self):
         text = bot._series_continue_progress_text()
-        self.assertIn("Проверяю сезоны", text)
+        self.assertIn("Проверяю, что докачать", text)
         self.assertIn("Plex", text)
         self.assertIn("историей загрузок", text)
         self.assertIn("каталогом сезонов", text)
-        self.assertIn("которых нет в Plex", text)
+        self.assertIn("можно докачать", text)
 
     def test_continue_command_renders_mine_list(self):
         update = _make_message_update(chat_id=100)
@@ -7593,7 +7593,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         build_state.assert_awaited_once_with(context, 100, include_missing=True)
         text = progress.edit_text.await_args.args[0]
         keyboard = progress.edit_text.await_args.kwargs["reply_markup"]
-        self.assertIn("Пока не нашёл сезоны", text)
+        self.assertIn("Пока не нашёл серии или сезоны", text)
         self.assertNotIn("Нет в Plex: S07", text)
         self.assertIn("cont:list:missing:0", self._callbacks(keyboard))
 
@@ -7698,7 +7698,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         text = bot._series_continue_list_text(state, "mine", 0)
         keyboard = bot._series_continue_list_keyboard(state, "mine", 0)
 
-        self.assertIn("Пока не нашёл сезоны", text)
+        self.assertIn("Пока не нашёл серии или сезоны", text)
         self.assertIn("Что проверяю", text)
         self.assertIn("Почему может быть пусто", text)
         self.assertIn("только уверенные варианты", text)
