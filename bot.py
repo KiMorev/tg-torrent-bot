@@ -16769,6 +16769,11 @@ def _series_bulk_reason_for_user(reason: str) -> str:
         return ""
     if reason.startswith("quality matches "):
         return f"качество совпало: {reason.removeprefix('quality matches ')}"
+    if reason.startswith("preferred quality unavailable: "):
+        payload = reason.removeprefix("preferred quality unavailable: ")
+        requested, _, selected_raw = payload.partition("; selected quality: ")
+        selected = selected_raw if selected_raw and selected_raw != "unknown" else "другое качество"
+        return f"{requested} не найдено, выбран {selected}"
     if reason.startswith("voice matched: "):
         return f"озвучка совпала: {reason.removeprefix('voice matched: ')}"
     if reason.startswith("voice from reference matched: "):

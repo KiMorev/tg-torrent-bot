@@ -564,6 +564,27 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertIn("Сезон 1 - похоже: WEB-DL", text)
         self.assertIn("сидов не видно", text)
 
+    def test_bulk_plan_text_explains_quality_fallback(self):
+        result = {
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 720p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }
+        plan = _bulk_plan(seasons=[1], results=[result])
+        text = bot._series_bulk_plan_text(
+            plan,
+            _bulk_profile(),
+            result_count=1,
+        )
+
+        self.assertEqual(plan.seasons[0].status, bot.STATUS_GOOD)
+        self.assertIn("Сезон 1 - похоже: WEB-DL", text)
+        self.assertIn("1080p не найдено, выбран 720p", text)
+
     def test_bulk_build_all_seasons_in_plex_finishes_without_saved_job(self):
         query = _make_query("srch:bulk_plan:0")
         query.message = MagicMock()

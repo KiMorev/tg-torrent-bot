@@ -6,6 +6,7 @@ from series_bulk_planner import (
     STATUS_ALREADY_DOWNLOADING,
     STATUS_ALREADY_IN_PLEX,
     STATUS_EXACT,
+    STATUS_GOOD,
     STATUS_MISSING,
     STATUS_NEEDS_DECISION,
     STATUS_PARTIAL,
@@ -166,6 +167,62 @@ class SeriesBulkPlannerTests(unittest.TestCase):
         season = plan.seasons[0]
         self.assertEqual(season.status, STATUS_NEEDS_DECISION)
         self.assertIn("original audio not found", season.candidates[0].hard_failures)
+
+    def test_preferred_quality_available_blocks_other_quality_auto_selection(self) -> None:
+        plan = build_series_bulk_plan(
+            series_title="Клиника",
+            seasons=[6],
+            profile=_base_profile(require_original=True),
+            results=[
+                _result("Клиника / Scrubs / Сезон: 6 / WEB-DL 720p / LostFilm / Original", seeders=500, size="40 GB"),
+                _result("Клиника / Scrubs / Сезон: 6 / WEB-DL 1080p / LostFilm / Original", seeders=1, size="5 GB"),
+            ],
+        )
+
+        season = plan.seasons[0]
+        self.assertEqual(season.status, STATUS_EXACT)
+        self.assertIsNotNone(season.selected)
+        self.assertIn("1080p", season.selected.result["title"])
+        self.assertEqual(len(season.candidates), 1)
+
+    def test_missing_preferred_quality_auto_selects_best_other_quality(self) -> None:
+        plan = build_series_bulk_plan(
+            series_title="Клиника",
+            seasons=[6],
+            profile=_base_profile(require_original=True),
+            results=[
+                _result("Клиника / Scrubs / Сезон: 6 / WEB-DL 720p / LostFilm / Original"),
+            ],
+        )
+
+        season = plan.seasons[0]
+        self.assertEqual(season.status, STATUS_GOOD)
+        self.assertIsNotNone(season.selected)
+        self.assertIn("720p", season.selected.result["title"])
+        self.assertIn(
+            "preferred quality unavailable: 1080p; selected quality: 720p",
+            season.selected.warnings,
+        )
+        self.assertNotIn("quality does not match search preference", season.selected.hard_failures)
+
+    def test_missing_preferred_quality_still_respects_other_hard_filters(self) -> None:
+        plan = build_series_bulk_plan(
+            series_title="Клиника",
+            seasons=[6],
+            profile=_base_profile(require_original=True),
+            results=[
+                _result("Клиника / Scrubs / Сезон: 6 / WEB-DL 720p / LostFilm"),
+            ],
+        )
+
+        season = plan.seasons[0]
+        self.assertEqual(season.status, STATUS_NEEDS_DECISION)
+        self.assertIn(
+            "preferred quality unavailable: 1080p; selected quality: 720p",
+            season.candidates[0].warnings,
+        )
+        self.assertIn("original audio not found", season.candidates[0].hard_failures)
+        self.assertNotIn("quality does not match search preference", season.candidates[0].hard_failures)
 
     def test_plex_and_downloading_seasons_are_skipped_before_candidate_selection(self) -> None:
         plan = build_series_bulk_plan(

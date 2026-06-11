@@ -227,7 +227,7 @@ def _evaluate_season_candidates(
     results: list[dict],
     profile: SeriesBulkProfile,
 ) -> tuple[CandidateEvaluation, ...]:
-    evaluations: list[CandidateEvaluation] = []
+    season_candidates: list[tuple[dict, str, ReleaseProfile, tuple[int, int] | None]] = []
     for result in results:
         if _result_is_non_downloadable_seed(result):
             continue
@@ -242,10 +242,21 @@ def _evaluate_season_candidates(
 
         release = release_profile_from_title(title, size=str(result.get("size") or ""))
         episode_progress = _parse_episode_info(title)
+        season_candidates.append((result, title, release, episode_progress))
+
+    preferred_quality_available = (
+        bool(profile.quality)
+        and profile.quality != "any"
+        and any(release.quality == profile.quality for _result, _title, release, _progress in season_candidates)
+    )
+
+    evaluations: list[CandidateEvaluation] = []
+    for result, _title, release, episode_progress in season_candidates:
         score, reasons, warnings, hard_failures = _score_candidate(
             result=result,
             release=release,
             profile=profile,
+            preferred_quality_available=preferred_quality_available,
         )
         if episode_progress and episode_progress[0] < episode_progress[1]:
             warnings = (*warnings, "season is partial")
@@ -388,6 +399,7 @@ def _score_candidate(
     result: dict,
     release: ReleaseProfile,
     profile: SeriesBulkProfile,
+    preferred_quality_available: bool = True,
 ) -> tuple[float, list[str], list[str], list[str]]:
     score = 1000.0
     reasons: list[str] = ["season matches"]
@@ -398,8 +410,13 @@ def _score_candidate(
         if release.quality == profile.quality:
             score += 260
             reasons.append(f"quality matches {profile.quality}")
-        else:
+        elif preferred_quality_available:
             hard_failures.append("quality does not match search preference")
+        else:
+            selected_quality = release.quality or "unknown"
+            warnings.append(
+                f"preferred quality unavailable: {profile.quality}; selected quality: {selected_quality}"
+            )
 
     if profile.require_original:
         if release.has_original:
