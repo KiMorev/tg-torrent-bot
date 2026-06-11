@@ -198,6 +198,7 @@ sequenceDiagram
 ### Что понадобится
 
 - Synology с установленным `Container Manager` / Docker.
+- Архитектура устройства `linux/amd64` или `linux/arm64`: готовый образ в GHCR публикуется для этих платформ.
 - SSH-доступ к NAS пользователем, который может запускать Docker.
 - Новый Telegram-бот из [@BotFather](https://t.me/BotFather): понадобится только `BOT_TOKEN`.
 - DSM-пользователь для PlexLoader, например `tg_bot_ds`, с доступом к Download Station и папке загрузки.
