@@ -11662,7 +11662,14 @@ async def _series_continue_metadata_totals_by_show(
         tvmaze_cache_keys = _series_continue_tvmaze_cache_keys(identity)
         cached_complete_tmdb = _series_continue_cached_complete_totals(cache, cache_keys)
         cached_complete_tvmaze = _series_continue_cached_complete_totals(cache, tvmaze_cache_keys)
-        if cached_complete_tmdb or cached_complete_tvmaze:
+        can_use_complete_cache = bool(cached_complete_tmdb) or (
+            bool(cached_complete_tvmaze)
+            and (
+                tmdb_client is None
+                or not (identity.tmdb_id or identity.imdb_id or identity.tvdb_id)
+            )
+        )
+        if can_use_complete_cache:
             selected = _series_continue_select_metadata_totals(
                 cached_complete_tmdb or _series_continue_cached_totals(cache, cache_keys),
                 cached_complete_tvmaze or _series_continue_cached_totals(cache, tvmaze_cache_keys),
@@ -11883,12 +11890,11 @@ def _series_continue_select_metadata_totals(
     *,
     show_title: str = "",
 ) -> dict[int, int]:
-    if not tmdb_totals:
-        return dict(tvmaze_totals)
     selected: dict[int, int] = {}
-    for season_number, total in sorted(tmdb_totals.items()):
+    for season_number in sorted(set(tmdb_totals) | set(tvmaze_totals)):
+        total = tmdb_totals.get(season_number)
         tvmaze_total = tvmaze_totals.get(season_number)
-        if tvmaze_total is not None and tvmaze_total != total:
+        if total is not None and tvmaze_total is not None and tvmaze_total != total:
             logger.info(
                 "Series continue total conflict show=%r season=%s tmdb=%s tvmaze=%s",
                 show_title,
@@ -11897,7 +11903,7 @@ def _series_continue_select_metadata_totals(
                 tvmaze_total,
             )
             continue
-        selected[season_number] = total
+        selected[season_number] = int(total if total is not None else tvmaze_total)
     return selected
 
 

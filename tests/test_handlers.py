@@ -7234,6 +7234,63 @@ class SeriesContinueCommandTests(unittest.TestCase):
         tvmaze.season_episode_counts.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
 
+    def test_continue_metadata_totals_refreshes_tmdb_when_only_tvmaze_cache_is_complete(self):
+        from plex import PlexShow
+
+        show = PlexShow(
+            "Tainy sledstviya",
+            2000,
+            "5984",
+            seasons={},
+            guid="plex://show/5d9c08f22df347001e3ba83b",
+            external_guids=["imdb://tt0442730", "tmdb://76713", "tvdb://113651"],
+        )
+        tmdb = MagicMock()
+        tmdb.season_episode_counts.return_value = {
+            season: 16
+            for season in range(1, 26)
+        } | {2: 12}
+        tvmaze = MagicMock()
+        tvmaze.season_episode_counts.return_value = {1: 16, 2: 12, 22: 16, 23: 16, 24: 16, 25: 16}
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {
+            "tmdb:76713": {"1": 16, "2": 12},
+            "tvdb:113651": {"1": 16, "2": 12},
+            "imdb:tt0442730": {"1": 16, "2": 12},
+            "plex_rating:5984": {"1": 16, "2": 12},
+            "tvmaze:tvdb:113651": {
+                "1": 16,
+                "2": 12,
+                "22": 16,
+                "23": 16,
+                "24": 16,
+                "25": 16,
+                bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+            },
+        }
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
+
+        self.assertEqual(sorted(totals["5984"]), list(range(1, 26)))
+        self.assertEqual(totals["5984"][25], 16)
+        tmdb.season_episode_counts.assert_called_once_with(
+            tmdb_id="76713",
+            imdb_id="tt0442730",
+            tvdb_id="113651",
+        )
+        tvmaze.season_episode_counts.assert_called_once_with(
+            imdb_id="tt0442730",
+            tvdb_id="113651",
+        )
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertTrue(saved["tmdb:76713"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
+        self.assertEqual(saved["tmdb:76713"]["25"], 16)
+
     def test_continue_metadata_totals_skips_cached_conflicts(self):
         from plex import PlexShow
 
