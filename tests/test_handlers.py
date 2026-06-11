@@ -6971,6 +6971,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         metadata_confidence: str = "confirmed",
         metadata_sources: tuple[str, ...] = (),
         metadata_source_counts: tuple[tuple[str, int], ...] = (),
+        metadata_unavailable_sources: tuple[str, ...] = (),
     ):
         from series_continue import PlexSeriesIdentity, SeriesMissingSeasonCandidate
 
@@ -6991,6 +6992,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
             metadata_confidence=metadata_confidence,
             metadata_sources=metadata_sources,
             metadata_source_counts=metadata_source_counts,
+            metadata_unavailable_sources=metadata_unavailable_sources,
         )
 
     def _callbacks(self, keyboard) -> list[str]:
@@ -7786,6 +7788,36 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("S07", list_text)
         self.assertIn("Каталог: спорное число серий S07", list_text)
         self.assertIn("S07: TMDB 10, TVMaze 8", detail_text)
+
+    def test_continue_missing_detail_names_single_source_and_unavailable_catalog(self):
+        candidate = self._missing_candidate(
+            season=7,
+            metadata_confidence="single_source",
+            metadata_sources=("tvmaze",),
+            metadata_source_counts=(("tvmaze", 8),),
+            metadata_unavailable_sources=("tmdb",),
+        )
+        state = {"raw_mine": [], "raw_all": [], "raw_missing": [candidate]}
+        bot._series_continue_refresh_hidden_views(state, set())
+        group = bot._series_continue_missing_groups(state, "missing")[0]
+
+        list_text = bot._series_continue_missing_list_text(state, "missing", 0)
+        detail_text = bot._series_continue_missing_detail_text(group)
+
+        self.assertIn("Каталог: TMDB недоступен, подтверждено TVMaze S07", list_text)
+        self.assertIn("TMDB недоступен, подтверждено TVMaze: S07", detail_text)
+
+    def test_continue_select_metadata_marks_unavailable_single_source(self):
+        selected = bot._series_continue_select_metadata_totals(
+            {},
+            {1: 8},
+            show_title="Wednesday",
+            unavailable_sources=("tmdb",),
+        )
+
+        self.assertEqual(selected[1].confidence, "single_source")
+        self.assertEqual(selected[1].sources, ("tvmaze",))
+        self.assertEqual(selected[1].unavailable_sources, ("tmdb",))
 
     def test_continue_missing_bulk_all_uses_only_missing_seasons(self):
         state = {

@@ -299,6 +299,7 @@ class SeriesMissingSeasonCandidateBuilderTests(unittest.TestCase):
             confidence="conflict",
             sources=("tmdb", "tvmaze"),
             source_episode_counts=(("tmdb", 10), ("tvmaze", 8)),
+            unavailable_sources=("tmdb",),
         )
 
         candidates = build_series_missing_season_candidates(
@@ -312,6 +313,7 @@ class SeriesMissingSeasonCandidateBuilderTests(unittest.TestCase):
         self.assertEqual(candidates[0].episode_count, 0)
         self.assertEqual(candidates[0].metadata_confidence, "conflict")
         self.assertEqual(candidates[0].metadata_source_counts, (("tmdb", 10), ("tvmaze", 8)))
+        self.assertEqual(candidates[0].metadata_unavailable_sources, ("tmdb",))
 
     def test_present_incomplete_season_does_not_become_missing_candidate(self):
         candidates = build_series_missing_season_candidates(

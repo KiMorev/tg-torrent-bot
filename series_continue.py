@@ -55,6 +55,7 @@ class SeriesMissingSeasonCandidate:
     metadata_confidence: str = "confirmed"
     metadata_sources: tuple[str, ...] = field(default_factory=tuple)
     metadata_source_counts: tuple[tuple[str, int], ...] = field(default_factory=tuple)
+    metadata_unavailable_sources: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class SeriesMetadataSeason:
     confidence: str = "single_source"
     sources: tuple[str, ...] = field(default_factory=tuple)
     source_episode_counts: tuple[tuple[str, int], ...] = field(default_factory=tuple)
+    unavailable_sources: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -225,6 +227,7 @@ def build_series_missing_season_candidates(
                     metadata_confidence=metadata_season.confidence,
                     metadata_sources=metadata_season.sources,
                     metadata_source_counts=metadata_season.source_episode_counts,
+                    metadata_unavailable_sources=metadata_season.unavailable_sources,
                 )
             )
 
@@ -491,12 +494,15 @@ def _metadata_season_from_value(season_number: int, value: object) -> SeriesMeta
         confidence = str(value.get("confidence") or "").strip() or (
             "single_source" if sources else "unknown_count"
         )
+        raw_unavailable = value.get("unavailable_sources")
+        unavailable = tuple(str(item) for item in raw_unavailable) if isinstance(raw_unavailable, (list, tuple)) else ()
         return SeriesMetadataSeason(
             season_number=season_number,
             episode_count=episode_count,
             confidence=confidence,
             sources=sources,
             source_episode_counts=tuple(source_counts),
+            unavailable_sources=unavailable,
         )
     episode_count = _safe_int(value)
     return SeriesMetadataSeason(

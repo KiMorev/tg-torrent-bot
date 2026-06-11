@@ -11687,23 +11687,31 @@ async def _series_continue_metadata_totals_by_show(
         cached_tmdb_totals = _series_continue_cached_totals(cache, cache_keys)
         cached_tvmaze_totals = _series_continue_cached_totals(cache, tvmaze_cache_keys)
         tmdb_totals: dict[int, int] = {}
+        tmdb_failed = False
         if tmdb_client is not None and (identity.tmdb_id or identity.imdb_id or identity.tvdb_id):
-            tmdb_totals = await _series_continue_fetch_tmdb_totals(identity)
+            tmdb_totals, tmdb_failed = await _series_continue_fetch_tmdb_totals_result(identity)
             if tmdb_totals:
                 _series_continue_store_cached_totals_snapshot(cache, cache_keys, tmdb_totals)
                 changed = True
 
         tvmaze_totals: dict[int, int] = {}
+        tvmaze_failed = False
         if tvmaze_client is not None and (identity.imdb_id or identity.tvdb_id):
-            tvmaze_totals = await _series_continue_fetch_tvmaze_totals(identity)
+            tvmaze_totals, tvmaze_failed = await _series_continue_fetch_tvmaze_totals_result(identity)
             if tvmaze_totals:
                 _series_continue_store_cached_totals_snapshot(cache, tvmaze_cache_keys, tvmaze_totals)
                 changed = True
 
+        unavailable_sources: list[str] = []
+        if tmdb_failed and not (tmdb_totals or cached_tmdb_totals):
+            unavailable_sources.append("tmdb")
+        if tvmaze_failed and not (tvmaze_totals or cached_tvmaze_totals):
+            unavailable_sources.append("tvmaze")
         selected = _series_continue_select_metadata_totals(
             tmdb_totals or cached_tmdb_totals,
             tvmaze_totals or cached_tvmaze_totals,
             show_title=identity.title,
+            unavailable_sources=tuple(unavailable_sources),
         )
         if selected:
             totals[str(show.rating_key)] = selected
@@ -11749,6 +11757,11 @@ async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int
 
 
 async def _series_continue_fetch_tmdb_totals(identity) -> dict[int, int]:
+    totals, _failed = await _series_continue_fetch_tmdb_totals_result(identity)
+    return totals
+
+
+async def _series_continue_fetch_tmdb_totals_result(identity) -> tuple[dict[int, int], bool]:
     try:
         totals = await asyncio.to_thread(
             tmdb_client.season_released_episode_counts,
@@ -11762,12 +11775,12 @@ async def _series_continue_fetch_tmdb_totals(identity) -> dict[int, int]:
             identity.title,
             exc_info=True,
         )
-        return {}
+        return {}, True
     return {
         int(season): int(total)
         for season, total in (totals or {}).items()
         if _series_continue_int(season) > 0 and _series_continue_int(total) > 0
-    }
+    }, False
 
 
 async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_number: int) -> tuple[int, bool]:
@@ -11802,6 +11815,11 @@ async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_
 
 
 async def _series_continue_fetch_tvmaze_totals(identity) -> dict[int, int]:
+    totals, _failed = await _series_continue_fetch_tvmaze_totals_result(identity)
+    return totals
+
+
+async def _series_continue_fetch_tvmaze_totals_result(identity) -> tuple[dict[int, int], bool]:
     try:
         totals = await asyncio.to_thread(
             tvmaze_client.season_released_episode_counts,
@@ -11814,12 +11832,12 @@ async def _series_continue_fetch_tvmaze_totals(identity) -> dict[int, int]:
             identity.title,
             exc_info=True,
         )
-        return {}
+        return {}, True
     return {
         int(season): int(total)
         for season, total in (totals or {}).items()
         if _series_continue_int(season) > 0 and _series_continue_int(total) > 0
-    }
+    }, False
 
 
 def _series_continue_load_totals_cache() -> dict:
@@ -11920,6 +11938,7 @@ def _series_continue_select_metadata_totals(
     tvmaze_totals: dict[int, int],
     *,
     show_title: str = "",
+    unavailable_sources: tuple[str, ...] = (),
 ) -> dict[int, SeriesMetadataSeason]:
     selected: dict[int, SeriesMetadataSeason] = {}
     for season_number in sorted(set(tmdb_totals) | set(tvmaze_totals)):
@@ -11955,6 +11974,7 @@ def _series_continue_select_metadata_totals(
                 confidence="single_source",
                 sources=("tmdb",),
                 source_episode_counts=(("tmdb", int(total)),),
+                unavailable_sources=tuple(source for source in unavailable_sources if source != "tmdb"),
             )
         elif tvmaze_total is not None:
             selected[season_number] = SeriesMetadataSeason(
@@ -11963,6 +11983,7 @@ def _series_continue_select_metadata_totals(
                 confidence="single_source",
                 sources=("tvmaze",),
                 source_episode_counts=(("tvmaze", int(tvmaze_total)),),
+                unavailable_sources=tuple(source for source in unavailable_sources if source != "tvmaze"),
             )
     return selected
 
@@ -12384,26 +12405,58 @@ def _series_continue_metadata_source_label(source: str) -> str:
     }.get(str(source or "").strip().lower(), str(source or "").strip() or "catalog")
 
 
+def _series_continue_metadata_sources_label(sources: tuple[str, ...]) -> str:
+    labels = [
+        _series_continue_metadata_source_label(source)
+        for source in sources
+        if str(source or "").strip()
+    ]
+    return ", ".join(labels) if labels else "одним каталогом"
+
+
+def _series_continue_single_source_status(
+    sources: tuple[str, ...],
+    unavailable_sources: tuple[str, ...],
+) -> str:
+    source_label = _series_continue_metadata_sources_label(sources)
+    if unavailable_sources:
+        unavailable_label = _series_continue_metadata_sources_label(unavailable_sources)
+        verb = "недоступны" if len(unavailable_sources) > 1 else "недоступен"
+        return f"{unavailable_label} {verb}, подтверждено {source_label}"
+    return f"Подтверждено {source_label}"
+
+
 def _series_continue_missing_group_catalog_note(group: dict) -> str:
     conflicts: list[int] = []
-    single_source: list[int] = []
+    single_by_status: dict[str, list[int]] = {}
     for candidate in group.get("candidates", []):
         if not isinstance(candidate, SeriesMissingSeasonCandidate):
             continue
         if candidate.metadata_confidence == "conflict":
             conflicts.append(candidate.season_number)
         elif candidate.metadata_confidence == "single_source":
-            single_source.append(candidate.season_number)
+            sources = candidate.metadata_sources or tuple(
+                source for source, _ in candidate.metadata_source_counts
+            )
+            status = _series_continue_single_source_status(
+                sources,
+                candidate.metadata_unavailable_sources,
+            )
+            single_by_status.setdefault(status, []).append(candidate.season_number)
     if conflicts:
         return f"   Каталог: спорное число серий {_series_continue_format_seasons(conflicts)}"
-    if single_source:
-        return f"   Каталог: один источник {_series_continue_format_seasons(single_source)}"
+    if single_by_status:
+        parts = [
+            f"{status} {_series_continue_format_seasons(seasons)}"
+            for status, seasons in sorted(single_by_status.items())
+        ]
+        return f"   Каталог: {'; '.join(parts)}"
     return ""
 
 
 def _series_continue_missing_group_catalog_detail_lines(group: dict) -> list[str]:
     conflict_lines: list[str] = []
-    single_by_sources: dict[tuple[str, ...], list[int]] = {}
+    single_by_status: dict[str, list[int]] = {}
     for candidate in group.get("candidates", []):
         if not isinstance(candidate, SeriesMissingSeasonCandidate):
             continue
@@ -12417,15 +12470,18 @@ def _series_continue_missing_group_catalog_detail_lines(group: dict) -> list[str
             sources = candidate.metadata_sources or tuple(
                 source for source, _ in candidate.metadata_source_counts
             )
-            single_by_sources.setdefault(sources, []).append(candidate.season_number)
+            status = _series_continue_single_source_status(
+                sources,
+                candidate.metadata_unavailable_sources,
+            )
+            single_by_status.setdefault(status, []).append(candidate.season_number)
 
     lines: list[str] = []
     if conflict_lines:
         lines.extend(["", "Спорное количество серий:"])
         lines.extend(conflict_lines)
-    for sources, seasons in sorted(single_by_sources.items(), key=lambda item: item[0]):
-        source_label = ", ".join(_series_continue_metadata_source_label(source) for source in sources)
-        lines.append(f"Один источник ({source_label}): {_series_continue_format_seasons(seasons)}")
+    for status, seasons in sorted(single_by_status.items(), key=lambda item: item[0]):
+        lines.append(f"{status}: {_series_continue_format_seasons(seasons)}")
     return lines
 
 
