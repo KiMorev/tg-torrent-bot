@@ -6633,22 +6633,18 @@ def _notification_recipients(task_id: str) -> set[int]:
         fallback_chat_ids=_all_allowed_chat_ids(),
         allowed_chat_ids=_all_allowed_chat_ids(),
     )
-    if recipients:
-        return recipients
-
     card_chat_ids = {chat_id for chat_id, _ in TASK_CARD_MESSAGES.get(str(task_id), set())}
-    if not card_chat_ids:
-        return recipients
-    allowed = _all_allowed_chat_ids()
-    if allowed:
-        card_chat_ids = {c for c in card_chat_ids if c in allowed}
     if card_chat_ids:
+        allowed = _all_allowed_chat_ids()
+        if allowed:
+            card_chat_ids = {c for c in card_chat_ids if c in allowed}
+    if card_chat_ids and not recipients:
         logger.info(
             "Task notification recipients recovered from task-card registry: "
             "task=%s chat_ids=%s",
             task_id, sorted(card_chat_ids),
         )
-    return card_chat_ids
+    return recipients | card_chat_ids
 
 
 def _notification_status_key(status: str) -> str:
@@ -7661,18 +7657,28 @@ async def _run_auto_delete_finished_once() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _forget_download_panel_message(chat_id: int | None, message_id: int | None) -> None:
+    if not isinstance(chat_id, int) or not isinstance(message_id, int):
+        return
+    if DOWNLOAD_PANEL_MESSAGES.get(chat_id) != message_id:
+        return
+
+    DOWNLOAD_PANEL_MESSAGES.pop(chat_id, None)
+    DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
+    DOWNLOAD_PANEL_SCOPES.pop(chat_id, None)
+    DOWNLOAD_PANEL_HAD_ACTIVE.pop(chat_id, None)
+
+
 def _register_task_card_message(chat_id: int | None, message_id: int | None, task_id: str | None) -> None:
     if not task_id or not isinstance(chat_id, int) or not isinstance(message_id, int):
         return
 
+    _forget_download_panel_message(chat_id, message_id)
     TASK_CARD_MESSAGES.setdefault(str(task_id), set()).add((chat_id, message_id))
-    # Sticky owner: ensure task_owners.json records this chat_id as the task's
-    # owner. _remember_task_owner is idempotent (see state_store L185-189), so a
-    # repeat call is a no-op without I/O. This is a safety net — every spot in
-    # the codebase that creates a task should already call _remember_task_owner
-    # explicitly, but if any of them silently fails (mid-write crash, empty
-    # task_id from a magnet poll), the active task-card guarantees recovery.
-    _remember_task_owner(str(task_id), chat_id)
+    # Sticky owner only when the task has no owner yet. Viewing a task card must
+    # not steal ownership from the user who started the download.
+    if _task_owner(str(task_id)) is None:
+        _remember_task_owner(str(task_id), chat_id)
 
 
 def _register_task_card_from_message(message, task_id: str | None, fallback_chat_id: int | None = None) -> None:

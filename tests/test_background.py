@@ -842,6 +842,43 @@ class NotificationSelfHealingTests(unittest.TestCase):
         self.assertIn(("tid1"), bot.TASK_CARD_MESSAGES)
         self.assertIn((999, 42), bot.TASK_CARD_MESSAGES["tid1"])
 
+    def test_task_card_registration_does_not_replace_existing_owner(self) -> None:
+        self._store.remember_task_owner("tid1", 999)
+
+        with patch.object(bot, "state_store", self._store):
+            bot._register_task_card_message(chat_id=100, message_id=42, task_id="tid1")
+
+        owners = self._store.load_task_owners()
+        self.assertEqual(owners.get("tid1"), 999)
+        self.assertIn((100, 42), bot.TASK_CARD_MESSAGES["tid1"])
+
+    def test_active_task_card_viewer_is_added_to_notification_recipients(self) -> None:
+        self._store.remember_task_owner("tid1", 999)
+        bot.TASK_CARD_MESSAGES["tid1"] = {(100, 42)}
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_app.bot.delete_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", False),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100, 999}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {100}),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        chat_ids = {call.kwargs["chat_id"] for call in mock_app.bot.send_message.await_args_list}
+        self.assertEqual(chat_ids, {100, 999})
+        notified = self._store.load_notified_tasks()["tid1"]
+        self.assertEqual(notified["sent"], ["100", "999"])
+
 
 class TaskNotificationDeliveryTests(unittest.TestCase):
     """Regression: transient Telegram errors must NOT count against the

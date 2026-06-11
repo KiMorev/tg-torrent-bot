@@ -8448,6 +8448,41 @@ class SearchTimeoutTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TaskCardRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        TASK_CARD_MESSAGES.clear()
+        bot.DOWNLOAD_PANEL_MESSAGES.clear()
+        bot.DOWNLOAD_PANEL_PAGES.clear()
+        bot.DOWNLOAD_PANEL_SCOPES.clear()
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE.clear()
+
+    def tearDown(self):
+        TASK_CARD_MESSAGES.clear()
+        bot.DOWNLOAD_PANEL_MESSAGES.clear()
+        bot.DOWNLOAD_PANEL_PAGES.clear()
+        bot.DOWNLOAD_PANEL_SCOPES.clear()
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE.clear()
+
+    def test_task_card_registration_detaches_same_message_from_download_panel(self):
+        bot.DOWNLOAD_PANEL_MESSAGES[100] = 42
+        bot.DOWNLOAD_PANEL_PAGES[100] = 1
+        bot.DOWNLOAD_PANEL_SCOPES[100] = bot.TASK_LIST_SCOPE_ALL
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE[100] = True
+
+        with (
+            patch.object(bot, "_task_owner", return_value=100),
+            patch.object(bot, "_remember_task_owner") as remember_owner,
+        ):
+            bot._register_task_card_message(chat_id=100, message_id=42, task_id="tid1")
+
+        self.assertIn((100, 42), TASK_CARD_MESSAGES["tid1"])
+        self.assertNotIn(100, bot.DOWNLOAD_PANEL_MESSAGES)
+        self.assertNotIn(100, bot.DOWNLOAD_PANEL_PAGES)
+        self.assertNotIn(100, bot.DOWNLOAD_PANEL_SCOPES)
+        self.assertNotIn(100, bot.DOWNLOAD_PANEL_HAD_ACTIVE)
+        remember_owner.assert_not_called()
+
+
 class TextMessageEntryTaskCardPreservationTests(unittest.IsolatedAsyncioTestCase):
     """text_message_entry must NOT delete a message that is a live task card.
 
