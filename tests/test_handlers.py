@@ -7062,7 +7062,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
             external_guids=["tmdb://119550"],
         )
         tmdb = MagicMock()
-        tmdb.season_episode_count.return_value = 8
+        tmdb.season_aired_episode_count.return_value = 8
         tvmaze = MagicMock()
         state = MagicMock()
         state.load_series_continue_totals.return_value = {}
@@ -7075,17 +7075,18 @@ class SeriesContinueCommandTests(unittest.TestCase):
             totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
 
         self.assertEqual(totals, {"show-key-cf": {5: 8}})
-        tmdb.season_episode_count.assert_called_once_with(
+        tmdb.season_aired_episode_count.assert_called_once_with(
             season_number=5,
             tmdb_id="119550",
             imdb_id="",
             tvdb_id="",
         )
-        tvmaze.season_episode_count.assert_not_called()
+        tvmaze.season_aired_episode_count.assert_not_called()
         state.save_series_continue_totals.assert_called_once()
         saved = state.save_series_continue_totals.call_args.args[0]
         self.assertEqual(saved["tmdb:119550"]["5"], 8)
         self.assertEqual(saved["plex_rating:show-key-cf"]["5"], 8)
+        self.assertEqual(saved["tmdb:119550"][bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY], 2)
 
     def test_continue_known_totals_fetches_plex_external_guids(self):
         from plex import PlexShow, PlexSeason
@@ -7110,9 +7111,9 @@ class SeriesContinueCommandTests(unittest.TestCase):
         plex = MagicMock()
         plex.get_show_details.return_value = detailed
         tmdb = MagicMock()
-        tmdb.season_episode_count.return_value = 8
+        tmdb.season_aired_episode_count.return_value = 8
         tvmaze = MagicMock()
-        tvmaze.season_episode_count.return_value = 8
+        tvmaze.season_aired_episode_count.return_value = 8
         state = MagicMock()
         state.load_series_continue_totals.return_value = {}
 
@@ -7126,13 +7127,13 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         self.assertEqual(totals, {"show-key-cf": {5: 8}})
         plex.get_show_details.assert_called_once_with("show-key-cf")
-        tmdb.season_episode_count.assert_called_once_with(
+        tmdb.season_aired_episode_count.assert_called_once_with(
             season_number=5,
             tmdb_id="",
             imdb_id="",
             tvdb_id="402960",
         )
-        tvmaze.season_episode_count.assert_called_once_with(
+        tvmaze.season_aired_episode_count.assert_called_once_with(
             season_number=5,
             imdb_id="",
             tvdb_id="402960",
@@ -7153,9 +7154,9 @@ class SeriesContinueCommandTests(unittest.TestCase):
             external_guids=["tmdb://96677", "tvdb://367178"],
         )
         tmdb = MagicMock()
-        tmdb.season_episode_count.return_value = 10
+        tmdb.season_aired_episode_count.return_value = 10
         tvmaze = MagicMock()
-        tvmaze.season_episode_count.return_value = 5
+        tvmaze.season_aired_episode_count.return_value = 5
         state = MagicMock()
         state.load_series_continue_totals.return_value = {}
 
@@ -7167,13 +7168,13 @@ class SeriesContinueCommandTests(unittest.TestCase):
             totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
 
         self.assertEqual(totals, {})
-        tmdb.season_episode_count.assert_called_once_with(
+        tmdb.season_aired_episode_count.assert_called_once_with(
             season_number=1,
             tmdb_id="96677",
             imdb_id="",
             tvdb_id="367178",
         )
-        tvmaze.season_episode_count.assert_called_once_with(
+        tvmaze.season_aired_episode_count.assert_called_once_with(
             season_number=1,
             imdb_id="",
             tvdb_id="367178",
@@ -7197,7 +7198,12 @@ class SeriesContinueCommandTests(unittest.TestCase):
         tmdb = MagicMock()
         tvmaze = MagicMock()
         state = MagicMock()
-        state.load_series_continue_totals.return_value = {"tmdb:119550": {"5": 8}}
+        state.load_series_continue_totals.return_value = {
+            "tmdb:119550": {
+                "5": 8,
+                bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY: 2,
+            }
+        }
 
         with (
             patch.object(bot, "tmdb_client", tmdb),
@@ -7207,9 +7213,40 @@ class SeriesContinueCommandTests(unittest.TestCase):
             totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
 
         self.assertEqual(totals, {"show-key-cf": {5: 8}})
-        tmdb.season_episode_count.assert_not_called()
-        tvmaze.season_episode_count.assert_not_called()
+        tmdb.season_aired_episode_count.assert_not_called()
+        tvmaze.season_aired_episode_count.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
+
+    def test_continue_known_totals_ignores_unversioned_local_cache(self):
+        from plex import PlexShow, PlexSeason
+
+        season = PlexSeason("season-key-5", 5, episode_count=4, file_paths=[], resolution="1080")
+        show = PlexShow(
+            "Clarkson's Farm",
+            2021,
+            "show-key-cf",
+            seasons={5: season},
+            guid="plex://show/cf",
+            external_guids=["tmdb://119550"],
+        )
+        tmdb = MagicMock()
+        tmdb.season_aired_episode_count.return_value = 4
+        tvmaze = MagicMock()
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {"tmdb:119550": {"5": 8}}
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_known_totals_by_show([show], []))
+
+        self.assertEqual(totals, {"show-key-cf": {5: 4}})
+        tmdb.season_aired_episode_count.assert_called_once()
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertEqual(saved["tmdb:119550"]["5"], 4)
+        self.assertEqual(saved["tmdb:119550"][bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY], 2)
 
     def test_continue_metadata_totals_uses_complete_cache_without_api(self):
         from plex import PlexShow
@@ -7231,6 +7268,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
                 "2": 18,
                 bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
                 bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
+                bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY: 2,
             },
         }
 
@@ -7245,9 +7283,48 @@ class SeriesContinueCommandTests(unittest.TestCase):
             {season: item.episode_count for season, item in totals["show-key-rookie"].items()},
             {1: 20, 2: 18},
         )
-        tmdb.season_episode_counts.assert_not_called()
-        tvmaze.season_episode_counts.assert_not_called()
+        tmdb.season_released_episode_counts.assert_not_called()
+        tvmaze.season_released_episode_counts.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
+
+    def test_continue_metadata_totals_ignores_unversioned_complete_cache(self):
+        from plex import PlexShow
+
+        show = PlexShow(
+            "The Gentlemen",
+            2024,
+            "show-key-gentlemen",
+            seasons={},
+            guid="plex://show/gentlemen",
+            external_guids=["tmdb://242446"],
+        )
+        tmdb = MagicMock()
+        tmdb.season_released_episode_counts.return_value = {1: 8}
+        tvmaze = MagicMock()
+        tvmaze.season_released_episode_counts.return_value = {}
+        state = MagicMock()
+        state.load_series_continue_totals.return_value = {
+            "tmdb:242446": {
+                "1": 8,
+                "2": 8,
+                bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
+                bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
+            },
+        }
+
+        with (
+            patch.object(bot, "tmdb_client", tmdb),
+            patch.object(bot, "tvmaze_client", tvmaze),
+            patch.object(bot, "state_store", state),
+        ):
+            totals = asyncio.run(bot._series_continue_metadata_totals_by_show([show]))
+
+        self.assertEqual(sorted(totals["show-key-gentlemen"]), [1])
+        tmdb.season_released_episode_counts.assert_called_once()
+        saved = state.save_series_continue_totals.call_args.args[0]
+        self.assertEqual(saved["tmdb:242446"]["1"], 8)
+        self.assertNotIn("2", saved["tmdb:242446"])
+        self.assertEqual(saved["tmdb:242446"][bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY], 2)
 
     def test_continue_metadata_totals_refreshes_tmdb_when_only_tvmaze_cache_is_complete(self):
         from plex import PlexShow
@@ -7261,12 +7338,12 @@ class SeriesContinueCommandTests(unittest.TestCase):
             external_guids=["imdb://tt0442730", "tmdb://76713", "tvdb://113651"],
         )
         tmdb = MagicMock()
-        tmdb.season_episode_counts.return_value = {
+        tmdb.season_released_episode_counts.return_value = {
             season: 16
             for season in range(1, 26)
         } | {2: 12}
         tvmaze = MagicMock()
-        tvmaze.season_episode_counts.return_value = {1: 16, 2: 12, 19: 28, 22: 16, 23: 16, 24: 16, 25: 16}
+        tvmaze.season_released_episode_counts.return_value = {1: 16, 2: 12, 19: 28, 22: 16, 23: 16, 24: 16, 25: 16}
         state = MagicMock()
         state.load_series_continue_totals.return_value = {
             "tmdb:76713": {"1": 16, "2": 12},
@@ -7295,12 +7372,12 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertEqual(totals["5984"][25].episode_count, 16)
         self.assertEqual(totals["5984"][19].confidence, "conflict")
         self.assertEqual(totals["5984"][19].episode_count, 0)
-        tmdb.season_episode_counts.assert_called_once_with(
+        tmdb.season_released_episode_counts.assert_called_once_with(
             tmdb_id="76713",
             imdb_id="tt0442730",
             tvdb_id="113651",
         )
-        tvmaze.season_episode_counts.assert_called_once_with(
+        tvmaze.season_released_episode_counts.assert_called_once_with(
             imdb_id="tt0442730",
             tvdb_id="113651",
         )
@@ -7320,9 +7397,9 @@ class SeriesContinueCommandTests(unittest.TestCase):
             external_guids=["tmdb://12345"],
         )
         tmdb = MagicMock()
-        tmdb.season_episode_counts.return_value = {1: 20, 2: 18, 3: 18}
+        tmdb.season_released_episode_counts.return_value = {1: 20, 2: 18, 3: 18}
         tvmaze = MagicMock()
-        tvmaze.season_episode_counts.return_value = {}
+        tvmaze.season_released_episode_counts.return_value = {}
         state = MagicMock()
         state.load_series_continue_totals.return_value = {
             "tmdb:12345": {
@@ -7332,6 +7409,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
                 bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(
                     bot.time.time() - bot._SERIES_CONTINUE_TOTALS_COMPLETE_TTL_SECONDS - 1
                 ),
+                bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY: 2,
             },
         }
 
@@ -7344,7 +7422,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         self.assertEqual(sorted(totals["show-key-rookie"]), [1, 2, 3])
         self.assertEqual(totals["show-key-rookie"][3].episode_count, 18)
-        tmdb.season_episode_counts.assert_called_once()
+        tmdb.season_released_episode_counts.assert_called_once()
 
     def test_continue_metadata_totals_marks_cached_conflicts(self):
         from plex import PlexShow
@@ -7366,12 +7444,14 @@ class SeriesContinueCommandTests(unittest.TestCase):
                 "2": 8,
                 bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
                 bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
+                bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY: 2,
             },
             "tvmaze:tvdb:367178": {
                 "1": 5,
                 "2": 8,
                 bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY: True,
                 bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY: int(bot.time.time()),
+                bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY: 2,
             },
         }
 
@@ -7386,8 +7466,8 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertEqual(totals["show-key-lupin"][1].confidence, "conflict")
         self.assertEqual(totals["show-key-lupin"][1].source_episode_counts, (("tmdb", 10), ("tvmaze", 5)))
         self.assertEqual(totals["show-key-lupin"][2].confidence, "confirmed")
-        tmdb.season_episode_counts.assert_not_called()
-        tvmaze.season_episode_counts.assert_not_called()
+        tmdb.season_released_episode_counts.assert_not_called()
+        tvmaze.season_released_episode_counts.assert_not_called()
         state.save_series_continue_totals.assert_not_called()
 
     def test_continue_metadata_totals_marks_live_conflicts_and_stores_complete_snapshots(self):
@@ -7402,9 +7482,9 @@ class SeriesContinueCommandTests(unittest.TestCase):
             external_guids=["tmdb://96677", "tvdb://367178"],
         )
         tmdb = MagicMock()
-        tmdb.season_episode_counts.return_value = {1: 10, 2: 8}
+        tmdb.season_released_episode_counts.return_value = {1: 10, 2: 8}
         tvmaze = MagicMock()
-        tvmaze.season_episode_counts.return_value = {1: 5, 2: 8}
+        tvmaze.season_released_episode_counts.return_value = {1: 5, 2: 8}
         state = MagicMock()
         state.load_series_continue_totals.return_value = {}
 
@@ -7419,12 +7499,12 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertEqual(totals["show-key-lupin"][1].confidence, "conflict")
         self.assertEqual(totals["show-key-lupin"][1].source_episode_counts, (("tmdb", 10), ("tvmaze", 5)))
         self.assertEqual(totals["show-key-lupin"][2].episode_count, 8)
-        tmdb.season_episode_counts.assert_called_once_with(
+        tmdb.season_released_episode_counts.assert_called_once_with(
             tmdb_id="96677",
             imdb_id="",
             tvdb_id="367178",
         )
-        tvmaze.season_episode_counts.assert_called_once_with(
+        tvmaze.season_released_episode_counts.assert_called_once_with(
             imdb_id="",
             tvdb_id="367178",
         )
@@ -7432,6 +7512,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertTrue(saved["tmdb:96677"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
         self.assertEqual(saved["tmdb:96677"]["1"], 10)
         self.assertGreater(saved["tmdb:96677"][bot._SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY], 0)
+        self.assertEqual(saved["tmdb:96677"][bot._SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY], 2)
         self.assertTrue(saved["tvmaze:tvdb:367178"][bot._SERIES_CONTINUE_TOTALS_COMPLETE_KEY])
         self.assertEqual(saved["tvmaze:tvdb:367178"]["1"], 5)
 

@@ -83,6 +83,41 @@ class TVmazeClientTests(unittest.TestCase):
         self.assertEqual(totals, {1: 3})
         self.assertIn("/seasons/100/episodes", client._session.get.call_args_list[2].args[0])
 
+    def test_season_aired_episode_count_counts_only_released_episodes(self) -> None:
+        client = TVmazeClient()
+        client._session = MagicMock()
+        client._session.get.side_effect = [
+            self._response({"id": 50701}),
+            self._response([{"id": 100, "number": 2, "episodeOrder": 8}]),
+            self._response([
+                {"id": 1, "airdate": "2024-03-07"},
+                {"id": 2, "airdate": "2024-03-14"},
+                {"id": 3, "airdate": "2999-01-01"},
+                {"id": 4, "airdate": ""},
+            ]),
+        ]
+
+        total = client.season_aired_episode_count(tvdb_id="367178", season_number=2)
+
+        self.assertEqual(total, 2)
+        self.assertIn("/seasons/100/episodes", client._session.get.call_args_list[2].args[0])
+
+    def test_season_released_episode_counts_skips_future_and_undated_seasons(self) -> None:
+        client = TVmazeClient()
+        client._session = MagicMock()
+        client._session.get.side_effect = [
+            self._response({"id": 50701}),
+            self._response([
+                {"id": 1, "number": 1, "episodeOrder": 8, "premiereDate": "2024-03-07"},
+                {"id": 2, "number": 2, "episodeOrder": 8, "premiereDate": "2999-01-01"},
+                {"id": 3, "number": 3, "episodeOrder": 8, "premiereDate": None},
+            ]),
+        ]
+
+        totals = client.season_released_episode_counts(tvdb_id="367178")
+
+        self.assertEqual(totals, {1: 8})
+
 
 if __name__ == "__main__":
     unittest.main()

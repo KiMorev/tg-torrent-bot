@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import date
 
 import requests
 
@@ -62,6 +63,46 @@ class TMDBClient:
                 return {}
             return self._season_episode_counts(tv_id)
 
+    def season_aired_episode_count(
+        self,
+        *,
+        season_number: int,
+        tmdb_id: str = "",
+        imdb_id: str = "",
+        tvdb_id: str = "",
+    ) -> int | None:
+        """Return episodes with an air date up to today."""
+        try:
+            season = int(season_number)
+        except (TypeError, ValueError):
+            return None
+        if season <= 0:
+            return None
+
+        with self._lock:
+            tv_id = self._safe_int(tmdb_id)
+            if tv_id is None:
+                tv_id = self._resolve_tv_id(imdb_id=imdb_id, tvdb_id=tvdb_id)
+            if tv_id is None:
+                return None
+            return self._season_aired_episode_count(tv_id, season)
+
+    def season_released_episode_counts(
+        self,
+        *,
+        tmdb_id: str = "",
+        imdb_id: str = "",
+        tvdb_id: str = "",
+    ) -> dict[int, int]:
+        """Return seasons whose first air date is not in the future."""
+        with self._lock:
+            tv_id = self._safe_int(tmdb_id)
+            if tv_id is None:
+                tv_id = self._resolve_tv_id(imdb_id=imdb_id, tvdb_id=tvdb_id)
+            if tv_id is None:
+                return {}
+            return self._season_released_episode_counts(tv_id)
+
     def _resolve_tv_id(self, *, imdb_id: str = "", tvdb_id: str = "") -> int | None:
         for external_id, source in (
             (imdb_id, "imdb_id"),
@@ -105,6 +146,38 @@ class TMDBClient:
             return len(episodes) or None
         return None
 
+    def _season_aired_episode_count(self, tv_id: int, season_number: int) -> int | None:
+        try:
+            response = self._session.get(
+                f"{_API_BASE}/tv/{tv_id}/season/{season_number}",
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            logger.debug("TMDB season lookup failed tv_id=%s season=%s: %s", tv_id, season_number, exc)
+            return None
+        episodes = data.get("episodes") if isinstance(data, dict) else None
+        if not isinstance(episodes, list):
+            return None
+        aired = 0
+        dated = 0
+        for episode in episodes:
+            if not isinstance(episode, dict):
+                continue
+            air_date = self._parse_date(episode.get("air_date"))
+            if air_date is None:
+                continue
+            dated += 1
+            if air_date <= date.today():
+                aired += 1
+        if dated:
+            return aired or None
+        season_air_date = self._parse_date(data.get("air_date")) if isinstance(data, dict) else None
+        if season_air_date is not None and season_air_date <= date.today():
+            return len(episodes) or None
+        return None
+
     def _season_episode_counts(self, tv_id: int) -> dict[int, int]:
         try:
             response = self._session.get(
@@ -134,6 +207,36 @@ class TMDBClient:
             result[season_number] = episode_count
         return result
 
+    def _season_released_episode_counts(self, tv_id: int) -> dict[int, int]:
+        try:
+            response = self._session.get(
+                f"{_API_BASE}/tv/{tv_id}",
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            logger.debug("TMDB TV seasons lookup failed tv_id=%s: %s", tv_id, exc)
+            return {}
+
+        seasons = data.get("seasons") if isinstance(data, dict) else None
+        if not isinstance(seasons, list):
+            return {}
+
+        result: dict[int, int] = {}
+        for season in seasons:
+            if not isinstance(season, dict):
+                continue
+            season_number = self._safe_int(season.get("season_number"))
+            episode_count = self._safe_int(season.get("episode_count"))
+            first_air_date = self._parse_date(season.get("air_date"))
+            if season_number is None or episode_count is None:
+                continue
+            if first_air_date is None or first_air_date > date.today():
+                continue
+            result[season_number] = episode_count
+        return result
+
     @staticmethod
     def _safe_int(value: object) -> int | None:
         try:
@@ -141,3 +244,13 @@ class TMDBClient:
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _parse_date(value: object) -> date | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return None

@@ -409,6 +409,8 @@ CONTINUE_STATE_KEY = "continue_state"
 CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all", "missing", "hidden_missing"}
 _SERIES_CONTINUE_TOTALS_COMPLETE_KEY = "__complete__"
 _SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY = "__fetched_at__"
+_SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY = "__version__"
+_SERIES_CONTINUE_TOTALS_CACHE_VERSION = 2
 _SERIES_CONTINUE_TOTALS_COMPLETE_TTL_SECONDS = 7 * 24 * 60 * 60
 # chat_id → имя пользователя (заполняется при запросе доступа)
 ACCESS_PENDING_USERS: dict[int, str] = {}
@@ -11729,7 +11731,7 @@ async def _series_continue_metadata_totals_by_show(
 async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int:
     try:
         total = await asyncio.to_thread(
-            tmdb_client.season_episode_count,
+            tmdb_client.season_aired_episode_count,
             season_number=season_number,
             tmdb_id=identity.tmdb_id,
             imdb_id=identity.imdb_id,
@@ -11749,7 +11751,7 @@ async def _series_continue_fetch_tmdb_total(identity, season_number: int) -> int
 async def _series_continue_fetch_tmdb_totals(identity) -> dict[int, int]:
     try:
         totals = await asyncio.to_thread(
-            tmdb_client.season_episode_counts,
+            tmdb_client.season_released_episode_counts,
             tmdb_id=identity.tmdb_id,
             imdb_id=identity.imdb_id,
             tvdb_id=identity.tvdb_id,
@@ -11779,7 +11781,7 @@ async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_
         return 0, False
     try:
         total = await asyncio.to_thread(
-            tvmaze_client.season_episode_count,
+            tvmaze_client.season_aired_episode_count,
             season_number=season_number,
             imdb_id=identity.imdb_id,
             tvdb_id=identity.tvdb_id,
@@ -11802,7 +11804,7 @@ async def _series_continue_tvmaze_validated_total(cache: dict, identity, season_
 async def _series_continue_fetch_tvmaze_totals(identity) -> dict[int, int]:
     try:
         totals = await asyncio.to_thread(
-            tvmaze_client.season_episode_counts,
+            tvmaze_client.season_released_episode_counts,
             imdb_id=identity.imdb_id,
             tvdb_id=identity.tvdb_id,
         )
@@ -11874,6 +11876,8 @@ def _series_continue_cached_total(cache: dict, keys: tuple[str, ...], season_num
         by_season = cache.get(key)
         if not isinstance(by_season, dict):
             continue
+        if by_season.get(_SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY) != _SERIES_CONTINUE_TOTALS_CACHE_VERSION:
+            continue
         total = _series_continue_int(by_season.get(str(season_number)))
         if total > 0:
             return total
@@ -11885,6 +11889,8 @@ def _series_continue_cached_totals(cache: dict, keys: tuple[str, ...]) -> dict[i
     for key in keys:
         by_season = cache.get(key)
         if not isinstance(by_season, dict):
+            continue
+        if by_season.get(_SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY) != _SERIES_CONTINUE_TOTALS_CACHE_VERSION:
             continue
         for raw_season, raw_total in by_season.items():
             season_number = _series_continue_int(raw_season)
@@ -11898,6 +11904,8 @@ def _series_continue_cached_complete_totals(cache: dict, keys: tuple[str, ...]) 
     for key in keys:
         by_season = cache.get(key)
         if isinstance(by_season, dict) and by_season.get(_SERIES_CONTINUE_TOTALS_COMPLETE_KEY):
+            if by_season.get(_SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY) != _SERIES_CONTINUE_TOTALS_CACHE_VERSION:
+                continue
             fetched_at = _series_continue_int(by_season.get(_SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY))
             if not fetched_at:
                 continue
@@ -11982,6 +11990,7 @@ def _series_continue_store_cached_totals_snapshot(
             by_season[str(season_number)] = int(total)
         by_season[_SERIES_CONTINUE_TOTALS_COMPLETE_KEY] = True
         by_season[_SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY] = int(time.time())
+        by_season[_SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY] = _SERIES_CONTINUE_TOTALS_CACHE_VERSION
 
 
 def _series_continue_store_cached_total(
@@ -11994,6 +12003,7 @@ def _series_continue_store_cached_total(
         by_season = cache.setdefault(key, {})
         if isinstance(by_season, dict):
             by_season[str(season_number)] = int(total)
+            by_season[_SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY] = _SERIES_CONTINUE_TOTALS_CACHE_VERSION
 
 
 async def _series_continue_identity_with_external_guids(show: "PlexShow"):
