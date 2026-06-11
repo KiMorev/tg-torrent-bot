@@ -6972,6 +6972,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         metadata_sources: tuple[str, ...] = (),
         metadata_source_counts: tuple[tuple[str, int], ...] = (),
         metadata_unavailable_sources: tuple[str, ...] = (),
+        quality: str = "1080",
     ):
         from series_continue import PlexSeriesIdentity, SeriesMissingSeasonCandidate
 
@@ -6987,7 +6988,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
             season_number=season,
             episode_count=18,
             present_seasons=(1, 2, 3, 4, 5, 6, 8),
-            quality="1080",
+            quality=quality,
             history_chat_ids=(100,),
             metadata_confidence=metadata_confidence,
             metadata_sources=metadata_sources,
@@ -7845,6 +7846,68 @@ class SeriesContinueCommandTests(unittest.TestCase):
         build_plan.assert_awaited_once()
         self.assertEqual(context.user_data["srch_series_bulk_target_seasons"], [7, 9])
         self.assertEqual(context.user_data["srch_series_bulk_origin"], "continue_missing")
+
+    def test_continue_missing_bulk_uses_default_quality_when_show_quality_unknown(self):
+        state = {
+            "raw_mine": [],
+            "raw_all": [],
+            "raw_missing": [
+                self._missing_candidate(season=7, quality=""),
+            ],
+        }
+        bot._series_continue_refresh_hidden_views(state, set())
+        update = _make_callback_update(chat_id=100, callback_data="cont:missing_bulk:missing:0:7")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        build_plan = AsyncMock(return_value=bot.SEARCH_RESULTS)
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_series_bulk_build_plan_from_context", build_plan),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        build_plan.assert_awaited_once()
+        self.assertEqual(context.user_data["srch_series_bulk_profile_draft"].quality, "1080p")
+        self.assertEqual(context.user_data["srch_series_bulk_base_quality"], "1080p")
+        self.assertEqual(context.user_data["srch_results"][0]["quality"], "1080p")
+        self.assertIn("1080", context.user_data["srch_results"][0]["title"])
+
+    def test_continue_missing_bulk_respects_user_any_quality_default(self):
+        state = {
+            "raw_mine": [],
+            "raw_all": [],
+            "raw_missing": [
+                self._missing_candidate(season=7, quality=""),
+            ],
+        }
+        bot._series_continue_refresh_hidden_views(state, set())
+        update = _make_callback_update(chat_id=100, callback_data="cont:missing_bulk:missing:0:7")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        build_plan = AsyncMock(return_value=bot.SEARCH_RESULTS)
+        store = MagicMock(
+            load_approved_chat_ids=MagicMock(return_value=set()),
+            load_user_search_defaults=MagicMock(return_value={"quality": "any"}),
+        )
+
+        async def run():
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_series_bulk_build_plan_from_context", build_plan),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        build_plan.assert_awaited_once()
+        self.assertEqual(context.user_data["srch_series_bulk_profile_draft"].quality, "any")
+        self.assertEqual(context.user_data["srch_series_bulk_base_quality"], "1080p")
+        self.assertEqual(context.user_data["srch_results"][0]["quality"], "")
+        self.assertNotIn("1080", context.user_data["srch_results"][0]["title"])
 
     def test_continue_missing_bulk_single_uses_only_selected_season(self):
         state = {

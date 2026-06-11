@@ -12653,6 +12653,14 @@ def _series_continue_missing_group_quality(group: dict) -> str:
     return ""
 
 
+def _series_continue_missing_bulk_quality(group: dict, chat_id: int | None) -> str:
+    inferred_quality = _series_continue_profile_quality(_series_continue_missing_group_quality(group))
+    if inferred_quality != "any":
+        return inferred_quality
+    settings = _search_settings_for_chat(chat_id)
+    return _series_continue_profile_quality(settings.get("quality") or "1080p")
+
+
 async def _series_continue_start_missing_bulk(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -12671,7 +12679,7 @@ async def _series_continue_start_missing_bulk(
         return ConversationHandler.END
 
     series_title = _series_continue_missing_group_title(group)
-    profile_quality = _series_continue_profile_quality(_series_continue_missing_group_quality(group))
+    profile_quality = _series_continue_missing_bulk_quality(group, _chat_id_from_query(query))
     query_quality = _series_continue_query_quality_token(profile_quality)
     quality_suffix = _quality_to_query_suffix(query_quality)
     title = _normalize_season_in_query(f"{series_title} Сезон {seasons[0]}{quality_suffix}")
