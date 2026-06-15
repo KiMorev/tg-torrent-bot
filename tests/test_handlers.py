@@ -630,8 +630,9 @@ class JackettWarmupTests(unittest.IsolatedAsyncioTestCase):
             "results_count": 5,
             "elapsed_seconds": 0.2,
             "failed_indexers": [],
+            "indexer_statuses": [Status()],
         }
-        jackett.get_last_indexer_statuses.return_value = [Status()]
+        jackett.get_last_indexer_statuses.side_effect = AssertionError("side-channel must not be used")
 
         with tempfile.TemporaryDirectory() as tmp:
             store = _make_store(tmp)
@@ -663,6 +664,65 @@ class JackettWarmupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["indexers"]["kinozal"]["state"], "ok")
         self.assertEqual(payload["indexers"]["kinozal"]["fail_streak"], 0)
+        jackett.get_last_indexer_statuses.assert_not_called()
+
+    def test_movie_discovery_search_uses_returned_statuses_not_side_channel(self):
+        class Status:
+            indexer_id = "kinozal"
+            name = "Kinozal"
+            status = 1
+            results = 0
+            error = "timeout"
+
+            @property
+            def is_ok(self):
+                return False
+
+        jackett = MagicMock()
+        jackett.search_with_statuses.return_value = ([], [Status()])
+        jackett.get_last_indexer_statuses.side_effect = AssertionError("side-channel must not be used")
+
+        with patch.object(bot, "jackett_client", jackett):
+            results, statuses = bot._jackett_movie_discovery_search("2026 1080p")
+
+        self.assertEqual(results, [])
+        self.assertEqual([st.indexer_id for st in statuses], ["kinozal"])
+        jackett.get_last_indexer_statuses.assert_not_called()
+
+    def test_guard_summary_and_prune_use_active_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_jackett_guard({
+                "version": 1,
+                "indexers": {
+                    "rutracker": {"id": "rutracker", "state": "degraded", "fail_streak": 1},
+                    "old-indexer": {"id": "old-indexer", "state": "degraded", "fail_streak": 1},
+                },
+            })
+
+            with patch.object(bot, "state_store", store):
+                summary = bot._jackett_guard_unready_summary(None, {"rutracker"})
+                removed = bot._prune_jackett_guard_state({"rutracker"})
+
+            payload = store.load_jackett_guard()
+
+        self.assertEqual(summary["enabled"], ["rutracker"])
+        self.assertEqual(removed, ["old-indexer"])
+        self.assertEqual(set(payload["indexers"].keys()), {"rutracker"})
+
+    async def test_guardian_loop_continues_after_unexpected_failure(self):
+        sleeps = AsyncMock(side_effect=[None, asyncio.CancelledError()])
+        next_due = MagicMock(side_effect=[RuntimeError("boom"), 0])
+
+        with (
+            patch.object(bot, "_jackett_warmup_enabled", return_value=True),
+            patch.object(bot, "_jackett_guard_next_due_delay", next_due),
+            patch.object(bot.asyncio, "sleep", sleeps),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await bot._jackett_guardian_loop(MagicMock())
+
+        self.assertEqual(next_due.call_count, 2)
 
     async def test_run_once_skips_when_indexer_lookup_is_busy(self):
         jackett = MagicMock()

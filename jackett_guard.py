@@ -278,21 +278,31 @@ def record_batch_failure(
     return state, events
 
 
-def unready_indexer_ids(payload: dict | None) -> set[str]:
+def unready_indexer_ids(payload: dict | None, *, pool: Iterable[object] | None = None) -> set[str]:
     state = normalize_payload(payload)
+    allowed = _normalize_pool(pool)
     return {
         indexer_id
         for indexer_id, entry in state["indexers"].items()
+        if (allowed is None or indexer_id in allowed)
         if str(entry.get("state") or "") in UNREADY_STATES
     }
 
 
-def unready_summary(payload: dict | None, enabled_ids: set[str] | None) -> dict[str, list[str]]:
+def unready_summary(
+    payload: dict | None,
+    enabled_ids: set[str] | None,
+    *,
+    pool: Iterable[object] | None = None,
+) -> dict[str, list[str]]:
     state = normalize_payload(payload)
+    allowed = _normalize_pool(pool)
     enabled: list[str] = []
     disabled: list[str] = []
     manual: list[str] = []
     for indexer_id, entry in sorted(state["indexers"].items()):
+        if allowed is not None and indexer_id not in allowed:
+            continue
         entry_state = str(entry.get("state") or "")
         if entry_state not in UNREADY_STATES:
             continue
@@ -307,6 +317,25 @@ def unready_summary(payload: dict | None, enabled_ids: set[str] | None) -> dict[
         "disabled": disabled,
         "manual_required": manual,
     }
+
+
+def prune_to_pool(
+    payload: dict | None,
+    pool: Iterable[object],
+    *,
+    now: float | None = None,
+) -> tuple[dict, list[str]]:
+    state = normalize_payload(payload)
+    allowed = _normalize_pool(pool) or set()
+    removed: list[str] = []
+    for indexer_id in list(state["indexers"].keys()):
+        if indexer_id not in allowed:
+            removed.append(indexer_id)
+            state["indexers"].pop(indexer_id, None)
+    if removed:
+        ts = now_ts() if now is None else float(now)
+        state["updated_at"] = ts_text(ts)
+    return state, sorted(removed)
 
 
 def due_indexer_ids(
@@ -373,3 +402,9 @@ def _to_float(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _normalize_pool(pool: Iterable[object] | None) -> set[str] | None:
+    if pool is None:
+        return None
+    return {indexer_id for indexer_id in (normalize_indexer_id(item) for item in pool) if indexer_id}

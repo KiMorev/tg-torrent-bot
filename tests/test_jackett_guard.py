@@ -12,6 +12,7 @@ from jackett_guard import (
     record_failure,
     record_statuses,
     record_success,
+    prune_to_pool,
     unready_indexer_ids,
     unready_summary,
 )
@@ -80,6 +81,39 @@ class JackettGuardTests(unittest.TestCase):
 
         self.assertEqual(summary["enabled"], ["rutracker"])
         self.assertEqual(summary["disabled"], ["noname-club"])
+
+    def test_unready_summary_ignores_indexers_outside_pool(self) -> None:
+        state, _ = record_batch_failure(
+            {},
+            ["rutracker", "old-indexer"],
+            error_kind="timeout",
+            error="timeout",
+            source="movie_discovery",
+            query="2026 1080p",
+            now=1000,
+        )
+
+        summary = unready_summary(state, None, pool={"rutracker"})
+
+        self.assertEqual(summary["enabled"], ["rutracker"])
+        self.assertEqual(summary["disabled"], [])
+
+    def test_prune_to_pool_removes_inactive_indexers(self) -> None:
+        state, _ = record_batch_failure(
+            {},
+            ["rutracker", "old-indexer"],
+            error_kind="timeout",
+            error="timeout",
+            source="movie_discovery",
+            query="2026 1080p",
+            now=1000,
+        )
+
+        state, removed = prune_to_pool(state, {"rutracker"}, now=1100)
+
+        self.assertEqual(removed, ["old-indexer"])
+        self.assertEqual(set(state["indexers"].keys()), {"rutracker"})
+        self.assertEqual(unready_indexer_ids(state), {"rutracker"})
 
     def test_record_statuses_recovers_only_bad_indexer(self) -> None:
         state, _ = record_failure({}, "kinozal", error_kind="timeout", error="timeout", now=1000)

@@ -167,6 +167,7 @@ class WarmupTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["results_count"], 1)
         self.assertEqual(result["indexers"], ["rutracker", "kinozal"])
+        self.assertEqual([st.indexer_id for st in result["indexer_statuses"]], ["rutracker"])
         params = session.requests[0][1]["params"]
         self.assertIn(("Tracker[]", "rutracker"), params)
         self.assertIn(("Tracker[]", "kinozal"), params)
@@ -347,6 +348,36 @@ class ParseIndexerStatusesTests(unittest.TestCase):
         # garbage + broken are skipped, two real ones survive
         self.assertEqual(len(statuses), 2)
         self.assertEqual({s.indexer_id for s in statuses}, {"ok", "also-ok"})
+
+
+class SearchWithStatusesTests(unittest.TestCase):
+    def test_search_with_statuses_returns_results_and_same_response_statuses(self) -> None:
+        client = JackettClient("http://jackett.local:9117", "secret")
+        payload = {
+            "Results": [{
+                "Title": "Movie 2026 1080p",
+                "Size": 1_000_000_000,
+                "Seeders": 10,
+                "TrackerId": "rutracker",
+                "Details": "https://rutracker.org/forum/viewtopic.php?t=123",
+                "Link": "http://jackett.local/dl/rutracker/?path=ABC",
+                "MagnetUri": "",
+                "PublishDate": "",
+            }],
+            "Indexers": [
+                {"ID": "rutracker", "Name": "Rutracker", "Status": 0, "Results": 1, "Error": ""},
+                {"ID": "kinozal", "Name": "Kinozal", "Status": 1, "Results": 0, "Error": "timeout"},
+            ],
+        }
+        session = SequenceSession([FakeResponse(text=json.dumps(payload))])
+        client._session = session
+
+        results, statuses = client.search_with_statuses("movie")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tracker, "rutracker")
+        self.assertEqual([st.indexer_id for st in statuses], ["rutracker", "kinozal"])
+        self.assertFalse(statuses[1].is_ok)
 
 
 class ParseXmlResultsTests(unittest.TestCase):

@@ -751,6 +751,34 @@ def _jackett_warmup_configured_indexers() -> list[str] | None:
     return None
 
 
+def _jackett_search_configured_indexers() -> list[str] | None:
+    indexers_raw = (JACKETT_INDEXERS or "all").strip().lower()
+    if indexers_raw and indexers_raw != "all":
+        return _split_indexer_ids(indexers_raw)
+    return None
+
+
+def _jackett_discovery_guard_pool(
+    current_indexer_ids: Iterable[str],
+    *,
+    tracker_lookup_ok: bool,
+) -> set[str] | None:
+    configured = _jackett_search_configured_indexers()
+    current = {
+        _jackett_guard.normalize_indexer_id(indexer_id)
+        for indexer_id in current_indexer_ids
+    }
+    current = {indexer_id for indexer_id in current if indexer_id}
+    if configured is not None:
+        configured_set = set(configured)
+        if tracker_lookup_ok and current:
+            return configured_set & current
+        return configured_set
+    if tracker_lookup_ok:
+        return current
+    return None
+
+
 def _jackett_warmup_next_batch(indexers: list[str], batch_size: int | None = None) -> list[str]:
     global _jackett_warmup_cursor
     pool = list(dict.fromkeys(i.strip().lower() for i in indexers if i and i.strip()))
@@ -829,8 +857,25 @@ def _jackett_guard_unready_ids() -> set[str]:
     return _jackett_guard.unready_indexer_ids(_load_jackett_guard_state())
 
 
-def _jackett_guard_unready_summary(enabled_ids: set[str] | None) -> dict[str, list[str]]:
-    return _jackett_guard.unready_summary(_load_jackett_guard_state(), enabled_ids)
+def _jackett_guard_unready_summary(
+    enabled_ids: set[str] | None,
+    active_indexer_ids: Iterable[str] | None = None,
+) -> dict[str, list[str]]:
+    return _jackett_guard.unready_summary(
+        _load_jackett_guard_state(),
+        enabled_ids,
+        pool=active_indexer_ids,
+    )
+
+
+def _prune_jackett_guard_state(active_indexer_ids: Iterable[str]) -> list[str]:
+    state, removed = _jackett_guard.prune_to_pool(
+        _load_jackett_guard_state(),
+        active_indexer_ids,
+    )
+    if removed:
+        _save_jackett_guard_state(state)
+    return removed
 
 
 def _jackett_guard_due_indexers(pool: Iterable[str], limit: int | None = None) -> list[str]:
@@ -858,6 +903,27 @@ async def _jackett_warmup_indexer_pool() -> tuple[list[str], str]:
     if indexers is None:
         return [], "busy"
     return [idx["id"] for idx in indexers if isinstance(idx, dict) and idx.get("id")], ""
+
+
+def _jackett_movie_discovery_search(search_query: str) -> tuple[list[JackettResult], list]:
+    assert jackett_client is not None
+    search_with_statuses = getattr(jackett_client, "search_with_statuses", None)
+    if callable(search_with_statuses):
+        response = search_with_statuses(
+            search_query,
+            fetch_limit=JACKETT_FETCH_LIMIT,
+            categories="2000",
+        )
+        if isinstance(response, tuple) and len(response) == 2:
+            results, statuses = response
+            return list(results or []), list(statuses or [])
+        logger.debug("Jackett search_with_statuses returned unexpected shape; falling back to search()")
+    results = jackett_client.search(
+        search_query,
+        fetch_limit=JACKETT_FETCH_LIMIT,
+        categories="2000",
+    )
+    return list(results or []), []
 
 
 async def _run_jackett_warmup_once(
@@ -935,10 +1001,7 @@ async def _run_jackett_warmup_once(
             result.get("results_count"),
             result.get("elapsed_seconds"),
         )
-        try:
-            statuses = jackett_client.get_last_indexer_statuses()
-        except Exception:
-            statuses = []
+        statuses = result.get("indexer_statuses") or []
         events = _record_jackett_guard_statuses(statuses, source=source, query=JACKETT_WARMUP_QUERY)
         if not statuses and len(batch) == 1:
             state, event = _jackett_guard.record_success(
@@ -2861,10 +2924,12 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
     md_settings = _load_movie_discovery_settings()
     known_tracker_ids: set[str] = set(md_settings.get("jackett_trackers_known") or [])
     current_tracker_ids: set[str] = set()
+    tracker_lookup_ok = False
     if jackett_client is not None:
         try:
             indexers = await asyncio.to_thread(jackett_client.get_indexers)
             current_tracker_ids = {idx["id"] for idx in indexers if idx.get("id")}
+            tracker_lookup_ok = True
         except Exception:
             logger.warning("Failed to get Jackett indexers for tracker monitoring", exc_info=True)
             current_tracker_ids = known_tracker_ids
@@ -2884,6 +2949,14 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
         if md_settings.get("jackett_trackers_enabled") is not None
         else None
     )
+    guard_pool_ids = _jackett_discovery_guard_pool(
+        current_tracker_ids,
+        tracker_lookup_ok=tracker_lookup_ok,
+    )
+    if guard_pool_ids is not None:
+        removed_guard_ids = _prune_jackett_guard_state(guard_pool_ids)
+        if removed_guard_ids:
+            logger.info("Jackett guard pruned inactive indexers: %s", removed_guard_ids)
 
     qualities = _movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES)
     allowed_years = _movie_discovery_years(now)
@@ -2922,22 +2995,13 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
 
         if jackett_client is not None:
             try:
-                results = await asyncio.to_thread(
-                    jackett_client.search,
-                    search_query,
-                    fetch_limit=JACKETT_FETCH_LIMIT,
-                    categories="2000",
-                )
+                results, statuses = await asyncio.to_thread(_jackett_movie_discovery_search, search_query)
                 source_counts["jackett_raw"] += len(results)
                 # Surface per-indexer statuses from this Jackett response.
                 # Each entry tells us whether a specific indexer succeeded,
                 # failed, or returned 0 results. We aggregate failures across
                 # all queries so the post-loop supplement step can fill in
                 # just the missing trackers from prev cache.
-                try:
-                    statuses = jackett_client.get_last_indexer_statuses()
-                except Exception:
-                    statuses = []
                 _record_jackett_guard_statuses(statuses, source="movie_discovery", query=search_query)
                 for st in statuses:
                     if st.is_ok:
@@ -3009,7 +3073,7 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
                 search_query, query_year, query_quality,
             )
 
-    guard_unready = _jackett_guard_unready_summary(enabled_ids)
+    guard_unready = _jackett_guard_unready_summary(enabled_ids, guard_pool_ids)
     guard_unready_indexer_ids = set(guard_unready["enabled"]) | set(guard_unready["disabled"])
     indexers_to_supplement = failed_indexer_ids | guard_unready_indexer_ids
     if guard_unready_indexer_ids:
@@ -4107,19 +4171,25 @@ async def _jackett_guardian_loop(app: "Application") -> None:
     logger.info("jackett_guard: loop started")
     try:
         while True:
-            delay = _jackett_guard_next_due_delay(JACKETT_WARMUP_INTERVAL_SECONDS)
-            delay = max(min_sleep, min(max_sleep, delay))
-            await asyncio.sleep(delay)
+            try:
+                delay = _jackett_guard_next_due_delay(JACKETT_WARMUP_INTERVAL_SECONDS)
+                delay = max(min_sleep, min(max_sleep, delay))
+                await asyncio.sleep(delay)
 
-            pool, pool_error = await _jackett_warmup_indexer_pool()
-            if pool_error:
-                logger.info("jackett_guard: retry skipped before search reason=%s", pool_error)
-                continue
-            due = _jackett_guard_due_indexers(pool, limit=JACKETT_WARMUP_BATCH_SIZE)
-            if not due:
-                continue
-            logger.info("jackett_guard: targeted retry indexers=%s", ",".join(due))
-            await _run_jackett_warmup_once(due, source="guardian")
+                pool, pool_error = await _jackett_warmup_indexer_pool()
+                if pool_error:
+                    logger.info("jackett_guard: retry skipped before search reason=%s", pool_error)
+                    continue
+                due = _jackett_guard_due_indexers(pool, limit=JACKETT_WARMUP_BATCH_SIZE)
+                if not due:
+                    continue
+                logger.info("jackett_guard: targeted retry indexers=%s", ",".join(due))
+                await _run_jackett_warmup_once(due, source="guardian")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("jackett_guard: unexpected failure", exc_info=True)
+                await asyncio.sleep(min_sleep)
     except asyncio.CancelledError:
         logger.info("Jackett guardian loop stopped")
         raise

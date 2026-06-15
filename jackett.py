@@ -331,6 +331,7 @@ class JackettClient:
                 "query": query,
                 "indexers": list(indexers or []),
                 "results_count": len(results) if isinstance(results, list) else 0,
+                "indexer_statuses": statuses,
                 "failed_indexers": [st.indexer_id for st in statuses if not st.is_ok],
                 "http_status": resp.status_code,
                 "elapsed_seconds": elapsed,
@@ -371,7 +372,6 @@ class JackettClient:
         finally:
             self._lock.release()
 
-    @_synchronized
     def search(
         self,
         query: str,
@@ -379,6 +379,22 @@ class JackettClient:
         fetch_limit: int | None = None,
         categories: str = "2000,5000,5070",
     ) -> list[JackettResult]:
+        results, _ = self.search_with_statuses(
+            query,
+            indexers=indexers,
+            fetch_limit=fetch_limit,
+            categories=categories,
+        )
+        return results
+
+    @_synchronized
+    def search_with_statuses(
+        self,
+        query: str,
+        indexers: list[str] | None = None,
+        fetch_limit: int | None = None,
+        categories: str = "2000,5000,5070",
+    ) -> tuple[list[JackettResult], list[JackettIndexerStatus]]:
         """Search Jackett via the JSON API with Tracker[] filtering.
 
         Uses /api/v2.0/indexers/all/results (JSON endpoint) which correctly
@@ -441,7 +457,7 @@ class JackettClient:
         # callers that don't care.
         self._last_indexer_statuses = statuses
 
-        return results
+        return results, statuses
 
     def get_last_indexer_statuses(self) -> list[JackettIndexerStatus]:
         """Return per-indexer statuses from the most recent successful search.
