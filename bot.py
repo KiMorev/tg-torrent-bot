@@ -926,6 +926,32 @@ def _jackett_movie_discovery_search(search_query: str) -> tuple[list[JackettResu
     return list(results or []), []
 
 
+def _jackett_failed_statuses_for_selection(statuses: Iterable, selected_ids: Iterable[str]) -> list:
+    selected = {
+        _jackett_guard.normalize_indexer_id(indexer_id)
+        for indexer_id in selected_ids
+        if str(indexer_id or "").strip()
+    }
+    failed = []
+    for status in statuses or []:
+        indexer_id = _jackett_guard.normalize_indexer_id(getattr(status, "indexer_id", ""))
+        if selected and indexer_id not in selected:
+            continue
+        is_ok_attr = getattr(status, "is_ok", True)
+        is_ok = is_ok_attr() if callable(is_ok_attr) else bool(is_ok_attr)
+        if not is_ok:
+            failed.append(status)
+    return failed
+
+
+def _jackett_failed_statuses_text(statuses: Iterable) -> str:
+    labels = []
+    for status in statuses or []:
+        labels.append(str(getattr(status, "name", "") or getattr(status, "indexer_id", "") or "").strip())
+    labels = [label for label in labels if label]
+    return ", ".join(labels[:5]) or "selected indexers"
+
+
 async def _run_jackett_warmup_once(
     target_indexers: Iterable[str] | None = None,
     *,
@@ -3703,6 +3729,25 @@ def _movie_notification_cards_from_items(items: list[dict]) -> list[dict]:
     ]
 
 
+def _movie_notification_snapshot_changed(cards: list[dict]) -> bool:
+    snapshot_ids = [str(card.get("kp_id")) for card in cards if card.get("kp_id")]
+    if not snapshot_ids:
+        return False
+    cache = _load_movie_discovery_cache()
+    cache_cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    if not cache_cards:
+        return False
+    _recompute_and_resort_cards(cache_cards)
+    current_ids = [
+        str(card.get("kp_id"))
+        for card in _movie_discovery_confirmed_cards(cache, limit=len(snapshot_ids))
+        if card.get("kp_id")
+    ]
+    if not current_ids:
+        return False
+    return current_ids != snapshot_ids
+
+
 def _movie_notification_result_label(result: dict | None) -> str:
     if not isinstance(result, dict):
         return "раздача не выбрана"
@@ -3775,8 +3820,10 @@ def _movie_notification_keyboard(
     push_id: str = "",
     count: int = 0,
     downloadable_indices: list[int] | None = None,
+    show_current_new: bool = False,
 ) -> "InlineKeyboardMarkup":
     rows: list[list[InlineKeyboardButton]] = []
+    open_callback = f"new:open:{push_id}" if push_id else "new:open"
     if downloadable_indices is None:
         downloadable_indices = list(range(max(0, count)))
     if push_id and downloadable_indices:
@@ -3790,11 +3837,13 @@ def _movie_notification_keyboard(
             ])
     rows.extend([
         [
-            InlineKeyboardButton("🎬 Открыть /new", callback_data="new:open"),
+            InlineKeyboardButton("🎬 Открыть /new", callback_data=open_callback),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:new_unsub"),
         ],
-        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
+    if show_current_new:
+        rows.append([InlineKeyboardButton("🔄 Свежий /new", callback_data="new:open")])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -5553,6 +5602,46 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
     return None, "1", found_title
 
 
+_PLEX_POLL_SEND_RETRY_DELAYS = (1.0, 3.0)
+
+
+async def _send_plex_poll_message(
+    app: "Application",
+    *,
+    chat_id: int,
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+    parse_mode: str | None = None,
+) -> tuple[bool, bool, str]:
+    """Send a Plex poll notification.
+
+    Returns ``(sent, retry_later, label)`` where ``retry_later`` means the
+    failure was transient even after short in-place retries.
+    """
+    for attempt, retry_delay in enumerate((*_PLEX_POLL_SEND_RETRY_DELAYS, None), start=1):
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            return True, False, ""
+        except Exception as exc:
+            label, is_permanent = await _classify_send_error(exc)
+            if is_permanent or retry_delay is None:
+                return False, not is_permanent, label
+            logger.info(
+                "Plex poll: transient send failure chat_id=%s label=%s attempt=%d — retrying",
+                chat_id,
+                label,
+                attempt,
+            )
+            if label != "rate_limit":
+                await asyncio.sleep(retry_delay)
+    return False, True, "unknown"
+
+
 async def _plex_poll_after_finish(
     app: "Application",
     task_id: str,
@@ -5596,6 +5685,7 @@ async def _plex_poll_after_finish(
     # "movie genuinely not in Plex" from "Plex was unreachable the whole time".
     refresh_succeeded_at_least_once = False
     cancelled = False
+    delivery_retry_needed = False
     try:
         for attempt in range(max_attempts):
             if attempt > 0:
@@ -5632,28 +5722,44 @@ async def _plex_poll_after_finish(
                     keyboard = InlineKeyboardMarkup([[close_btn]])
                 await _delete_hint_messages()
                 history_extra = _plex_found_history_extra(target, metadata_type, found_title)
-                _record_download_history(
-                    "plex_found",
-                    chat_ids=chat_ids,
-                    task_id=task_id,
-                    meta=meta,
-                    title=found_title,
-                    plex_rating_key=rating_key,
-                    plex_metadata_type=metadata_type,
-                    **history_extra,
-                )
+                delivered_chat_ids = []
+                retry_later_chat_ids = []
                 for cid in chat_ids:
-                    try:
-                        await app.bot.send_message(
-                            chat_id=cid,
-                            text=text,
-                            reply_markup=keyboard,
-                            parse_mode="HTML",
+                    sent, retry_later, label = await _send_plex_poll_message(
+                        app,
+                        chat_id=cid,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+                    if sent:
+                        delivered_chat_ids.append(cid)
+                    elif retry_later:
+                        retry_later_chat_ids.append(cid)
+                        logger.info(
+                            "Plex poll: found-notification deferred chat_id=%s label=%s",
+                            cid,
+                            label,
                         )
-                    except Exception:
+                    else:
                         logger.warning(
-                            "Plex poll: failed to send found-notification chat_id=%s", cid, exc_info=True
+                            "Plex poll: failed to send found-notification chat_id=%s label=%s",
+                            cid,
+                            label,
                         )
+                if retry_later_chat_ids:
+                    delivery_retry_needed = True
+                if delivered_chat_ids or not retry_later_chat_ids:
+                    _record_download_history(
+                        "plex_found",
+                        chat_ids=delivered_chat_ids or chat_ids,
+                        task_id=task_id,
+                        meta=meta,
+                        title=found_title,
+                        plex_rating_key=rating_key,
+                        plex_metadata_type=metadata_type,
+                        **history_extra,
+                    )
                 logger.info(
                     "Plex polling: found %r after %d attempt(s)", found_title, attempt + 1
                 )
@@ -5675,28 +5781,44 @@ async def _plex_poll_after_finish(
             )
             log_reason = "Plex unreachable"
         await _delete_hint_messages()
-        _record_download_history(
-            "plex_not_found",
-            chat_ids=chat_ids,
-            task_id=task_id,
-            meta=meta,
-            title=task_title,
-            reason=log_reason,
-            timeout_minutes=timeout_min,
-        )
         keyboard = _final_notification_keyboard(task_id, show_plex=False)
+        delivered_chat_ids = []
+        retry_later_chat_ids = []
         for cid in chat_ids:
-            try:
-                await app.bot.send_message(
-                    chat_id=cid,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+            sent, retry_later, label = await _send_plex_poll_message(
+                app,
+                chat_id=cid,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            if sent:
+                delivered_chat_ids.append(cid)
+            elif retry_later:
+                retry_later_chat_ids.append(cid)
+                logger.info(
+                    "Plex poll: timeout-notification deferred chat_id=%s label=%s",
+                    cid,
+                    label,
                 )
-            except Exception:
+            else:
                 logger.warning(
-                    "Plex poll: failed to send timeout-notification chat_id=%s", cid, exc_info=True
+                    "Plex poll: failed to send timeout-notification chat_id=%s label=%s",
+                    cid,
+                    label,
                 )
+        if retry_later_chat_ids:
+            delivery_retry_needed = True
+        if delivered_chat_ids or not retry_later_chat_ids:
+            _record_download_history(
+                "plex_not_found",
+                chat_ids=delivered_chat_ids or chat_ids,
+                task_id=task_id,
+                meta=meta,
+                title=task_title,
+                reason=log_reason,
+                timeout_minutes=timeout_min,
+            )
         logger.info(
             "Plex polling: gave up on %r after %d attempt(s) — reason=%s",
             task_title, max_attempts, log_reason,
@@ -5708,6 +5830,8 @@ async def _plex_poll_after_finish(
         raise
     finally:
         if cancelled:
+            _PLEX_POLLING_TASKS.pop(task_id, None)
+        elif delivery_retry_needed:
             _PLEX_POLLING_TASKS.pop(task_id, None)
         else:
             _PLEX_POLLING_TASKS[task_id] = None  # Mark as done; key stays to prevent re-launch
@@ -10452,6 +10576,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
         if selected and not jackett_errored:  # Jackett search
             try:
+                j_statuses_raw = []
                 # PR2 prefetch hit: if a previous did-you-mean prefetch fired
                 # for THIS exact base_query, use its result instead of doing a
                 # fresh network call. Massive UX win for the «typo → tap
@@ -10494,15 +10619,68 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
 
                 if j_results_raw is None:
                     # Normal path: no prefetch or prefetch unusable.
-                    j_results_raw = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            jackett_client.search,
-                            base_query,  # quality suffix stripped — we filter client-side
-                            indexers=list(selected),
-                            fetch_limit=JACKETT_FETCH_LIMIT,
-                        ),
-                        timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
+                    search_with_statuses = getattr(jackett_client, "search_with_statuses", None)
+                    if callable(search_with_statuses):
+                        response = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                search_with_statuses,
+                                base_query,  # quality suffix stripped — we filter client-side
+                                indexers=list(selected),
+                                fetch_limit=JACKETT_FETCH_LIMIT,
+                            ),
+                            timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
+                        )
+                        if isinstance(response, tuple) and len(response) == 2:
+                            j_results_raw = list(response[0] or [])
+                            j_statuses_raw = list(response[1] or [])
+                        else:
+                            logger.debug("Jackett search_with_statuses returned unexpected shape in _run_search; falling back to search()")
+                            j_results_raw = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    jackett_client.search,
+                                    base_query,  # quality suffix stripped — we filter client-side
+                                    indexers=list(selected),
+                                    fetch_limit=JACKETT_FETCH_LIMIT,
+                                ),
+                                timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
+                            )
+                            get_statuses = getattr(jackett_client, "get_last_indexer_statuses", None)
+                            if callable(get_statuses):
+                                j_statuses_raw = list(get_statuses() or [])
+                    else:
+                        j_results_raw = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                jackett_client.search,
+                                base_query,  # quality suffix stripped — we filter client-side
+                                indexers=list(selected),
+                                fetch_limit=JACKETT_FETCH_LIMIT,
+                            ),
+                            timeout=JACKETT_SEARCH_TIMEOUT_SECONDS + 5.0,
+                        )
+                        get_statuses = getattr(jackett_client, "get_last_indexer_statuses", None)
+                        if callable(get_statuses):
+                            j_statuses_raw = list(get_statuses() or [])
+
+                failed_statuses = _jackett_failed_statuses_for_selection(j_statuses_raw, selected)
+                if not j_results_raw and failed_statuses:
+                    failed_label = _jackett_failed_statuses_text(failed_statuses)
+                    raw_err = f"Jackett returned a partial failure for: {failed_label}"
+                    logger.warning(
+                        "Jackett search partial failure in _run_search query=%r failed_indexers=%s",
+                        base_query,
+                        failed_label,
                     )
+                    jackett_errored = True
+                    jackett_err_msg = raw_err
+                    if rutracker_client:
+                        banner = "⚠️ Jackett временно недоступен, ищу напрямую в Rutracker"
+                    else:
+                        await edit_fn(
+                            _search_source_error_text("jackett", raw_err),
+                            reply_markup=_search_error_keyboard(),
+                            parse_mode="HTML",
+                        )
+                        return ConversationHandler.END
             except (JackettError, asyncio.TimeoutError) as e:
                 raw_err = (
                     f"Jackett не ответил за {int(JACKETT_SEARCH_TIMEOUT_SECONDS)} сек — проверьте Global timeout в настройках Jackett"
@@ -14457,7 +14635,7 @@ async def _download_and_add(
     """
     results = context.user_data.get("srch_results", [])
     if index < 0 or index >= len(results):
-        await query.edit_message_text(
+        await _safe_edit_callback(query,
             "Результат недоступен.",
             reply_markup=_search_error_keyboard(),
         )
@@ -14493,7 +14671,7 @@ async def _download_and_add(
                 "download_policy": download_policy,
                 "movie_handled_cards": _movie_handled_cards,
             }
-            await query.edit_message_text(
+            await _safe_edit_callback(query,
                 _plex_confirm_text(plex_check, display_title, req_quality),
                 reply_markup=_plex_confirm_keyboard(),
                 parse_mode="HTML",
@@ -14518,7 +14696,7 @@ async def _download_and_add(
                     "plex_old_season_key": series_check.season.rating_key,
                     "plex_action": series_check.action,
                 }
-                await query.edit_message_text(
+                await _safe_edit_callback(query,
                     _plex_series_confirm_text(series_check, display_title, req_quality),
                     reply_markup=_plex_confirm_keyboard(
                         show_upgrade=(series_check.action == "offer_upgrade")
@@ -14535,7 +14713,7 @@ async def _download_and_add(
         severity, msg = disk_check
         if severity == "block":
             logger.warning("Download blocked: disk space critical (%s)", msg)
-            await query.edit_message_text(
+            await _safe_edit_callback(query,
                 msg,
                 reply_markup=_search_error_keyboard(),
                 parse_mode="HTML",
@@ -14546,7 +14724,7 @@ async def _download_and_add(
         context.user_data["srch_disk_warn"] = msg
         logger.info("Disk-space warning before download: %s", msg)
 
-    await query.edit_message_text(
+    await _safe_edit_callback(query,
         "⏳ Добавляю загрузку\n\n"
         "Сейчас получаю torrent-файл и передаю задачу в очередь скачивания."
     )
@@ -14612,7 +14790,7 @@ async def _download_and_add(
                             "Jackett download failed (%s), trying rutracker_client direct: topic_id=%s",
                             torrent_err, topic_id_from_url,
                         )
-                        await query.edit_message_text(
+                        await _safe_edit_callback(query,
                             "⏳ Пробую запасной путь\n\n"
                             "Jackett не отдал torrent-файл. Получаю раздачу напрямую с Rutracker."
                         )
@@ -14632,7 +14810,7 @@ async def _download_and_add(
                     pass  # task_id is set; skip the re-search/magnet block
                 else:
                     logger.warning("torrent_url download failed (%s), refreshing via re-search", torrent_err)
-                    await query.edit_message_text(
+                    await _safe_edit_callback(query,
                         "⏳ Повторяю попытку\n\n"
                         "Обновляю данные раздачи и пробую передать её в очередь скачивания."
                     )
@@ -14697,7 +14875,7 @@ async def _download_and_add(
                 )
             download_method = "magnet"
         else:
-            await query.edit_message_text("Не удалось скачать торрент: нет доступного источника.")
+            await _safe_edit_callback(query, "Не удалось скачать торрент: нет доступного источника.")
             return ConversationHandler.END
 
         if not task_id and download_method != "magnet":
@@ -14803,7 +14981,7 @@ async def _download_and_add(
             # a "⬅️ Назад" button that restores this view instead of force-cancelling.
             context.user_data["srch_series_success_text"] = success_text
             context.user_data["srch_series_success_task_id"] = task_id
-            await query.edit_message_text(
+            await _safe_edit_callback(query,
                 success_text, reply_markup=_search_after_add_keyboard(task_id)
             )
             _register_task_card_from_query(query, task_id)
@@ -14811,7 +14989,7 @@ async def _download_and_add(
                 _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
             return SEARCH_RESULTS
 
-        await query.edit_message_text(
+        await _safe_edit_callback(query,
             success_text,
             reply_markup=_task_reply_markup(task_id),
         )
@@ -14827,12 +15005,12 @@ async def _download_and_add(
             meta=_build_task_meta_from_result(result, source="search") if isinstance(result, dict) else None,
             error=_format_download_error(e),
         )
-        can_queue = _pending_downloads_enabled()
+        can_queue = _pending_downloads_enabled() and _is_pending_retryable_download_error(e)
         error_text = _download_failure_text(e, can_queue=can_queue)
         # Remember the error so the pending-queue handler (if user clicks
         # «⏳ Поставить в очередь») can record it on the queued entry.
         context.user_data["srch_last_dl_error"] = _format_download_error(e)
-        await query.edit_message_text(
+        await _safe_edit_callback(query,
             error_text,
             reply_markup=_download_error_keyboard(
                 index=index,
@@ -21724,6 +21902,52 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     await query.answer()
     chat_id = query.message.chat.id if query.message else None
+    data_parts = (query.data or "").split(":")
+    push_id = data_parts[2] if len(data_parts) >= 3 else ""
+    if chat_id and push_id:
+        snapshot = _load_movie_notification_snapshot(push_id, chat_id)
+        items = snapshot.get("items") if isinstance(snapshot, dict) and isinstance(snapshot.get("items"), list) else []
+        cards = _movie_notification_cards_from_items(items)
+        if cards:
+            snapshot_changed = _movie_notification_snapshot_changed(cards)
+            text = _format_movie_notification_text(cards)
+            if snapshot_changed:
+                text = (
+                    "⚠️ <b>Свежий /new уже изменился.</b>\n"
+                    "Показываю снимок из уведомления, чтобы кнопки скачивания совпали с пушем.\n\n"
+                    f"{text}"
+                )
+            logger.info(
+                "movie_discovery: /new render path=open_callback_snapshot chat=%s push_id=%s cards=%d kp_ids=[%s]",
+                chat_id,
+                push_id,
+                len(cards),
+                ",".join(str(c.get("kp_id") or "-") for c in cards[:10]),
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=_movie_notification_keyboard(
+                    push_id,
+                    len(items),
+                    _movie_notification_downloadable_indices(items),
+                    show_current_new=snapshot_changed,
+                ),
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            _mark_user_shown_in_new(chat_id, cards)
+            try:
+                if query.message:
+                    await query.message.delete()
+            except Exception:
+                logger.debug("Failed to delete movie discovery notification", exc_info=True)
+            return
+        logger.info(
+            "movie_discovery: /new snapshot missing path=open_callback chat=%s push_id=%s — falling back to current cache",
+            chat_id,
+            push_id,
+        )
     cache = _load_movie_discovery_cache()
     logger.info(
         "movie_discovery: /new render path=open_callback chat=%s cache_cards=%d top10_kp=[%s]",
@@ -24251,7 +24475,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(movie_new_close_callback, pattern=r"^new:close$"))
     app.add_handler(CallbackQueryHandler(movie_new_subscribe_callback, pattern=r"^new:subscribe$"))
     app.add_handler(CallbackQueryHandler(movie_new_unsubscribe_callback, pattern=r"^new:unsubscribe$"))
-    app.add_handler(CallbackQueryHandler(movie_new_open_callback, pattern=r"^new:open$"))
+    app.add_handler(CallbackQueryHandler(movie_new_open_callback, pattern=r"^new:open(?::[0-9a-f]{10})?$"))
     app.add_handler(CallbackQueryHandler(movie_new_notification_bulk_confirm, pattern=r"^new:bulk:[0-9a-f]{10}$"))
     app.add_handler(CallbackQueryHandler(movie_new_notification_bulk_run, pattern=r"^new:bulk_ok:[0-9a-f]{10}$"))
     app.add_handler(CallbackQueryHandler(movie_new_notification_push_back, pattern=r"^new:push_back:[0-9a-f]{10}$"))

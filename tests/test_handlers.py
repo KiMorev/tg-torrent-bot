@@ -2306,6 +2306,77 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         update.callback_query.message.delete.assert_awaited_once()
         self.assertIn("Photo Push Movie", context.bot.send_message.call_args.kwargs["text"])
 
+    def test_movie_new_open_with_push_id_uses_notification_snapshot(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:open:abc123def0")
+        context = _make_context()
+        snapshot = {
+            "items": [{
+                "card": {
+                    "kp_id": 77,
+                    "title": "Snapshot Only Movie",
+                    "year": 2026,
+                    "rating": 7.5,
+                    "best_quality": "1080p",
+                    "releases": [{"title": "snapshot release", "score": 1}],
+                },
+                "result": {"title": "Snapshot Only Movie 1080p", "source": "jackett"},
+            }],
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_notification_snapshot", return_value=snapshot),
+            patch.object(bot, "_movie_notification_snapshot_changed", return_value=False) as snapshot_changed,
+            patch.object(bot, "_mark_user_shown_in_new") as mark_shown,
+        ):
+            asyncio.run(bot.movie_new_open_callback(update, context))
+
+        snapshot_changed.assert_called_once()
+        context.bot.send_message.assert_awaited_once()
+        sent = context.bot.send_message.call_args.kwargs
+        self.assertIn("Snapshot Only Movie", sent["text"])
+        self.assertNotIn("Свежий /new уже изменился", sent["text"])
+        mark_shown.assert_called_once()
+        self.assertEqual(mark_shown.call_args.args[0], 100)
+        self.assertEqual(mark_shown.call_args.args[1][0]["kp_id"], 77)
+        update.callback_query.message.delete.assert_awaited_once()
+
+    def test_movie_new_open_with_changed_snapshot_points_to_fresh_new(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:open:abc123def0")
+        context = _make_context()
+        snapshot = {
+            "items": [{
+                "card": {
+                    "kp_id": 77,
+                    "title": "Historical Movie",
+                    "year": 2026,
+                    "rating": 7.5,
+                    "best_quality": "1080p",
+                    "releases": [{"title": "historical release", "score": 1}],
+                },
+                "result": {"title": "Historical Movie 1080p", "source": "jackett"},
+            }],
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_load_movie_notification_snapshot", return_value=snapshot),
+            patch.object(bot, "_movie_notification_snapshot_changed", return_value=True),
+            patch.object(bot, "_mark_user_shown_in_new"),
+        ):
+            asyncio.run(bot.movie_new_open_callback(update, context))
+
+        sent = context.bot.send_message.call_args.kwargs
+        self.assertIn("Свежий /new уже изменился", sent["text"])
+        buttons = {
+            button.text: button.callback_data
+            for row in sent["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🔄 Свежий /new"], "new:open")
+
     def test_recompute_and_resort_resorts_in_place(self):
         """_recompute_and_resort_cards: cards with stale wrong-order scores get re-sorted."""
         from datetime import datetime as _dt
@@ -3069,7 +3140,7 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             await _run_movie_discovery_notifications(cache, app)
         keyboard = app.bot.send_message.call_args.kwargs["reply_markup"]
         buttons = {btn.text: btn.callback_data for row in keyboard.inline_keyboard for btn in row}
-        self.assertEqual(buttons["🎬 Открыть /new"], "new:open")
+        self.assertRegex(buttons["🎬 Открыть /new"], r"^new:open:[0-9a-f]{10}$")
         self.assertTrue(buttons["🔕 Отписаться"].endswith(":new_unsub"))
 
     async def test_notification_uses_top_card_poster_when_available(self):
@@ -4565,6 +4636,103 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task_id, "")
         mock_ds.list_tasks.assert_called_once()
 
+    async def test_nonretryable_download_station_failure_hides_queue_button(self):
+        from download_station import DownloadStationError
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Auth Fail Movie 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=12345",
+            "torrent_url": None,
+            "magnet_url": None,
+            "tracker_name": "rutracker",
+            "source": "rutracker",
+            "topic_id": "12345",
+            "size": "3 GB",
+            "seeders": 10,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Auth Fail Movie"})
+        mock_rt = MagicMock()
+        mock_rt.download_torrent.return_value = b"d8:announce4:test"
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        mock_ds.create_torrent_file.side_effect = DownloadStationError("Auth failed")
+
+        with (
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_pending_downloads_enabled", return_value=True),
+            patch.object(bot, "_record_download_history"),
+        ):
+            result_state = await bot._download_and_add(
+                update.callback_query,
+                context,
+                0,
+                subscribe=False,
+                _skip_plex_check=True,
+            )
+
+        self.assertEqual(result_state, bot.SEARCH_RESULTS)
+        final_call = update.callback_query.edit_message_text.await_args
+        callbacks = [
+            button.callback_data
+            for row in final_call.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("srch:retry_dl:0", callbacks)
+        self.assertNotIn("srch:queue_dl:0", callbacks)
+
+    async def test_retryable_jackett_failure_keeps_queue_button(self):
+        from jackett import JackettError
+        update = _make_callback_update(chat_id=100)
+        result = {
+            "title": "Retryable Movie 1080p",
+            "url": "https://example.org/topic/1",
+            "torrent_url": "http://jackett/dl/public/?path=old",
+            "magnet_url": None,
+            "tracker_name": "public",
+            "source": "jackett",
+            "topic_id": "",
+            "size": "3 GB",
+            "seeders": 10,
+        }
+        context = _make_context(user_data={"srch_results": [result], "srch_query": "Retryable Movie"})
+        mock_jackett = MagicMock()
+        mock_jackett.download_torrent.side_effect = JackettError("HTTP 404")
+        mock_jackett._api_key = "k"
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", None),
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "PLEX_ENABLED", False),
+            patch.object(bot, "_check_disk_space_for_download", return_value=None),
+            patch.object(bot, "_refresh_jackett_torrent_url", AsyncMock(return_value=None)),
+            patch.object(bot, "_pending_downloads_enabled", return_value=True),
+            patch.object(bot, "_record_download_history"),
+        ):
+            result_state = await bot._download_and_add(
+                update.callback_query,
+                context,
+                0,
+                subscribe=False,
+                _skip_plex_check=True,
+            )
+
+        self.assertEqual(result_state, bot.SEARCH_RESULTS)
+        final_call = update.callback_query.edit_message_text.await_args
+        callbacks = [
+            button.callback_data
+            for row in final_call.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("srch:retry_dl:0", callbacks)
+        self.assertIn("srch:queue_dl:0", callbacks)
+
 
 class FormatDownloadErrorTests(unittest.TestCase):
     """_format_download_error: replaces raw long URLs with a compact summary."""
@@ -5064,6 +5232,58 @@ class PlexPollingTests(unittest.TestCase):
         self.assertIn("▶️ Смотреть в Plex", labels)
         self.assertIn("✖️ Закрыть", labels)
         self.assertNotIn("📋 Показать задачу", labels)
+
+    def test_poll_after_finish_retries_transient_found_send_failure(self):
+        movie = self._make_plex_movie("Dune", 2021, ["/video/Dune.2021.1080p.mkv"])
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock(side_effect=[bot.TimedOut("temporary"), None])
+        tasks_dict = {"task1": object()}
+
+        with (
+            patch.object(bot, "_plex_library", {("dune", 2021): movie}),
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=movie),
+            patch.object(bot, "_plex_machine_id", "abc123"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", tasks_dict),
+            patch.object(bot, "_record_download_history") as history,
+            patch.object(bot, "_mark_plex_poll_done") as mark_done,
+            patch.object(bot.asyncio, "sleep", AsyncMock()) as sleep,
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Dune.2021.1080p", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        self.assertEqual(fake_app.bot.send_message.await_count, 2)
+        sleep.assert_awaited_once_with(1.0)
+        history.assert_called_once()
+        mark_done.assert_called_once_with("task1")
+        self.assertIn("task1", tasks_dict)
+        self.assertIsNone(tasks_dict["task1"])
+
+    def test_poll_after_finish_keeps_retry_open_after_persistent_transient_send_failure(self):
+        movie = self._make_plex_movie("Dune", 2021, ["/video/Dune.2021.1080p.mkv"])
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock(side_effect=bot.TimedOut("temporary"))
+        tasks_dict = {"task1": object()}
+
+        with (
+            patch.object(bot, "_plex_library", {("dune", 2021): movie}),
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_find_by_ds_title", return_value=movie),
+            patch.object(bot, "_plex_machine_id", "abc123"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", tasks_dict),
+            patch.object(bot, "_record_download_history") as history,
+            patch.object(bot, "_mark_plex_poll_done") as mark_done,
+            patch.object(bot.asyncio, "sleep", AsyncMock()),
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Dune.2021.1080p", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        self.assertEqual(fake_app.bot.send_message.await_count, 3)
+        history.assert_not_called()
+        mark_done.assert_not_called()
+        self.assertNotIn("task1", tasks_dict)
 
     def test_poll_after_finish_sends_timeout_notification_when_not_found(self):
         """Polling should send a timeout-notification when exhausted without finding the movie."""
@@ -6892,6 +7112,7 @@ class NotificationKeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["⬇️ 1"], "new:dl:abc123def0:0")
         self.assertEqual(buttons["⬇️ 3"], "new:dl:abc123def0:2")
         self.assertEqual(buttons["⬇️ Скачать все 2"], "new:bulk:abc123def0")
+        self.assertEqual(buttons["🎬 Открыть /new"], "new:open:abc123def0")
         self.assertNotIn("⬇️ 2", buttons)
 
     def test_movie_notification_text_links_kinopoisk_title(self):

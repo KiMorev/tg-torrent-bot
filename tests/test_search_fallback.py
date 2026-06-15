@@ -25,7 +25,7 @@ os.environ.setdefault("DS_PASSWORD", "testpass")
 os.environ.setdefault("DS_DESTINATION", "video")
 
 import bot
-from jackett import JackettError
+from jackett import JackettError, JackettIndexerStatus
 from rutracker import RutrackerError
 
 
@@ -194,6 +194,43 @@ class JackettErrorFallsBackToRutrackerTests(unittest.TestCase):
         args, kwargs = message.edit_text.call_args
         text = args[0] if args else kwargs.get("text", "")
         self.assertIn("Some Movie [2024]", text)
+
+
+class JackettPartialFailureFallsBackToRutrackerTests(unittest.TestCase):
+    """Jackett can return HTTP 200 with no results because a selected indexer failed."""
+
+    def test_empty_results_with_failed_selected_indexer_triggers_rutracker_fallback(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search_with_statuses.return_value = (
+            [],
+            [JackettIndexerStatus("kinozal", "Kinozal", 1, 0, "timeout")],
+        )
+        mock_jackett.search.side_effect = AssertionError("search() fallback should not be needed")
+        rt_result = MagicMock()
+        rt_result.topic_id = "12345"
+        rt_result.title = "Fallback Movie [2026]"
+        rt_result.category = "Movies"
+        rt_result.size = "5 GB"
+        rt_result.seeders = 42
+        mock_rutracker = MagicMock()
+        mock_rutracker.search.return_value = [rt_result]
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+        context.user_data["srch_jackett_indexers"] = [{"id": "rutracker"}, {"id": "kinozal"}]
+        context.user_data["srch_jackett_selected"] = {"rutracker", "kinozal"}
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", mock_rutracker),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Fallback Movie"))
+
+        mock_jackett.search_with_statuses.assert_called_once()
+        mock_rutracker.search.assert_called_once()
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Fallback Movie [2026]", text)
 
 
 class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
