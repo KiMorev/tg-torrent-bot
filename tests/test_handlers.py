@@ -96,6 +96,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         auto_delete_tasks_file=d / "auto_delete.json",
         topic_subscriptions_file=d / "subscriptions.json",
         download_history_file=d / "download_history.jsonl",
+        jackett_guard_file=d / "jackett_guard.json",
     )
 
 
@@ -591,6 +592,8 @@ class JackettWarmupTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(bot, "state_store", _make_store(tmp)),
             patch.object(bot, "jackett_client", jackett),
             patch.object(bot, "JACKETT_WARMUP_ENABLED", True),
             patch.object(bot, "JACKETT_WARMUP_INDEXERS", "auto"),
@@ -608,11 +611,66 @@ class JackettWarmupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["last_state"], "ok")
         self.assertEqual(status["last_results_count"], 4)
 
+    async def test_run_once_records_guard_statuses(self):
+        class Status:
+            indexer_id = "kinozal"
+            name = "Kinozal"
+            status = 0
+            results = 5
+            error = ""
+
+            @property
+            def is_ok(self):
+                return True
+
+        jackett = MagicMock()
+        jackett.get_indexers_if_idle.return_value = [{"id": "kinozal"}]
+        jackett.warmup.return_value = {
+            "ok": True,
+            "results_count": 5,
+            "elapsed_seconds": 0.2,
+            "failed_indexers": [],
+        }
+        jackett.get_last_indexer_statuses.return_value = [Status()]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_jackett_guard({
+                "version": 1,
+                "indexers": {
+                    "kinozal": {
+                        "id": "kinozal",
+                        "name": "Kinozal",
+                        "state": "degraded",
+                        "fail_streak": 1,
+                        "next_retry_ts": 0,
+                    }
+                },
+            })
+            with (
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "jackett_client", jackett),
+                patch.object(bot, "JACKETT_WARMUP_ENABLED", True),
+                patch.object(bot, "JACKETT_WARMUP_INDEXERS", "auto"),
+                patch.object(bot, "JACKETT_INDEXERS", "all"),
+                patch.object(bot, "JACKETT_WARMUP_QUERY", "1080p"),
+                patch.object(bot, "JACKETT_WARMUP_BATCH_SIZE", 2),
+                patch.object(bot, "_JACKETT_WARMUP_STATUS", {}),
+            ):
+                await bot._run_jackett_warmup_once()
+
+            payload = store.load_jackett_guard()
+
+        self.assertEqual(payload["indexers"]["kinozal"]["state"], "ok")
+        self.assertEqual(payload["indexers"]["kinozal"]["fail_streak"], 0)
+
     async def test_run_once_skips_when_indexer_lookup_is_busy(self):
         jackett = MagicMock()
         jackett.get_indexers_if_idle.return_value = None
 
         with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(bot, "state_store", _make_store(tmp)),
             patch.object(bot, "jackett_client", jackett),
             patch.object(bot, "JACKETT_WARMUP_ENABLED", True),
             patch.object(bot, "JACKETT_WARMUP_INDEXERS", "auto"),
@@ -624,6 +682,28 @@ class JackettWarmupTests(unittest.IsolatedAsyncioTestCase):
         jackett.warmup.assert_not_called()
         self.assertEqual(status["last_state"], "skipped")
         self.assertEqual(status["last_error"], "busy")
+
+
+class MovieDiscoveryAdminNotificationTests(unittest.TestCase):
+    def test_ready_notification_uses_protected_mode_for_enabled_failures(self):
+        text = bot._format_movie_discovery_ready_notification(
+            failed_enabled=["kinozal"],
+            failed_disabled=["noname-club"],
+        )
+
+        self.assertIn("защищённом режиме", text)
+        self.assertIn("kinozal", text)
+        self.assertIn("не влияют на /new", text)
+        self.assertNotIn("полноценно функционирует", text)
+
+    def test_recovery_notification_lists_recovered_indexers(self):
+        text = bot._format_movie_discovery_recovery_notification(
+            2,
+            ["kinozal", "rutracker"],
+        )
+
+        self.assertIn("Поиск восстановился после 2", text)
+        self.assertIn("Jackett снова готов: kinozal, rutracker", text)
 
 
 class AdminPanelTests(unittest.TestCase):
@@ -9031,6 +9111,7 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
         self.assertIn("seasons", [command.command for command in public_commands])
         self.assertIn("_subscription_check_loop", created)
         self.assertIn("_jackett_warmup_loop", created)
+        self.assertIn("_jackett_guardian_loop", created)
         self.assertIn("_progress_update_loop", created)
 
     def test_setup_starts_tracker_and_maintenance_loops_separately(self):

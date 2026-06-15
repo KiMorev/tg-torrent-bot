@@ -258,6 +258,7 @@ class AppContextTests(unittest.TestCase):
         self.assertIsNotNone(context.tvmaze_client)
         self.assertEqual(context.state_store.series_continue_totals_file, settings.series_continue_totals_file)
         self.assertEqual(context.state_store.series_continue_hidden_file, settings.series_continue_hidden_file)
+        self.assertEqual(context.state_store.jackett_guard_file, settings.state_dir / "jackett_guard.json")
 
     def test_build_app_context_leaves_optional_clients_disabled(self) -> None:
         context = build_app_context(load_settings(BASE_ENV))

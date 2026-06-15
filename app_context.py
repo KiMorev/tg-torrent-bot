@@ -54,6 +54,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         gpt_usage_file=settings.gpt_usage_file,
         torrent_titles_cache_file=settings.torrent_titles_cache_file,
         download_history_file=settings.state_dir / "download_history.jsonl",
+        jackett_guard_file=settings.state_dir / "jackett_guard.json",
     )
     rutracker_client = (
         RutrackerClient(

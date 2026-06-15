@@ -118,6 +118,7 @@ from keyboards import (
     movie_trackers_keyboard,
 )
 from jackett import JackettError, JackettMagnetRedirect, JackettResult
+import jackett_guard as _jackett_guard
 from jackett_subscriptions import (
     JACKETT_SUBSCRIPTION_SCHEMA,
     apply_jackett_subscription_match,
@@ -420,6 +421,7 @@ PROGRESS_UPDATE_TASK: asyncio.Task | None = None
 SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
 JACKETT_WARMUP_TASK: asyncio.Task | None = None
+JACKETT_GUARDIAN_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # Seconds to wait after DS task creation before injecting public trackers.
 # DS may not have fully initialised the task metadata immediately after create_torrent_file /
@@ -777,6 +779,72 @@ def _jackett_warmup_status_snapshot() -> dict:
     return status
 
 
+def _load_jackett_guard_state() -> dict:
+    return _jackett_guard.normalize_payload(state_store.load_jackett_guard())
+
+
+def _save_jackett_guard_state(payload: dict) -> None:
+    state_store.save_jackett_guard(_jackett_guard.normalize_payload(payload))
+
+
+def _record_jackett_guard_statuses(statuses: Iterable, *, source: str, query: str) -> list[dict]:
+    status_list = list(statuses or [])
+    if not status_list:
+        return []
+    state, events = _jackett_guard.record_statuses(
+        _load_jackett_guard_state(),
+        status_list,
+        source=source,
+        query=query,
+    )
+    _save_jackett_guard_state(state)
+    return events
+
+
+def _record_jackett_guard_batch_failure(
+    indexer_ids: Iterable[str],
+    *,
+    error_kind: str,
+    error: str,
+    source: str,
+    query: str,
+) -> list[dict]:
+    ids = [_jackett_guard.normalize_indexer_id(indexer_id) for indexer_id in indexer_ids]
+    ids = [indexer_id for indexer_id in ids if indexer_id]
+    if not ids:
+        return []
+    state, events = _jackett_guard.record_batch_failure(
+        _load_jackett_guard_state(),
+        ids,
+        error_kind=error_kind,
+        error=error,
+        source=source,
+        query=query,
+    )
+    _save_jackett_guard_state(state)
+    return events
+
+
+def _jackett_guard_unready_ids() -> set[str]:
+    return _jackett_guard.unready_indexer_ids(_load_jackett_guard_state())
+
+
+def _jackett_guard_unready_summary(enabled_ids: set[str] | None) -> dict[str, list[str]]:
+    return _jackett_guard.unready_summary(_load_jackett_guard_state(), enabled_ids)
+
+
+def _jackett_guard_due_indexers(pool: Iterable[str], limit: int | None = None) -> list[str]:
+    return _jackett_guard.due_indexer_ids(
+        _load_jackett_guard_state(),
+        pool=pool,
+        limit=limit,
+    )
+
+
+def _jackett_guard_next_due_delay(default: float) -> float:
+    return _jackett_guard.next_due_delay(_load_jackett_guard_state(), default=default)
+
+
 async def _jackett_warmup_indexer_pool() -> tuple[list[str], str]:
     configured = _jackett_warmup_configured_indexers()
     if configured is not None:
@@ -792,7 +860,11 @@ async def _jackett_warmup_indexer_pool() -> tuple[list[str], str]:
     return [idx["id"] for idx in indexers if isinstance(idx, dict) and idx.get("id")], ""
 
 
-async def _run_jackett_warmup_once() -> dict:
+async def _run_jackett_warmup_once(
+    target_indexers: Iterable[str] | None = None,
+    *,
+    source: str = "warmup",
+) -> dict:
     now_ts = time.time()
     if not _jackett_warmup_enabled():
         _JACKETT_WARMUP_STATUS.update({
@@ -814,7 +886,19 @@ async def _run_jackett_warmup_once() -> dict:
         logger.info("jackett_warmup: %s before search reason=%s", state, pool_error)
         return dict(_JACKETT_WARMUP_STATUS)
 
-    batch = _jackett_warmup_next_batch(pool)
+    if target_indexers is not None:
+        pool_set = set(pool)
+        batch = [
+            indexer_id
+            for indexer_id in dict.fromkeys(
+                _jackett_guard.normalize_indexer_id(indexer_id)
+                for indexer_id in target_indexers
+            )
+            if indexer_id and indexer_id in pool_set
+        ]
+    else:
+        due = _jackett_guard_due_indexers(pool, limit=JACKETT_WARMUP_BATCH_SIZE)
+        batch = due or _jackett_warmup_next_batch(pool)
     if not batch:
         _JACKETT_WARMUP_STATUS.update({
             "enabled": True,
@@ -851,6 +935,27 @@ async def _run_jackett_warmup_once() -> dict:
             result.get("results_count"),
             result.get("elapsed_seconds"),
         )
+        try:
+            statuses = jackett_client.get_last_indexer_statuses()
+        except Exception:
+            statuses = []
+        events = _record_jackett_guard_statuses(statuses, source=source, query=JACKETT_WARMUP_QUERY)
+        if not statuses and len(batch) == 1:
+            state, event = _jackett_guard.record_success(
+                _load_jackett_guard_state(),
+                batch[0],
+                source=source,
+                query=JACKETT_WARMUP_QUERY,
+                results=int(result.get("results_count") or 0),
+            )
+            _save_jackett_guard_state(state)
+            if event:
+                events.append(event)
+        if events:
+            logger.info(
+                "jackett_guard: warmup events=%s",
+                ",".join(f"{e.get('indexer_id')}:{e.get('kind')}" for e in events),
+            )
     else:
         state = "skipped" if result.get("skipped") else "failed"
         error = str(result.get("reason") or result.get("error") or result.get("error_kind") or "unknown")
@@ -864,6 +969,14 @@ async def _run_jackett_warmup_once() -> dict:
             "last_elapsed_seconds": result.get("elapsed_seconds"),
         })
         logger.info("jackett_warmup: %s indexers=%s error=%s", state, ",".join(batch), error)
+        if not result.get("skipped"):
+            _record_jackett_guard_batch_failure(
+                batch,
+                error_kind=str(result.get("error_kind") or ""),
+                error=error,
+                source=source,
+                query=JACKETT_WARMUP_QUERY,
+            )
     return dict(_JACKETT_WARMUP_STATUS)
 
 
@@ -2825,12 +2938,13 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
                     statuses = jackett_client.get_last_indexer_statuses()
                 except Exception:
                     statuses = []
+                _record_jackett_guard_statuses(statuses, source="movie_discovery", query=search_query)
                 for st in statuses:
                     if st.is_ok:
                         # Healthy or status>0 with Results>0 (Torznab warning,
                         # data still came back). Log at debug level — no action.
                         continue
-                    failed_indexer_ids.add(st.indexer_id)
+                    failed_indexer_ids.add(_jackett_guard.normalize_indexer_id(st.indexer_id))
                     logger.warning(
                         "movie_discovery: Jackett indexer %r failed for %r "
                         "(status=%d results=%d error=%r) — will supplement from prev",
@@ -2895,19 +3009,30 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
                 search_query, query_year, query_quality,
             )
 
+    guard_unready = _jackett_guard_unready_summary(enabled_ids)
+    guard_unready_indexer_ids = set(guard_unready["enabled"]) | set(guard_unready["disabled"])
+    indexers_to_supplement = failed_indexer_ids | guard_unready_indexer_ids
+    if guard_unready_indexer_ids:
+        logger.info(
+            "movie_discovery: Jackett guard marks indexers unready enabled=%s disabled=%s manual=%s",
+            guard_unready["enabled"] or "none",
+            guard_unready["disabled"] or "none",
+            guard_unready["manual_required"] or "none",
+        )
+
     # Per-indexer aware supplement: for each Jackett indexer that this
-    # refresh's response marks as failed (Status=1 / Results=0 / Error in
-    # Indexers field), take the prev refresh's releases that came FROM
-    # that specific tracker. We don't need to supplement for indexers
-    # that responded cleanly — those replies are authoritative.
-    if failed_indexer_ids or failed_query_specs:
+    # refresh's response marks as failed, or that Guardian still considers
+    # unready, take the prev refresh's releases that came FROM that tracker.
+    # A current successful Indexers status records recovery before this point,
+    # so recovered indexers are not supplemented here.
+    if indexers_to_supplement or failed_query_specs:
         prev_for_supplement = _load_movie_discovery_cache()
         prev_all = prev_for_supplement.get("all_releases") or []
         supplemented = 0
-        if failed_indexer_ids and isinstance(prev_all, list):
+        if indexers_to_supplement and isinstance(prev_all, list):
             # Match prev releases by tracker field — those came from indexers
-            # that just failed in the current refresh.
-            failed_indexer_set = set(failed_indexer_ids)
+            # that just failed in the current refresh or are still guarded.
+            failed_indexer_set = set(indexers_to_supplement)
             for prev_rel in prev_all:
                 if not isinstance(prev_rel, dict):
                     continue
@@ -2927,8 +3052,9 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
             )
         logger.info(
             "movie_discovery: supplemented %d releases from prev cache "
-            "(failed_indexers=%s failed_specs=%s)",
+            "(failed_indexers=%s guard_unready=%s failed_specs=%s)",
             supplemented, failed_indexer_ids or "none",
+            guard_unready_indexer_ids or "none",
             failed_query_specs or "none",
         )
 
@@ -3044,12 +3170,13 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
         if md_settings.get("jackett_trackers_enabled") is not None
         else None
     )
+    guarded_failed_indexer_ids = set(failed_indexer_ids) | guard_unready_indexer_ids
     if enabled_for_rating is None:
-        failed_enabled = set(failed_indexer_ids)
+        failed_enabled = set(guarded_failed_indexer_ids)
         failed_disabled: set[str] = set()
     else:
-        failed_enabled = failed_indexer_ids & enabled_for_rating
-        failed_disabled = failed_indexer_ids - enabled_for_rating
+        failed_enabled = guarded_failed_indexer_ids & enabled_for_rating
+        failed_disabled = guarded_failed_indexer_ids - enabled_for_rating
     failed_specs_payload = [[year, quality] for (year, quality) in failed_query_specs]
     failed_enabled_payload = sorted(failed_enabled)  # gating signal
     failed_disabled_payload = sorted(failed_disabled)  # info-only
@@ -3891,6 +4018,39 @@ async def _notify_admins(app: "Application", text: str) -> None:
             logger.warning("Failed to send admin notification to %s", admin_chat_id, exc_info=True)
 
 
+def _format_movie_discovery_ready_notification(
+    failed_enabled: Iterable[str] = (),
+    failed_disabled: Iterable[str] = (),
+) -> str:
+    enabled = [str(item) for item in failed_enabled if str(item or "").strip()]
+    disabled = [str(item) for item in failed_disabled if str(item or "").strip()]
+    if enabled:
+        text = (
+            "✅ Поиск разогрет в защищённом режиме."
+            f"\n\nПроблемные индексеры: {', '.join(enabled)}."
+            "\nPlexLoader использует прошлый хороший снимок и продолжит проверять восстановление."
+        )
+    else:
+        text = "✅ Поиск разогрет, бот полноценно функционирует."
+    if disabled:
+        text += (
+            f"\nℹ️ Прочие индексеры (не влияют на /new): {', '.join(disabled)}"
+            "\n   — отключены или сломаны на стороне трекера."
+        )
+    return text
+
+
+def _format_movie_discovery_recovery_notification(
+    fail_streak: int,
+    recovered_indexers: Iterable[str] = (),
+) -> str:
+    text = f"✅ Поиск восстановился после {fail_streak} неудачных попыток."
+    recovered = sorted({str(item) for item in recovered_indexers if str(item or "").strip()})
+    if recovered:
+        text += f"\n\nJackett снова готов: {', '.join(recovered)}."
+    return text
+
+
 async def _jackett_warmup_loop(app: "Application") -> None:
     if not _jackett_warmup_enabled():
         logger.info("Jackett warmup disabled")
@@ -3937,6 +4097,34 @@ async def _jackett_warmup_loop(app: "Application") -> None:
         raise
 
 
+async def _jackett_guardian_loop(app: "Application") -> None:
+    if not _jackett_warmup_enabled():
+        logger.info("Jackett guardian disabled")
+        return
+
+    min_sleep = 30.0
+    max_sleep = 3600.0
+    logger.info("jackett_guard: loop started")
+    try:
+        while True:
+            delay = _jackett_guard_next_due_delay(JACKETT_WARMUP_INTERVAL_SECONDS)
+            delay = max(min_sleep, min(max_sleep, delay))
+            await asyncio.sleep(delay)
+
+            pool, pool_error = await _jackett_warmup_indexer_pool()
+            if pool_error:
+                logger.info("jackett_guard: retry skipped before search reason=%s", pool_error)
+                continue
+            due = _jackett_guard_due_indexers(pool, limit=JACKETT_WARMUP_BATCH_SIZE)
+            if not due:
+                continue
+            logger.info("jackett_guard: targeted retry indexers=%s", ",".join(due))
+            await _run_jackett_warmup_once(due, source="guardian")
+    except asyncio.CancelledError:
+        logger.info("Jackett guardian loop stopped")
+        raise
+
+
 async def _movie_discovery_loop(app: "Application") -> None:
     if not _movie_discovery_enabled():
         logger.info("Movie discovery disabled")
@@ -3970,6 +4158,7 @@ async def _movie_discovery_loop(app: "Application") -> None:
     fail_streak = 0
     startup_ready_notified = False
     current_interval = interval
+    degraded_indexers_seen: set[str] = set()
 
     def _read_degradation_signal() -> tuple[list, list, list]:
         """Return (failed_specs, failed_enabled_ids, failed_disabled_ids).
@@ -4018,17 +4207,7 @@ async def _movie_discovery_loop(app: "Application") -> None:
         if failed_enabled and fail_streak < len(_MOVIE_DISCOVERY_RETRY_BACKOFF):
             # Still retrying enabled-rating failures — defer ready.
             return False
-        text = "✅ Поиск разогрет, бот полноценно функционирует."
-        if failed_enabled:
-            text += (
-                f"\n⚠️ Индексеры рейтинга с проблемами: {', '.join(failed_enabled)}"
-                "\n   Содержимое /new восполнено из прошлого кэша."
-            )
-        if failed_disabled:
-            text += (
-                f"\nℹ️ Прочие индексеры (не влияют на /new): {', '.join(failed_disabled)}"
-                "\n   — отключены или сломаны на стороне трекера."
-            )
+        text = _format_movie_discovery_ready_notification(failed_enabled, failed_disabled)
         await _notify_admins(app, text)
         return True
 
@@ -4040,6 +4219,7 @@ async def _movie_discovery_loop(app: "Application") -> None:
         card_count = _read_card_count()
         if failed_specs or failed_enabled:
             fail_streak = 1
+            degraded_indexers_seen.update(map(str, failed_enabled))
             current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
             logger.info(
                 "movie_discovery: first refresh degraded (failed_specs=%s, "
@@ -4056,17 +4236,10 @@ async def _movie_discovery_loop(app: "Application") -> None:
         else:
             # All clean — send ready immediately, but still mention disabled
             # failures if there were any (info-only).
-            if failed_disabled:
-                await _notify_admins(
-                    app,
-                    "✅ Поиск разогрет, бот полноценно функционирует."
-                    f"\nℹ️ Прочие индексеры (не влияют на /new): {', '.join(failed_disabled)}"
-                    "\n   — отключены или сломаны на стороне трекера.",
-                )
-            else:
-                await _notify_admins(
-                    app, "✅ Поиск разогрет, бот полноценно функционирует.",
-                )
+            await _notify_admins(
+                app,
+                _format_movie_discovery_ready_notification((), failed_disabled),
+            )
             startup_ready_notified = True
 
         while True:
@@ -4076,6 +4249,7 @@ async def _movie_discovery_loop(app: "Application") -> None:
             card_count = _read_card_count()
             if failed_specs or failed_enabled:
                 fail_streak += 1
+                degraded_indexers_seen.update(map(str, failed_enabled))
                 current_interval = _MOVIE_DISCOVERY_RETRY_BACKOFF.get(fail_streak, interval)
                 logger.info(
                     "movie_discovery: degraded refresh (streak=%d, failed_specs=%s, "
@@ -4097,14 +4271,19 @@ async def _movie_discovery_loop(app: "Application") -> None:
                         fail_streak,
                     )
                     await _notify_admins(
-                        app, f"✅ Поиск восстановился после {fail_streak} неудачных попыток.",
+                        app,
+                        _format_movie_discovery_recovery_notification(
+                            fail_streak,
+                            degraded_indexers_seen,
+                        ),
                     )
                 if not startup_ready_notified:
                     await _notify_admins(
-                        app, "✅ Поиск разогрет, бот полноценно функционирует.",
+                        app, _format_movie_discovery_ready_notification(),
                     )
                     startup_ready_notified = True
                 fail_streak = 0
+                degraded_indexers_seen.clear()
                 current_interval = interval
     except asyncio.CancelledError:
         logger.info("Movie discovery loop stopped")
@@ -23899,7 +24078,7 @@ def _run_polling(app: Application) -> None:
 
 async def setup_bot_commands(app: Application) -> None:
     global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK, MOVIE_DISCOVERY_TASK
-    global SUBSCRIPTION_MONITOR_TASK, JACKETT_WARMUP_TASK
+    global SUBSCRIPTION_MONITOR_TASK, JACKETT_WARMUP_TASK, JACKETT_GUARDIAN_TASK
     global _PLEX_WEBHOOK_SERVER
 
     _cleanup_tmp_dir()
@@ -23939,6 +24118,8 @@ async def setup_bot_commands(app: Application) -> None:
     if _jackett_warmup_enabled():
         JACKETT_WARMUP_TASK = app.create_task(_jackett_warmup_loop(app))
         logger.info("Jackett warmup loop started, interval=%ss", JACKETT_WARMUP_INTERVAL_SECONDS)
+        JACKETT_GUARDIAN_TASK = app.create_task(_jackett_guardian_loop(app))
+        logger.info("Jackett guardian loop started")
 
     if PLEX_ENABLED:
         app.create_task(_plex_cache_loop(app))

@@ -21,6 +21,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         series_continue_totals_file=d / "series_continue_totals.json",
         series_continue_hidden_file=d / "series_continue_hidden.json",
         download_history_file=d / "download_history.jsonl",
+        jackett_guard_file=d / "jackett_guard.json",
     )
 
 
@@ -96,6 +97,18 @@ class StateStoreTests(unittest.TestCase):
 
     def test_pending_downloads_empty_when_missing(self) -> None:
         self.assertEqual(self.store.load_pending_downloads(), {})
+
+    def test_jackett_guard_roundtrip(self) -> None:
+        payload = {
+            "version": 1,
+            "indexers": {
+                "kinozal": {"state": "degraded", "fail_streak": 2},
+            },
+        }
+
+        self.store.save_jackett_guard(payload)
+
+        self.assertEqual(self.store.load_jackett_guard(), payload)
 
     def test_pending_downloads_ignores_non_dict_entries(self) -> None:
         # Save raw bad payload, then verify load skips it.
