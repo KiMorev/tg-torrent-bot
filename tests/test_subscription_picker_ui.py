@@ -184,6 +184,27 @@ class SearchDownloadPickTests(unittest.TestCase):
         self.assertIn("📦 Скачать, когда сезон завершится", labels)
         self.assertTrue(any("К результатам" in l for l in labels))
 
+    def test_cancels_bulk_prefetch_when_leaving_profile(self):
+        update = MagicMock(callback_query=_make_query("srch:dl_pick:0"))
+        ctx = _make_context()
+
+        async def run_flow():
+            prefetch = {
+                "key": ("show", 0, ("source", "stable"), ()),
+                "known": asyncio.create_task(asyncio.sleep(60)),
+                "wide": asyncio.create_task(asyncio.sleep(60)),
+            }
+            ctx.user_data[bot._SERIES_BULK_PREFETCH_SLOT] = prefetch
+            await bot.search_download_pick(update, ctx)
+            await asyncio.sleep(0)
+            return prefetch
+
+        prefetch = asyncio.run(run_flow())
+
+        self.assertNotIn(bot._SERIES_BULK_PREFETCH_SLOT, ctx.user_data)
+        for name in bot._SERIES_BULK_PREFETCH_TASK_NAMES:
+            self.assertTrue(prefetch[name].cancelled())
+
     def test_stale_index_returns_error_message(self):
         update = MagicMock(callback_query=_make_query("srch:dl_pick:5"))
         ctx = _make_context(results=[{"title": "X", "partial": True}])
@@ -577,12 +598,11 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         async def run_flow():
             await bot.search_series_bulk_plan(update, ctx)
             prefetch = ctx.user_data[bot._SERIES_BULK_PREFETCH_SLOT]
-            await asyncio.gather(
-                prefetch["known"],
-                prefetch["plex"],
-                prefetch["downloads"],
-                prefetch["wide"],
+            self.assertEqual(
+                set(prefetch) - {"key"},
+                set(bot._SERIES_BULK_PREFETCH_TASK_NAMES),
             )
+            await asyncio.gather(prefetch["known"], prefetch["wide"])
             query.edit_message_text.reset_mock()
             query.data = "srch:bulk_build"
             return await bot.search_series_bulk_build_plan(update, ctx)
@@ -650,7 +670,7 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
             prefetch = asyncio.run(run_flow())
 
         self.assertNotIn(bot._SERIES_BULK_PREFETCH_SLOT, ctx.user_data)
-        for name in ("known", "plex", "downloads", "wide"):
+        for name in bot._SERIES_BULK_PREFETCH_TASK_NAMES:
             self.assertTrue(prefetch[name].cancelled())
 
     def test_bulk_plan_marks_good_candidate_as_likely_with_reason(self):
@@ -787,6 +807,70 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         gif_msg.delete.assert_awaited_once()
         self.assertEqual(query.edit_message_text.await_count, 1)
         self.assertIn("Определяю список сезонов", query.edit_message_text.await_args.args[0])
+
+    def test_search_cancel_during_bulk_build_stops_after_gpt_enrich(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Scrubs S01 WEB-DL 1080p Original Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Scrubs 1080p Original Sub"
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        cancel_query = _make_query("srch:cancel")
+        cancel_query.message = MagicMock()
+        cancel_query.message.chat = MagicMock(id=100)
+        cancel_query.message.delete = AsyncMock()
+        cancel_update = MagicMock(callback_query=cancel_query)
+        fake_store, saved_jobs = _fake_series_bulk_store()
+
+        async def run_flow():
+            enrich_started = asyncio.Event()
+            release_enrich = asyncio.Event()
+
+            async def enrich_waits_for_cancel(plan, _profile, max_seasons=None):
+                enrich_started.set()
+                await release_enrich.wait()
+                return plan
+
+            with patch.object(
+                bot,
+                "_gpt_enrich_series_bulk_plan",
+                AsyncMock(side_effect=enrich_waits_for_cancel),
+            ):
+                await bot.search_series_bulk_plan(update, ctx)
+                query.edit_message_text.reset_mock()
+                query.data = "srch:bulk_build"
+                build_task = asyncio.create_task(bot.search_series_bulk_build_plan(update, ctx))
+                await asyncio.wait_for(enrich_started.wait(), timeout=1)
+                await bot.search_cancel(cancel_update, ctx)
+                release_enrich.set()
+                return await asyncio.wait_for(build_task, timeout=1)
+
+        with (
+            patch.object(bot, "_series_bulk_schedule_prefetch"),
+            patch.object(bot, "_series_bulk_known_seasons", AsyncMock(return_value=([1], True))),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value=set())),
+            patch.object(bot, "_series_bulk_downloading_seasons", AsyncMock(return_value=set())),
+            patch.object(bot, "_series_bulk_search_once", AsyncMock(return_value=([], []))),
+            patch.object(bot, "_send_auto_delete", AsyncMock()),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(run_flow())
+
+        self.assertEqual(state, bot.ConversationHandler.END)
+        self.assertNotIn("srch_series_bulk_plan", ctx.user_data)
+        self.assertNotIn("srch_series_bulk_job_id", ctx.user_data)
+        self.assertNotIn("srch_series_bulk_cancelled_token", ctx.user_data)
+        self.assertEqual(saved_jobs, {})
 
     def test_bulk_build_shows_long_running_notice(self):
         query = _make_query("srch:bulk_plan:0")

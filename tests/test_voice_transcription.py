@@ -273,6 +273,48 @@ class VoiceMessageEntryTests(unittest.TestCase):
         self.assertIn("Услышал", last_call_text)
         self.assertIn("Дюна часть вторая", last_call_text)
 
+    def test_successful_transcription_cancels_bulk_prefetch(self):
+        update = _make_voice_update(duration=8)
+        context = _make_voice_context()
+
+        tg_file = MagicMock()
+
+        async def _fake_download(custom_path):
+            Path(custom_path).write_bytes(b"")
+        tg_file.download_to_drive = AsyncMock(side_effect=_fake_download)
+        context.bot.get_file.return_value = tg_file
+
+        async def run_flow():
+            prefetch = {
+                "key": ("show", 0, ("source", "stable"), ()),
+                "known": asyncio.create_task(asyncio.sleep(60)),
+                "wide": asyncio.create_task(asyncio.sleep(60)),
+            }
+            context.user_data[bot._SERIES_BULK_PREFETCH_SLOT] = prefetch
+            await bot.voice_message_entry(update, context)
+            await asyncio.sleep(0)
+            return prefetch
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(
+                load_approved_chat_ids=MagicMock(return_value=set()),
+            )),
+            patch.object(bot, "VOICE_SEARCH_ENABLED", True),
+            patch.object(bot, "OPENAI_API_KEY", "sk-test"),
+            patch.object(bot, "VOICE_MAX_SECONDS", 30),
+            patch.object(bot, "transcribe_audio_detailed", return_value=("Dune part two", None)),
+            patch.object(bot, "rutracker_client", MagicMock()),
+            patch.object(bot, "_safe_edit_message", new=AsyncMock()),
+            patch.object(bot, "_voice_record_usage"),
+        ):
+            prefetch = asyncio.run(run_flow())
+
+        self.assertNotIn(bot._SERIES_BULK_PREFETCH_SLOT, context.user_data)
+        for name in bot._SERIES_BULK_PREFETCH_TASK_NAMES:
+            self.assertTrue(prefetch[name].cancelled())
+
 
 class TranscribeAudioDetailedTests(unittest.TestCase):
     """Extra coverage for the (text, error_label) tuple return shape."""
