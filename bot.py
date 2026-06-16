@@ -557,7 +557,10 @@ def _save_approved_chat_ids(chat_ids: set[int]) -> None:
 
 
 def _all_allowed_chat_ids() -> set[int]:
-    return all_allowed_chat_ids(ALLOWED_CHAT_IDS, ADMIN_CHAT_IDS, _load_approved_chat_ids())
+    approved = _load_approved_chat_ids()
+    if not isinstance(approved, set):
+        approved = set()
+    return all_allowed_chat_ids(ALLOWED_CHAT_IDS, ADMIN_CHAT_IDS, approved)
 
 
 def _is_admin_chat(chat_id: int | None) -> bool:
@@ -566,7 +569,22 @@ def _is_admin_chat(chat_id: int | None) -> bool:
 
 def _is_allowed(update: Update) -> bool:
     chat_id = update.effective_chat.id if update.effective_chat else None
-    return is_allowed_chat(chat_id, ALLOWED_CHAT_IDS, ADMIN_CHAT_IDS, _load_approved_chat_ids())
+    approved = _load_approved_chat_ids()
+    if not isinstance(approved, set):
+        approved = set()
+    return is_allowed_chat(chat_id, ALLOWED_CHAT_IDS, ADMIN_CHAT_IDS, approved)
+
+
+def _background_chat_id(chat_id: object) -> int | None:
+    """Return an allowed chat_id for background pushes, or None when skipped."""
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+    if cid in _all_allowed_chat_ids():
+        return cid
+    logger.info("Background notification skipped for revoked/unapproved chat_id=%s", cid)
+    return None
 
 
 def _chat_id(update: Update) -> str:
@@ -3919,6 +3937,96 @@ async def _send_movie_notification_push_to_user(
     return sent
 
 
+def _movie_notification_pending(settings: dict) -> dict:
+    pending = settings.setdefault("movie_notification_pending", {})
+    if not isinstance(pending, dict):
+        pending = {}
+        settings["movie_notification_pending"] = pending
+    return pending
+
+
+def _movie_notification_pending_cards(entry: object) -> list[dict]:
+    if not isinstance(entry, dict):
+        return []
+    cards = entry.get("cards")
+    if not isinstance(cards, list):
+        return []
+    return [card for card in cards if isinstance(card, dict)]
+
+
+def _queue_movie_notification(settings: dict, chat_id: int, cards: list[dict]) -> bool:
+    queued_cards = [
+        _movie_notification_snapshot_card(card)
+        for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+        if isinstance(card, dict) and card.get("kp_id")
+    ]
+    if not queued_cards:
+        return False
+
+    pending = _movie_notification_pending(settings)
+    key = str(chat_id)
+    existing_entry = pending.get(key)
+    existing_cards = _movie_notification_pending_cards(existing_entry)
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for card in [*existing_cards, *queued_cards]:
+        identifiers = _card_identifiers(card)
+        identity = identifiers[0] if identifiers else str(card.get("title") or "")
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(card)
+        if len(merged) >= _MOVIE_NOTIFICATION_ACTION_LIMIT:
+            break
+    pending[key] = {
+        "queued_at": datetime.now(DISPLAY_TIMEZONE).isoformat(timespec="seconds"),
+        "cards": merged,
+    }
+    return True
+
+
+def _remove_queued_movie_notification(settings: dict, chat_id: int) -> bool:
+    pending = _movie_notification_pending(settings)
+    if str(chat_id) not in pending:
+        return False
+    pending.pop(str(chat_id), None)
+    return True
+
+
+def _handle_movie_notification_send_failure(
+    chat_id: int,
+    failure_label: str | None,
+    is_permanent: bool,
+    push_cards: list[dict],
+) -> None:
+    if is_permanent:
+        failure_count, unsubscribed = _record_movie_subscription_failure(
+            chat_id, failure_label or "permanent"
+        )
+        if unsubscribed:
+            logger.warning(
+                "movie_discovery: notify failed permanently chat=%s label=%s "
+                "attempt=%s/%s — unsubscribed from /new",
+                chat_id, failure_label, failure_count, _MOVIE_NOTIFICATION_MAX_FAILURES,
+            )
+        else:
+            logger.warning(
+                "movie_discovery: notify failed permanently chat=%s label=%s "
+                "attempt=%s/%s",
+                chat_id, failure_label, failure_count, _MOVIE_NOTIFICATION_MAX_FAILURES,
+            )
+    else:
+        log_level = logging.ERROR if failure_label == "message_format_bug" else logging.INFO
+        logger.log(
+            log_level,
+            "movie_discovery: notify deferred chat=%s label=%s candidates=%d kp_ids=[%s]",
+            chat_id,
+            failure_label,
+            len(push_cards),
+            ",".join(str(c.get("kp_id") or "-") for c in push_cards),
+        )
+
+
 async def _run_movie_discovery_notifications(
     cache: dict,
     app: "Application",
@@ -3933,8 +4041,8 @@ async def _run_movie_discovery_notifications(
     the same film is never sent twice to the same person.
 
     Quiet hours (_NOTIFY_WINDOW_START_HOUR – _NOTIFY_WINDOW_END_HOUR): outside
-    the window we DON'T mark anything as seen. The diff against seen-set self-heals
-    on the next in-window refresh — no separate pending queue needed.
+    the window we queue a compact snapshot and DON'T mark anything as seen.
+    The queued snapshot is delivered first on the next in-window pass.
 
     False-push protection (four layers, all motivated by the observed bug
     where cold-Jackett-after-restart produced a transient top-10 containing a
@@ -3961,6 +4069,15 @@ async def _run_movie_discovery_notifications(
     raw_cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
     raw_top_cards = raw_cards[:10]
     top_cards = _movie_discovery_confirmed_cards(cache)
+    settings = _load_movie_discovery_settings()
+    subs = settings.get("movie_subscriptions") or {}
+    if not isinstance(subs, dict):
+        subs = {}
+    if not subs:
+        logger.info("movie_discovery: notify skipped — no subscribers")
+        return
+    out_of_window = not _is_in_notification_window()
+
     if not top_cards:
         if raw_top_cards:
             logger.info(
@@ -3971,41 +4088,28 @@ async def _run_movie_discovery_notifications(
             )
         else:
             logger.info("movie_discovery: notify skipped — no cards in cache")
-        return
+        if out_of_window or not _movie_notification_pending(settings):
+            return
 
     if _movie_discovery_cache_has_gating_degradation(cache):
         logger.info("movie_discovery: notify skipped — degraded refresh")
         return
 
-    if skip_push and not (cache.get("prev_top10_kp_ids") or []):
+    if top_cards and skip_push and not (cache.get("prev_top10_kp_ids") or []):
         # Layer B: first refresh after startup without previous top-10 data.
         # The cache is available via /new, but no push is sent until another
         # refresh confirms the first snapshot.
         logger.info("movie_discovery: notify skipped — first refresh after startup")
         return
-    if skip_push:
+    if top_cards and skip_push:
         logger.info("movie_discovery: first refresh after startup — notifying confirmed cards only")
-
-    settings = _load_movie_discovery_settings()
-    subs = settings.get("movie_subscriptions") or {}
-    if not isinstance(subs, dict):
-        subs = {}
-    if not subs:
-        logger.info("movie_discovery: notify skipped — no subscribers")
-        return
-
-    if not _is_in_notification_window():
-        # Quiet hours — don't push and don't mark anything seen. The next in-window
-        # refresh will compute the same (or larger) diff and deliver naturally.
-        logger.info("movie_discovery: notify skipped — out of notification window")
-        return
 
     # Layer C: regression guard. If most of the previous top-10 has disappeared,
     # this refresh is unstable — likely cold-Jackett aftermath, or a transient
     # outage of one of the sources. Skip the whole push cycle.
     prev_top10_kp_ids: list[int] = list(cache.get("prev_top10_kp_ids") or [])
     prev_top10_set = {kp for kp in prev_top10_kp_ids if kp}
-    if prev_top10_set:
+    if top_cards and prev_top10_set:
         current_kp_set = {c.get("kp_id") for c in raw_top_cards if c.get("kp_id")}
         common = prev_top10_set & current_kp_set
         removed_pct = (len(prev_top10_set) - len(common)) / len(prev_top10_set) * 100
@@ -4033,6 +4137,10 @@ async def _run_movie_discovery_notifications(
             chat_id = int(chat_id_str)
         except (TypeError, ValueError):
             continue
+        if _background_chat_id(chat_id) is None:
+            subs.pop(chat_id_str, None)
+            _save_movie_discovery_settings(settings)
+            continue
 
         # Skip film when EITHER signal is already set:
         #   - notified_at: bot has already pushed it once → avoid duplicate push
@@ -4043,6 +4151,52 @@ async def _run_movie_discovery_notifications(
         # film entering the top-10 for the first time has to survive one more
         # cycle before its push is allowed.
         user_entries = _get_user_entries_from_settings(settings, chat_id)
+
+        if not out_of_window:
+            queued_cards = _movie_notification_pending_cards(
+                _movie_notification_pending(settings).get(chat_id_str)
+            )
+            queued_for_user = [
+                c for c in queued_cards
+                if c.get("kp_id")
+                and not c.get("in_plex")
+                and not _is_card_notified_in_entries(c, user_entries)
+                and not _is_card_shown_in_new_in_entries(c, user_entries)
+                and not _is_card_handled_in_new_in_entries(c, user_entries)
+            ]
+            if queued_cards and not queued_for_user:
+                if _remove_queued_movie_notification(settings, chat_id):
+                    _save_movie_discovery_settings(settings)
+            elif queued_for_user:
+                push_cards = queued_for_user[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+                logger.info(
+                    "movie_discovery: notify queued chat=%s candidates=%d kp_ids=[%s]",
+                    chat_id,
+                    len(push_cards),
+                    ",".join(str(c.get("kp_id") or "-") for c in push_cards),
+                )
+                sent, failure_label, is_permanent = await _send_movie_notification_push_to_user_result(
+                    push_cards, chat_id, app
+                )
+                if sent:
+                    _remove_queued_movie_notification(settings, chat_id)
+                    _save_movie_discovery_settings(settings)
+                    _mark_user_notified(chat_id, push_cards)
+                    _clear_movie_subscription_failures(chat_id)
+                    settings = _load_movie_discovery_settings()
+                    subs = settings.get("movie_subscriptions") or {}
+                    logger.info(
+                        "movie_discovery: notify queued sent chat=%s pushed=%d kp_ids=[%s]",
+                        chat_id,
+                        len(push_cards),
+                        ",".join(str(c.get("kp_id") or "-") for c in push_cards),
+                    )
+                else:
+                    _handle_movie_notification_send_failure(
+                        chat_id, failure_label, is_permanent, push_cards
+                    )
+                continue
+
         new_for_user = [
             c for c in top_cards
             if c.get("kp_id")
@@ -4066,6 +4220,17 @@ async def _run_movie_discovery_notifications(
         )
 
         push_cards = new_for_user[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+        if out_of_window:
+            if _queue_movie_notification(settings, chat_id, push_cards):
+                _save_movie_discovery_settings(settings)
+                logger.info(
+                    "movie_discovery: notify queued chat=%s pushed=%d kp_ids=[%s] reason=quiet_hours",
+                    chat_id,
+                    len(push_cards),
+                    ",".join(str(c.get("kp_id") or "-") for c in push_cards),
+                )
+            continue
+
         sent, failure_label, is_permanent = await _send_movie_notification_push_to_user_result(
             push_cards, chat_id, app
         )
@@ -4074,6 +4239,8 @@ async def _run_movie_discovery_notifications(
             # visible when the user clicks "Открыть /new" from the push.
             _mark_user_notified(chat_id, push_cards)
             _clear_movie_subscription_failures(chat_id)
+            settings = _load_movie_discovery_settings()
+            subs = settings.get("movie_subscriptions") or {}
             logger.info(
                 "movie_discovery: notify sent chat=%s pushed=%d kp_ids=[%s]",
                 chat_id,
@@ -5722,9 +5889,10 @@ async def _plex_poll_after_finish(
                     keyboard = InlineKeyboardMarkup([[close_btn]])
                 await _delete_hint_messages()
                 history_extra = _plex_found_history_extra(target, metadata_type, found_title)
+                target_chat_ids = _plex_poll_target_chat_ids(task_id, "found", chat_ids)
                 delivered_chat_ids = []
                 retry_later_chat_ids = []
-                for cid in chat_ids:
+                for cid in target_chat_ids:
                     sent, retry_later, label = await _send_plex_poll_message(
                         app,
                         chat_id=cid,
@@ -5734,6 +5902,7 @@ async def _plex_poll_after_finish(
                     )
                     if sent:
                         delivered_chat_ids.append(cid)
+                        _mark_plex_poll_sent(task_id, "found", cid)
                     elif retry_later:
                         retry_later_chat_ids.append(cid)
                         logger.info(
@@ -5749,10 +5918,10 @@ async def _plex_poll_after_finish(
                         )
                 if retry_later_chat_ids:
                     delivery_retry_needed = True
-                if delivered_chat_ids or not retry_later_chat_ids:
+                if delivered_chat_ids or (target_chat_ids and not retry_later_chat_ids):
                     _record_download_history(
                         "plex_found",
-                        chat_ids=delivered_chat_ids or chat_ids,
+                        chat_ids=delivered_chat_ids or target_chat_ids,
                         task_id=task_id,
                         meta=meta,
                         title=found_title,
@@ -5782,9 +5951,10 @@ async def _plex_poll_after_finish(
             log_reason = "Plex unreachable"
         await _delete_hint_messages()
         keyboard = _final_notification_keyboard(task_id, show_plex=False)
+        target_chat_ids = _plex_poll_target_chat_ids(task_id, "timeout", chat_ids)
         delivered_chat_ids = []
         retry_later_chat_ids = []
-        for cid in chat_ids:
+        for cid in target_chat_ids:
             sent, retry_later, label = await _send_plex_poll_message(
                 app,
                 chat_id=cid,
@@ -5794,6 +5964,7 @@ async def _plex_poll_after_finish(
             )
             if sent:
                 delivered_chat_ids.append(cid)
+                _mark_plex_poll_sent(task_id, "timeout", cid)
             elif retry_later:
                 retry_later_chat_ids.append(cid)
                 logger.info(
@@ -5809,10 +5980,10 @@ async def _plex_poll_after_finish(
                 )
         if retry_later_chat_ids:
             delivery_retry_needed = True
-        if delivered_chat_ids or not retry_later_chat_ids:
+        if delivered_chat_ids or (target_chat_ids and not retry_later_chat_ids):
             _record_download_history(
                 "plex_not_found",
-                chat_ids=delivered_chat_ids or chat_ids,
+                chat_ids=delivered_chat_ids or target_chat_ids,
                 task_id=task_id,
                 meta=meta,
                 title=task_title,
@@ -6900,17 +7071,25 @@ def _load_notified_tasks() -> dict[str, object]:
 def _save_notified_tasks(tasks: dict[str, object]) -> None:
     current = state_store.load_notified_tasks()
     for task_id, current_entry in current.items():
-        if not (isinstance(current_entry, dict) and current_entry.get("plex_done")):
+        if not isinstance(current_entry, dict):
+            continue
+        preserved: dict[str, object] = {}
+        if current_entry.get("plex_done"):
+            preserved["plex_done"] = True
+        current_plex_poll = current_entry.get("plex_poll")
+        if isinstance(current_plex_poll, dict) and current_plex_poll:
+            preserved["plex_poll"] = current_plex_poll
+        if not preserved:
             continue
         next_entry = tasks.get(task_id)
         if isinstance(next_entry, dict):
-            next_entry["plex_done"] = True
+            next_entry.update(preserved)
         elif next_entry is not None:
             tasks[task_id] = {
                 "status": str(next_entry),
                 "sent": [],
                 "failures": {},
-                "plex_done": True,
+                **preserved,
             }
         else:
             tasks[task_id] = current_entry
@@ -6933,6 +7112,51 @@ def _plex_poll_is_done(task_id: str, notified: dict) -> bool:
     """Return True if Plex polling already completed for *task_id* (persisted marker)."""
     raw = notified.get(task_id)
     return isinstance(raw, dict) and bool(raw.get("plex_done"))
+
+
+def _plex_poll_sent_recipients(task_id: str, key: str) -> set[int]:
+    raw = _load_notified_tasks().get(task_id)
+    if not isinstance(raw, dict):
+        return set()
+    raw_plex_poll = raw.get("plex_poll")
+    if not isinstance(raw_plex_poll, dict):
+        return set()
+    sent: set[int] = set()
+    for chat_id in raw_plex_poll.get(key, []):
+        try:
+            sent.add(int(chat_id))
+        except (TypeError, ValueError):
+            continue
+    return sent
+
+
+def _mark_plex_poll_sent(task_id: str, key: str, chat_id: int) -> None:
+    notified = _load_notified_tasks()
+    raw = notified.get(task_id)
+    if isinstance(raw, dict):
+        entry = raw
+    else:
+        entry = {"status": str(raw or ""), "sent": [], "failures": {}}
+    raw_plex_poll = entry.setdefault("plex_poll", {})
+    if not isinstance(raw_plex_poll, dict):
+        raw_plex_poll = {}
+        entry["plex_poll"] = raw_plex_poll
+    sent = {str(cid) for cid in raw_plex_poll.get(key, []) if cid}
+    sent.add(str(int(chat_id)))
+    raw_plex_poll[key] = sorted(sent)
+    notified[task_id] = entry
+    _save_notified_tasks(notified)
+
+
+def _plex_poll_target_chat_ids(task_id: str, key: str, chat_ids: list[int]) -> list[int]:
+    already_sent = _plex_poll_sent_recipients(task_id, key)
+    result: list[int] = []
+    for chat_id in chat_ids:
+        cid = _background_chat_id(chat_id)
+        if cid is None or cid in already_sent:
+            continue
+        result.append(cid)
+    return result
 
 
 def _load_auto_delete_tasks() -> dict[str, float]:
@@ -7142,6 +7366,9 @@ def _make_notification_delivery_state(
             entry["subscribers"] = sorted(subscribers)
         if raw_state.get("plex_done"):
             entry["plex_done"] = True
+        plex_poll = raw_state.get("plex_poll")
+        if isinstance(plex_poll, dict) and plex_poll:
+            entry["plex_poll"] = plex_poll
     return entry
 
 
@@ -7166,11 +7393,12 @@ async def _handle_duplicate_task(
     app: Application,
     dup_task: dict,
     all_tasks: list[dict],
-) -> None:
+) -> bool:
     """Handle a task that DS rejected as torrent_duplicate.
 
-    Finds the original task already in DS, auto-deletes the rejected duplicate,
-    and sends a context-aware notification to the user who tried to add it.
+    Finds the original task already in DS and sends a context-aware
+    notification to the user who tried to add it.  The duplicate is deleted
+    only after the notification is delivered.
     """
     dup_id = task_id = dup_task.get("id", "")
     dup_title = dup_task.get("title", "")
@@ -7185,15 +7413,21 @@ async def _handle_duplicate_task(
         None,
     )
 
-    # Auto-delete the duplicate task so it doesn't clutter DS.
-    try:
-        await asyncio.to_thread(ds_client.delete_task, dup_id)
-        logger.info("Auto-deleted duplicate task %s (%s)", dup_id, dup_title)
-    except Exception:
-        logger.warning("Failed to auto-delete duplicate task %s", dup_id, exc_info=True)
+    async def _delete_duplicate() -> None:
+        try:
+            await asyncio.to_thread(ds_client.delete_task, dup_id)
+            logger.info("Auto-deleted duplicate task %s (%s)", dup_id, dup_title)
+        except Exception:
+            logger.warning("Failed to auto-delete duplicate task %s", dup_id, exc_info=True)
 
     if not owner_id:
-        return
+        await _delete_duplicate()
+        return True
+
+    send_chat_id = _background_chat_id(owner_id)
+    if send_chat_id is None:
+        await _delete_duplicate()
+        return True
 
     # Build notification text and keyboard based on original task state.
     if original:
@@ -7284,9 +7518,13 @@ async def _handle_duplicate_task(
         ])
 
     try:
-        await app.bot.send_message(chat_id=owner_id, text=text, reply_markup=kb)
+        await app.bot.send_message(chat_id=send_chat_id, text=text, reply_markup=kb)
     except Exception:
         logger.warning("Failed to send duplicate notification to %s", owner_id, exc_info=True)
+        return False
+
+    await _delete_duplicate()
+    return True
 
 
 async def _classify_send_error(exc: Exception) -> tuple[str, bool]:
@@ -7384,7 +7622,9 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
                 or (isinstance(raw, dict) and raw.get("status") == "error:torrent_duplicate")
             )
             if not already_handled:
-                await _handle_duplicate_task(app, task, tasks)
+                duplicate_handled = await _handle_duplicate_task(app, task, tasks)
+                if not duplicate_handled:
+                    continue
                 owner_id = (_load_task_owners() or {}).get(task_id)
                 sent: set[str] = {str(owner_id)} if owner_id else set()
                 notified[task_id] = _make_notification_delivery_state(
@@ -7430,7 +7670,9 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
             if isinstance(raw_state, dict):
                 for sub_id_str in raw_state.get("subscribers", []):
                     try:
-                        recipients.add(int(sub_id_str))
+                        sub_chat_id = _background_chat_id(sub_id_str)
+                        if sub_chat_id is not None:
+                            recipients.add(sub_chat_id)
                     except (TypeError, ValueError):
                         pass
 
@@ -7677,18 +7919,38 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
 
 async def _notify_pending_success(
     app: Application, entry: dict, task_id: str, method: str,
-) -> None:
-    chat_id = entry.get("chat_id")
-    if not chat_id:
-        return
+) -> bool:
+    chat_id = _background_chat_id(entry.get("chat_id"))
+    if chat_id is None:
+        return True
     title = entry.get("title") or "загрузка"
+
+    if task_id and not entry.get("task_recorded"):
+        _remember_task_owner(task_id, chat_id)
+        result = _pending_entry_to_search_result(entry)
+        _remember_task_meta(task_id, _build_task_meta_from_result(result, source="pending"))
+        _record_download_added_history(
+            task_id,
+            chat_id,
+            result,
+            method=method,
+            meta_source="pending",
+            subscribe=bool(entry.get("subscribe")),
+            notify_policy=entry.get("notify_policy"),
+            download_policy=entry.get("download_policy"),
+        )
+        _schedule_task_notification_fast_wake(app, f"pending_download:{task_id}")
+        entry["task_recorded"] = True
+        entry["task_id"] = task_id
+        entry["method"] = method
 
     # If the original action was «⬇️📺 Серии» / «⬇️🎯 Сезон» (subscribe=True),
     # recreate the subscription now that the download actually succeeded.
     # Without this, queueing a series after a download failure would silently
     # downgrade to a one-shot — the user's original intent is lost.
-    subscribe_restored = False
-    if entry.get("subscribe"):
+    subscribe_restored = bool(entry.get("subscription_restored"))
+    if entry.get("subscribe") and not entry.get("subscription_restore_attempted"):
+        entry["subscription_restore_attempted"] = True
         notify_policy, download_policy = _coerce_subscription_policies(
             entry.get("notify_policy"), entry.get("download_policy")
         )
@@ -7699,7 +7961,7 @@ async def _notify_pending_success(
                 subs = state_store.load_topic_subscriptions()
                 now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
                 subs[sub_key] = build_jackett_subscription(
-                    chat_id=int(chat_id),
+                    chat_id=chat_id,
                     query=entry.get("title") or "",
                     result=_pending_entry_to_search_result(entry),
                     seen_results=[],
@@ -7721,7 +7983,7 @@ async def _notify_pending_success(
                 if topic_id and episode_info:
                     subs = state_store.load_topic_subscriptions()
                     new_sub = {
-                        "chat_id": int(chat_id),
+                        "chat_id": chat_id,
                         "title": title,
                         "last_episode_end": episode_info[0],
                         "total_episodes": episode_info[1],
@@ -7742,6 +8004,7 @@ async def _notify_pending_success(
                 "Pending-success: failed to restore subscription for %s",
                 title, exc_info=True,
             )
+        entry["subscription_restored"] = subscribe_restored
 
     text = (
         f"✅ Отложенная загрузка стартовала: «{title}».\n"
@@ -7758,31 +8021,26 @@ async def _notify_pending_success(
             "\n⚠️ Подписка не была восстановлена автоматически — "
             "добавьте её вручную через поиск."
         )
+    rows = []
+    if task_id:
+        rows.append([InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     try:
-        await app.bot.send_message(chat_id=int(chat_id), text=text)
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
     except Exception:
         logger.warning("Failed to notify pending-success for chat_id=%s", chat_id, exc_info=True)
-    if task_id:
-        _remember_task_owner(task_id, int(chat_id))
-        result = _pending_entry_to_search_result(entry)
-        _remember_task_meta(task_id, _build_task_meta_from_result(result, source="pending"))
-        _record_download_added_history(
-            task_id,
-            int(chat_id),
-            result,
-            method=method,
-            meta_source="pending",
-            subscribe=bool(entry.get("subscribe")),
-            notify_policy=entry.get("notify_policy"),
-            download_policy=entry.get("download_policy"),
-        )
-        _schedule_task_notification_fast_wake(app, f"pending_download:{task_id}")
+        return False
+    return True
 
 
-async def _notify_pending_dropped(app: Application, entry: dict) -> None:
-    chat_id = entry.get("chat_id")
-    if not chat_id:
-        return
+async def _notify_pending_dropped(app: Application, entry: dict) -> bool:
+    chat_id = _background_chat_id(entry.get("chat_id"))
+    if chat_id is None:
+        return True
     title = entry.get("title") or "загрузка"
     attempts = int(entry.get("attempts") or 0)
     last_error = _stored_error_user_text(entry.get("last_error"))
@@ -7793,9 +8051,17 @@ async def _notify_pending_dropped(app: Application, entry: dict) -> None:
         "Попробуйте найти раздачу заново."
     )
     try:
-        await app.bot.send_message(chat_id=int(chat_id), text=text)
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
+            ]]),
+        )
     except Exception:
         logger.warning("Failed to notify pending-dropped for chat_id=%s", chat_id, exc_info=True)
+        return False
+    return True
 
 
 def _stored_error_user_text(raw: object) -> str:
@@ -7922,13 +8188,49 @@ async def _run_pending_downloads_once(app: Application) -> None:
     changed = False
 
     for entry_id, entry in list(pending.items()):
+        notification_pending = str(entry.get("notification_pending") or "")
+        if notification_pending == "success":
+            task_id = str(entry.get("task_id") or "")
+            method = str(entry.get("method") or "download")
+            if await _notify_pending_success(app, entry, task_id, method):
+                _series_bulk_record_pending_retry_result(
+                    entry,
+                    "downloaded",
+                    task_id=task_id,
+                    method=method,
+                    summary=f"скачан после отложенного повтора: {task_id or method}",
+                )
+                del pending[entry_id]
+            else:
+                entry["last_notification_attempt_at"] = now.isoformat()
+            changed = True
+            continue
+
+        if notification_pending == "drop":
+            if await _notify_pending_dropped(app, entry):
+                _series_bulk_record_pending_retry_result(
+                    entry,
+                    "pending_failed",
+                    error=_stored_error_user_text(entry.get("last_error") or "истёк срок отложенных попыток"),
+                    summary="отложенный повтор не сработал",
+                )
+                del pending[entry_id]
+            else:
+                entry["last_notification_attempt_at"] = now.isoformat()
+            changed = True
+            continue
+
         added_at_str = str(entry.get("added_at") or "")
         try:
             added_at = datetime.fromisoformat(added_at_str)
         except ValueError:
             added_at = now  # malformed → treat as just-added (give it a chance)
         if now - added_at > ttl:
-            await _notify_pending_dropped(app, entry)
+            if not await _notify_pending_dropped(app, entry):
+                entry["notification_pending"] = "drop"
+                entry["last_notification_attempt_at"] = now.isoformat()
+                changed = True
+                continue
             _series_bulk_record_pending_retry_result(
                 entry,
                 "pending_failed",
@@ -7955,7 +8257,13 @@ async def _run_pending_downloads_once(app: Application) -> None:
         # Success — notify and drop.
         logger.info("Pending download succeeded: id=%s task_id=%s method=%s",
                     entry_id, task_id, method)
-        await _notify_pending_success(app, entry, task_id, method)
+        if not await _notify_pending_success(app, entry, task_id, method):
+            entry["notification_pending"] = "success"
+            entry["task_id"] = task_id
+            entry["method"] = method
+            entry["last_notification_attempt_at"] = now.isoformat()
+            changed = True
+            continue
         _series_bulk_record_pending_retry_result(
             entry,
             "downloaded",
@@ -20380,6 +20688,125 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+def _keyboard_with_close(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        *rows,
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _jackett_subscription_pending_payload(
+    *,
+    text: str,
+    task_id: str,
+    complete: bool,
+    final_action_succeeded: bool,
+    title: str,
+    checked_at: str,
+    new_episode_end: int | None = None,
+    total_episodes: int | None = None,
+    seen_titles: list[str] | None = None,
+    topic_url: str = "",
+    tracker: str = "",
+) -> dict:
+    payload = {
+        "text": text,
+        "task_id": task_id,
+        "complete": complete,
+        "final_action_succeeded": final_action_succeeded,
+        "title": title,
+        "checked_at": checked_at,
+        "topic_url": topic_url,
+        "tracker": tracker,
+        "created_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
+    }
+    if new_episode_end is not None:
+        payload["new_episode_end"] = new_episode_end
+    if total_episodes is not None:
+        payload["total_episodes"] = total_episodes
+    if seen_titles:
+        payload["seen_titles"] = seen_titles[-100:]
+    return payload
+
+
+def _jackett_subscription_keyboard_from_pending(key: str, pending: dict) -> InlineKeyboardMarkup:
+    task_id = str(pending.get("task_id") or "")
+    complete = bool(pending.get("complete"))
+    topic_url = str(pending.get("topic_url") or "")
+    if task_id:
+        if complete:
+            return _keyboard_with_close([[
+                InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id)),
+            ]])
+        return _keyboard_with_close([[
+            InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id)),
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+        ]])
+    if topic_url:
+        return _keyboard_with_close([[
+            InlineKeyboardButton("🔍 Открыть раздачу", url=topic_url),
+        ]])
+    return _keyboard_with_close([[
+        InlineKeyboardButton("🔍 Посмотреть и скачать", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}"),
+        InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
+    ]])
+
+
+def _apply_jackett_subscription_pending(
+    subs: dict,
+    key: str,
+    sub: dict,
+    pending: dict,
+) -> None:
+    if pending.get("final_action_succeeded"):
+        subs.pop(key, None)
+        return
+
+    if pending.get("new_episode_end") is not None:
+        sub["last_episode_end"] = pending.get("new_episode_end")
+    if pending.get("total_episodes") is not None:
+        sub["total_episodes"] = pending.get("total_episodes")
+    if pending.get("title"):
+        sub["title"] = pending.get("title")
+    if pending.get("tracker"):
+        sub["tracker"] = pending.get("tracker")
+    if pending.get("topic_url"):
+        sub["topic_url"] = pending.get("topic_url")
+    seen_titles = pending.get("seen_titles")
+    if isinstance(seen_titles, list):
+        sub["seen_titles"] = [str(title) for title in seen_titles if title][-100:]
+    sub["last_check"] = str(
+        pending.get("checked_at") or datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    )
+    sub.pop("pending_notification", None)
+
+
+async def _deliver_jackett_subscription_pending_notification(
+    app: Application,
+    subs: dict,
+    key: str,
+    sub: dict,
+    pending: dict,
+) -> bool:
+    chat_id = _background_chat_id(sub.get("chat_id"))
+    if chat_id is None:
+        _apply_jackett_subscription_pending(subs, key, sub, pending)
+        return True
+
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=str(pending.get("text") or ""),
+            reply_markup=_jackett_subscription_keyboard_from_pending(key, pending),
+        )
+    except Exception:
+        logger.warning("Failed to deliver pending Jackett subscription notification to %s", chat_id, exc_info=True)
+        return False
+
+    _apply_jackett_subscription_pending(subs, key, sub, pending)
+    return True
+
+
 async def _check_jackett_sub_via_rutracker_direct(
     app: Application,
     subs: dict,
@@ -20419,7 +20846,7 @@ async def _check_jackett_sub_via_rutracker_direct(
                         f"{short}\n\n"
                         "Проверка приостановлена."
                     ),
-                    reply_markup=InlineKeyboardMarkup([[
+                    reply_markup=_keyboard_with_close([[
                         InlineKeyboardButton(
                             "🗑️ Удалить подписку",
                             callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}",
@@ -20428,6 +20855,9 @@ async def _check_jackett_sub_via_rutracker_direct(
                 )
             except Exception:
                 logger.warning("Failed to notify chat %s about unavailable Jackett/RT sub", chat_id, exc_info=True)
+                sub.pop("unavailable_at", None)
+                sub.pop("unavailable_reason", None)
+                return True
         logger.info("Jackett/RT sub topic unavailable: key=%s topic=%s", key, topic_id)
         return True  # handled — stop checking this subscription
     except RutrackerError as e:
@@ -20496,7 +20926,8 @@ async def _check_jackett_sub_via_rutracker_direct(
     #   partial episode), advance state — the user explicitly asked us not
     #   to download yet, so re-attempting next check would also skip.
     download_attempted_and_failed = wants_download and not task_id
-    if not download_attempted_and_failed:
+    defer_advance_until_notification = wants_notify and not download_attempted_and_failed
+    if not download_attempted_and_failed and not defer_advance_until_notification:
         sub["last_episode_end"] = new_end
         sub["total_episodes"] = new_total
         sub["title"] = new_title
@@ -20505,7 +20936,7 @@ async def _check_jackett_sub_via_rutracker_direct(
         # nothing else to do anyway).
         if is_complete and (task_id or not wants_download):
             subs.pop(key, None)
-    else:
+    elif download_attempted_and_failed:
         logger.info(
             "Jackett/RT sub %s: download failed — keeping state at last_end=%s for retry",
             key, last_end,
@@ -20529,15 +20960,13 @@ async def _check_jackett_sub_via_rutracker_direct(
             f"{progress}\n"
             "Торрент обновлён в Download Station. Подписка снята."
         )
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", task_id)),
-        ]])
+        kb = _download_list_keyboard(task_id)
     elif task_id:
         text = (
             f"🔔 Подписка «{short_q}» обновилась — задача добавлена!\n"
             f"\n🔎 {new_title}{progress}"
         )
-        kb = InlineKeyboardMarkup([[
+        kb = _keyboard_with_close([[
             InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id)),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
@@ -20561,7 +20990,7 @@ async def _check_jackett_sub_via_rutracker_direct(
             f"\n🔎 {new_title}{progress}\n\n"
             "Авто-загрузка отключена для этой подписки."
         )
-        kb = InlineKeyboardMarkup([[
+        kb = _keyboard_with_close([[
             InlineKeyboardButton("🔍 Посмотреть и скачать", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}"),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
@@ -20572,16 +21001,42 @@ async def _check_jackett_sub_via_rutracker_direct(
             f"\n🔎 {new_title}{progress}\n\n"
             "⚠️ Скачайте вручную."
         )
-        kb = InlineKeyboardMarkup([[
+        kb = _keyboard_with_close([[
             InlineKeyboardButton("🔍 Посмотреть и скачать", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}"),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_unsub:{key}"),
         ]])
 
+    pending_payload = None
+    if defer_advance_until_notification:
+        pending_payload = _jackett_subscription_pending_payload(
+            text=text,
+            task_id=task_id,
+            complete=is_complete,
+            final_action_succeeded=is_complete and (bool(task_id) or not wants_download),
+            title=new_title,
+            checked_at=now_text,
+            new_episode_end=new_end,
+            total_episodes=new_total,
+            topic_url=topic_url,
+        )
+
+    sent = not chat_id
     if chat_id:
-        try:
-            await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-        except Exception:
-            logger.warning("Failed to notify chat %s for Jackett/RT sub update", chat_id, exc_info=True)
+        send_chat_id = _background_chat_id(chat_id)
+        if send_chat_id is None:
+            sent = True
+        else:
+            try:
+                await app.bot.send_message(chat_id=send_chat_id, text=text, reply_markup=kb)
+                sent = True
+            except Exception:
+                logger.warning("Failed to notify chat %s for Jackett/RT sub update", chat_id, exc_info=True)
+                if pending_payload:
+                    sub["pending_notification"] = pending_payload
+                return True
+
+    if sent and pending_payload:
+        _apply_jackett_subscription_pending(subs, key, sub, pending_payload)
 
     logger.info(
         "Jackett/RT sub updated via Rutracker direct: key=%s ep=%s→%s/%s task=%s",
@@ -20712,8 +21167,19 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
     for key, sub in list(jackett_subs.items()):
         try:
+            pending = sub.get("pending_notification")
+            if isinstance(pending, dict):
+                if await _deliver_jackett_subscription_pending_notification(app, subs, key, sub, pending):
+                    changed = True
+                    logger.info("Pending Jackett subscription notification delivered: key=%s", key)
+                continue
+
             # Skip subscriptions that have been marked permanently unavailable.
             if sub.get("unavailable_at"):
+                continue
+            if _background_chat_id(sub.get("chat_id")) is None:
+                subs.pop(key, None)
+                changed = True
                 continue
 
             # Fast path: if the topic is on Rutracker, use the direct API instead of
@@ -20742,7 +21208,11 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 changed = True
                 continue
 
-            chat_id = sub.get("chat_id")
+            chat_id = _background_chat_id(sub.get("chat_id"))
+            if chat_id is None:
+                subs.pop(key, None)
+                changed = True
+                continue
             short_q = search_query[:40] + "…" if len(search_query) > 40 else search_query
             episode_info = _parse_episode_info(candidate.title)
             progress = f"\nСерии: {episode_info[0]} из {episode_info[1]}" if episode_info else ""
@@ -20809,23 +21279,22 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     f"\n🔎 {candidate.title}"
                     f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
                     f"{progress}\n\n"
-                    "Задача добавлена в DS. Подписка снята."
+                    "Задача добавлена в Download Station. Подписка снята."
                 )
-                kb = InlineKeyboardMarkup([[
+                kb = _keyboard_with_close([[
                     InlineKeyboardButton(
                         BUTTON_SHOW_TASK,
                         callback_data=_task_callback("info", task_id),
                     ),
-                    InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
                 ]])
             elif task_id:
                 text = (
-                    f"🔔 Подписка «{short_q}» обновилась — задача добавлена в DS!\n"
+                    f"🔔 Подписка «{short_q}» обновилась — задача добавлена в Download Station!\n"
                     f"\n🔎 {candidate.title}"
                     f"\n📦 {candidate.size} | 🌱 {candidate.seeders} | 📡 {candidate.tracker}"
                     f"{progress}"
                 )
-                kb = InlineKeyboardMarkup([[
+                kb = _keyboard_with_close([[
                     InlineKeyboardButton(
                         BUTTON_SHOW_TASK,
                         callback_data=_task_callback("info", task_id),
@@ -20858,7 +21327,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     f"{progress}"
                     "\n\nАвто-загрузка отключена для этой подписки."
                 )
-                kb = InlineKeyboardMarkup([[
+                kb = _keyboard_with_close([[
                     InlineKeyboardButton(
                         "🔍 Посмотреть и скачать",
                         callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
@@ -20877,7 +21346,7 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     f"{progress}"
                     "\n\n⚠️ Авто-загрузка не удалась — скачайте вручную."
                 )
-                kb = InlineKeyboardMarkup([[
+                kb = _keyboard_with_close([[
                     InlineKeyboardButton(
                         "🔍 Посмотреть и скачать",
                         callback_data=f"{SUB_CALLBACK_PREFIX}:jackett_view:{key}",
@@ -20895,6 +21364,26 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                     sent = True
                 except Exception:
                     logger.warning("Failed to notify chat %s for Jackett subscription", chat_id, exc_info=True)
+                    if task_id:
+                        checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                        seen_titles = list(dict.fromkeys([
+                            *sub.get("seen_titles", []),
+                            *(r.title for r in new_results),
+                        ]))
+                        sub["pending_notification"] = _jackett_subscription_pending_payload(
+                            text=text,
+                            task_id=task_id,
+                            complete=is_complete,
+                            final_action_succeeded=final_action_succeeded,
+                            title=candidate.title,
+                            checked_at=checked_at,
+                            new_episode_end=episode_info[0] if episode_info else None,
+                            total_episodes=episode_info[1] if episode_info else None,
+                            seen_titles=seen_titles,
+                            topic_url=str(getattr(candidate, "topic_url", "") or ""),
+                            tracker=str(getattr(candidate, "tracker", "") or ""),
+                        )
+                        changed = True
 
             if sent:
                 checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -20936,13 +21425,14 @@ async def _mark_rutracker_subscription_unavailable(
         f"ID темы: {topic_id}\n\n"
         "Я приостановил проверку этой подписки. Если тема удалена окончательно, её можно убрать."
     )
-    keyboard = InlineKeyboardMarkup([[
+    keyboard = _keyboard_with_close([[
         InlineKeyboardButton("🗑️ Удалить подписку", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}")
     ]])
 
-    if chat_id:
+    send_chat_id = _background_chat_id(chat_id)
+    if send_chat_id is not None:
         try:
-            await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+            await app.bot.send_message(chat_id=send_chat_id, text=text, reply_markup=keyboard)
         except Exception:
             logger.warning("Failed to notify chat %s about unavailable topic %s", chat_id, topic_id, exc_info=True)
             return False
@@ -20998,7 +21488,7 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
             "Авто-загрузка отключена для этой подписки.\n"
             "Подписка снята автоматически."
         )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
+        keyboard = _keyboard_with_close([[InlineKeyboardButton(
             "🔍 Открыть тему",
             url=_rutracker_topic_url(topic_id),
         )]])
@@ -21010,7 +21500,7 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
             f"Эпизодов: {last_end} → {new_end} из {new_total}\n"
             "Авто-загрузка отключена для этой подписки."
         )
-        keyboard = InlineKeyboardMarkup([[
+        keyboard = _keyboard_with_close([[
             InlineKeyboardButton("🔍 Открыть тему", url=_rutracker_topic_url(topic_id)),
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
         ]])
@@ -21021,7 +21511,7 @@ def _rutracker_subscription_notification(pending: dict, topic_id: str) -> tuple[
         f"Эпизодов: {last_end} → {new_end} из {new_total}\n"
         "Торрент обновлён в Download Station."
     )
-    keyboard = InlineKeyboardMarkup([[
+    keyboard = _keyboard_with_close([[
         InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", task_id)),
         InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{topic_id}"),
     ]])
@@ -21036,8 +21526,8 @@ async def _deliver_rutracker_subscription_notification(
     pending: dict,
 ) -> bool:
     text, keyboard = _rutracker_subscription_notification(pending, topic_id)
-    chat_id = sub.get("chat_id")
-    if chat_id:
+    chat_id = _background_chat_id(sub.get("chat_id"))
+    if chat_id is not None:
         try:
             await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
         except Exception:
@@ -21072,6 +21562,10 @@ async def _check_subscriptions(app: Application) -> None:
         if sub.get("type") == "jackett":
             continue
         if sub.get("unavailable_at"):
+            continue
+        if _background_chat_id(sub.get("chat_id")) is None:
+            subs.pop(topic_id, None)
+            changed = True
             continue
         try:
             pending = sub.get("pending_notification")

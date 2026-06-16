@@ -76,8 +76,11 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = _make_store(self._tmp.name)
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
 
     def tearDown(self):
+        self._allowed_patch.stop()
         self._tmp.cleanup()
 
     def _run(self, sub: dict, *, ds_raises: Exception | None = None,
@@ -166,8 +169,11 @@ class JackettRtDirectSeasonCompleteTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = _make_store(self._tmp.name)
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
 
     def tearDown(self):
+        self._allowed_patch.stop()
         self._tmp.cleanup()
 
     def _run(self, sub: dict, new_title: str = "Show S1E1-5 of 10"):
@@ -229,8 +235,11 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = _make_store(self._tmp.name)
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
 
     def tearDown(self):
+        self._allowed_patch.stop()
         self._tmp.cleanup()
 
     def test_failed_download_in_final_only_falls_back_to_notify(self):
@@ -490,6 +499,58 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
         self.assertIn("Подписка снята", text)
 
 
+    def test_send_failure_after_jackett_download_retries_notification_only(self):
+        from jackett import JackettResult
+        sub_key = "jackett:pending-send"
+        sub = {
+            "type": "jackett",
+            "chat_id": 100,
+            "query": "Show",
+            "title": "Show S1E1-1 of 10",
+            "tracker": "kinozal",
+            "topic_url": "https://kinozal.tv/topic/77",
+            "notify_policy": bot.NOTIFY_EACH_UPDATE,
+            "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
+            "last_episode_end": 1,
+            "total_episodes": 10,
+            "last_check": "2026-05-01 10:00",
+            "seen_titles": [],
+        }
+        self.store.save_topic_subscriptions({sub_key: sub})
+
+        candidate = JackettResult(
+            title="Show S1E1-5 of 10", size="10 GB", seeders=10,
+            torrent_url="http://jk/x", magnet_url=None,
+            tracker="kinozal", topic_url="https://kinozal.tv/topic/77",
+        )
+        app = MagicMock()
+        app.bot.send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None])
+        jackett = MagicMock()
+        jackett.search.return_value = [candidate]
+        download = AsyncMock(return_value="task-1")
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "select_jackett_subscription_candidate", return_value=candidate),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct",
+                         AsyncMock(return_value=False)),
+            patch.object(bot, "_jackett_subscription_auto_download", download),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+            stored = self.store.load_topic_subscriptions()[sub_key]
+            self.assertIn("pending_notification", stored)
+            self.assertEqual(stored["last_episode_end"], 1)
+
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        stored = self.store.load_topic_subscriptions()[sub_key]
+        self.assertNotIn("pending_notification", stored)
+        self.assertEqual(stored["last_episode_end"], 5)
+        self.assertEqual(download.await_count, 1)
+        self.assertEqual(jackett.search.call_count, 1)
+
+
 class PendingDownloadSubscribePreserveTests(unittest.TestCase):
     """Bug F: queueing a failed «⬇️📺 Серии» / «⬇️🎯 Сезон» must restore the
     subscription when the pending download eventually succeeds."""
@@ -497,8 +558,11 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = _make_store(self._tmp.name)
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
 
     def tearDown(self):
+        self._allowed_patch.stop()
         self._tmp.cleanup()
 
     def _seed_subscribe_entry(
@@ -587,6 +651,47 @@ class PendingDownloadSubscribePreserveTests(unittest.TestCase):
         self._run_loop_with_success()
         subs = self.store.load_topic_subscriptions()
         self.assertEqual(subs, {})
+
+    def test_pending_success_notification_retry_does_not_download_again(self):
+        from datetime import datetime
+        self.store.save_pending_downloads({
+            "p3": {
+                "chat_id": 100,
+                "added_at": datetime.now(bot.DISPLAY_TIMEZONE).isoformat(),
+                "title": "One-shot Movie",
+                "topic_url": "",
+                "torrent_url": "http://x",
+                "magnet_url": None,
+                "tracker": "",
+                "source": "jackett",
+                "subscribe": False,
+                "attempts": 0,
+                "last_attempt_at": None,
+                "last_error": "",
+            }
+        })
+        app = MagicMock()
+        app.bot.send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None])
+        attempt = AsyncMock(return_value=("task-x", "torrent-файл"))
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "PENDING_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "PENDING_DOWNLOADS_TTL_HOURS", 24.0),
+            patch.object(bot, "_attempt_pending_download", attempt),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_record_download_added_history"),
+        ):
+            asyncio.run(bot._run_pending_downloads_once(app))
+            pending_after_first = self.store.load_pending_downloads()
+            self.assertEqual(pending_after_first["p3"]["notification_pending"], "success")
+
+            asyncio.run(bot._run_pending_downloads_once(app))
+
+        self.assertEqual(attempt.await_count, 1)
+        self.assertEqual(app.bot.send_message.await_count, 2)
+        self.assertEqual(self.store.load_pending_downloads(), {})
 
     def test_pending_entry_carries_policy_from_search(self):
         """Bug F upstream: _pending_download_entry_from_result must preserve

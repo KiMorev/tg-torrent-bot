@@ -284,14 +284,25 @@ class JsonStateStore:
                     str(s) for s in value.get("subscribers", []) if s
                 ]
                 plex_done: bool = bool(value.get("plex_done"))
+                raw_plex_poll = value.get("plex_poll", {})
+                plex_poll: dict[str, list[str]] = {}
+                if isinstance(raw_plex_poll, dict):
+                    for name, sent_ids in raw_plex_poll.items():
+                        if not isinstance(sent_ids, list):
+                            continue
+                        sent = sorted({str(chat_id) for chat_id in sent_ids if chat_id})
+                        if sent:
+                            plex_poll[str(name)] = sent
                 # Skip entries that carry no useful state at all.
-                if not status and not subscribers and not plex_done:
+                if not status and not subscribers and not plex_done and not plex_poll:
                     continue
                 entry: dict = {"status": status, "sent": sent, "failures": failures}
                 if subscribers:
                     entry["subscribers"] = subscribers
                 if plex_done:
                     entry["plex_done"] = True
+                if plex_poll:
+                    entry["plex_poll"] = plex_poll
                 tasks[str(task_id)] = entry
             else:
                 tasks[str(task_id)] = str(value)

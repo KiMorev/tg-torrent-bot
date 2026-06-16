@@ -455,6 +455,21 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(sorted(entry["subscribers"]), ["777", "888"])
         self.assertEqual(entry["status"], "")
 
+    def test_notified_tasks_preserve_plex_poll_delivery_state(self) -> None:
+        self.store.save_notified_tasks({
+            "tid3": {
+                "status": "",
+                "sent": [],
+                "failures": {},
+                "plex_poll": {"found": ["100"], "timeout": ["200"]},
+            }
+        })
+        loaded = self.store.load_notified_tasks()
+        self.assertEqual(
+            loaded["tid3"]["plex_poll"],
+            {"found": ["100"], "timeout": ["200"]},
+        )
+
     def test_notified_tasks_subscriber_only_entry_not_dropped(self) -> None:
         """An entry with no status but with subscribers must not be silently discarded."""
         self.store.save_notified_tasks({

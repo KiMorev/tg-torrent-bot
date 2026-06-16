@@ -2921,6 +2921,10 @@ class MovieDiscoveryDegradedCacheGuardTests(unittest.TestCase):
 class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
     """Tests for _run_movie_discovery_notifications — per-user seen semantics."""
 
+    def setUp(self):
+        self._allowed_patch = unittest.mock.patch("bot.ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
+
     def _patch_settings(self, settings: dict):
         import bot as _bot_module
         self._orig_load = _bot_module._load_movie_discovery_settings
@@ -2933,6 +2937,7 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         if hasattr(self, "_orig_load"):
             _bot_module._load_movie_discovery_settings = self._orig_load
             _bot_module._save_movie_discovery_settings = self._orig_save
+        self._allowed_patch.stop()
 
     def _make_card(
         self,
@@ -3075,9 +3080,8 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         await _run_movie_discovery_notifications(cache, app)
         app.bot.send_message.assert_not_called()
 
-    async def test_quiet_hours_skips_push_and_does_not_mark_seen(self):
-        """Outside quiet hours we don't push AND don't mark seen — so next
-        in-window refresh will deliver the same diff naturally."""
+    async def test_quiet_hours_queues_push_and_does_not_mark_seen(self):
+        """Outside quiet hours we queue a snapshot and do not mark it notified."""
         settings = {
             "movie_subscriptions": {"100": {}},
             "movie_seen_by_user": {},
@@ -3088,8 +3092,28 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         with unittest.mock.patch("bot._is_in_notification_window", return_value=False):
             await _run_movie_discovery_notifications(cache, app)
         app.bot.send_message.assert_not_called()
-        # Seen set must remain empty — film will be delivered later
+        # Seen set must remain empty — film will be delivered later.
         self.assertEqual(settings.get("movie_seen_by_user", {}).get("100", {}), {})
+        queued = settings.get("movie_notification_pending", {}).get("100", {})
+        self.assertEqual([card.get("kp_id") for card in queued.get("cards", [])], [1])
+
+    async def test_queued_quiet_hours_push_delivers_even_if_cache_lost_card(self):
+        settings = {
+            "movie_subscriptions": {"100": {}},
+            "movie_seen_by_user": {},
+            "movie_notification_pending": {
+                "100": {"cards": [self._make_card("Ночной", kp_id=7)]},
+            },
+        }
+        self._patch_settings(settings)
+        app = AsyncMock()
+        cache = {"cards": []}
+        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+            await _run_movie_discovery_notifications(cache, app)
+
+        app.bot.send_message.assert_called_once()
+        self.assertNotIn("100", settings.get("movie_notification_pending", {}))
+        self.assertIn("kp:7", settings.get("movie_seen_by_user", {}).get("100", {}))
 
     async def test_permanent_delivery_failures_unsubscribe_after_cap(self):
         settings = {
@@ -3119,6 +3143,7 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
             unittest.mock.patch("bot._load_movie_discovery_settings", side_effect=lambda: settings) as load,
             unittest.mock.patch("bot._save_movie_discovery_settings"),
             unittest.mock.patch("bot._is_in_notification_window", return_value=True),
+            unittest.mock.patch("bot.ALLOWED_CHAT_IDS", {100, 200}),
             unittest.mock.patch(
                 "bot._send_movie_notification_push_to_user_result",
                 new=AsyncMock(return_value=(False, "network", False)),
@@ -3211,7 +3236,10 @@ class MovieDiscoveryNotificationTests(unittest.IsolatedAsyncioTestCase):
         self._patch_settings(settings)
         app = AsyncMock()
         cache = {"cards": [self._make_card("X", kp_id=42)]}
-        with unittest.mock.patch("bot._is_in_notification_window", return_value=True):
+        with (
+            unittest.mock.patch("bot._is_in_notification_window", return_value=True),
+            unittest.mock.patch("bot.ALLOWED_CHAT_IDS", {100, 200}),
+        ):
             await _run_movie_discovery_notifications(cache, app)
         # Only user 200 gets a push (user 100 already seen)
         recipient_ids = [call.kwargs["chat_id"] for call in app.bot.send_message.await_args_list]
@@ -5063,6 +5091,13 @@ class PlexPreDownloadCheckTests(unittest.TestCase):
 class PlexPollingTests(unittest.TestCase):
     """Tests for _plex_find_by_ds_title and _plex_poll_after_finish."""
 
+    def setUp(self):
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
+
+    def tearDown(self):
+        self._allowed_patch.stop()
+
     def _labels(self, keyboard):
         return [button.text for row in keyboard.inline_keyboard for button in row]
 
@@ -5158,6 +5193,8 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_plex_library_find", return_value=None),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
             patch.object(bot, "_plex_consecutive_failures", 3),
+            patch.object(bot, "_load_notified_tasks", return_value={}),
+            patch.object(bot, "_mark_plex_poll_sent"),
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "task1", "Some.Movie.2024", [100], max_attempts=1, interval_seconds=0
@@ -5295,6 +5332,8 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_refresh_plex_library", AsyncMock()),
             patch.object(bot, "_plex_find_by_ds_title", return_value=None),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_load_notified_tasks", return_value={}),
+            patch.object(bot, "_mark_plex_poll_sent"),
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "task1", "Some.Movie.2024", [100], max_attempts=1, interval_seconds=0
@@ -5585,6 +5624,32 @@ class PlexPollingTests(unittest.TestCase):
         # _save_notified_tasks must have been called with plex_done=True for task1
         self.assertIn("task1", saved)
         self.assertTrue(saved["task1"].get("plex_done"))
+
+    def test_poll_after_finish_does_not_resend_already_delivered_found(self):
+        fake_app = MagicMock()
+        fake_app.bot.send_message = AsyncMock()
+        target = MagicMock()
+        target.rating_key = "rk1"
+
+        with (
+            patch.object(bot, "_refresh_plex_library", AsyncMock()),
+            patch.object(bot, "_plex_poll_lookup_target", AsyncMock(return_value=(target, "1", "Movie"))),
+            patch.object(bot, "_plex_machine_id", "machine1"),
+            patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "_load_notified_tasks",
+                         return_value={"task1": {"plex_poll": {"found": ["100"]}}}),
+            patch.object(bot, "_mark_plex_poll_sent") as mark_sent,
+            patch.object(bot, "_mark_plex_poll_done") as mark_done,
+            patch.object(bot, "_record_download_history") as history,
+        ):
+            asyncio.run(_plex_poll_after_finish(
+                fake_app, "task1", "Movie", [100], max_attempts=1, interval_seconds=0
+            ))
+
+        fake_app.bot.send_message.assert_not_awaited()
+        mark_sent.assert_not_called()
+        history.assert_not_called()
+        mark_done.assert_called_once_with("task1")
 
     def test_poll_after_finish_cancel_does_not_persist_plex_done_marker(self):
         """Cancelled polling must be retried after restart, not marked done."""
@@ -9505,6 +9570,13 @@ class ExtractRutrackerTopicIdTests(unittest.TestCase):
 
 class CheckJackettSubViaRutrackerDirectTests(unittest.TestCase):
     """Unit tests for the Rutracker-direct fast path in Jackett subscription checks."""
+
+    def setUp(self):
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
+
+    def tearDown(self):
+        self._allowed_patch.stop()
 
     def _make_app(self):
         app = MagicMock()

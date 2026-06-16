@@ -1048,8 +1048,11 @@ class PendingDownloadsLoopTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self._store = _make_store(self._tmp.name)
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
 
     def tearDown(self) -> None:
+        self._allowed_patch.stop()
         self._tmp.cleanup()
 
     def _seed_entry(self, *, attempts: int = 0, hours_ago: float = 0.0) -> str:
@@ -2108,6 +2111,35 @@ class DuplicateDetectionTests(unittest.TestCase):
         self.assertIn("dup1", notified)
         self.assertEqual(notified["dup1"]["status"], "error:torrent_duplicate")
 
+    def test_duplicate_send_failure_is_not_marked_or_deleted(self) -> None:
+        duplicate = self._dup_task()
+        original = {
+            "id": "orig1",
+            "title": "Movie.mkv",
+            "status": "downloading",
+            "type": "bt",
+            "size": 100,
+            "additional": {"transfer": {"size_downloaded": 10}, "detail": {}},
+        }
+        self._store.save_task_owners({"dup1": 100})
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [duplicate, original]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"error"}),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+        ):
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        self.assertNotIn("dup1", self._store.load_notified_tasks())
+        mock_ds.delete_task.assert_not_called()
+
 
 class SubscriberNotificationTests(unittest.TestCase):
     """Users who subscribed via sub_notify are notified when the task finishes."""
@@ -2140,7 +2172,7 @@ class SubscriberNotificationTests(unittest.TestCase):
             patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
             patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
             patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
-            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {888, 999}),
         ):
             asyncio.run(_run_task_notifications_once(mock_app))
 
@@ -2210,7 +2242,7 @@ class SubscriberNotificationTests(unittest.TestCase):
             patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
             patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
             patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
-            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {888, 999}),
             patch.object(bot, "PLEX_ENABLED", False),
         ):
             asyncio.run(_run_task_notifications_once(mock_app))
