@@ -7289,13 +7289,92 @@ def _youtube_job_to_task(job: dict) -> dict:
 
 
 def _youtube_job_card_text(job: dict) -> str:
-    text = _view_format_task_card(
-        _youtube_job_to_task(job),
-        display_timezone=DISPLAY_TIMEZONE,
-    )
+    text = _youtube_pipeline_card_text(job)
     if job.get("status") == "failed" and job.get("error"):
         text += f"\nОшибка: {job['error']}"
     return text
+
+
+def _youtube_has_separate_audio(job: dict) -> bool:
+    return "+" in str(job.get("format_id") or "")
+
+
+def _youtube_stage_line(done: bool, active: bool, label: str) -> str:
+    marker = "✅" if done else "⬇️" if active else "☐"
+    return f"{marker} {label}"
+
+
+def _youtube_current_file_progress(job: dict) -> str:
+    downloaded = int(job.get("downloaded_bytes") or 0)
+    total = int(job.get("total_bytes") or 0)
+    speed = int(job.get("speed_bytes") or 0)
+    eta = job.get("eta_seconds")
+
+    parts: list[str] = []
+    percent = _progress_percent(downloaded, total)
+    if percent is not None:
+        parts.append(f"{percent:.0f}%")
+    elif downloaded:
+        parts.append(_format_size(downloaded))
+    if speed:
+        parts.append(f"{_format_size(speed)}/с")
+    try:
+        eta_seconds = int(eta)
+    except (TypeError, ValueError):
+        eta_seconds = 0
+    if eta_seconds > 0:
+        parts.append(f"осталось {_youtube_duration_text(eta_seconds)}")
+    return " · ".join(parts)
+
+
+def _youtube_pipeline_card_text(job: dict) -> str:
+    status = str(job.get("status") or "queued")
+    separate_audio = _youtube_has_separate_audio(job)
+    media_step = str(job.get("media_step") or "")
+    video_done = bool(job.get("video_done")) or status in {"processing", "completed"}
+    audio_done = bool(job.get("audio_done")) or (separate_audio and status in {"processing", "completed"})
+    download_done = status in {"processing", "completed"} or (video_done and (audio_done or not separate_audio))
+
+    lines = [
+        "YouTube",
+        f"Название: {job.get('title') or job.get('video_id') or 'без названия'}",
+    ]
+    if job.get("quality"):
+        lines.append(f"Качество: {job.get('quality')}")
+    lines.append("")
+    lines.append(_youtube_stage_line(status != "queued", status == "queued", "В очереди"))
+    lines.append(_youtube_stage_line(
+        status in {"downloading", "processing", "completed"},
+        status == "fetching_metadata",
+        "Подготовка",
+    ))
+
+    video_active = status == "downloading" and media_step in {"", "video"}
+    lines.append(_youtube_stage_line(video_done or download_done, video_active, "Скачивание видео"))
+    if video_active:
+        progress = _youtube_current_file_progress(job)
+        if progress:
+            lines.append(f"   Текущий файл: {progress}")
+
+    if separate_audio:
+        audio_active = status == "downloading" and media_step == "audio"
+        lines.append(_youtube_stage_line(audio_done, audio_active, "Скачивание аудио"))
+        if audio_active:
+            progress = _youtube_current_file_progress(job)
+            if progress:
+                lines.append(f"   Текущий файл: {progress}")
+        lines.append(_youtube_stage_line(
+            status == "completed",
+            status == "processing",
+            "Сборка MP4",
+        ))
+
+    lines.append(_youtube_stage_line(
+        status == "completed",
+        status == "processing" and not separate_audio,
+        "Обложка и metadata",
+    ))
+    return "\n".join(lines)
 
 
 def _youtube_register_job_message(job_id: str, chat_id: int | None, message_id: int | None) -> None:
@@ -7404,18 +7483,39 @@ def _youtube_check_download_dir() -> None:
             )
 
 
-def _youtube_progress_hook(job_id: str):
+def _youtube_progress_hook(job_id: str, *, separate_streams: bool = False):
     last_saved_at = 0.0
+    current_filename = ""
+    current_part = 0
 
     def _hook(payload: dict) -> None:
-        nonlocal last_saved_at
+        nonlocal current_filename, current_part, last_saved_at
         status = str(payload.get("status") or "")
         now_ts = time.time()
-        if status == "downloading" and now_ts - last_saved_at < YOUTUBE_PROGRESS_SAVE_INTERVAL_SECONDS:
+        filename = str(payload.get("filename") or payload.get("tmpfilename") or "")
+        step_changed = False
+        if status == "downloading":
+            if filename and filename != current_filename:
+                current_filename = filename
+                current_part += 1
+                step_changed = True
+            elif current_part <= 0:
+                current_part = 1
+                step_changed = True
+        if (
+            status == "downloading"
+            and not step_changed
+            and now_ts - last_saved_at < YOUTUBE_PROGRESS_SAVE_INTERVAL_SECONDS
+        ):
             return
         fields: dict = {}
         if status == "downloading":
             fields["status"] = "downloading"
+            if separate_streams and current_part >= 2:
+                fields["media_step"] = "audio"
+                fields["video_done"] = True
+            else:
+                fields["media_step"] = "video"
             fields["downloaded_bytes"] = int(payload.get("downloaded_bytes") or 0)
             total = payload.get("total_bytes") or payload.get("total_bytes_estimate")
             if total:
@@ -7424,8 +7524,23 @@ def _youtube_progress_hook(job_id: str):
                 fields["speed_bytes"] = int(payload.get("speed") or 0)
             if payload.get("eta") is not None:
                 fields["eta_seconds"] = int(payload.get("eta") or 0)
+            elif step_changed:
+                fields["eta_seconds"] = 0
         elif status == "finished":
-            fields["status"] = "processing"
+            if separate_streams and current_part <= 1:
+                fields["status"] = "downloading"
+                fields["media_step"] = "audio"
+                fields["video_done"] = True
+                fields["downloaded_bytes"] = 0
+                fields["total_bytes"] = 0
+                fields["eta_seconds"] = 0
+            else:
+                fields["status"] = "processing"
+                fields["media_step"] = "processing"
+                fields["video_done"] = True
+                if separate_streams:
+                    fields["audio_done"] = True
+                fields["eta_seconds"] = 0
             fields["speed_bytes"] = 0
         if fields:
             _youtube_update_job(job_id, **fields)
@@ -7616,7 +7731,10 @@ async def _youtube_worker_once(app: "Application") -> None:
             output_root=Path(YOUTUBE_DOWNLOAD_DIR),
             max_height=int(job.get("target_height") or YOUTUBE_MAX_HEIGHT),
             audio_language=YOUTUBE_AUDIO_LANGUAGE,
-            progress_hook=_youtube_progress_hook(job_id),
+            progress_hook=_youtube_progress_hook(
+                job_id,
+                separate_streams=_youtube_has_separate_audio(job),
+            ),
         )
         job = _youtube_update_job(
             job_id,
