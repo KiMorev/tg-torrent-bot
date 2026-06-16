@@ -806,6 +806,24 @@ class TasksKeyboardCloseTests(unittest.TestCase):
         last_row = keyboard.inline_keyboard[-1]
         self.assertEqual(last_row[0].text, "✖️ Закрыть")
 
+    def test_youtube_task_keyboard_is_read_only(self) -> None:
+        buttons = self._buttons(_task_keyboard("yt_1", status="finished", task_type="youtube"))
+
+        self.assertEqual(buttons["🔄 Обновить статус"], "task:info:yt_1")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+        self.assertNotIn("🗑️ Удалить", buttons)
+        self.assertNotIn("▶️ Запустить", buttons)
+        self.assertNotIn("⏸️ Пауза", buttons)
+
+    def test_tasks_keyboard_does_not_offer_finished_cleanup_for_youtube_only(self) -> None:
+        keyboard = _tasks_keyboard([
+            {"id": "yt_1", "title": "Clip", "status": "finished", "type": "youtube"}
+        ])
+        labels = self._labels(keyboard)
+
+        self.assertNotIn("🧹 Удалить завершенные", labels)
+
     def test_tasks_keyboard_with_admin_scope_still_has_close(self) -> None:
         keyboard = _tasks_keyboard([], scope="all", is_admin=True)
         labels = self._labels(keyboard)

@@ -2056,7 +2056,7 @@ def _task_owner(task_id: str | None, owners: dict[str, int] | None = None) -> in
     if not task_id:
         return None
 
-    return (owners or _load_task_owners()).get(str(task_id))
+    return (owners or _combined_task_owners()).get(str(task_id))
 
 
 def _can_access_task_id(chat_id: int | None, task_id: str) -> bool:
@@ -2072,7 +2072,7 @@ def _filter_tasks_for_scope(tasks: list[dict], chat_id: int | None, scope: str) 
         tasks,
         chat_id,
         scope,
-        owners=_load_task_owners(),
+        owners=_combined_task_owners(),
         is_admin=_is_admin_chat(chat_id),
         scope_all=TASK_LIST_SCOPE_ALL,
     )
@@ -2097,7 +2097,7 @@ def _format_tasks(
     total_count: int | None = None,
     page: int = 0,
 ) -> str:
-    owners = _load_task_owners() if scope == TASK_LIST_SCOPE_ALL else {}
+    owners = _combined_task_owners() if scope == TASK_LIST_SCOPE_ALL else {}
     auto_delete_enabled = _auto_delete_finished_enabled()
     return _view_format_tasks(
         tasks,
@@ -7288,6 +7288,73 @@ def _youtube_job_to_task(job: dict) -> dict:
     return task
 
 
+def _youtube_job_task_id(job_id: str, job: dict) -> str:
+    return str(job.get("id") or job_id or "")
+
+
+def _youtube_job_owner(job: dict) -> int | None:
+    try:
+        return int(job.get("chat_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _youtube_task_owners() -> dict[str, int]:
+    if not _youtube_downloads_enabled():
+        return {}
+
+    owners: dict[str, int] = {}
+    for job_id, job in _youtube_load_jobs().items():
+        if not isinstance(job, dict):
+            continue
+        task_id = _youtube_job_task_id(job_id, job)
+        owner = _youtube_job_owner(job)
+        if task_id and owner is not None:
+            owners[task_id] = owner
+    return owners
+
+
+def _combined_task_owners() -> dict[str, int]:
+    owners = _load_task_owners()
+    combined = {
+        str(task_id): owner
+        for task_id, owner in owners.items()
+    } if isinstance(owners, dict) else {}
+    combined.update(_youtube_task_owners())
+    return combined
+
+
+def _youtube_panel_tasks() -> list[dict]:
+    if not _youtube_downloads_enabled():
+        return []
+
+    tasks: list[dict] = []
+    jobs = _youtube_load_jobs()
+    for job_id, job in sorted(
+        jobs.items(),
+        key=lambda item: str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+        reverse=True,
+    ):
+        if not isinstance(job, dict):
+            continue
+        task_id = _youtube_job_task_id(job_id, job)
+        if not task_id:
+            continue
+        task = _youtube_job_to_task({**job, "id": task_id})
+        if task["status"] == "finished" and job.get("updated_at"):
+            task["finished_at"] = job.get("updated_at")
+        tasks.append(task)
+    return tasks
+
+
+def _download_panel_tasks(ds_tasks: list[dict]) -> list[dict]:
+    return [*ds_tasks, *_youtube_panel_tasks()]
+
+
+def _find_youtube_panel_task(task_id: str) -> dict | None:
+    return _find_task(_youtube_panel_tasks(), task_id)
+
+
 def _youtube_job_card_text(job: dict) -> str:
     text = _youtube_pipeline_card_text(job)
     if job.get("status") == "failed" and job.get("error"):
@@ -9429,11 +9496,12 @@ async def _run_progress_panel_update_once(app) -> None:
         return
 
     try:
-        tasks = await asyncio.to_thread(ds_client.list_tasks)
+        ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError:
         logger.warning("Progress panel update failed to list tasks", exc_info=True)
         return
 
+    tasks = _download_panel_tasks(ds_tasks)
     active_now = _has_active_tasks(tasks)
     if not active_now and not any(DOWNLOAD_PANEL_HAD_ACTIVE.values()):
         return
@@ -23335,7 +23403,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _delete_command_message_safely(update, context, "status command")
 
     try:
-        tasks = await asyncio.to_thread(ds_client.list_tasks)
+        ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
         logger.exception("Failed to list Download Station tasks")
         await _safe_edit_message(
@@ -23344,6 +23412,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    tasks = _download_panel_tasks(ds_tasks)
     scope = _default_list_scope(chat.id)
     visible_tasks = _filter_tasks_for_scope(tasks, chat.id, scope)
     total_count = len(tasks) if _is_admin_chat(chat.id) else None
@@ -24207,7 +24276,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _forget_task_card_message(chat_id, message_id)
         await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
         try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
+            ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
                 _download_station_user_error_text("Не удалось получить список загрузок."),
@@ -24215,6 +24284,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
+        tasks = _download_panel_tasks(ds_tasks)
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
         total_count = len(tasks) if _is_admin_chat(chat_id) else None
         await _edit_download_panel(query, context, visible_tasks, scope, total_count=total_count, page=0)
@@ -24225,7 +24295,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _forget_task_card_message(chat_id, message_id)
         await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
         try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
+            ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
                 _download_station_user_error_text("Не удалось получить список загрузок."),
@@ -24233,6 +24303,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
+        tasks = _download_panel_tasks(ds_tasks)
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
         total_pages = max(1, (len(visible_tasks) + TASK_LIST_PAGE_SIZE - 1) // TASK_LIST_PAGE_SIZE)
         current_page = DOWNLOAD_PANEL_PAGES.get(chat_id, 0)
@@ -24262,7 +24333,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         scope = _normalize_list_scope(task_id, chat_id)
         await _safe_edit_callback(query, "🔎 Проверяю завершенные задачи…")
         try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
+            ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
             await query.edit_message_text(
                 _download_station_user_error_text("Не удалось получить список загрузок."),
@@ -24270,9 +24341,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
-        finished_ids = _finished_task_ids(visible_tasks)
+        visible_ds_tasks = _filter_tasks_for_scope(ds_tasks, chat_id, scope)
+        finished_ids = _finished_task_ids(visible_ds_tasks)
         if not finished_ids:
+            tasks = _download_panel_tasks(ds_tasks)
+            visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
             await query.edit_message_text(
                 "Завершенных задач сейчас нет.",
                 reply_markup=_tasks_keyboard(visible_tasks, scope=scope, is_admin=_is_admin_chat(chat_id)),
@@ -24289,10 +24362,12 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         scope = _normalize_list_scope(task_id, chat_id)
         await _safe_edit_callback(query, "🧹 Удаляю завершенные задачи…")
         try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
-            visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
-            finished_ids = _finished_task_ids(visible_tasks)
+            ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
+            visible_ds_tasks = _filter_tasks_for_scope(ds_tasks, chat_id, scope)
+            finished_ids = _finished_task_ids(visible_ds_tasks)
             if not finished_ids:
+                tasks = _download_panel_tasks(ds_tasks)
+                visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
                 await query.edit_message_text(
                     "Завершенных задач сейчас нет.",
                     reply_markup=_tasks_keyboard(visible_tasks, scope=scope, is_admin=_is_admin_chat(chat_id)),
@@ -24309,7 +24384,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         try:
-            tasks = await asyncio.to_thread(ds_client.list_tasks)
+            ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError:
             await query.edit_message_text(
                 f"Удалено завершенных задач: {len(finished_ids)}.",
@@ -24317,6 +24392,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
+        tasks = _download_panel_tasks(ds_tasks)
         visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
         total_count = len(tasks) if _is_admin_chat(chat_id) else None
         await _edit_message_as_download_panel(
@@ -24494,6 +24570,16 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(
             "Эта задача не относится к вашим загрузкам.",
             reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
+        return
+
+    youtube_task = _find_youtube_panel_task(task_id)
+    if youtube_task:
+        await _safe_edit_callback(query, "🔎 Получаю задачу…")
+        status = (youtube_task.get("status") or "").lower()
+        await query.edit_message_text(
+            _format_task_card(youtube_task, chat_id),
+            reply_markup=_make_task_keyboard(task_id, status, youtube_task.get("type", "")),
         )
         return
 

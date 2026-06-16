@@ -385,7 +385,11 @@ def _tasks_keyboard(
             )
         rows.append(nav_row)
 
-    if _finished_task_ids(tasks):
+    deletable_tasks = [
+        task for task in tasks
+        if (task.get("type") or "").lower() != "youtube"
+    ]
+    if _finished_task_ids(deletable_tasks):
         rows.append(
             [
                 InlineKeyboardButton(
@@ -408,6 +412,13 @@ def _task_keyboard(
 ) -> InlineKeyboardMarkup:
     status = status.lower()
     rows = [[InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))]]
+
+    if (task_type or "").lower() == "youtube":
+        rows.append(
+            [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))]
+        )
+        rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+        return InlineKeyboardMarkup(rows)
 
     if status in {"downloading", "seeding", "finishing", "hash_checking"}:
         rows[0].append(

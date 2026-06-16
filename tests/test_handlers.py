@@ -9244,6 +9244,124 @@ class StatusCommandTests(unittest.TestCase):
         bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
         bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
 
+    def test_status_includes_youtube_download_jobs(self):
+        update = _make_message_update(chat_id=100)
+        context = _make_context()
+        progress_message = MagicMock()
+        progress_message.message_id = 77
+        progress_message.edit_text = AsyncMock()
+        context.bot.send_message.return_value = progress_message
+
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = []
+        bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "file_size": 1024,
+                    "updated_at": "2026-06-16T22:57:00+03:00",
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "ds_client", fake_ds),
+            ):
+                asyncio.run(status(update, context))
+
+        text = progress_message.edit_text.await_args.args[0]
+        self.assertIn("YouTube Clip", text)
+        self.assertIn("1. ✅ YouTube Clip", text)
+        self.assertEqual(bot.DOWNLOAD_PANEL_MESSAGES[100], 77)
+        bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
+        bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
+
+    def test_task_list_callback_includes_youtube_download_jobs(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:list:mine")
+        context = _make_context()
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "file_size": 1024,
+                    "updated_at": "2026-06-16T22:57:00+03:00",
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "ds_client", fake_ds),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("YouTube Clip", text)
+        self.assertIn("1. ✅ YouTube Clip", text)
+
+    def test_task_info_callback_opens_youtube_job_without_download_station(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:info:yt_1")
+        context = _make_context()
+        fake_ds = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "file_size": 1024,
+                    "updated_at": "2026-06-16T22:57:00+03:00",
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "ds_client", fake_ds),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+        fake_ds.list_tasks.assert_not_called()
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("YouTube Clip", text)
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = {
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+        self.assertIn("task:list:default", callbacks)
+        self.assertNotIn("task:delete_ask:yt_1", callbacks)
+
     def test_progress_panel_gets_final_update_when_last_task_finished(self):
         active_task = {
             "id": "t1", "status": "downloading", "title": "Film",
@@ -9275,6 +9393,48 @@ class StatusCommandTests(unittest.TestCase):
 
             self.assertEqual(app.bot.edit_message_text.await_count, 2)
             self.assertFalse(bot.DOWNLOAD_PANEL_HAD_ACTIVE[100])
+        finally:
+            bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
+            bot.DOWNLOAD_PANEL_PAGES.pop(100, None)
+            bot.DOWNLOAD_PANEL_SCOPES.pop(100, None)
+            bot.DOWNLOAD_PANEL_HAD_ACTIVE.pop(100, None)
+
+    def test_progress_panel_updates_for_active_youtube_download(self):
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = []
+        app = MagicMock()
+        app.bot.edit_message_text = AsyncMock()
+
+        bot.DOWNLOAD_PANEL_MESSAGES[100] = 77
+        bot.DOWNLOAD_PANEL_PAGES[100] = 0
+        bot.DOWNLOAD_PANEL_SCOPES[100] = bot.TASK_LIST_SCOPE_MY
+        bot.DOWNLOAD_PANEL_HAD_ACTIVE[100] = False
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = _make_store(tmp)
+                store.save_youtube_downloads({
+                    "yt_1": {
+                        "id": "yt_1",
+                        "chat_id": 100,
+                        "status": "downloading",
+                        "title": "YouTube Clip",
+                        "downloaded_bytes": 10,
+                        "total_bytes": 100,
+                    }
+                })
+
+                with (
+                    patch.object(bot, "ds_client", mock_ds),
+                    patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                    patch.object(bot, "state_store", store),
+                    patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                ):
+                    asyncio.run(_run_progress_panel_update_once(app))
+
+            self.assertEqual(app.bot.edit_message_text.await_count, 1)
+            self.assertIn("YouTube Clip", app.bot.edit_message_text.await_args.kwargs["text"])
+            self.assertTrue(bot.DOWNLOAD_PANEL_HAD_ACTIVE[100])
         finally:
             bot.DOWNLOAD_PANEL_MESSAGES.pop(100, None)
             bot.DOWNLOAD_PANEL_PAGES.pop(100, None)

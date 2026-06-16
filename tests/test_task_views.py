@@ -117,7 +117,7 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("задачи, которые вы запустили через бот", my_text)
         self.assertIn("нажмите «Обновить»", my_text)
         self.assertIn("Задач сейчас нет", all_text)
-        self.assertIn("задачи из Download Station", all_text)
+        self.assertIn("задачи из Download Station и YouTube-очереди", all_text)
 
     def test_format_task_card_for_user_hides_technical_fields(self) -> None:
         text = format_task_card(
