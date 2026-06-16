@@ -107,7 +107,7 @@
 | `tmdb.py` | TMDB API для количества уже вышедших эпизодов в сезоне и карты стартовавших сезонов сериала `/seasons` по Plex external ids. |
 | `tvmaze.py` | TVmaze API для high-confidence проверки aired totals и карты стартовавших сезонов `/seasons` по Plex `imdb`/`tvdb` ids. |
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
-| `youtube_downloads.py` | YouTube URL parsing, metadata через `yt-dlp`, выбор MP4/H.264/AAC формата без транскодирования, план путей, sidecar-файлы и audio-language remux/copy для Plex. |
+| `youtube_downloads.py` | YouTube URL parsing, metadata через `yt-dlp`, выбор MP4/H.264/AAC формата без транскодирования, план путей, sidecar-файлы, collection-friendly MP4 tags и audio-language remux/copy для Plex. |
 | `plex.py` | Plex API, фильмы, сериалы, сезоны, качество, unmatched detection. |
 | `diagnostics.py` | Короткая сводка и подробные разделы диагностики внешних сервисов для `/admin`. |
 | `state_store.py` | Atomic JSON load/save через `JsonStateStore`, append-only JSONL для истории загрузок. |

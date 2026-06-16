@@ -438,28 +438,53 @@ def _normalize_audio_language(audio_language: str | None) -> str | None:
     return value
 
 
-def _apply_audio_language(video_path: Path, audio_language: str | None) -> str | None:
+def _mp4_metadata_fields(info: dict[str, Any], canonical_url: str) -> dict[str, str]:
+    title = str(info.get("title") or "").strip()
+    channel = str(info.get("channel") or info.get("uploader") or "").strip()
+    fields: dict[str, str] = {}
+    if title:
+        fields["title"] = title
+    if channel:
+        fields["artist"] = channel
+        fields["album"] = channel
+    if info.get("upload_date") or info.get("timestamp") or info.get("release_timestamp"):
+        fields["date"] = _upload_date(info)
+    if canonical_url:
+        fields["comment"] = canonical_url
+    return fields
+
+
+def _apply_mp4_metadata(
+    video_path: Path,
+    *,
+    info: dict[str, Any],
+    canonical_url: str,
+    audio_language: str | None,
+) -> str | None:
     language = _normalize_audio_language(audio_language)
-    if not language:
+    metadata = _mp4_metadata_fields(info, canonical_url)
+    if not language and not metadata:
         return None
-    tmp_path = video_path.with_name(f".{video_path.stem}.audio-lang.tmp{video_path.suffix}")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+    ]
+    for key, value in metadata.items():
+        command.extend(["-metadata", f"{key}={value}"])
+    if language:
+        command.extend(["-metadata:s:a:0", f"language={language}"])
+    tmp_path = video_path.with_name(f".{video_path.stem}.metadata.tmp{video_path.suffix}")
     if tmp_path.exists():
         tmp_path.unlink()
     try:
         subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(video_path),
-                "-map",
-                "0",
-                "-c",
-                "copy",
-                "-metadata:s:a:0",
-                f"language={language}",
-                str(tmp_path),
-            ],
+            [*command, str(tmp_path)],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -468,8 +493,21 @@ def _apply_audio_language(video_path: Path, audio_language: str | None) -> str |
     except subprocess.CalledProcessError as exc:
         if tmp_path.exists():
             tmp_path.unlink()
-        raise YouTubeDownloadError("Не удалось проставить язык аудиодорожки через ffmpeg.") from exc
+        raise YouTubeDownloadError("Не удалось проставить MP4 metadata через ffmpeg.") from exc
     return language
+
+
+def _apply_audio_language(video_path: Path, audio_language: str | None) -> str | None:
+    """Compatibility wrapper for tests and callers that only need audio language."""
+    language = _normalize_audio_language(audio_language)
+    if not language:
+        return None
+    return _apply_mp4_metadata(
+        video_path,
+        info={},
+        canonical_url="",
+        audio_language=audio_language,
+    )
 
 
 def download_video(
@@ -522,7 +560,12 @@ def download_video(
         final_path.replace(plan.video_path)
         final_path = plan.video_path
 
-    applied_audio_language = _apply_audio_language(final_path, audio_language)
+    applied_audio_language = _apply_mp4_metadata(
+        final_path,
+        info=info,
+        canonical_url=canonical_url,
+        audio_language=audio_language,
+    )
     write_sidecars(info, choice, canonical_url, plan)
     return {
         "video_id": info.get("id"),

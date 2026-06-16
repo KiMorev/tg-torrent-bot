@@ -623,6 +623,9 @@ YOUTUBE_MIN_FREE_GB=5
 - папка канала дает базовую группировку без перетаскивания канала в имя файла;
 - дата, `video_id`, URL и канал сохраняются в `info.json`, чтобы технические
   идентификаторы не попадали в заголовок Plex-карточки;
+- MP4 metadata содержит `title`, `artist=<channel>`, `album=<channel>`, `date`
+  и YouTube URL в comment; это мягкая попытка дать Plex collection/category по
+  каналу через Local Media Assets без Plex API;
 - `YOUTUBE_AUDIO_LANGUAGE=und` по умолчанию прописывает неопределенный язык
   аудиодорожки через ffmpeg copy/remux, чтобы Plex не показывал ложный
   "Английский"; при необходимости можно поставить `rus` или `auto`.

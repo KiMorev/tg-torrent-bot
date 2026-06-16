@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from youtube_downloads import (
     _apply_audio_language,
+    _apply_mp4_metadata,
     YouTubeUnsupportedError,
     build_path_plan,
     compatible_quality_options,
@@ -230,3 +231,35 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
 
         self.assertIsNone(language)
         run.assert_not_called()
+
+    def test_apply_mp4_metadata_sets_channel_as_album_for_plex_collections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "Clip.mp4"
+            video_path.write_bytes(b"old")
+
+            def fake_run(cmd, **kwargs):
+                self.assertIn("-c", cmd)
+                self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+                self.assertIn("title=Clip title", cmd)
+                self.assertIn("artist=Channel Name", cmd)
+                self.assertIn("album=Channel Name", cmd)
+                self.assertIn("date=2026-06-16", cmd)
+                self.assertIn("comment=https://www.youtube.com/watch?v=abcdefghijk", cmd)
+                self.assertIn("language=und", cmd)
+                Path(cmd[-1]).write_bytes(b"new")
+
+            with patch("youtube_downloads.subprocess.run", side_effect=fake_run) as run:
+                language = _apply_mp4_metadata(
+                    video_path,
+                    info={
+                        "title": "Clip title",
+                        "channel": "Channel Name",
+                        "upload_date": "20260616",
+                    },
+                    canonical_url="https://www.youtube.com/watch?v=abcdefghijk",
+                    audio_language="und",
+                )
+
+            self.assertEqual(language, "und")
+            self.assertEqual(video_path.read_bytes(), b"new")
+            run.assert_called_once()
