@@ -25117,6 +25117,7 @@ def _cleanup_tmp_dir() -> None:
 
 def _run_polling(app: Application) -> None:
     app.run_polling(
+        bootstrap_retries=5,
         drop_pending_updates=True,
         allowed_updates=TELEGRAM_ALLOWED_UPDATES,
     )

@@ -9460,6 +9460,7 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
         _run_polling(app)
 
         app.run_polling.assert_called_once_with(
+            bootstrap_retries=5,
             drop_pending_updates=True,
             allowed_updates=TELEGRAM_ALLOWED_UPDATES,
         )
