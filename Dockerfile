@@ -5,6 +5,8 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+RUN apk add --no-cache ffmpeg
+
 COPY requirements.txt .
 RUN pip install \
     --no-cache-dir \
@@ -13,7 +15,7 @@ RUN pip install \
     --index-url https://pypi.org/simple \
     -r requirements.txt
 
-COPY access_control.py app_context.py bot.py config.py diagnostics.py download_station.py filename_normalizer.py state_store.py storage.py subscription_policy.py series_bulk_planner.py series_continue.py search_intent.py voice_transcription.py gpt_client.py gpt_features.py rutracker.py kinopoisk.py jackett.py jackett_guard.py jackett_subscriptions.py movie_discovery.py formatters.py keyboards.py plex.py plex_webhooks.py progressive_status.py task_policies.py task_views.py torrent_utils.py tracker_service.py tmdb.py tvmaze.py ./
+COPY access_control.py app_context.py bot.py config.py diagnostics.py download_station.py filename_normalizer.py state_store.py storage.py subscription_policy.py series_bulk_planner.py series_continue.py search_intent.py voice_transcription.py gpt_client.py gpt_features.py rutracker.py kinopoisk.py jackett.py jackett_guard.py jackett_subscriptions.py movie_discovery.py formatters.py keyboards.py plex.py plex_webhooks.py progressive_status.py task_policies.py task_views.py torrent_utils.py tracker_service.py tmdb.py tvmaze.py youtube_downloads.py ./
 COPY assets/ ./assets/
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \

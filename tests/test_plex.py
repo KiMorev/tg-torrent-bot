@@ -278,6 +278,44 @@ class PlexClientSectionTests(unittest.TestCase):
                           return_value=_mock_response(xml)):
             self.assertEqual(client.find_movie_section(), "")
 
+    def test_finds_section_by_title(self):
+        client = _make_client()
+        xml = (
+            '<MediaContainer>'
+            '  <Directory type="movie" key="1" title="Movies"/>'
+            '  <Directory type="movie" key="9" title="YouTube"/>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)):
+            self.assertEqual(client.find_section_by_title("youtube"), "9")
+
+    def test_get_section_videos_reads_generic_video_section(self):
+        client = _make_client()
+        xml = (
+            '<MediaContainer>'
+            '  <Video title="Clip [yt-abcdefghijk]" year="2026" ratingKey="99" addedAt="100">'
+            '    <Media videoResolution="720"><Part file="/volume1/youtube/Clip [yt-abcdefghijk].mp4"/></Media>'
+            '  </Video>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)):
+            videos = client.get_section_videos("9")
+
+        self.assertEqual(len(videos), 1)
+        self.assertEqual(videos[0].rating_key, "99")
+        self.assertIn("abcdefghijk", videos[0].file_paths[0])
+
+    def test_refresh_section_accepts_empty_success_response(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 204
+        resp.ok = True
+        resp.content = b""
+        with patch.object(client._session, "get", return_value=resp) as mock_get:
+            self.assertTrue(client.refresh_section("9"))
+
+        self.assertIn("/library/sections/9/refresh", mock_get.call_args.args[0])
+
 
 # ---------------------------------------------------------------------------
 # PlexClient — get_all_movies

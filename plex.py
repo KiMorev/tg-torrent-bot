@@ -75,6 +75,13 @@ class PlexParseError(PlexAPIError):
 
 
 @dataclass
+class PlexSection:
+    key: str
+    title: str
+    type: str
+
+
+@dataclass
 class PlexMovie:
     title: str
     year: int
@@ -208,6 +215,26 @@ class PlexClient:
             # Plex returned non-XML (HTML error page, truncated body, etc.)
             raise PlexParseError(f"Malformed response from {path}: {exc}") from exc
 
+    def _get_ok(self, path: str, **params: Any) -> bool:
+        url = f"{self._base}{path}"
+        try:
+            resp = self._session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+        except requests.Timeout as exc:
+            raise PlexTimeoutError(f"Timeout connecting to {path}") from exc
+        except requests.ConnectionError as exc:
+            raise PlexConnectionError(f"Connection failed: {exc}") from exc
+        except requests.RequestException as exc:
+            raise PlexAPIError(f"Request failed: {exc}", error_kind="other") from exc
+
+        if resp.status_code == 401:
+            raise PlexAuthError("Invalid Plex token (HTTP 401)")
+        if not resp.ok:
+            raise PlexAPIError(
+                f"HTTP {resp.status_code} from {path}",
+                error_kind="http",
+            )
+        return True
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -236,6 +263,40 @@ class PlexClient:
             if directory.get("type") == _SECTION_TYPE_MOVIE:
                 return directory.get("key", "")
         return ""
+
+    def list_sections(self) -> list[PlexSection]:
+        root = self._get("/library/sections")
+        sections: list[PlexSection] = []
+        for directory in root.findall("Directory"):
+            key = directory.get("key", "")
+            if not key:
+                continue
+            sections.append(PlexSection(
+                key=key,
+                title=directory.get("title", ""),
+                type=directory.get("type", ""),
+            ))
+        return sections
+
+    def find_section_by_title(self, title: str) -> str:
+        wanted = str(title or "").strip().casefold()
+        if not wanted:
+            return ""
+        for section in self.list_sections():
+            if section.title.strip().casefold() == wanted:
+                return section.key
+        return ""
+
+    def refresh_section(self, section_id: str) -> bool:
+        if not section_id:
+            return False
+        return self._get_ok(f"/library/sections/{section_id}/refresh")
+
+    def get_section_videos(self, section_id: str) -> list[PlexMovie]:
+        if not section_id:
+            return []
+        root = self._get(f"/library/sections/{section_id}/all")
+        return [_parse_video(v) for v in root.findall("Video")]
 
     def _ensure_section(self) -> str:
         if not self._section_id:

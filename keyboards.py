@@ -21,6 +21,7 @@ ADMIN_CALLBACK_PREFIX = "admin"
 SEARCH_CALLBACK_PREFIX = "srch"
 JACKETT_SELECT_PREFIX = "jk"  # used inside srch: namespace
 SUB_CALLBACK_PREFIX = "sub"
+YOUTUBE_CALLBACK_PREFIX = "yt"
 
 TASK_LIST_SCOPE_ALL = "all"
 TASK_LIST_SCOPE_MY = "mine"
@@ -121,6 +122,46 @@ def _task_error_keyboard(
         ])
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
+
+
+def _youtube_disabled_keyboard(url: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if url:
+        rows.append([InlineKeyboardButton("Открыть YouTube", url=url)])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _youtube_preview_keyboard(
+    token: str,
+    qualities: list[tuple[int, str]],
+    *,
+    url: str | None = None,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    quality_buttons = [
+        InlineKeyboardButton(label, callback_data=f"{YOUTUBE_CALLBACK_PREFIX}:dl:{token}:{height}")
+        for height, label in qualities
+    ]
+    for index in range(0, len(quality_buttons), 2):
+        rows.append(quality_buttons[index:index + 2])
+    if url:
+        rows.append([InlineKeyboardButton("Открыть YouTube", url=url)])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _youtube_close_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _youtube_plex_keyboard(plex_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
 
 
 def _admin_panel_keyboard(
@@ -262,7 +303,10 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("➕ Трекеры", callback_data=_admin_callback("diag_trackers")),
                 InlineKeyboardButton("🎬 Plex", callback_data=_admin_callback("diag_plex")),
             ],
-            [InlineKeyboardButton("🤖 GPT / Voice", callback_data=_admin_callback("diag_ai"))],
+            [
+                InlineKeyboardButton("▶️ YouTube", callback_data=_admin_callback("diag_youtube")),
+                InlineKeyboardButton("🤖 GPT / Voice", callback_data=_admin_callback("diag_ai")),
+            ],
             [
                 InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback("diagnostics")),
                 InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home")),

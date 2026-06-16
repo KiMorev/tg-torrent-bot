@@ -1,7 +1,11 @@
 import html
+import importlib.util
+import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, tzinfo
+from pathlib import Path
 
 import requests
 
@@ -38,6 +42,7 @@ DIAGNOSTICS_SECTIONS = {
     "jackett": ("🌐 <b>Jackett</b>", ("Jackett",)),
     "trackers": ("➕ <b>Public-трекеры</b>", ("Public trackers",)),
     "plex": ("🎬 <b>Plex</b>", ("Plex", "Plex deep-link", "Plex webhook")),
+    "youtube": ("▶️ <b>YouTube</b>", ("YouTube downloads",)),
     "ai": ("🤖 <b>GPT / Voice</b>", ("Голосовой поиск", "GPT chat")),
 }
 
@@ -754,6 +759,79 @@ def _gpt_chat_diagnostic(
     )
 
 
+def _youtube_diagnostic(
+    *,
+    enabled: bool,
+    download_dir: str,
+    plex_client=None,
+    plex_library_name: str = "YouTube",
+    plex_section: str = "",
+) -> ServiceDiagnostic:
+    if not enabled:
+        return ServiceDiagnostic(
+            "YouTube downloads",
+            "disabled",
+            _summary("disabled", "▶️", "YouTube", "выключен"),
+        )
+
+    details: list[str] = []
+    status = "ok"
+    messages: list[str] = []
+    if importlib.util.find_spec("yt_dlp") is None:
+        status = "error"
+        messages.append("yt-dlp не установлен")
+    else:
+        details.append("   yt-dlp: установлен")
+    if not shutil.which("ffmpeg"):
+        status = "error"
+        messages.append("ffmpeg не найден")
+    else:
+        details.append("   ffmpeg: найден")
+
+    path = Path(download_dir)
+    if not path.exists() or not path.is_dir():
+        status = "error"
+        messages.append(f"папка недоступна: {download_dir}")
+    elif not os.access(path, os.W_OK):
+        status = "error"
+        messages.append(f"нет прав на запись: {download_dir}")
+    else:
+        details.append(f"   Папка: {html.escape(str(path))}")
+
+    if plex_client is not None:
+        try:
+            section_id = plex_section or plex_client.find_section_by_title(plex_library_name)
+            if section_id:
+                details.append(f"   Plex library: {html.escape(plex_library_name)} ({html.escape(str(section_id))})")
+            else:
+                status = "warn" if status == "ok" else status
+                messages.append(f"Plex library {plex_library_name!r} не найдена")
+        except Exception as exc:
+            status = "warn" if status == "ok" else status
+            messages.append(f"Plex проверить не удалось: {exc}")
+
+    if status == "ok":
+        return ServiceDiagnostic(
+            "YouTube downloads",
+            "ok",
+            _summary("ok", "▶️", "YouTube", "готов к скачиванию"),
+            details,
+        )
+    if status == "warn":
+        return ServiceDiagnostic(
+            "YouTube downloads",
+            "warn",
+            _summary("warn", "▶️", "YouTube", "; ".join(messages) or "есть предупреждения"),
+            details,
+        )
+    return ServiceDiagnostic(
+        "YouTube downloads",
+        "error",
+        _summary("error", "▶️", "YouTube", "; ".join(messages) or "не готов"),
+        details,
+    )
+
+
 def run_diagnostics(
     *,
     rutracker_client,
@@ -772,6 +850,10 @@ def run_diagnostics(
     gpt_enabled: bool = False,
     gpt_model: str = "gpt-4o-mini",
     gpt_usage: dict | None = None,
+    youtube_enabled: bool = False,
+    youtube_download_dir: str = "/youtube_storage",
+    youtube_plex_library_name: str = "YouTube",
+    youtube_plex_section: str = "",
 ) -> DiagnosticsReport:
     return DiagnosticsReport(
         [
@@ -782,6 +864,13 @@ def run_diagnostics(
             _plex_diagnostic(plex_client, plex_cache_info),
             _plex_deeplink_diagnostic(plex_deeplink_base_url),
             _plex_webhook_diagnostic(plex_webhook_info),
+            _youtube_diagnostic(
+                enabled=youtube_enabled,
+                download_dir=youtube_download_dir,
+                plex_client=plex_client,
+                plex_library_name=youtube_plex_library_name,
+                plex_section=youtube_plex_section,
+            ),
             _voice_search_diagnostic(
                 enabled=voice_search_enabled,
                 api_key=openai_api_key,

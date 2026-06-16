@@ -84,6 +84,7 @@ class JsonStateStore:
         torrent_titles_cache_file: Path | None = None,
         download_history_file: Path | None = None,
         jackett_guard_file: Path | None = None,
+        youtube_downloads_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -105,6 +106,7 @@ class JsonStateStore:
         self.torrent_titles_cache_file = torrent_titles_cache_file
         self.download_history_file = download_history_file
         self.jackett_guard_file = jackett_guard_file
+        self.youtube_downloads_file = youtube_downloads_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -512,6 +514,28 @@ class JsonStateStore:
         # Stable order for diff-friendly JSON.
         ordered = {k: entries[k] for k in sorted(entries.keys())}
         self.save_json_file(self.pending_downloads_file, ordered, "pending downloads")
+
+    def load_youtube_downloads(self) -> dict[str, dict]:
+        if not self.youtube_downloads_file:
+            return {}
+        payload = self.load_json_file(self.youtube_downloads_file, {})
+        if not isinstance(payload, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for job_id, job in payload.items():
+            if isinstance(job, dict) and job_id:
+                out[str(job_id)] = job
+        return out
+
+    def save_youtube_downloads(self, jobs: dict[str, dict]) -> None:
+        if not self.youtube_downloads_file:
+            return
+        ordered = {
+            str(job_id): jobs[job_id]
+            for job_id in sorted(jobs.keys())
+            if isinstance(jobs[job_id], dict) and job_id
+        }
+        self.save_json_file(self.youtube_downloads_file, ordered, "YouTube downloads")
 
     def load_series_bulk_jobs(self) -> dict[str, dict]:
         """Load persistent series bulk plans.

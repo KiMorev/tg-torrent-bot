@@ -176,6 +176,21 @@ class AppSettings:
     gpt_model: str
     gpt_usage_file: Path
     torrent_titles_cache_file: Path
+    youtube_downloads_enabled: bool
+    youtube_download_dir: Path
+    youtube_downloads_file: Path
+    youtube_max_duration_minutes: int
+    youtube_max_height: int
+    youtube_max_parallel: int
+    youtube_max_queue_size: int
+    youtube_max_queue_per_chat: int
+    youtube_min_free_gb: float
+    youtube_plex_section: str
+    youtube_plex_library_name: str
+    youtube_plex_refresh_after_download: bool
+    youtube_plex_poll_after_download: bool
+    youtube_plex_poll_attempts: int
+    youtube_plex_poll_interval_seconds: float
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
@@ -330,4 +345,24 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
             "TORRENT_TITLES_CACHE_FILE",
             str(state_dir / "torrent_titles_cache.json"),
         )),
+        youtube_downloads_enabled=env_bool(env, "YOUTUBE_DOWNLOADS_ENABLED", False),
+        youtube_download_dir=Path(env.get("YOUTUBE_DOWNLOAD_DIR", "/youtube_storage")),
+        youtube_downloads_file=Path(
+            env.get("YOUTUBE_DOWNLOADS_FILE", str(state_dir / "youtube_downloads.json"))
+        ),
+        youtube_max_duration_minutes=max(1, env_int(env, "YOUTUBE_MAX_DURATION_MINUTES", 300)),
+        youtube_max_height=max(144, min(1080, env_int(env, "YOUTUBE_MAX_HEIGHT", 1080))),
+        youtube_max_parallel=max(1, env_int(env, "YOUTUBE_MAX_PARALLEL", 1)),
+        youtube_max_queue_size=max(0, env_int(env, "YOUTUBE_MAX_QUEUE_SIZE", 0)),
+        youtube_max_queue_per_chat=max(0, env_int(env, "YOUTUBE_MAX_QUEUE_PER_CHAT", 0)),
+        youtube_min_free_gb=max(0.0, env_float(env, "YOUTUBE_MIN_FREE_GB", 5.0)),
+        youtube_plex_section=env.get("YOUTUBE_PLEX_SECTION", "").strip(),
+        youtube_plex_library_name=(env.get("YOUTUBE_PLEX_LIBRARY_NAME", "YouTube").strip() or "YouTube"),
+        youtube_plex_refresh_after_download=env_bool(env, "YOUTUBE_PLEX_REFRESH_AFTER_DOWNLOAD", False),
+        youtube_plex_poll_after_download=env_bool(env, "YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD", True),
+        youtube_plex_poll_attempts=max(1, env_int(env, "YOUTUBE_PLEX_POLL_ATTEMPTS", 20)),
+        youtube_plex_poll_interval_seconds=max(
+            1.0,
+            env_float(env, "YOUTUBE_PLEX_POLL_INTERVAL_SECONDS", 30.0),
+        ),
     )

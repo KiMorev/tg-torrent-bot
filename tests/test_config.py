@@ -107,6 +107,21 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.plex_webhook_debounce_seconds, 10.0)
         self.assertFalse(settings.tmdb_enabled)
         self.assertEqual(settings.tmdb_api_token, "")
+        self.assertFalse(settings.youtube_downloads_enabled)
+        self.assertEqual(settings.youtube_download_dir, Path("/youtube_storage"))
+        self.assertEqual(settings.youtube_downloads_file, Path("/tmp/tg_torrent_drop/youtube_downloads.json"))
+        self.assertEqual(settings.youtube_max_duration_minutes, 300)
+        self.assertEqual(settings.youtube_max_height, 1080)
+        self.assertEqual(settings.youtube_max_parallel, 1)
+        self.assertEqual(settings.youtube_max_queue_size, 0)
+        self.assertEqual(settings.youtube_max_queue_per_chat, 0)
+        self.assertEqual(settings.youtube_min_free_gb, 5.0)
+        self.assertEqual(settings.youtube_plex_section, "")
+        self.assertEqual(settings.youtube_plex_library_name, "YouTube")
+        self.assertFalse(settings.youtube_plex_refresh_after_download)
+        self.assertTrue(settings.youtube_plex_poll_after_download)
+        self.assertEqual(settings.youtube_plex_poll_attempts, 20)
+        self.assertEqual(settings.youtube_plex_poll_interval_seconds, 30.0)
 
     def test_load_settings_accepts_overrides_and_clamps_values(self) -> None:
         env = {
@@ -150,6 +165,21 @@ class ConfigParsingTests(unittest.TestCase):
             "PLEX_WEBHOOK_TOKEN": "hook-token",
             "PLEX_WEBHOOK_DEBOUNCE_SECONDS": "-1",
             "TMDB_API_TOKEN": "tmdb-token",
+            "YOUTUBE_DOWNLOADS_ENABLED": "true",
+            "YOUTUBE_DOWNLOAD_DIR": "/yt",
+            "YOUTUBE_DOWNLOADS_FILE": "/cache/youtube.json",
+            "YOUTUBE_MAX_DURATION_MINUTES": "0",
+            "YOUTUBE_MAX_HEIGHT": "2160",
+            "YOUTUBE_MAX_PARALLEL": "0",
+            "YOUTUBE_MAX_QUEUE_SIZE": "-1",
+            "YOUTUBE_MAX_QUEUE_PER_CHAT": "-2",
+            "YOUTUBE_MIN_FREE_GB": "-5",
+            "YOUTUBE_PLEX_SECTION": "7",
+            "YOUTUBE_PLEX_LIBRARY_NAME": " Youtube ",
+            "YOUTUBE_PLEX_REFRESH_AFTER_DOWNLOAD": "true",
+            "YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD": "false",
+            "YOUTUBE_PLEX_POLL_ATTEMPTS": "0",
+            "YOUTUBE_PLEX_POLL_INTERVAL_SECONDS": "0",
         }
 
         settings = load_settings(env)
@@ -195,6 +225,21 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.plex_webhook_debounce_seconds, 0.0)
         self.assertTrue(settings.tmdb_enabled)
         self.assertEqual(settings.tmdb_api_token, "tmdb-token")
+        self.assertTrue(settings.youtube_downloads_enabled)
+        self.assertEqual(settings.youtube_download_dir, Path("/yt"))
+        self.assertEqual(settings.youtube_downloads_file, Path("/cache/youtube.json"))
+        self.assertEqual(settings.youtube_max_duration_minutes, 1)
+        self.assertEqual(settings.youtube_max_height, 1080)
+        self.assertEqual(settings.youtube_max_parallel, 1)
+        self.assertEqual(settings.youtube_max_queue_size, 0)
+        self.assertEqual(settings.youtube_max_queue_per_chat, 0)
+        self.assertEqual(settings.youtube_min_free_gb, 0.0)
+        self.assertEqual(settings.youtube_plex_section, "7")
+        self.assertEqual(settings.youtube_plex_library_name, "Youtube")
+        self.assertTrue(settings.youtube_plex_refresh_after_download)
+        self.assertFalse(settings.youtube_plex_poll_after_download)
+        self.assertEqual(settings.youtube_plex_poll_attempts, 1)
+        self.assertEqual(settings.youtube_plex_poll_interval_seconds, 1.0)
 
     def test_load_settings_enables_jackett_only_with_complete_credentials(self) -> None:
         settings = load_settings({
@@ -258,6 +303,7 @@ class AppContextTests(unittest.TestCase):
         self.assertIsNotNone(context.tvmaze_client)
         self.assertEqual(context.state_store.series_continue_totals_file, settings.series_continue_totals_file)
         self.assertEqual(context.state_store.series_continue_hidden_file, settings.series_continue_hidden_file)
+        self.assertEqual(context.state_store.youtube_downloads_file, settings.youtube_downloads_file)
         self.assertEqual(context.state_store.jackett_guard_file, settings.state_dir / "jackett_guard.json")
 
     def test_build_app_context_leaves_optional_clients_disabled(self) -> None:

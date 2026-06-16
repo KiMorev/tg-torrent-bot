@@ -97,6 +97,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         topic_subscriptions_file=d / "subscriptions.json",
         download_history_file=d / "download_history.jsonl",
         jackett_guard_file=d / "jackett_guard.json",
+        youtube_downloads_file=d / "youtube_downloads.json",
     )
 
 
@@ -6813,6 +6814,203 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("srch_intent", context.user_data)
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("Что скачать: одна раздача", text)
+
+    async def test_youtube_link_disabled_does_not_start_search(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "https://youtu.be/abcdefghijk"
+        context = _make_context()
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+            patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", False),
+            patch.object(bot, "search_got_query", AsyncMock()) as search,
+        ):
+            result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        search.assert_not_awaited()
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("YouTube-download сейчас отключён", text)
+
+    async def test_youtube_link_enabled_shows_preview(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "https://youtu.be/abcdefghijk"
+        status = MagicMock()
+        status.message_id = 77
+        status.edit_text = AsyncMock()
+        update.message.reply_text.return_value = status
+        context = _make_context()
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        info = {
+            "id": "abcdefghijk",
+            "title": "Test clip",
+            "channel": "Channel",
+            "duration": 120,
+            "formats": [
+                {
+                    "format_id": "22",
+                    "ext": "mp4",
+                    "height": 720,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "mp4a.40.2",
+                }
+            ],
+        }
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+            patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+            patch.object(bot, "_youtube_extract_metadata", MagicMock(return_value=info)),
+        ):
+            result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        text = status.edit_text.await_args.args[0]
+        self.assertIn("Test clip", text)
+        keyboard = status.edit_text.await_args.kwargs["reply_markup"]
+        callbacks = {
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+        self.assertTrue(any(callback.startswith("yt:dl:") for callback in callbacks))
+
+    async def test_youtube_callback_creates_queue_job(self):
+        update = _make_callback_update(chat_id=100, callback_data="yt:dl:tok123:720")
+        context = _make_context()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            bot.YOUTUBE_PREVIEWS["tok123"] = {
+                "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "video_id": "abcdefghijk",
+                "title": "Test clip",
+                "channel": "Channel",
+                "duration_seconds": 120,
+                "qualities": [
+                    {
+                        "height": 720,
+                        "label": "720p",
+                        "format_id": "22",
+                        "filesize": 1000,
+                    }
+                ],
+            }
+            try:
+                with (
+                    patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                    patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                    patch.object(bot, "state_store", store),
+                    patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                ):
+                    await bot.youtube_callback(update, context)
+
+                jobs = store.load_youtube_downloads()
+                self.assertEqual(len(jobs), 1)
+                job = next(iter(jobs.values()))
+                self.assertEqual(job["status"], "queued")
+                self.assertEqual(job["video_id"], "abcdefghijk")
+                self.assertEqual(job["target_height"], 720)
+                history = store.load_download_history(chat_id=100)
+                self.assertEqual(history[-1]["event"], "youtube_download_queued")
+                self.assertEqual(history[-1]["source"], "youtube")
+            finally:
+                bot.YOUTUBE_PREVIEWS.pop("tok123", None)
+
+    async def test_youtube_worker_completes_queued_job(self):
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            job = {
+                "id": "yt_1",
+                "chat_id": 100,
+                "status": "queued",
+                "created_at": "2026-06-16T10:00:00+03:00",
+                "updated_at": "2026-06-16T10:00:00+03:00",
+                "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "video_id": "abcdefghijk",
+                "title": "Test clip",
+                "target_height": 720,
+                "quality": "720p",
+            }
+            store.save_youtube_downloads({"yt_1": job})
+
+            with (
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", Path(tmp)),
+                patch.object(bot, "YOUTUBE_MIN_FREE_GB", 0),
+                patch.object(bot, "_youtube_download_video", MagicMock(return_value={
+                    "file_path": str(Path(tmp) / "Test clip.mp4"),
+                    "file_size": 1234,
+                    "item_dir": str(Path(tmp) / "Test clip"),
+                    "format_id": "22",
+                    "quality": "720p",
+                    "title": "Test clip",
+                    "channel": "Channel",
+                    "duration_seconds": 120,
+                })),
+                patch.object(bot, "_youtube_delete_job_cards", AsyncMock()),
+                patch.object(bot, "_youtube_start_plex_poll_if_needed", AsyncMock()) as plex_poll,
+            ):
+                await bot._youtube_worker_once(app)
+
+            jobs = store.load_youtube_downloads()
+            self.assertEqual(jobs["yt_1"]["status"], "completed")
+            self.assertEqual(jobs["yt_1"]["file_size"], 1234)
+            events = [item["event"] for item in store.load_download_history(chat_id=100)]
+            self.assertIn("youtube_download_started", events)
+            self.assertIn("youtube_download_completed", events)
+            app.bot.send_message.assert_awaited()
+            plex_poll.assert_awaited()
+
+    async def test_youtube_worker_records_download_failure(self):
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "queued",
+                    "created_at": "2026-06-16T10:00:00+03:00",
+                    "updated_at": "2026-06-16T10:00:00+03:00",
+                    "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                    "video_id": "abcdefghijk",
+                    "title": "Test clip",
+                    "target_height": 720,
+                    "quality": "720p",
+                }
+            })
+
+            with (
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", Path(tmp)),
+                patch.object(bot, "YOUTUBE_MIN_FREE_GB", 0),
+                patch.object(bot, "_youtube_download_video", MagicMock(side_effect=bot.YouTubeDownloadError("boom"))),
+                patch.object(bot, "_youtube_delete_job_cards", AsyncMock()),
+            ):
+                await bot._youtube_worker_once(app)
+
+            jobs = store.load_youtube_downloads()
+            self.assertEqual(jobs["yt_1"]["status"], "failed")
+            self.assertIn("boom", jobs["yt_1"]["error"])
+            history = store.load_download_history(chat_id=100)
+            self.assertEqual(history[-1]["event"], "youtube_download_failed")
+            app.bot.send_message.assert_awaited()
 
     async def test_new_text_query_prefills_personal_defaults(self):
         update = _make_message_update(chat_id=100)

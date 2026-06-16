@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import time
 import uuid
 from collections import Counter
@@ -109,11 +110,16 @@ from keyboards import (
     _season_back_to_picker_keyboard,
     SEARCH_PAGE_SIZE,
     SUB_CALLBACK_PREFIX,
+    YOUTUBE_CALLBACK_PREFIX,
     _task_callback,
     _task_error_keyboard,
     _task_keyboard,
     _task_reply_markup,
     _tasks_keyboard,
+    _youtube_close_keyboard,
+    _youtube_disabled_keyboard,
+    _youtube_plex_keyboard,
+    _youtube_preview_keyboard,
     users_keyboard,
     movie_trackers_keyboard,
 )
@@ -283,6 +289,17 @@ from tracker_service import (
     tracker_key as _tracker_normalized_key,
     tracker_result_lines as _tracker_lines,
 )
+from youtube_downloads import (
+    YouTubeDownloadError,
+    YouTubeFormatChoice,
+    YouTubeToolMissingError,
+    YouTubeUnsupportedError,
+    compatible_quality_options,
+    download_video as _youtube_download_video,
+    extract_metadata as _youtube_extract_metadata,
+    extract_youtube_video_id,
+    find_youtube_url,
+)
 
 
 settings = load_settings()
@@ -373,6 +390,20 @@ VOICE_SEARCH_ENABLED = settings.voice_search_enabled and bool(OPENAI_API_KEY)
 VOICE_MAX_SECONDS = settings.voice_max_seconds
 GPT_ENABLED = settings.gpt_enabled and bool(OPENAI_API_KEY)
 GPT_MODEL = settings.gpt_model
+YOUTUBE_DOWNLOADS_ENABLED = settings.youtube_downloads_enabled
+YOUTUBE_DOWNLOAD_DIR = settings.youtube_download_dir
+YOUTUBE_MAX_DURATION_MINUTES = settings.youtube_max_duration_minutes
+YOUTUBE_MAX_HEIGHT = settings.youtube_max_height
+YOUTUBE_MAX_PARALLEL = settings.youtube_max_parallel
+YOUTUBE_MAX_QUEUE_SIZE = settings.youtube_max_queue_size
+YOUTUBE_MAX_QUEUE_PER_CHAT = settings.youtube_max_queue_per_chat
+YOUTUBE_MIN_FREE_GB = settings.youtube_min_free_gb
+YOUTUBE_PLEX_SECTION = settings.youtube_plex_section
+YOUTUBE_PLEX_LIBRARY_NAME = settings.youtube_plex_library_name
+YOUTUBE_PLEX_REFRESH_AFTER_DOWNLOAD = settings.youtube_plex_refresh_after_download
+YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD = settings.youtube_plex_poll_after_download
+YOUTUBE_PLEX_POLL_ATTEMPTS = settings.youtube_plex_poll_attempts
+YOUTUBE_PLEX_POLL_INTERVAL_SECONDS = settings.youtube_plex_poll_interval_seconds
 
 # kinopoiskapiunofficial.tech free tier: 500 requests/day
 _KP_DAILY_LIMIT = 500
@@ -422,6 +453,8 @@ SUBSCRIPTION_MONITOR_TASK: asyncio.Task | None = None
 MOVIE_DISCOVERY_TASK: asyncio.Task | None = None
 JACKETT_WARMUP_TASK: asyncio.Task | None = None
 JACKETT_GUARDIAN_TASK: asyncio.Task | None = None
+YOUTUBE_WORKER_TASK: asyncio.Task | None = None
+YOUTUBE_STATUS_UPDATE_TASK: asyncio.Task | None = None
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # Seconds to wait after DS task creation before injecting public trackers.
 # DS may not have fully initialised the task metadata immediately after create_torrent_file /
@@ -433,6 +466,9 @@ _TRACKER_INJECT_INITIAL_DELAY = 3.0
 TASK_CARD_REFRESH_TASKS: dict[tuple[int, int], asyncio.Task] = {}
 # task_id → task-card messages that can be removed after a final notification
 TASK_CARD_MESSAGES: dict[str, set[tuple[int, int]]] = {}
+YOUTUBE_PREVIEWS: dict[str, dict] = {}
+YOUTUBE_JOB_MESSAGES: dict[str, set[tuple[int, int]]] = {}
+YOUTUBE_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
 MAX_TASK_NOTIFICATION_FAILURES = 3
 # Unix timestamp of next scheduled subscription check (set by the loop)
 _next_subscription_check_at: float | None = None
@@ -738,6 +774,10 @@ def _background_monitor_enabled() -> bool:
 
 def _task_maintenance_enabled() -> bool:
     return _background_monitor_enabled()
+
+
+def _youtube_downloads_enabled() -> bool:
+    return bool(YOUTUBE_DOWNLOADS_ENABLED)
 
 
 def _subscription_monitor_enabled() -> bool:
@@ -7133,6 +7173,637 @@ def _record_download_added_from_title_history(
     )
 
 
+_YOUTUBE_ACTIVE_STATUSES = {"queued", "fetching_metadata", "downloading", "processing"}
+_YOUTUBE_TERMINAL_STATUSES = {"completed", "failed"}
+
+
+def _youtube_now() -> str:
+    return datetime.now(DISPLAY_TIMEZONE).isoformat(timespec="seconds")
+
+
+def _youtube_duration_text(seconds: object) -> str:
+    try:
+        total = int(seconds or 0)
+    except (TypeError, ValueError):
+        return "неизвестно"
+    if total <= 0:
+        return "неизвестно"
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _youtube_load_jobs() -> dict[str, dict]:
+    load = getattr(state_store, "load_youtube_downloads", None)
+    if not callable(load):
+        return {}
+    return load()
+
+
+def _youtube_save_jobs(jobs: dict[str, dict]) -> None:
+    save = getattr(state_store, "save_youtube_downloads", None)
+    if callable(save):
+        save(jobs)
+
+
+def _youtube_update_job(job_id: str, **fields) -> dict | None:
+    jobs = _youtube_load_jobs()
+    job = jobs.get(str(job_id))
+    if not isinstance(job, dict):
+        return None
+    job.update({key: value for key, value in fields.items() if value is not None})
+    job["updated_at"] = _youtube_now()
+    jobs[str(job_id)] = job
+    _youtube_save_jobs(jobs)
+    return job
+
+
+def _youtube_history_fields(job: dict) -> dict:
+    fields = {
+        "source": "youtube",
+        "youtube_job_id": job.get("id"),
+        "youtube_video_id": job.get("video_id"),
+        "canonical_url": job.get("canonical_url") or job.get("url"),
+        "title": job.get("title"),
+        "channel": job.get("channel"),
+        "duration_seconds": job.get("duration_seconds"),
+        "quality": job.get("quality"),
+        "format_id": job.get("format_id"),
+        "file_path": job.get("file_path"),
+        "file_size": job.get("file_size"),
+    }
+    return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {})}
+
+
+def _youtube_record_history(event: str, job: dict, **extra) -> None:
+    chat_id = None
+    try:
+        chat_id = int(job.get("chat_id"))
+    except (TypeError, ValueError):
+        pass
+    _record_download_history(
+        event,
+        chat_id=chat_id,
+        **_youtube_history_fields(job),
+        **extra,
+    )
+
+
+def _youtube_task_status(status: str) -> str:
+    return {
+        "queued": "waiting",
+        "fetching_metadata": "waiting",
+        "downloading": "downloading",
+        "processing": "finishing",
+        "completed": "finished",
+        "failed": "error",
+    }.get((status or "").lower(), "waiting")
+
+
+def _youtube_job_to_task(job: dict) -> dict:
+    downloaded = job.get("downloaded_bytes") or job.get("file_size") or 0
+    total = job.get("total_bytes") or job.get("estimated_size") or job.get("file_size") or 0
+    task = {
+        "id": job.get("id") or "",
+        "title": job.get("title") or job.get("video_id") or "YouTube",
+        "status": _youtube_task_status(str(job.get("status") or "")),
+        "size": total,
+        "type": "youtube",
+        "additional": {
+            "transfer": {
+                "size_downloaded": downloaded,
+                "speed_download": job.get("speed_bytes") or 0,
+            }
+        },
+    }
+    if job.get("error"):
+        task["status_extra"] = {"error_detail": job.get("error")}
+    return task
+
+
+def _youtube_job_card_text(job: dict) -> str:
+    text = _view_format_task_card(
+        _youtube_job_to_task(job),
+        display_timezone=DISPLAY_TIMEZONE,
+    )
+    if job.get("status") == "failed" and job.get("error"):
+        text += f"\nОшибка: {job['error']}"
+    return text
+
+
+def _youtube_register_job_message(job_id: str, chat_id: int | None, message_id: int | None) -> None:
+    if not job_id or chat_id is None or message_id is None:
+        return
+    YOUTUBE_JOB_MESSAGES.setdefault(str(job_id), set()).add((chat_id, message_id))
+
+
+async def _youtube_delete_job_cards(app: "Application", job_id: str) -> None:
+    for chat_id, message_id in YOUTUBE_JOB_MESSAGES.pop(str(job_id), set()):
+        try:
+            await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass
+
+
+async def _youtube_update_registered_cards(app: "Application") -> None:
+    jobs = _youtube_load_jobs()
+    for job_id, targets in list(YOUTUBE_JOB_MESSAGES.items()):
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") in _YOUTUBE_TERMINAL_STATUSES:
+            continue
+        text = _youtube_job_card_text(job)
+        remaining: set[tuple[int, int]] = set()
+        for chat_id, message_id in list(targets):
+            try:
+                await app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=_youtube_close_keyboard(),
+                )
+                remaining.add((chat_id, message_id))
+            except Exception:
+                logger.debug("YouTube status card edit failed job_id=%s", job_id, exc_info=True)
+        if remaining:
+            YOUTUBE_JOB_MESSAGES[job_id] = remaining
+        else:
+            YOUTUBE_JOB_MESSAGES.pop(job_id, None)
+
+
+async def _youtube_status_update_loop(app: "Application") -> None:
+    while True:
+        try:
+            await _run_background_step("YouTube status cards", lambda: _youtube_update_registered_cards(app))
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
+
+
+def _youtube_queue_limit_message(chat_id: int | None) -> str | None:
+    jobs = _youtube_load_jobs()
+    active_jobs = [
+        job for job in jobs.values()
+        if isinstance(job, dict) and job.get("status") in _YOUTUBE_ACTIVE_STATUSES
+    ]
+    if YOUTUBE_MAX_QUEUE_SIZE and len(active_jobs) >= YOUTUBE_MAX_QUEUE_SIZE:
+        return "Очередь YouTube-загрузок сейчас заполнена. Попробуйте позже."
+    if chat_id is not None and YOUTUBE_MAX_QUEUE_PER_CHAT:
+        per_chat = [
+            job for job in active_jobs
+            if str(job.get("chat_id")) == str(chat_id)
+        ]
+        if len(per_chat) >= YOUTUBE_MAX_QUEUE_PER_CHAT:
+            return "У вас уже есть YouTube-задачи в очереди. Дождитесь завершения."
+    return None
+
+
+def _youtube_preview_text(preview: dict) -> str:
+    qualities = ", ".join(choice.get("label", "") for choice in preview.get("qualities", []) if choice.get("label"))
+    return (
+        "YouTube\n"
+        f"Название: {preview.get('title') or 'без названия'}\n"
+        f"Канал: {preview.get('channel') or 'неизвестно'}\n"
+        f"Длительность: {_youtube_duration_text(preview.get('duration_seconds'))}\n"
+        f"Доступно: {qualities or 'нет совместимых форматов'}\n\n"
+        "Выберите качество для скачивания."
+    )
+
+
+def _youtube_failure_message(exc: Exception) -> str:
+    text = str(exc).strip() or "неизвестная ошибка"
+    if isinstance(exc, YouTubeToolMissingError):
+        return f"YouTube-download включён, но контейнер не готов: {text}"
+    if isinstance(exc, YouTubeUnsupportedError):
+        return text
+    return f"Не удалось обработать YouTube-ссылку: {text}"
+
+
+def _youtube_check_download_dir() -> None:
+    path = Path(YOUTUBE_DOWNLOAD_DIR)
+    if not path.exists() or not path.is_dir():
+        raise YouTubeDownloadError(f"Папка YouTube недоступна: {path}")
+    if not os.access(path, os.W_OK):
+        raise YouTubeDownloadError(f"Нет прав на запись в папку YouTube: {path}")
+    if YOUTUBE_MIN_FREE_GB > 0:
+        usage = shutil.disk_usage(path)
+        min_free = int(YOUTUBE_MIN_FREE_GB * 1024 * 1024 * 1024)
+        if usage.free < min_free:
+            raise YouTubeDownloadError(
+                f"На диске осталось {_format_size(usage.free)}, нужно минимум {_format_size(min_free)}."
+            )
+
+
+def _youtube_progress_hook(job_id: str):
+    last_saved_at = 0.0
+
+    def _hook(payload: dict) -> None:
+        nonlocal last_saved_at
+        status = str(payload.get("status") or "")
+        now_ts = time.time()
+        if status == "downloading" and now_ts - last_saved_at < 2.0:
+            return
+        fields: dict = {}
+        if status == "downloading":
+            fields["status"] = "downloading"
+            fields["downloaded_bytes"] = int(payload.get("downloaded_bytes") or 0)
+            total = payload.get("total_bytes") or payload.get("total_bytes_estimate")
+            if total:
+                fields["total_bytes"] = int(total)
+            if payload.get("speed"):
+                fields["speed_bytes"] = int(payload.get("speed") or 0)
+            if payload.get("eta") is not None:
+                fields["eta_seconds"] = int(payload.get("eta") or 0)
+        elif status == "finished":
+            fields["status"] = "processing"
+            fields["speed_bytes"] = 0
+        if fields:
+            _youtube_update_job(job_id, **fields)
+            last_saved_at = now_ts
+
+    return _hook
+
+
+async def _youtube_send_completed_message(app: "Application", job: dict) -> None:
+    chat_id = _background_chat_id(job.get("chat_id"))
+    if chat_id is None:
+        return
+    lines = [
+        "✅ Видео скачано",
+        f"Название: {job.get('title') or 'YouTube'}",
+    ]
+    if job.get("quality"):
+        lines.append(f"Качество: {job.get('quality')}")
+    if job.get("file_size"):
+        lines.append(f"Размер: {_format_size(job.get('file_size'))}")
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            reply_markup=_youtube_close_keyboard(),
+        )
+    except Exception:
+        logger.warning("YouTube completion notification failed job_id=%s", job.get("id"), exc_info=True)
+
+
+async def _youtube_send_failed_message(app: "Application", job: dict) -> None:
+    chat_id = _background_chat_id(job.get("chat_id"))
+    if chat_id is None:
+        return
+    text = (
+        "⚠️ Не удалось скачать YouTube-видео\n"
+        f"Название: {job.get('title') or job.get('canonical_url') or 'YouTube'}\n"
+        f"Ошибка: {job.get('error') or 'неизвестно'}"
+    )
+    try:
+        await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=_youtube_close_keyboard())
+    except Exception:
+        logger.warning("YouTube failure notification failed job_id=%s", job.get("id"), exc_info=True)
+
+
+async def _youtube_plex_section_id() -> str:
+    if not plex_client:
+        return ""
+    if YOUTUBE_PLEX_SECTION:
+        return YOUTUBE_PLEX_SECTION
+    return await asyncio.to_thread(plex_client.find_section_by_title, YOUTUBE_PLEX_LIBRARY_NAME)
+
+
+async def _youtube_find_in_plex(section_id: str, job: dict):
+    if not plex_client or not section_id:
+        return None
+    videos = await asyncio.to_thread(plex_client.get_section_videos, section_id)
+    video_id = str(job.get("video_id") or "")
+    file_name = Path(str(job.get("file_path") or "")).name
+    for video in videos:
+        title = getattr(video, "title", "") or ""
+        paths = getattr(video, "file_paths", []) or []
+        if video_id and (video_id in title or any(video_id in str(path) for path in paths)):
+            return video
+        if file_name and any(Path(str(path)).name == file_name for path in paths):
+            return video
+    return None
+
+
+async def _youtube_plex_poll_after_finish(
+    app: "Application",
+    job: dict,
+    *,
+    hint_msg_id: int | None = None,
+) -> None:
+    job_id = str(job.get("id") or "")
+    chat_id = _background_chat_id(job.get("chat_id"))
+    try:
+        section_id = await _youtube_plex_section_id()
+        if not section_id:
+            raise YouTubeDownloadError(f"Plex-библиотека `{YOUTUBE_PLEX_LIBRARY_NAME}` не найдена.")
+        if YOUTUBE_PLEX_REFRESH_AFTER_DOWNLOAD and plex_client:
+            await asyncio.to_thread(plex_client.refresh_section, section_id)
+        for attempt in range(YOUTUBE_PLEX_POLL_ATTEMPTS):
+            if attempt > 0:
+                await asyncio.sleep(YOUTUBE_PLEX_POLL_INTERVAL_SECONDS)
+            found = await _youtube_find_in_plex(section_id, job)
+            if found is None:
+                continue
+            if chat_id is not None and hint_msg_id:
+                await _delete_message_safely(app, chat_id, hint_msg_id, "YouTube Plex hint")
+            machine_id = _plex_machine_id
+            if not machine_id and plex_client:
+                try:
+                    machine_id = await asyncio.to_thread(plex_client.get_machine_id)
+                except Exception:
+                    machine_id = ""
+            rating_key = getattr(found, "rating_key", "")
+            plex_url = _plex_deep_link(rating_key, machine_id) if rating_key and machine_id else ""
+            if chat_id is not None:
+                text = f"✅ {job.get('title') or 'Видео'} добавлено в Plex."
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=_youtube_plex_keyboard(plex_url) if plex_url else _youtube_close_keyboard(),
+                    )
+                except Exception:
+                    logger.warning("YouTube Plex found notification failed job_id=%s", job_id, exc_info=True)
+            _youtube_record_history(
+                "youtube_plex_found",
+                job,
+                plex_rating_key=rating_key,
+            )
+            return
+        if chat_id is not None and hint_msg_id:
+            await _delete_message_safely(app, chat_id, hint_msg_id, "YouTube Plex hint")
+        if chat_id is not None:
+            timeout_min = int(YOUTUBE_PLEX_POLL_ATTEMPTS * YOUTUBE_PLEX_POLL_INTERVAL_SECONDS // 60)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ {job.get('title') or 'Видео'} скачано, "
+                    f"но не появилось в Plex за {timeout_min} мин."
+                ),
+                reply_markup=_youtube_close_keyboard(),
+            )
+        _youtube_record_history("youtube_plex_not_found", job, reason="timeout")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("YouTube Plex polling failed job_id=%s: %s", job_id, exc, exc_info=True)
+        if chat_id is not None and hint_msg_id:
+            await _delete_message_safely(app, chat_id, hint_msg_id, "YouTube Plex hint")
+        _youtube_record_history("youtube_plex_not_found", job, reason=str(exc))
+    finally:
+        YOUTUBE_PLEX_POLLING_TASKS.pop(job_id, None)
+
+
+async def _youtube_start_plex_poll_if_needed(app: "Application", job: dict) -> None:
+    if not (PLEX_ENABLED and YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD and plex_client):
+        return
+    job_id = str(job.get("id") or "")
+    if not job_id or job_id in YOUTUBE_PLEX_POLLING_TASKS:
+        return
+    chat_id = _background_chat_id(job.get("chat_id"))
+    hint_msg_id = None
+    if chat_id is not None:
+        try:
+            hint = await app.bot.send_message(
+                chat_id=chat_id,
+                text="🔄 Ищем файл в библиотеке Plex — сообщу, как только появится.",
+                reply_markup=_youtube_close_keyboard(),
+            )
+            hint_msg_id = getattr(hint, "message_id", None)
+        except Exception:
+            logger.warning("YouTube Plex hint send failed job_id=%s", job_id, exc_info=True)
+    task = app.create_task(_youtube_plex_poll_after_finish(app, dict(job), hint_msg_id=hint_msg_id))
+    if isinstance(task, asyncio.Future):
+        YOUTUBE_PLEX_POLLING_TASKS[job_id] = task
+
+
+async def _youtube_worker_once(app: "Application") -> None:
+    jobs = _youtube_load_jobs()
+    running = [
+        job for job in jobs.values()
+        if isinstance(job, dict) and job.get("status") in {"fetching_metadata", "downloading", "processing"}
+    ]
+    if running:
+        return
+    queued = [
+        job for job in jobs.values()
+        if isinstance(job, dict) and job.get("status") == "queued"
+    ]
+    if not queued:
+        return
+    job = sorted(queued, key=lambda item: str(item.get("created_at") or ""))[0]
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return
+    try:
+        _youtube_check_download_dir()
+        job = _youtube_update_job(job_id, status="fetching_metadata", error="") or job
+        _youtube_record_history("youtube_download_started", job)
+        result = await asyncio.to_thread(
+            _youtube_download_video,
+            str(job.get("canonical_url") or job.get("url") or ""),
+            output_root=Path(YOUTUBE_DOWNLOAD_DIR),
+            max_height=int(job.get("target_height") or YOUTUBE_MAX_HEIGHT),
+            progress_hook=_youtube_progress_hook(job_id),
+        )
+        job = _youtube_update_job(
+            job_id,
+            status="completed",
+            downloaded_bytes=result.get("file_size"),
+            total_bytes=result.get("file_size"),
+            speed_bytes=0,
+            file_path=result.get("file_path"),
+            file_size=result.get("file_size"),
+            item_dir=result.get("item_dir"),
+            format_id=result.get("format_id"),
+            quality=result.get("quality") or job.get("quality"),
+            title=result.get("title") or job.get("title"),
+            channel=result.get("channel") or job.get("channel"),
+            duration_seconds=result.get("duration_seconds") or job.get("duration_seconds"),
+        ) or job
+        _youtube_record_history("youtube_download_completed", job)
+        await _youtube_delete_job_cards(app, job_id)
+        await _youtube_send_completed_message(app, job)
+        await _youtube_start_plex_poll_if_needed(app, job)
+    except Exception as exc:
+        error = _youtube_failure_message(exc)
+        job = _youtube_update_job(job_id, status="failed", error=error, speed_bytes=0) or job
+        _youtube_record_history("youtube_download_failed", job, error=error)
+        await _youtube_delete_job_cards(app, job_id)
+        await _youtube_send_failed_message(app, job)
+
+
+async def _youtube_worker_loop(app: "Application") -> None:
+    logger.info("YouTube worker loop started")
+    while True:
+        try:
+            await _run_background_step("YouTube worker", lambda: _youtube_worker_once(app))
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
+
+
+def _youtube_reset_interrupted_jobs() -> None:
+    jobs = _youtube_load_jobs()
+    changed = False
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") in {"fetching_metadata", "downloading", "processing"}:
+            job["status"] = "queued"
+            job["updated_at"] = _youtube_now()
+            job["error"] = "Возобновлено после перезапуска контейнера."
+            changed = True
+    if changed:
+        _youtube_save_jobs(jobs)
+
+
+async def youtube_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> int:
+    if not _youtube_downloads_enabled():
+        await update.message.reply_text(
+            "YouTube-download сейчас отключён.",
+            reply_markup=_youtube_disabled_keyboard(url),
+        )
+        return ConversationHandler.END
+
+    status = await update.message.reply_text(
+        "⏳ Получаю данные YouTube…",
+        reply_markup=_youtube_close_keyboard(),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    try:
+        info = await asyncio.to_thread(_youtube_extract_metadata, url)
+        duration = int(info.get("duration") or 0)
+        if duration and duration > YOUTUBE_MAX_DURATION_MINUTES * 60:
+            raise YouTubeUnsupportedError(
+                f"Видео длиннее лимита {YOUTUBE_MAX_DURATION_MINUTES} мин."
+            )
+        choices = compatible_quality_options(info, YOUTUBE_MAX_HEIGHT)
+        if not choices:
+            raise YouTubeUnsupportedError(
+                "Нет совместимых MP4/H.264/AAC форматов без перекодирования."
+            )
+        token = uuid.uuid4().hex[:10]
+        preview = {
+            "token": token,
+            "url": url,
+            "canonical_url": url,
+            "video_id": str(info.get("id") or extract_youtube_video_id(url) or ""),
+            "title": info.get("title") or "",
+            "channel": info.get("channel") or info.get("uploader") or "",
+            "duration_seconds": duration,
+            "qualities": [
+                {
+                    "height": choice.height,
+                    "label": choice.label,
+                    "format_id": choice.format_id,
+                    "filesize": choice.filesize,
+                }
+                for choice in choices
+            ],
+        }
+        YOUTUBE_PREVIEWS[token] = preview
+        keyboard = _youtube_preview_keyboard(
+            token,
+            [(choice.height, f"⬇️ {choice.label}") for choice in choices],
+            url=url,
+        )
+        await _safe_edit_message(
+            status,
+            _youtube_preview_text(preview),
+            reply_markup=keyboard,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except Exception as exc:
+        await _safe_edit_message(
+            status,
+            _youtube_failure_message(exc),
+            reply_markup=_youtube_disabled_keyboard(url),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    return ConversationHandler.END
+
+
+async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_allowed(update):
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+
+    try:
+        _, action, token, raw_height = (query.data or "").split(":", 3)
+        height = int(raw_height)
+    except (ValueError, TypeError):
+        await _safe_edit_callback(query, "Не удалось разобрать YouTube-действие.", reply_markup=_youtube_close_keyboard())
+        return
+    if action != "dl":
+        await _safe_edit_callback(query, "Неизвестное YouTube-действие.", reply_markup=_youtube_close_keyboard())
+        return
+    if not _youtube_downloads_enabled():
+        await _safe_edit_callback(query, "YouTube-download сейчас отключён.", reply_markup=_youtube_close_keyboard())
+        return
+    preview = YOUTUBE_PREVIEWS.get(token)
+    if not isinstance(preview, dict):
+        await _safe_edit_callback(
+            query,
+            "Предпросмотр устарел. Пришлите YouTube-ссылку ещё раз.",
+            reply_markup=_youtube_close_keyboard(),
+        )
+        return
+    choice = next(
+        (item for item in preview.get("qualities", []) if int(item.get("height") or 0) == height),
+        None,
+    )
+    if not isinstance(choice, dict):
+        await _safe_edit_callback(query, "Это качество больше недоступно.", reply_markup=_youtube_close_keyboard())
+        return
+    chat_id = _chat_id_from_query(query)
+    limit_message = _youtube_queue_limit_message(chat_id)
+    if limit_message:
+        await _safe_edit_callback(query, limit_message, reply_markup=_youtube_close_keyboard())
+        return
+
+    job_id = f"yt_{uuid.uuid4().hex[:12]}"
+    job = {
+        "id": job_id,
+        "chat_id": chat_id,
+        "status": "queued",
+        "created_at": _youtube_now(),
+        "updated_at": _youtube_now(),
+        "url": preview.get("url"),
+        "canonical_url": preview.get("canonical_url"),
+        "video_id": preview.get("video_id"),
+        "title": preview.get("title"),
+        "channel": preview.get("channel"),
+        "duration_seconds": preview.get("duration_seconds"),
+        "target_height": height,
+        "quality": choice.get("label"),
+        "format_id": choice.get("format_id"),
+        "estimated_size": choice.get("filesize"),
+        "downloaded_bytes": 0,
+        "total_bytes": choice.get("filesize") or 0,
+        "speed_bytes": 0,
+        "error": "",
+    }
+    jobs = _youtube_load_jobs()
+    jobs[job_id] = job
+    _youtube_save_jobs(jobs)
+    YOUTUBE_PREVIEWS.pop(token, None)
+    _youtube_record_history("youtube_download_queued", job)
+
+    chat_id = _chat_id_from_query(query)
+    message_id = _message_id_from_message(query.message) if query.message else None
+    _youtube_register_job_message(job_id, chat_id, message_id)
+    await _safe_edit_callback(query, _youtube_job_card_text(job), reply_markup=_youtube_close_keyboard())
+
+
 def _load_notified_tasks() -> dict[str, object]:
     return state_store.load_notified_tasks()
 
@@ -9322,6 +9993,10 @@ async def _build_diagnostics_report():
         gpt_enabled=GPT_ENABLED,
         gpt_model=GPT_MODEL,
         gpt_usage=state_store.load_gpt_usage(),
+        youtube_enabled=YOUTUBE_DOWNLOADS_ENABLED,
+        youtube_download_dir=str(YOUTUBE_DOWNLOAD_DIR),
+        youtube_plex_library_name=YOUTUBE_PLEX_LIBRARY_NAME,
+        youtube_plex_section=YOUTUBE_PLEX_SECTION,
     )
 
 
@@ -24932,17 +25607,22 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await settings_command(update, context)
         return ConversationHandler.END
 
-    # 1. Magnet link — handle immediately, don't start a search conversation.
+    # 1. YouTube link — handle separately from torrent search.
+    youtube_url = find_youtube_url(text)
+    if youtube_url:
+        return await youtube_link_entry(update, context, youtube_url)
+
+    # 2. Magnet link — handle immediately, don't start a search conversation.
     magnet_uri = _find_magnet(text)
     if magnet_uri:
         await _process_magnet_uri(update, context, magnet_uri)
         return ConversationHandler.END
 
-    # 2. Kinopoisk URL — delegate to the existing KP flow if the client is ready.
+    # 3. Kinopoisk URL — delegate to the existing KP flow if the client is ready.
     if kinopoisk_client and extract_kp_id(text):
         return await kp_link_entry(update, context)
 
-    # 3. Anything else — treat as a search query if any search client is ready.
+    # 4. Anything else — treat as a search query if any search client is ready.
     if rutracker_client is None and jackett_client is None:
         await update.message.reply_text("Пришлите .torrent файл или magnet-ссылку.")
         return ConversationHandler.END
@@ -24978,6 +25658,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _is_allowed(update):
         logger.warning("Rejected text from chat_id=%s", _chat_id(update))
         await _reply_access_pending(update, context)
+        return
+
+    youtube_url = find_youtube_url(update.message.text or "")
+    if youtube_url:
+        await youtube_link_entry(update, context, youtube_url)
         return
 
     magnet_uri = _find_magnet(update.message.text or "")
@@ -25126,6 +25811,7 @@ def _run_polling(app: Application) -> None:
 async def setup_bot_commands(app: Application) -> None:
     global BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK, MOVIE_DISCOVERY_TASK
     global SUBSCRIPTION_MONITOR_TASK, JACKETT_WARMUP_TASK, JACKETT_GUARDIAN_TASK
+    global YOUTUBE_WORKER_TASK, YOUTUBE_STATUS_UPDATE_TASK
     global _PLEX_WEBHOOK_SERVER
 
     _cleanup_tmp_dir()
@@ -25161,6 +25847,12 @@ async def setup_bot_commands(app: Application) -> None:
         # Note: separate pending-loop is no longer needed — the per-user 'seen'
         # diff is naturally self-healing: outside quiet hours we just skip the
         # push; next in-window refresh delivers everything still unseen.
+
+    if _youtube_downloads_enabled():
+        _youtube_reset_interrupted_jobs()
+        YOUTUBE_WORKER_TASK = app.create_task(_youtube_worker_loop(app))
+        YOUTUBE_STATUS_UPDATE_TASK = app.create_task(_youtube_status_update_loop(app))
+        logger.info("YouTube downloads enabled: dir=%s max_height=%s", YOUTUBE_DOWNLOAD_DIR, YOUTUBE_MAX_HEIGHT)
 
     if _jackett_warmup_enabled():
         JACKETT_WARMUP_TASK = app.create_task(_jackett_warmup_loop(app))
@@ -25222,6 +25914,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(access_callback, pattern=f"^{ACCESS_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
+    app.add_handler(CallbackQueryHandler(youtube_callback, pattern=f"^{YOUTUBE_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(series_continue_callback, pattern=f"^{CONTINUE_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(movie_new_refresh_callback, pattern=r"^new:refresh$"))

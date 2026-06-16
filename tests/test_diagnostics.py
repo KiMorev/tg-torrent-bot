@@ -88,6 +88,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("Кинопоиск", text)
         # Plex disabled when plex_client=None (default)
         self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
+        self.assertIn("⛔ ▶️ <b>YouTube</b>: выключен", text)
 
         jackett_text = format_diagnostics_section(report, "jackett")
         trackers_text = format_diagnostics_section(report, "trackers")
@@ -132,6 +133,23 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("Public-трекеры</b>: выключены", text)
         self.assertNotIn("Кинопоиск", text)
         self.assertIn("⛔ 🎬 <b>Plex</b>: не настроен", text)
+        self.assertIn("⛔ ▶️ <b>YouTube</b>: выключен", text)
+
+    def test_youtube_diagnostics_reports_missing_folder_when_enabled(self) -> None:
+        report = run_diagnostics(
+            rutracker_client=None,
+            jackett_client=None,
+            ds_client=FakeDownloadStation(),
+            tracker_service=FakeTrackerService(),
+            display_timezone=timezone.utc,
+            youtube_enabled=True,
+            youtube_download_dir="/definitely/missing/youtube",
+        )
+
+        text = format_diagnostics_section(report, "youtube")
+
+        self.assertIn("YouTube", text)
+        self.assertIn("папка недоступна", text)
 
     def test_stale_tracker_cache_reports_ok_not_warning(self) -> None:
         """A stale but non-empty cache is still functional — must show ✅, not ⚠️."""

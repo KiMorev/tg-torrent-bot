@@ -27,6 +27,10 @@ from keyboards import (
     _task_error_keyboard,
     _task_keyboard,
     _tasks_keyboard,
+    _youtube_close_keyboard,
+    _youtube_disabled_keyboard,
+    _youtube_plex_keyboard,
+    _youtube_preview_keyboard,
     tracker_selection_label,
     users_keyboard,
     movie_trackers_keyboard,
@@ -118,6 +122,65 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(labels, ["🎬 Новинки", "🎬 Трекеры новинок"])
         self.assertEqual(callbacks["🎬 Новинки"], "admin:movie_status")
         self.assertEqual(callbacks["🎬 Трекеры новинок"], "admin:movie_trackers")
+
+    def test_admin_diagnostics_keyboard_has_youtube_section(self) -> None:
+        keyboard = _admin_diagnostics_keyboard()
+
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["▶️ YouTube"], "admin:diag_youtube")
+
+    def test_youtube_preview_keyboard_has_quality_open_and_close(self) -> None:
+        keyboard = _youtube_preview_keyboard(
+            "abc123",
+            [(1080, "⬇️ 1080p"), (720, "⬇️ 720p")],
+            url="https://www.youtube.com/watch?v=abcdefghijk",
+        )
+
+        buttons = {
+            button.text: button.callback_data or button.url
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["⬇️ 1080p"], "yt:dl:abc123:1080")
+        self.assertEqual(buttons["⬇️ 720p"], "yt:dl:abc123:720")
+        self.assertEqual(buttons["Открыть YouTube"], "https://www.youtube.com/watch?v=abcdefghijk")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_youtube_disabled_and_close_keyboards_use_global_close(self) -> None:
+        disabled = _youtube_disabled_keyboard("https://www.youtube.com/watch?v=abcdefghijk")
+        close = _youtube_close_keyboard()
+
+        disabled_buttons = {
+            button.text: button.callback_data or button.url
+            for row in disabled.inline_keyboard
+            for button in row
+        }
+        close_buttons = {
+            button.text: button.callback_data
+            for row in close.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(disabled_buttons["✖️ Закрыть"], "task:close:")
+        self.assertEqual(close_buttons["✖️ Закрыть"], "task:close:")
+
+    def test_youtube_plex_keyboard_has_plex_url_and_close(self) -> None:
+        keyboard = _youtube_plex_keyboard("https://app.plex.tv/desktop")
+
+        buttons = {
+            button.text: button.callback_data or button.url
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["▶️ Смотреть в Plex"], "https://app.plex.tv/desktop")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
     def test_admin_panel_keyboard_kp_buttons_moved_to_drilldown(self) -> None:
         """KP cache management buttons are no longer on the main panel —

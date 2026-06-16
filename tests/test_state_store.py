@@ -23,6 +23,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         series_continue_hidden_file=d / "series_continue_hidden.json",
         download_history_file=d / "download_history.jsonl",
         jackett_guard_file=d / "jackett_guard.json",
+        youtube_downloads_file=d / "youtube_downloads.json",
     )
 
 
@@ -122,6 +123,25 @@ class StateStoreTests(unittest.TestCase):
         self.assertIn("good", loaded)
         self.assertNotIn("bad", loaded)
         self.assertNotIn("alsobad", loaded)
+
+    def test_youtube_downloads_roundtrip_and_filters_bad_entries(self) -> None:
+        jobs = {
+            "yt_b": {"status": "queued", "title": "B"},
+            "yt_a": {"status": "completed", "title": "A"},
+        }
+
+        self.store.save_youtube_downloads(jobs)
+        self.store.save_json_file(
+            self.store.youtube_downloads_file,
+            {**self.store.load_youtube_downloads(), "bad": "not-dict"},
+            "test",
+        )
+
+        loaded = self.store.load_youtube_downloads()
+
+        self.assertEqual(loaded["yt_a"]["title"], "A")
+        self.assertEqual(loaded["yt_b"]["status"], "queued")
+        self.assertNotIn("bad", loaded)
 
     def test_series_bulk_jobs_roundtrip(self) -> None:
         jobs = {

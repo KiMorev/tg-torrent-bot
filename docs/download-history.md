@@ -18,7 +18,13 @@
 - `download_failed` - добавление или финальный статус завершились ошибкой;
 - `files_normalized` - исходные файлы сериала переименованы в Plex-формат после подтверждения пользователя;
 - `plex_found` - Plex нашёл фильм или сезон после скачивания;
-- `plex_not_found` - Plex не подтвердил появление за окно ожидания.
+- `plex_not_found` - Plex не подтвердил появление за окно ожидания;
+- `youtube_download_queued` - пользователь подтвердил скачивание YouTube-ролика;
+- `youtube_download_started` - YouTube worker начал скачивание;
+- `youtube_download_completed` - файл YouTube-ролика сохранён на NAS;
+- `youtube_download_failed` - metadata/download/remux завершились ошибкой;
+- `youtube_plex_found` - YouTube-ролик появился в отдельной Plex-библиотеке;
+- `youtube_plex_not_found` - Plex не подтвердил появление YouTube-ролика за окно ожидания.
 
 ## Привязка к пользователю
 
@@ -37,6 +43,7 @@
 - название раздачи и нормализованное название;
 - `kind`, `year`, `quality`, `series_query`, `season`;
 - `tracker`, `indexer`, `source`, `topic_id`, безопасная `topic_url`;
+- для YouTube: `youtube_job_id`, `youtube_video_id`, `canonical_url`, `channel`, `duration_seconds`, `format_id`, `file_path`, `file_size`;
 - профиль релиза из parsed meta: качество, source, HDR, аудио, языки, группа, edition;
 - статус DS, прогресс, размер, `error_detail`;
 - результат Plex lookup: rating key, тип metadata, причина timeout.
@@ -49,7 +56,8 @@
 - полные magnet-ссылки;
 - Jackett proxy/download URL вида `/dl/...` и ссылки с `apikey`;
 - содержимое `.torrent`;
-- raw HTML/API-ответы трекеров.
+- raw HTML/API-ответы трекеров;
+- raw metadata `yt-dlp`, временные direct download URLs YouTube и cookies.
 
 Если нужен URL, сохраняется только безопасная страница темы трекера, например `https://rutracker.org/forum/viewtopic.php?t=12345`.
 
@@ -64,6 +72,8 @@
 - `_check_subscriptions()` и Jackett subscription paths - автоскачивание по подпискам;
 - `_run_task_notifications_once()` - финальные статусы DS;
 - `_handle_normalization_callback()` - подтверждённое переименование файлов сериала;
-- `_plex_poll_after_finish()` - итог поиска в Plex.
+- `_plex_poll_after_finish()` - итог поиска в Plex;
+- `youtube_callback()` и `_youtube_worker_once()` - очередь, старт, успех и ошибка YouTube-download;
+- `_youtube_plex_poll_after_finish()` - итог поиска YouTube-ролика в отдельной Plex-библиотеке.
 
 Перед добавлением новых точек записи проверь, что событие не дублируется при повторном фоне и что в payload не попали секретные ссылки.
