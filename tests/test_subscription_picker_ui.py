@@ -543,6 +543,116 @@ class SearchSeriesBulkPlanTests(unittest.TestCase):
         self.assertEqual(job["seasons"]["2"]["plan_status"], bot.STATUS_EXACT)
         self.assertEqual(job["seasons"]["2"]["runtime_status"], "pending")
 
+    def test_bulk_build_reuses_completed_profile_prefetch(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        wide_result = {
+            "title": "Клиника / Scrubs / Сезон: 2 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }
+        ctx = _make_context(results=results)
+        ctx.user_data["srch_search_query"] = "Клиника 1080p Original Sub"
+        ctx.bot.send_animation = AsyncMock(return_value=None)
+        fake_store, saved_jobs = _fake_series_bulk_store()
+
+        async def passthrough(plan, _profile, max_seasons=None):
+            return plan
+
+        async def run_flow():
+            await bot.search_series_bulk_plan(update, ctx)
+            prefetch = ctx.user_data[bot._SERIES_BULK_PREFETCH_SLOT]
+            await asyncio.gather(
+                prefetch["known"],
+                prefetch["plex"],
+                prefetch["downloads"],
+                prefetch["wide"],
+            )
+            query.edit_message_text.reset_mock()
+            query.data = "srch:bulk_build"
+            return await bot.search_series_bulk_build_plan(update, ctx)
+
+        with (
+            patch.object(bot, "_SERIES_BULK_PREFETCH_START_DELAY_SECONDS", 0),
+            patch.object(bot, "_series_bulk_known_seasons", AsyncMock(return_value=([1, 2], True))) as known,
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(return_value={1})) as plex,
+            patch.object(bot, "_series_bulk_downloading_seasons", AsyncMock(return_value=set())) as downloads,
+            patch.object(bot, "_series_bulk_search_once", AsyncMock(return_value=([wide_result], []))) as search,
+            patch.object(bot, "_gpt_enrich_series_bulk_plan", AsyncMock(side_effect=passthrough)),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            state = asyncio.run(run_flow())
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        self.assertEqual(known.await_count, 1)
+        self.assertEqual(plex.await_count, 1)
+        self.assertEqual(downloads.await_count, 1)
+        self.assertEqual(search.await_count, 1)
+        self.assertNotIn(bot._SERIES_BULK_PREFETCH_SLOT, ctx.user_data)
+        final_text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Сезон 1 - уже есть в Plex", final_text)
+        self.assertIn("Сезон 2 - уверенно: WEB-DL", final_text)
+        self.assertEqual(len(saved_jobs), 1)
+
+    def test_bulk_prefetch_cancelled_on_search_cancel(self):
+        query = _make_query("srch:bulk_plan:0")
+        query.message = MagicMock()
+        query.message.chat = MagicMock(id=100)
+        update = MagicMock(callback_query=query)
+        results = [{
+            "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",
+            "partial": False,
+            "series": True,
+            "size": "10 GB",
+            "seeders": 20,
+            "source": "jackett",
+            "tracker_name": "rutracker",
+        }]
+        ctx = _make_context(results=results)
+        cancel_query = _make_query("srch:cancel")
+        cancel_query.message = MagicMock()
+        cancel_query.message.chat = MagicMock(id=100)
+        cancel_query.message.delete = AsyncMock()
+        cancel_update = MagicMock(callback_query=cancel_query)
+
+        async def slow(*_args, **_kwargs):
+            await asyncio.sleep(60)
+
+        async def run_flow():
+            await bot.search_series_bulk_plan(update, ctx)
+            prefetch = ctx.user_data[bot._SERIES_BULK_PREFETCH_SLOT]
+            await bot.search_cancel(cancel_update, ctx)
+            await asyncio.sleep(0)
+            return prefetch
+
+        with (
+            patch.object(bot, "_series_bulk_known_seasons", AsyncMock(side_effect=slow)),
+            patch.object(bot, "_get_plex_seasons_for_series", AsyncMock(side_effect=slow)),
+            patch.object(bot, "_series_bulk_downloading_seasons", AsyncMock(side_effect=slow)),
+            patch.object(bot, "_series_bulk_search_once", AsyncMock(side_effect=slow)),
+            patch.object(bot, "_send_auto_delete", AsyncMock()),
+        ):
+            prefetch = asyncio.run(run_flow())
+
+        self.assertNotIn(bot._SERIES_BULK_PREFETCH_SLOT, ctx.user_data)
+        for name in ("known", "plex", "downloads", "wide"):
+            self.assertTrue(prefetch[name].cancelled())
+
     def test_bulk_plan_marks_good_candidate_as_likely_with_reason(self):
         result = {
             "title": "Клиника / Scrubs / Сезон: 1 / WEB-DL 1080p / Original / Sub",

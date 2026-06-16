@@ -10751,6 +10751,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     context.user_data.pop("srch_clusters", None)
     context.user_data.pop("srch_picker_clusters", None)
     context.user_data.pop("srch_cluster_picker_return", None)
+    _cancel_series_bulk_prefetch(context)
     # Check for in-flight didmean prefetch BEFORE Strategy-2 splitting — we
     # need base_query to compare. If the prefetched query matches the current
     # base, we'll use its raw Jackett results below; otherwise we cancel it
@@ -15354,6 +15355,7 @@ async def search_direct_download(update: Update, context: ContextTypes.DEFAULT_T
     # User committed to a result — any in-flight did-you-mean prefetch is now
     # irrelevant. Cancel to free the asyncio.Task.
     _cancel_didmean_prefetch(context)
+    _cancel_series_bulk_prefetch(context)
     return await _download_and_add(query, context, index, subscribe=False)
 
 
@@ -15627,6 +15629,11 @@ def _series_bulk_start_action(context: ContextTypes.DEFAULT_TYPE, action: str) -
 def _series_bulk_finish_action(context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
     if context.user_data.get("srch_series_bulk_action_running") == action:
         context.user_data.pop("srch_series_bulk_action_running", None)
+
+
+_SERIES_BULK_PREFETCH_SLOT = "srch_series_bulk_prefetch"
+_SERIES_BULK_PREFETCH_MISS = object()
+_SERIES_BULK_PREFETCH_START_DELAY_SECONDS = 0.1
 
 
 def _series_bulk_resolved(context: ContextTypes.DEFAULT_TYPE) -> dict[int, str]:
@@ -17430,6 +17437,142 @@ async def _series_bulk_downloading_seasons(series_query: str) -> set[int]:
     return found
 
 
+def _series_bulk_prefetch_key(
+    context: ContextTypes.DEFAULT_TYPE,
+    series_query: str,
+    index: int,
+    result: dict,
+) -> tuple[str, int, tuple[str, str], tuple[int, ...]]:
+    raw_target_seasons = context.user_data.get("srch_series_bulk_target_seasons")
+    target_seasons = tuple(sorted({
+        _series_continue_int(season)
+        for season in (raw_target_seasons or [])
+        if _series_continue_int(season) > 0
+    }))
+    return series_query, int(index), _series_bulk_result_key(result), target_seasons
+
+
+def _series_bulk_cancel_prefetch_tasks(prefetch: object) -> None:
+    if not isinstance(prefetch, dict):
+        return
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    for name in ("known", "plex", "downloads", "wide"):
+        task = prefetch.get(name)
+        if not isinstance(task, asyncio.Task) or task.done():
+            continue
+        if running_loop is not None and task.get_loop() is not running_loop:
+            continue
+        task.cancel()
+
+
+def _cancel_series_bulk_prefetch(context: ContextTypes.DEFAULT_TYPE) -> None:
+    prefetch = context.user_data.pop(_SERIES_BULK_PREFETCH_SLOT, None)
+    _series_bulk_cancel_prefetch_tasks(prefetch)
+
+
+def _series_bulk_prefetch_task_usable(task: object) -> bool:
+    if not isinstance(task, asyncio.Task) or task.cancelled():
+        return False
+    return task.get_loop() is asyncio.get_running_loop()
+
+
+async def _series_bulk_prefetch_guard(label: str, factory):
+    try:
+        await asyncio.sleep(_SERIES_BULK_PREFETCH_START_DELAY_SECONDS)
+        return await factory()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.info("Series bulk prefetch failed at %s: %s", label, exc)
+        return exc
+
+
+def _series_bulk_schedule_prefetch(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    series_query: str,
+    index: int,
+    result: dict,
+    results: list[dict],
+) -> None:
+    key = _series_bulk_prefetch_key(context, series_query, index, result)
+    existing = context.user_data.get(_SERIES_BULK_PREFETCH_SLOT)
+    if isinstance(existing, dict) and existing.get("key") == key:
+        tasks = [existing.get(name) for name in ("known", "plex", "downloads", "wide")]
+        if all(_series_bulk_prefetch_task_usable(task) for task in tasks):
+            return
+
+    _cancel_series_bulk_prefetch(context)
+    results_snapshot = [dict(item) for item in results if isinstance(item, dict)]
+    context.user_data[_SERIES_BULK_PREFETCH_SLOT] = {
+        "key": key,
+        "known": asyncio.create_task(
+            _series_bulk_prefetch_guard(
+                "known",
+                lambda: _series_bulk_known_seasons(series_query, results_snapshot),
+            )
+        ),
+        "plex": asyncio.create_task(
+            _series_bulk_prefetch_guard(
+                "plex",
+                lambda: _get_plex_seasons_for_series(series_query),
+            )
+        ),
+        "downloads": asyncio.create_task(
+            _series_bulk_prefetch_guard(
+                "downloads",
+                lambda: _series_bulk_downloading_seasons(series_query),
+            )
+        ),
+        "wide": asyncio.create_task(
+            _series_bulk_prefetch_guard(
+                "wide",
+                lambda: _series_bulk_search_once(context, series_query),
+            )
+        ),
+    }
+    logger.debug("Series bulk prefetch started for %r", series_query)
+
+
+def _series_bulk_take_prefetch(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    series_query: str,
+    index: int,
+    result: dict,
+) -> dict[str, asyncio.Task] | None:
+    key = _series_bulk_prefetch_key(context, series_query, index, result)
+    prefetch = context.user_data.pop(_SERIES_BULK_PREFETCH_SLOT, None)
+    if not isinstance(prefetch, dict):
+        return None
+    tasks = {
+        name: prefetch.get(name)
+        for name in ("known", "plex", "downloads", "wide")
+    }
+    if prefetch.get("key") != key or not all(_series_bulk_prefetch_task_usable(task) for task in tasks.values()):
+        _series_bulk_cancel_prefetch_tasks(prefetch)
+        return None
+    return tasks
+
+
+async def _series_bulk_prefetch_value(
+    prefetch_tasks: dict[str, asyncio.Task] | None,
+    name: str,
+):
+    if not prefetch_tasks:
+        return _SERIES_BULK_PREFETCH_MISS
+    task = prefetch_tasks.get(name)
+    if task is None:
+        return _SERIES_BULK_PREFETCH_MISS
+    value = await task
+    if isinstance(value, Exception):
+        return _SERIES_BULK_PREFETCH_MISS
+    return value
+
+
 def _series_bulk_candidate_label(candidate) -> str:
     release = candidate.release
     parts = [
@@ -18922,7 +19065,21 @@ async def search_series_bulk_rebuild(update: Update, context: ContextTypes.DEFAU
     context.user_data["srch_series_bulk_resolved"] = {}
     context.user_data["srch_series_bulk_failed"] = {}
     context.user_data["srch_series_bulk_failed_candidates"] = {}
-    return await _series_bulk_show_profile(query, context)
+    state = await _series_bulk_show_profile(query, context)
+    current = _series_bulk_current_index_and_result(context)
+    if current is not None:
+        index, result = current
+        series_query = _extract_series_base_query(str(result.get("title") or ""))
+        results = context.user_data.get("srch_results", [])
+        if series_query and isinstance(results, list):
+            _series_bulk_schedule_prefetch(
+                context,
+                series_query=series_query,
+                index=index,
+                result=result,
+                results=results,
+            )
+    return state
 
 
 async def search_series_bulk_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -19132,7 +19289,15 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["srch_series_bulk_index"] = index
     context.user_data["srch_series_bulk_profile_draft"] = profile
     context.user_data["srch_series_bulk_base_quality"] = base_quality
-    return await _series_bulk_show_profile(query, context)
+    state = await _series_bulk_show_profile(query, context)
+    _series_bulk_schedule_prefetch(
+        context,
+        series_query=series_query,
+        index=index,
+        result=result,
+        results=results,
+    )
+    return state
 
 
 async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -19143,6 +19308,7 @@ async def search_series_bulk_build_plan(update: Update, context: ContextTypes.DE
 
 async def _series_bulk_build_plan_from_context(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     build_token = _series_bulk_start_build(context)
+    prefetch_tasks: dict[str, asyncio.Task] | None = None
     try:
         index = int(context.user_data.get("srch_series_bulk_index"))
     except (TypeError, ValueError):
@@ -19173,6 +19339,12 @@ async def _series_bulk_build_plan_from_context(query, context: ContextTypes.DEFA
         return SEARCH_RESULTS
 
     _cancel_didmean_prefetch(context)
+    prefetch_tasks = _series_bulk_take_prefetch(
+        context,
+        series_query=series_query,
+        index=index,
+        result=result,
+    )
     chat_id = _chat_id_from_query(query)
     animation_msg = await _series_bulk_send_animation(context, chat_id)
     long_notice_task: asyncio.Task | None = None
@@ -19191,7 +19363,11 @@ async def _series_bulk_build_plan_from_context(query, context: ContextTypes.DEFA
             seasons = target_seasons
             verified = True
         else:
-            seasons, verified = await _series_bulk_known_seasons(series_query, results)
+            prefetched = await _series_bulk_prefetch_value(prefetch_tasks, "known")
+            if prefetched is _SERIES_BULK_PREFETCH_MISS:
+                seasons, verified = await _series_bulk_known_seasons(series_query, results)
+            else:
+                seasons, verified = prefetched
             if _series_bulk_build_cancelled(context, build_token):
                 return ConversationHandler.END
             clicked_season = _extract_season_from_query(str(result.get("title") or ""))
@@ -19202,17 +19378,29 @@ async def _series_bulk_build_plan_from_context(query, context: ContextTypes.DEFA
             profile = _series_bulk_profile_from_result(context, result)
 
         await _series_bulk_edit_wait(query, context, series_query, "plex")
-        plex_seasons = await _get_plex_seasons_for_series(series_query)
+        prefetched = await _series_bulk_prefetch_value(prefetch_tasks, "plex")
+        if prefetched is _SERIES_BULK_PREFETCH_MISS:
+            plex_seasons = await _get_plex_seasons_for_series(series_query)
+        else:
+            plex_seasons = set(prefetched)
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
 
         await _series_bulk_edit_wait(query, context, series_query, "downloads")
-        downloading_seasons = await _series_bulk_downloading_seasons(series_query)
+        prefetched = await _series_bulk_prefetch_value(prefetch_tasks, "downloads")
+        if prefetched is _SERIES_BULK_PREFETCH_MISS:
+            downloading_seasons = await _series_bulk_downloading_seasons(series_query)
+        else:
+            downloading_seasons = set(prefetched)
         if _series_bulk_build_cancelled(context, build_token):
             return ConversationHandler.END
 
         await _series_bulk_edit_wait(query, context, series_query, "search")
-        wide_results, wide_warnings = await _series_bulk_search_once(context, series_query)
+        prefetched = await _series_bulk_prefetch_value(prefetch_tasks, "wide")
+        if prefetched is _SERIES_BULK_PREFETCH_MISS:
+            wide_results, wide_warnings = await _series_bulk_search_once(context, series_query)
+        else:
+            wide_results, wide_warnings = prefetched
         search_warnings = list(wide_warnings)
         wide_hit_fetch_limit = _series_bulk_has_fetch_limit_warning(wide_warnings)
         if _series_bulk_build_cancelled(context, build_token):
@@ -19320,6 +19508,7 @@ async def _series_bulk_build_plan_from_context(query, context: ContextTypes.DEFA
         context.user_data.pop("srch_series_bulk_wait_stage", None)
         context.user_data.pop("srch_series_bulk_long_notice", None)
         _series_bulk_finish_build(context, build_token)
+        _series_bulk_cancel_prefetch_tasks(prefetch_tasks)
         await _series_bulk_delete_animation(animation_msg)
 
 
@@ -19900,6 +20089,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         context.user_data.pop(key, None)
     # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
     _cancel_didmean_prefetch(context)
+    _cancel_series_bulk_prefetch(context)
 
     return ConversationHandler.END
 
@@ -19973,6 +20163,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data.pop(key, None)
     # Cancel any in-flight did-you-mean prefetch task (Proposal #2).
     _cancel_didmean_prefetch(context)
+    _cancel_series_bulk_prefetch(context)
 
     return ConversationHandler.END
 
@@ -24663,6 +24854,7 @@ async def text_message_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # (_run_search would cancel it too on mismatch, but explicit cancel here
     # avoids a brief window where the task keeps running.)
     _cancel_didmean_prefetch(context)
+    _cancel_series_bulk_prefetch(context)
 
     if text.lower() in {
         "настройки",
