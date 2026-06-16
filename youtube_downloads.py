@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,26 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
 MAX_FILENAME_CHARS = 140
 DEFAULT_MIN_HEIGHT = 640
+DOWNLOAD_RETRY_DELAYS_SECONDS = (5.0, 15.0)
+TRANSIENT_DOWNLOAD_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "remote end closed",
+    "temporary failure",
+    "network is unreachable",
+    "name or service not known",
+    "http error 500",
+    "http error 502",
+    "http error 503",
+    "http error 504",
+    "server returned 500",
+    "server returned 502",
+    "server returned 503",
+    "server returned 504",
+)
 
 
 class YouTubeDownloadError(Exception):
@@ -37,6 +58,74 @@ class YouTubeUnsupportedError(YouTubeDownloadError):
 
 class YouTubeToolMissingError(YouTubeDownloadError):
     """yt-dlp or ffmpeg is unavailable in the runtime image."""
+
+
+def _is_transient_download_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in TRANSIENT_DOWNLOAD_ERROR_MARKERS)
+
+
+def _download_retry_reason(exc: Exception) -> str:
+    text = str(exc or "").lower()
+    if "timed out" in text or "timeout" in text:
+        return "сетевой таймаут YouTube"
+    if "http error 5" in text or "server returned 5" in text:
+        return "временная ошибка YouTube"
+    return "временный сетевой сбой YouTube"
+
+
+def _friendly_download_error(exc: Exception) -> str:
+    reason = _download_retry_reason(exc)
+    return f"Не удалось скачать видео: {reason}. Повторите позже."
+
+
+def _download_with_retries(
+    run_download: Callable[[], None],
+    *,
+    progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> None:
+    max_attempts = len(DOWNLOAD_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            run_download()
+            return
+        except Exception as exc:
+            if not _is_transient_download_error(exc):
+                raise YouTubeDownloadError(f"Не удалось скачать видео: {exc}") from exc
+            if attempt >= max_attempts:
+                raise YouTubeDownloadError(_friendly_download_error(exc)) from exc
+            if progress_hook:
+                progress_hook({
+                    "status": "retrying",
+                    "attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "reason": _download_retry_reason(exc),
+                })
+            sleep_func(DOWNLOAD_RETRY_DELAYS_SECONDS[attempt - 1])
+
+
+def _cleanup_failed_download(plan: "YouTubePathPlan", *, preserve_final: bool) -> None:
+    if not plan.item_dir.exists():
+        return
+    removable_exact = {plan.video_path}
+    if not preserve_final:
+        removable_exact.update({plan.poster_path, plan.fanart_path, plan.info_path})
+    stem = plan.video_path.stem
+    for path in plan.item_dir.iterdir():
+        if not path.is_file():
+            continue
+        if preserve_final and path == plan.video_path:
+            continue
+        if path in removable_exact or path.name.startswith(f"{stem}."):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    try:
+        plan.item_dir.rmdir()
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True)
@@ -536,21 +625,33 @@ def download_video(
             progress_hook(payload)
 
     outtmpl = str(plan.video_path.with_suffix(".%(ext)s"))
-    try:
-        with yt_dlp.YoutubeDL({
-            "format": choice.format_id,
-            "outtmpl": outtmpl,
-            "merge_output_format": "mp4",
-            "noplaylist": True,
-            "quiet": True,
-            "noprogress": True,
-            "no_warnings": True,
-            "progress_hooks": [_hook],
-            "overwrites": True,
-        }) as ydl:
+    ydl_options = {
+        "format": choice.format_id,
+        "outtmpl": outtmpl,
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "noprogress": True,
+        "no_warnings": True,
+        "progress_hooks": [_hook],
+        "overwrites": True,
+        "socket_timeout": 30,
+        "retries": 5,
+        "fragment_retries": 5,
+        "file_access_retries": 3,
+        "extractor_retries": 3,
+    }
+
+    def _run_download() -> None:
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
             ydl.download([canonical_url])
-    except Exception as exc:
-        raise YouTubeDownloadError(f"Не удалось скачать видео: {exc}") from exc
+
+    had_existing_video = plan.video_path.exists()
+    try:
+        _download_with_retries(_run_download, progress_hook=_hook)
+    except YouTubeDownloadError:
+        _cleanup_failed_download(plan, preserve_final=had_existing_video)
+        raise
 
     final_path = _find_final_video(plan)
     if not final_path.exists():

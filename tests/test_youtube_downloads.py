@@ -6,6 +6,10 @@ from unittest.mock import patch
 from youtube_downloads import (
     _apply_audio_language,
     _apply_mp4_metadata,
+    _cleanup_failed_download,
+    _download_with_retries,
+    YouTubeDownloadError,
+    YouTubePathPlan,
     YouTubeUnsupportedError,
     build_path_plan,
     compatible_quality_options,
@@ -263,3 +267,93 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
             self.assertEqual(language, "und")
             self.assertEqual(video_path.read_bytes(), b"new")
             run.assert_called_once()
+
+    def test_download_with_retries_recovers_after_transient_timeout(self) -> None:
+        attempts = []
+        progress = []
+
+        def run_download() -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError(
+                    "ERROR: [download] Got error: "
+                    "(<HTTPSConnection(host='rr4.googlevideo.com')>: timed out)"
+                )
+
+        _download_with_retries(
+            run_download,
+            progress_hook=progress.append,
+            sleep_func=lambda _delay: None,
+        )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(progress[0]["status"], "retrying")
+        self.assertEqual(progress[0]["attempt"], 2)
+        self.assertEqual(progress[0]["max_attempts"], 3)
+        self.assertIn("таймаут", progress[0]["reason"])
+
+    def test_download_with_retries_hides_low_level_timeout_after_final_failure(self) -> None:
+        attempts = []
+
+        def run_download() -> None:
+            attempts.append(1)
+            raise RuntimeError(
+                "ERROR: [download] Got error: "
+                "(<HTTPSConnection(host='rr4.googlevideo.com', port=443)>: "
+                "Connection timed out. (connect timeout=20.0))"
+            )
+
+        with self.assertRaises(YouTubeDownloadError) as caught:
+            _download_with_retries(
+                run_download,
+                progress_hook=lambda _payload: None,
+                sleep_func=lambda _delay: None,
+            )
+
+        text = str(caught.exception)
+        self.assertEqual(len(attempts), 3)
+        self.assertIn("Не удалось скачать видео", text)
+        self.assertIn("сетевой таймаут YouTube", text)
+        self.assertNotIn("HTTPSConnection", text)
+        self.assertNotIn("googlevideo.com", text)
+
+    def test_cleanup_failed_download_removes_partial_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+            (item_dir / "Clip.mp4.part").write_bytes(b"partial")
+            (item_dir / "Clip.f137.mp4").write_bytes(b"partial")
+            plan.info_path.write_text("{}", encoding="utf-8")
+
+            _cleanup_failed_download(plan, preserve_final=False)
+
+            self.assertFalse(item_dir.exists())
+
+    def test_cleanup_failed_download_preserves_existing_final_video(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+            plan.video_path.write_bytes(b"ready")
+            plan.poster_path.write_bytes(b"poster")
+            (item_dir / "Clip.mp4.part").write_bytes(b"partial")
+
+            _cleanup_failed_download(plan, preserve_final=True)
+
+            self.assertTrue(item_dir.exists())
+            self.assertEqual(plan.video_path.read_bytes(), b"ready")
+            self.assertTrue(plan.poster_path.exists())
+            self.assertFalse((item_dir / "Clip.mp4.part").exists())

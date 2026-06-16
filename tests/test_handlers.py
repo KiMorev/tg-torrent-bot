@@ -6999,6 +6999,28 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Скачивание аудио", text)
         self.assertNotIn("Сборка MP4", text)
 
+    def test_youtube_job_card_shows_retry_status(self):
+        text = bot._youtube_job_card_text({
+            "id": "yt_1",
+            "status": "downloading",
+            "title": "Test clip",
+            "quality": "720p",
+            "format_id": "22",
+            "media_step": "video",
+            "retry_attempt": 2,
+            "retry_max_attempts": 3,
+            "retry_reason": "сетевой таймаут YouTube",
+        })
+
+        self.assertIn("Повтор 2/3: сетевой таймаут YouTube", text)
+
+    def test_youtube_failure_message_keeps_download_error_readable(self):
+        text = bot._youtube_failure_message(
+            bot.YouTubeDownloadError("Не удалось скачать видео: сетевой таймаут YouTube. Повторите позже.")
+        )
+
+        self.assertEqual(text, "Не удалось скачать видео: сетевой таймаут YouTube. Повторите позже.")
+
     def test_youtube_progress_hook_marks_second_stream_as_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = _make_store(tmp)
@@ -7033,6 +7055,33 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(job["downloaded_bytes"], 10)
             self.assertEqual(job["total_bytes"], 50)
             self.assertEqual(job["eta_seconds"], 0)
+
+    def test_youtube_progress_hook_records_retry_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "status": "queued",
+                    "format_id": "22",
+                    "title": "Test clip",
+                }
+            })
+            with patch.object(bot, "state_store", store):
+                hook = bot._youtube_progress_hook("yt_1", separate_streams=False)
+                hook({
+                    "status": "retrying",
+                    "attempt": 2,
+                    "max_attempts": 3,
+                    "reason": "сетевой таймаут YouTube",
+                })
+
+            job = store.load_youtube_downloads()["yt_1"]
+            self.assertEqual(job["status"], "downloading")
+            self.assertEqual(job["media_step"], "video")
+            self.assertEqual(job["retry_attempt"], 2)
+            self.assertEqual(job["retry_max_attempts"], 3)
+            self.assertEqual(job["retry_reason"], "сетевой таймаут YouTube")
 
     async def test_youtube_worker_completes_queued_job(self):
         app = MagicMock()

@@ -7327,6 +7327,18 @@ def _youtube_current_file_progress(job: dict) -> str:
     return " · ".join(parts)
 
 
+def _youtube_retry_progress(job: dict) -> str:
+    try:
+        attempt = int(job.get("retry_attempt") or 0)
+        max_attempts = int(job.get("retry_max_attempts") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if attempt <= 0 or max_attempts <= 0:
+        return ""
+    reason = str(job.get("retry_reason") or "временный сетевой сбой YouTube").strip()
+    return f"Повтор {attempt}/{max_attempts}: {reason}"
+
+
 def _youtube_pipeline_card_text(job: dict) -> str:
     status = str(job.get("status") or "queued")
     separate_audio = _youtube_has_separate_audio(job)
@@ -7355,6 +7367,9 @@ def _youtube_pipeline_card_text(job: dict) -> str:
         progress = _youtube_current_file_progress(job)
         if progress:
             lines.append(f"   Текущий файл: {progress}")
+        retry = _youtube_retry_progress(job)
+        if retry:
+            lines.append(f"   {retry}")
 
     if separate_audio:
         audio_active = status == "downloading" and media_step == "audio"
@@ -7363,6 +7378,9 @@ def _youtube_pipeline_card_text(job: dict) -> str:
             progress = _youtube_current_file_progress(job)
             if progress:
                 lines.append(f"   Текущий файл: {progress}")
+            retry = _youtube_retry_progress(job)
+            if retry:
+                lines.append(f"   {retry}")
         lines.append(_youtube_stage_line(
             status == "completed",
             status == "processing",
@@ -7463,7 +7481,7 @@ def _youtube_failure_message(exc: Exception) -> str:
     text = str(exc).strip() or "неизвестная ошибка"
     if isinstance(exc, YouTubeToolMissingError):
         return f"YouTube-download включён, но контейнер не готов: {text}"
-    if isinstance(exc, YouTubeUnsupportedError):
+    if isinstance(exc, (YouTubeUnsupportedError, YouTubeDownloadError)):
         return text
     return f"Не удалось обработать YouTube-ссылку: {text}"
 
@@ -7516,6 +7534,9 @@ def _youtube_progress_hook(job_id: str, *, separate_streams: bool = False):
                 fields["video_done"] = True
             else:
                 fields["media_step"] = "video"
+            fields["retry_attempt"] = 0
+            fields["retry_max_attempts"] = 0
+            fields["retry_reason"] = ""
             fields["downloaded_bytes"] = int(payload.get("downloaded_bytes") or 0)
             total = payload.get("total_bytes") or payload.get("total_bytes_estimate")
             if total:
@@ -7526,7 +7547,22 @@ def _youtube_progress_hook(job_id: str, *, separate_streams: bool = False):
                 fields["eta_seconds"] = int(payload.get("eta") or 0)
             elif step_changed:
                 fields["eta_seconds"] = 0
+        elif status == "retrying":
+            fields["status"] = "downloading"
+            if separate_streams and current_part >= 2:
+                fields["media_step"] = "audio"
+                fields["video_done"] = True
+            else:
+                fields["media_step"] = "video"
+            fields["retry_attempt"] = int(payload.get("attempt") or 0)
+            fields["retry_max_attempts"] = int(payload.get("max_attempts") or 0)
+            fields["retry_reason"] = str(payload.get("reason") or "временный сетевой сбой YouTube")
+            fields["speed_bytes"] = 0
+            fields["eta_seconds"] = 0
         elif status == "finished":
+            fields["retry_attempt"] = 0
+            fields["retry_max_attempts"] = 0
+            fields["retry_reason"] = ""
             if separate_streams and current_part <= 1:
                 fields["status"] = "downloading"
                 fields["media_step"] = "audio"
