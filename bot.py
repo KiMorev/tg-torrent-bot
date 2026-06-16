@@ -7646,6 +7646,43 @@ async def _youtube_find_in_plex(section_id: str, job: dict):
     return None
 
 
+async def _youtube_set_collection_poster(section_id: str, job: dict) -> bool:
+    if not plex_client or not section_id:
+        return False
+    channel = str(job.get("channel") or "").strip()
+    if not channel:
+        return False
+    item_dir_value = str(job.get("item_dir") or "").strip()
+    if not item_dir_value:
+        return False
+    item_dir = Path(item_dir_value)
+    poster_path = item_dir / "poster.jpg"
+    if not poster_path.exists():
+        return False
+    try:
+        collection = await asyncio.to_thread(plex_client.find_section_collection, section_id, channel)
+        rating_key = getattr(collection, "rating_key", "") if collection else ""
+        if not rating_key:
+            return False
+        await asyncio.to_thread(plex_client.upload_poster, rating_key, poster_path)
+        logger.info(
+            "YouTube Plex collection poster set job_id=%s collection=%r rating_key=%s",
+            job.get("id"),
+            channel,
+            rating_key,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "YouTube Plex collection poster failed job_id=%s collection=%r: %s",
+            job.get("id"),
+            channel,
+            exc,
+            exc_info=True,
+        )
+        return False
+
+
 async def _youtube_plex_poll_after_finish(
     app: "Application",
     job: dict,
@@ -7691,6 +7728,7 @@ async def _youtube_plex_poll_after_finish(
                 job,
                 plex_rating_key=rating_key,
             )
+            await _youtube_set_collection_poster(section_id, job)
             return
         if chat_id is not None and hint_msg_id:
             await _delete_message_safely(app, chat_id, hint_msg_id, "YouTube Plex hint")

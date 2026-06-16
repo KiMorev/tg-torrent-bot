@@ -1,6 +1,8 @@
 """Unit tests for plex.py."""
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from xml.etree import ElementTree
 
@@ -8,6 +10,7 @@ import requests
 
 from plex import (
     PlexClient,
+    PlexCollection,
     PlexMovie,
     PlexShow,
     PlexSeason,
@@ -315,6 +318,52 @@ class PlexClientSectionTests(unittest.TestCase):
             self.assertTrue(client.refresh_section("9"))
 
         self.assertIn("/library/sections/9/refresh", mock_get.call_args.args[0])
+
+    def test_get_section_collections_reads_collections(self):
+        client = _make_client()
+        xml = (
+            '<MediaContainer>'
+            '  <Directory title="AcademeG" ratingKey="123" thumb="/library/metadata/123/thumb"/>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)):
+            collections = client.get_section_collections("9")
+
+        self.assertEqual(collections, [
+            PlexCollection(
+                title="AcademeG",
+                rating_key="123",
+                thumb="/library/metadata/123/thumb",
+            )
+        ])
+
+    def test_find_section_collection_matches_title_case_insensitive(self):
+        client = _make_client()
+        xml = (
+            '<MediaContainer>'
+            '  <Directory title="AcademeG" ratingKey="123"/>'
+            '</MediaContainer>'
+        )
+        with patch.object(client._session, "get", return_value=_mock_response(xml)):
+            collection = client.find_section_collection("9", "academeg")
+
+        self.assertIsNotNone(collection)
+        self.assertEqual(collection.rating_key, "123")
+
+    def test_upload_poster_posts_image_bytes(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        with tempfile.TemporaryDirectory() as tmp:
+            poster_path = Path(tmp) / "poster.jpg"
+            poster_path.write_bytes(b"poster-data")
+            with patch.object(client._session, "post", return_value=resp) as mock_post:
+                self.assertTrue(client.upload_poster("123", poster_path))
+
+        self.assertIn("/library/metadata/123/posters", mock_post.call_args.args[0])
+        self.assertEqual(mock_post.call_args.kwargs["data"], b"poster-data")
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 10)
 
 
 # ---------------------------------------------------------------------------

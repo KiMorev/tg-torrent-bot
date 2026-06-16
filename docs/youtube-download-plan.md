@@ -628,7 +628,9 @@ YOUTUBE_MIN_FREE_GB=5
   идентификаторы не попадали в заголовок Plex-карточки;
 - MP4 metadata содержит `title`, `artist=<channel>`, `album=<channel>`, `date`
   и YouTube URL в comment; это мягкая попытка дать Plex collection/category по
-  каналу через Local Media Assets без Plex API;
+  каналу через Local Media Assets;
+- после Plex lookup бот best-effort ищет коллекцию с названием канала и заливает
+  `poster.jpg` как постер коллекции через Plex API;
 - `YOUTUBE_AUDIO_LANGUAGE=und` по умолчанию прописывает неопределенный язык
   аудиодорожки через ffmpeg copy/remux, чтобы Plex не показывал ложный
   "Английский"; при необходимости можно поставить `rus` или `auto`.
@@ -755,8 +757,8 @@ Unit-тесты:
   только после создания shared folder.
 - Plex: создаем отдельную библиотеку `YouTube` типа "Другие видео"; ролики не
   кладем внутрь `/volume1/video`, чтобы не смешивать их с фильмами/сериалами.
-- Plex artwork: сохраняем `poster.jpg` и `fanart.jpg` рядом с видео; ожидаем
-  local artwork behavior, но подтверждаем smoke-test'ом на реальном Plex.
+- Plex artwork: сохраняем `poster.jpg` и `fanart.jpg` рядом с видео; для
+  коллекции канала после Plex lookup best-effort заливаем `poster.jpg` через API.
 - Progress: используем Python API `yt-dlp` и `progress_hooks`; Telegram-статус
   обновляем с throttle, без парсинга обычного stdout.
 

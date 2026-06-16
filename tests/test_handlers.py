@@ -7083,6 +7083,40 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(job["retry_max_attempts"], 3)
             self.assertEqual(job["retry_reason"], "сетевой таймаут YouTube")
 
+    async def test_youtube_set_collection_poster_uploads_channel_poster(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            poster_path = Path(tmp) / "poster.jpg"
+            poster_path.write_bytes(b"poster")
+            plex = MagicMock()
+            plex.find_section_collection.return_value = MagicMock(rating_key="collection-1")
+
+            with patch.object(bot, "plex_client", plex):
+                uploaded = await bot._youtube_set_collection_poster(
+                    "9",
+                    {
+                        "id": "yt_1",
+                        "channel": "AcademeG",
+                        "item_dir": tmp,
+                    },
+                )
+
+            self.assertTrue(uploaded)
+            plex.find_section_collection.assert_called_once_with("9", "AcademeG")
+            plex.upload_poster.assert_called_once_with("collection-1", poster_path)
+
+    async def test_youtube_set_collection_poster_skips_missing_poster(self):
+        plex = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(bot, "plex_client", plex):
+                uploaded = await bot._youtube_set_collection_poster(
+                    "9",
+                    {"id": "yt_1", "channel": "AcademeG", "item_dir": tmp},
+                )
+
+        self.assertFalse(uploaded)
+        plex.find_section_collection.assert_not_called()
+        plex.upload_poster.assert_not_called()
+
     async def test_youtube_worker_completes_queued_job(self):
         app = MagicMock()
         app.bot.send_message = AsyncMock()

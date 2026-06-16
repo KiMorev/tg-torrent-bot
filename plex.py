@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
@@ -79,6 +80,13 @@ class PlexSection:
     key: str
     title: str
     type: str
+
+
+@dataclass
+class PlexCollection:
+    title: str
+    rating_key: str
+    thumb: str = ""
 
 
 @dataclass
@@ -235,6 +243,26 @@ class PlexClient:
             )
         return True
 
+    def _post_ok(self, path: str, *, data: bytes | None = None, **params: Any) -> bool:
+        url = f"{self._base}{path}"
+        try:
+            resp = self._session.post(url, params=params, data=data, timeout=_REQUEST_TIMEOUT)
+        except requests.Timeout as exc:
+            raise PlexTimeoutError(f"Timeout connecting to {path}") from exc
+        except requests.ConnectionError as exc:
+            raise PlexConnectionError(f"Connection failed: {exc}") from exc
+        except requests.RequestException as exc:
+            raise PlexAPIError(f"Request failed: {exc}", error_kind="other") from exc
+
+        if resp.status_code == 401:
+            raise PlexAuthError("Invalid Plex token (HTTP 401)")
+        if not resp.ok:
+            raise PlexAPIError(
+                f"HTTP {resp.status_code} from {path}",
+                error_kind="http",
+            )
+        return True
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -297,6 +325,28 @@ class PlexClient:
             return []
         root = self._get(f"/library/sections/{section_id}/all")
         return [_parse_video(v) for v in root.findall("Video")]
+
+    def get_section_collections(self, section_id: str) -> list[PlexCollection]:
+        if not section_id:
+            return []
+        root = self._get(f"/library/sections/{section_id}/collections")
+        return [_parse_collection(d) for d in root.findall("Directory")]
+
+    def find_section_collection(self, section_id: str, title: str) -> PlexCollection | None:
+        wanted = str(title or "").strip().casefold()
+        if not section_id or not wanted:
+            return None
+        for collection in self.get_section_collections(section_id):
+            if collection.title.strip().casefold() == wanted:
+                return collection
+        return None
+
+    def upload_poster(self, rating_key: str, poster_path: str | Path) -> bool:
+        if not rating_key:
+            return False
+        with open(poster_path, "rb") as fh:
+            data = fh.read()
+        return self._post_ok(f"/library/metadata/{rating_key}/posters", data=data)
 
     def _ensure_section(self) -> str:
         if not self._section_id:
@@ -497,6 +547,14 @@ class PlexClient:
 # ------------------------------------------------------------------
 # XML parsing helpers
 # ------------------------------------------------------------------
+
+def _parse_collection(directory: ElementTree.Element) -> PlexCollection:
+    return PlexCollection(
+        title=directory.get("title", ""),
+        rating_key=directory.get("ratingKey", ""),
+        thumb=directory.get("thumb", ""),
+    )
+
 
 def _parse_video(video: ElementTree.Element) -> PlexMovie:
     """Build a PlexMovie from a <Video> XML element."""
