@@ -2191,6 +2191,74 @@ def _get_user_entries_from_settings(settings: dict, chat_id: int) -> dict:
     return user_entry if isinstance(user_entry, dict) else {}
 
 
+def _parse_movie_seen_timestamp(raw: object) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _movie_seen_entry_is_current(entry: object, *, min_year: int) -> bool:
+    if isinstance(entry, str):
+        parsed = _parse_movie_seen_timestamp(entry)
+        return parsed is None or parsed.year >= min_year
+    if not isinstance(entry, dict):
+        return True
+
+    timestamps = [
+        entry.get("notified_at"),
+        entry.get("shown_at"),
+        entry.get("handled_at"),
+    ]
+    parsed_values: list[datetime] = []
+    for raw in timestamps:
+        if not raw:
+            continue
+        parsed = _parse_movie_seen_timestamp(raw)
+        if parsed is None:
+            return True
+        parsed_values.append(parsed)
+    if not parsed_values:
+        return True
+    return any(parsed.year >= min_year for parsed in parsed_values)
+
+
+def _prune_movie_seen_by_user(settings: dict, *, now: datetime | None = None) -> bool:
+    seen_by_user = settings.get("movie_seen_by_user")
+    if not isinstance(seen_by_user, dict):
+        return False
+
+    current = now or datetime.now(DISPLAY_TIMEZONE)
+    min_year = current.year - 1
+    pruned_users: dict = {}
+    changed = False
+
+    for chat_id, user_entry in seen_by_user.items():
+        if not isinstance(user_entry, dict):
+            pruned_users[str(chat_id)] = user_entry
+            continue
+
+        pruned_entry = {
+            str(card_id): entry
+            for card_id, entry in user_entry.items()
+            if _movie_seen_entry_is_current(entry, min_year=min_year)
+        }
+        if len(pruned_entry) != len(user_entry):
+            changed = True
+        if pruned_entry:
+            pruned_users[str(chat_id)] = pruned_entry
+        else:
+            changed = True
+
+    if not changed:
+        return False
+    settings["movie_seen_by_user"] = pruned_users
+    return True
+
+
 def _entry_is_notified(entry) -> bool:
     """True iff a push was sent for this film to this user.
 
@@ -2282,8 +2350,10 @@ def _mark_user_signal(chat_id: int, cards: list[dict], *, signal: str) -> None:
     assert signal in ("notified_at", "shown_at", "handled_at")
     if not chat_id or not cards:
         return
-    now_text = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    now = datetime.now(DISPLAY_TIMEZONE)
+    now_text = now.strftime("%Y-%m-%d %H:%M")
     settings = _load_movie_discovery_settings()
+    changed = _prune_movie_seen_by_user(settings, now=now)
     seen_by_user = settings.get("movie_seen_by_user")
     if not isinstance(seen_by_user, dict):
         seen_by_user = {}
@@ -2292,7 +2362,6 @@ def _mark_user_signal(chat_id: int, cards: list[dict], *, signal: str) -> None:
     if not isinstance(user_entry, dict):
         user_entry = {}
 
-    changed = False
     for card in cards:
         for cid in _card_identifiers(card):
             existing = user_entry.get(cid)

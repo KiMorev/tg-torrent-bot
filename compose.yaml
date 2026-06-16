@@ -7,6 +7,10 @@ services:
     labels:
       # Watchtower will only auto-update containers with this label set to true.
       - "com.centurylinklabs.watchtower.enable=true"
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -106,6 +110,10 @@ services:
     image: containrrr/watchtower:latest
     container_name: watchtower
     restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:

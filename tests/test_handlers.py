@@ -4213,6 +4213,46 @@ class MovieSeenByUserHelpersTests(unittest.TestCase):
         self.assertEqual(entry.get("notified_at"), "2026-05-01 10:00")
         self.assertTrue(entry.get("shown_at"))
 
+    def test_prune_movie_seen_keeps_previous_calendar_year_until_year_end(self):
+        from bot import _prune_movie_seen_by_user
+        settings = {
+            "movie_seen_by_user": {
+                "100": {
+                    "kp:prev": {"shown_at": "2025-01-01 00:00"},
+                    "kp:current": {"notified_at": "2026-06-01 12:00"},
+                    "kp:old": {"handled_at": "2024-12-31 23:59"},
+                }
+            }
+        }
+
+        changed = _prune_movie_seen_by_user(settings, now=datetime(2026, 12, 31, 23, 59))
+
+        self.assertTrue(changed)
+        seen = settings["movie_seen_by_user"]["100"]
+        self.assertIn("kp:prev", seen)
+        self.assertIn("kp:current", seen)
+        self.assertNotIn("kp:old", seen)
+
+    def test_prune_movie_seen_preserves_unparseable_and_prunes_legacy_old(self):
+        from bot import _prune_movie_seen_by_user
+        settings = {
+            "movie_seen_by_user": {
+                "100": {
+                    "kp:legacy_prev": "2025-01-01 00:00",
+                    "kp:legacy_old": "2024-12-31 23:59",
+                    "kp:unknown": "old-ts",
+                }
+            }
+        }
+
+        changed = _prune_movie_seen_by_user(settings, now=datetime(2026, 12, 31, 23, 59))
+
+        self.assertTrue(changed)
+        seen = settings["movie_seen_by_user"]["100"]
+        self.assertIn("kp:legacy_prev", seen)
+        self.assertIn("kp:unknown", seen)
+        self.assertNotIn("kp:legacy_old", seen)
+
 
 class FormatMovieDiscoveryCachePerUserBadgeTests(unittest.TestCase):
     """Tests for the per-user 🆕 badge in _format_movie_discovery_cache."""

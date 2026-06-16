@@ -137,10 +137,10 @@
 | `topic_subscriptions.json` | Rutracker/Jackett подписки на новые серии; `pending_notification` хранит уже созданный task/update push, если Telegram-доставка упала после успешного добавления задачи. |
 | `movie_discovery.json` | Кэш карточек `/new`, KP cache, fingerprints, сигналы деградации последнего refresh. |
 | `jackett_guard.json` | Per-indexer состояние Jackett Guardian: последний успех/ошибка, state, fail/zero streak и следующий targeted retry. |
-| `movie_discovery_settings.json` | Настройки `/new`, подписчики и failures доставки, per-user seen/shown/handled flags, Jackett trackers, snapshot последних push-уведомлений `/new` и `movie_notification_pending` для quiet-hours очереди. |
+| `movie_discovery_settings.json` | Настройки `/new`, подписчики и failures доставки, per-user seen/shown/handled flags за текущий и предыдущий календарный год, Jackett trackers, snapshot последних push-уведомлений `/new` и `movie_notification_pending` для quiet-hours очереди. |
 | `movie_discovery_debug.json` | Debug snapshot последнего refresh `/new`. |
 | `pending_downloads.json` | Очередь отложенных скачиваний и retry-state; после успешного скачивания может хранить `notification_pending=success/drop`, чтобы дослать push без повторного скачивания; bulk-записи могут содержать `series_bulk: {job_id, season}`. |
-| `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам. |
+| `series_bulk_jobs.json` | Планы массового скачивания сезонов, ручные решения, созданные task id, подписки и ошибки по сезонам; terminal jobs (`cancelled`, `replaced`, `batch_completed`, `pack_downloaded`) старше 14 дней очищаются при сохранении. |
 | `series_continue_totals.json` | Кэш количества уже вышедших эпизодов сезона и карты стартовавших сезонов из TMDB/TVmaze для `/seasons`, keyed by Plex/external id; complete-снимки содержат `__complete__`, `__fetched_at__` и `__version__`, старые снимки обновляются перед missing-проверкой. |
 | `series_continue_hidden.json` | Персонально скрытые сезоны `/seasons`, keyed by chat id; ключи разделены по спискам `incomplete:<show>:Sxx` и `missing:<show>:Sxx`. |
 | `download_history.jsonl` | Append-only история событий загрузки по пользователям: добавление, завершение, soft-complete, ошибки, переименование файлов (`files_normalized`) и результат Plex polling; для найденных Plex-сезонов сохраняет series-поля для `/seasons`. |

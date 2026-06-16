@@ -445,9 +445,9 @@ http://<NAS_IP>:8099/plex/webhook/health?token=<PLEX_WEBHOOK_TOKEN>
 | `DS_RETRY_ATTEMPTS`, `DS_RETRY_DELAY` | Повторы API-запросов к Download Station. |
 | `MAGNET_POLL_ATTEMPTS`, `MAGNET_POLL_INTERVAL_SECONDS` | Сколько ждать появления task ID после добавления magnet-ссылки. |
 | `MOVIE_DISCOVERY_CACHE_FILE` | JSON-кэш карточек `/new`. |
-| `MOVIE_DISCOVERY_SETTINGS_FILE` | Runtime-настройки `/new`: выбранные трекеры, подписки на unmatched и т.п. |
+| `MOVIE_DISCOVERY_SETTINGS_FILE` | Runtime-настройки `/new`: выбранные трекеры, подписки на unmatched и per-user seen-флаги за текущий и предыдущий календарный год. |
 | `MOVIE_DISCOVERY_DEBUG_FILE` | Debug-снимок последнего обновления `/new`. |
-| `SERIES_BULK_JOBS_FILE` | JSON-файл планов массового скачивания сезонов. |
+| `SERIES_BULK_JOBS_FILE` | JSON-файл планов массового скачивания сезонов; завершённые, отменённые и заменённые планы старше 14 дней очищаются при сохранении. |
 | `SERIES_CONTINUE_TOTALS_FILE` | JSON-кэш количества уже вышедших эпизодов и карт стартовавших сезонов из TMDB/TVmaze для `/seasons`. |
 | `SERIES_CONTINUE_HIDDEN_FILE` | JSON-файл персонально скрытых сезонов `/seasons`. |
 

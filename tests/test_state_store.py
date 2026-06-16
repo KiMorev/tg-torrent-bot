@@ -1,9 +1,10 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from state_store import JsonStateStore
+from state_store import JsonStateStore, _prune_series_bulk_jobs
 
 
 def _make_store(tmp_dir: str) -> JsonStateStore:
@@ -169,6 +170,46 @@ class StateStoreTests(unittest.TestCase):
         loaded = self.store.load_series_bulk_jobs()
 
         self.assertEqual(loaded, {"good": {"series_title": "Клиника"}})
+
+    def test_prune_series_bulk_jobs_removes_only_old_terminal_jobs(self) -> None:
+        jobs = {
+            "old_done": {
+                "status": "batch_completed",
+                "updated_at": "2026-05-01T12:00:00+00:00",
+            },
+            "old_replaced": {
+                "status": "replaced",
+                "updated_at": "2026-05-01T12:00:00+00:00",
+            },
+            "old_failed": {
+                "status": "batch_failed",
+                "updated_at": "2026-05-01T12:00:00+00:00",
+            },
+            "old_pending": {
+                "status": "batch_completed_with_pending",
+                "updated_at": "2026-05-01T12:00:00+00:00",
+            },
+            "recent_done": {
+                "status": "batch_completed",
+                "updated_at": "2026-06-10T12:00:00+00:00",
+            },
+            "unknown_date": {
+                "status": "batch_completed",
+                "updated_at": "not-a-date",
+            },
+        }
+
+        pruned = _prune_series_bulk_jobs(
+            jobs,
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+
+        self.assertNotIn("old_done", pruned)
+        self.assertNotIn("old_replaced", pruned)
+        self.assertIn("old_failed", pruned)
+        self.assertIn("old_pending", pruned)
+        self.assertIn("recent_done", pruned)
+        self.assertIn("unknown_date", pruned)
 
     def test_series_continue_totals_roundtrip(self) -> None:
         totals = {"show-key": {"5": 8}}

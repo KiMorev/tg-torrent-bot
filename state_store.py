@@ -3,7 +3,7 @@ import logging
 import os
 import secrets
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,52 @@ logger = logging.getLogger("tg_torrent_drop")
 # Safety caps: prevent JSON state files from growing without bound
 _MAX_NOTIFIED_TASKS = 500
 _MAX_TRACKER_PROCESSED = 1000
+_SERIES_BULK_JOBS_RETENTION_DAYS = 14
+_SERIES_BULK_JOBS_PRUNE_STATUSES = {
+    "cancelled",
+    "replaced",
+    "batch_completed",
+    "pack_downloaded",
+}
+
+
+def _parse_iso_datetime(raw: object) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _prune_series_bulk_jobs(
+    jobs: dict[str, dict],
+    *,
+    now: datetime | None = None,
+    retention_days: int = _SERIES_BULK_JOBS_RETENTION_DAYS,
+) -> dict[str, dict]:
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    else:
+        now_dt = now_dt.astimezone(timezone.utc)
+    cutoff = now_dt - timedelta(days=max(0, retention_days))
+
+    pruned: dict[str, dict] = {}
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict) or not job_id:
+            continue
+        status = str(job.get("status") or "")
+        if status in _SERIES_BULK_JOBS_PRUNE_STATUSES:
+            updated_at = _parse_iso_datetime(job.get("updated_at") or job.get("created_at"))
+            if updated_at is not None and updated_at < cutoff:
+                continue
+        pruned[str(job_id)] = job
+    return pruned
 
 
 class JsonStateStore:
@@ -487,6 +533,7 @@ class JsonStateStore:
     def save_series_bulk_jobs(self, jobs: dict[str, dict]) -> None:
         if not self.series_bulk_jobs_file:
             return
+        jobs = _prune_series_bulk_jobs(jobs)
         ordered = {
             str(job_id): jobs[job_id]
             for job_id in sorted(jobs.keys())
