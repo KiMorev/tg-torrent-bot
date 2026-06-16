@@ -352,10 +352,8 @@ def build_path_plan(info: dict[str, Any], output_root: Path) -> YouTubePathPlan:
 
     title = _safe_component(info.get("title"), video_id)
     channel = _safe_component(info.get("channel") or info.get("uploader"), "YouTube")
-    date = _upload_date(info)
-    item_name = _safe_component(f"{date} - {title} [yt-{video_id}]", video_id)
-    item_dir = Path(output_root) / channel / item_name
-    video_path = item_dir / f"{item_name}.mp4"
+    item_dir = Path(output_root) / channel / title
+    video_path = item_dir / f"{title}.mp4"
     return YouTubePathPlan(
         item_dir=item_dir,
         video_path=video_path,
@@ -429,11 +427,57 @@ def _find_final_video(plan: YouTubePathPlan) -> Path:
     return plan.video_path
 
 
+def _normalize_audio_language(audio_language: str | None) -> str | None:
+    value = str(audio_language or "und").strip().lower()
+    if value in {"", "auto"}:
+        return None
+    if not re.fullmatch(r"[a-z]{3}", value):
+        raise YouTubeDownloadError(
+            "YOUTUBE_AUDIO_LANGUAGE должен быть ISO-639-2 кодом из 3 букв, например und или rus."
+        )
+    return value
+
+
+def _apply_audio_language(video_path: Path, audio_language: str | None) -> str | None:
+    language = _normalize_audio_language(audio_language)
+    if not language:
+        return None
+    tmp_path = video_path.with_name(f".{video_path.stem}.audio-lang.tmp{video_path.suffix}")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-metadata:s:a:0",
+                f"language={language}",
+                str(tmp_path),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tmp_path.replace(video_path)
+    except subprocess.CalledProcessError as exc:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise YouTubeDownloadError("Не удалось проставить язык аудиодорожки через ffmpeg.") from exc
+    return language
+
+
 def download_video(
     url: str,
     *,
     output_root: Path,
     max_height: int,
+    audio_language: str | None = "und",
     progress_hook: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if not shutil.which("ffmpeg"):
@@ -478,6 +522,7 @@ def download_video(
         final_path.replace(plan.video_path)
         final_path = plan.video_path
 
+    applied_audio_language = _apply_audio_language(final_path, audio_language)
     write_sidecars(info, choice, canonical_url, plan)
     return {
         "video_id": info.get("id"),
@@ -490,4 +535,5 @@ def download_video(
         "file_path": str(final_path),
         "file_size": final_path.stat().st_size,
         "item_dir": str(plan.item_dir),
+        "audio_language": applied_audio_language,
     }

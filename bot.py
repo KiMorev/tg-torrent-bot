@@ -395,6 +395,7 @@ YOUTUBE_DOWNLOAD_DIR = settings.youtube_download_dir
 YOUTUBE_MAX_DURATION_MINUTES = settings.youtube_max_duration_minutes
 YOUTUBE_MAX_HEIGHT = settings.youtube_max_height
 YOUTUBE_MIN_HEIGHT = settings.youtube_min_height
+YOUTUBE_AUDIO_LANGUAGE = settings.youtube_audio_language
 YOUTUBE_MAX_PARALLEL = settings.youtube_max_parallel
 YOUTUBE_MAX_QUEUE_SIZE = settings.youtube_max_queue_size
 YOUTUBE_MAX_QUEUE_PER_CHAT = settings.youtube_max_queue_per_chat
@@ -7614,6 +7615,7 @@ async def _youtube_worker_once(app: "Application") -> None:
             str(job.get("canonical_url") or job.get("url") or ""),
             output_root=Path(YOUTUBE_DOWNLOAD_DIR),
             max_height=int(job.get("target_height") or YOUTUBE_MAX_HEIGHT),
+            audio_language=YOUTUBE_AUDIO_LANGUAGE,
             progress_hook=_youtube_progress_hook(job_id),
         )
         job = _youtube_update_job(

@@ -6982,23 +6982,25 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 "quality": "720p",
             }
             store.save_youtube_downloads({"yt_1": job})
+            download = MagicMock(return_value={
+                "file_path": str(Path(tmp) / "Test clip.mp4"),
+                "file_size": 1234,
+                "item_dir": str(Path(tmp) / "Test clip"),
+                "format_id": "22",
+                "quality": "720p",
+                "title": "Test clip",
+                "channel": "Channel",
+                "duration_seconds": 120,
+            })
 
             with (
                 patch.object(bot, "state_store", store),
                 patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
                 patch.object(bot, "ADMIN_CHAT_IDS", set()),
                 patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", Path(tmp)),
+                patch.object(bot, "YOUTUBE_AUDIO_LANGUAGE", "rus"),
                 patch.object(bot, "YOUTUBE_MIN_FREE_GB", 0),
-                patch.object(bot, "_youtube_download_video", MagicMock(return_value={
-                    "file_path": str(Path(tmp) / "Test clip.mp4"),
-                    "file_size": 1234,
-                    "item_dir": str(Path(tmp) / "Test clip"),
-                    "format_id": "22",
-                    "quality": "720p",
-                    "title": "Test clip",
-                    "channel": "Channel",
-                    "duration_seconds": 120,
-                })),
+                patch.object(bot, "_youtube_download_video", download),
                 patch.object(bot, "_youtube_delete_job_cards", AsyncMock()) as delete_cards,
                 patch.object(bot, "_youtube_start_plex_poll_if_needed", AsyncMock()) as plex_poll,
             ):
@@ -7010,6 +7012,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             events = [item["event"] for item in store.load_download_history(chat_id=100)]
             self.assertIn("youtube_download_started", events)
             self.assertIn("youtube_download_completed", events)
+            self.assertEqual(download.call_args.kwargs["audio_language"], "rus")
             delete_cards.assert_awaited_once()
             app.bot.send_message.assert_awaited_once()
             plex_poll.assert_awaited()

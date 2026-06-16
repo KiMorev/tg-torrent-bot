@@ -113,6 +113,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.youtube_max_duration_minutes, 300)
         self.assertEqual(settings.youtube_max_height, 1080)
         self.assertEqual(settings.youtube_min_height, 640)
+        self.assertEqual(settings.youtube_audio_language, "und")
         self.assertEqual(settings.youtube_max_parallel, 1)
         self.assertEqual(settings.youtube_max_queue_size, 0)
         self.assertEqual(settings.youtube_max_queue_per_chat, 0)
@@ -172,6 +173,7 @@ class ConfigParsingTests(unittest.TestCase):
             "YOUTUBE_MAX_DURATION_MINUTES": "0",
             "YOUTUBE_MAX_HEIGHT": "2160",
             "YOUTUBE_MIN_HEIGHT": "2160",
+            "YOUTUBE_AUDIO_LANGUAGE": " RUS ",
             "YOUTUBE_MAX_PARALLEL": "0",
             "YOUTUBE_MAX_QUEUE_SIZE": "-1",
             "YOUTUBE_MAX_QUEUE_PER_CHAT": "-2",
@@ -233,6 +235,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.youtube_max_duration_minutes, 1)
         self.assertEqual(settings.youtube_max_height, 1080)
         self.assertEqual(settings.youtube_min_height, 1080)
+        self.assertEqual(settings.youtube_audio_language, "rus")
         self.assertEqual(settings.youtube_max_parallel, 1)
         self.assertEqual(settings.youtube_max_queue_size, 0)
         self.assertEqual(settings.youtube_max_queue_per_chat, 0)

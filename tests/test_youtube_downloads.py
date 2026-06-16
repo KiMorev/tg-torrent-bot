@@ -1,7 +1,10 @@
 import unittest
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from youtube_downloads import (
+    _apply_audio_language,
     YouTubeUnsupportedError,
     build_path_plan,
     compatible_quality_options,
@@ -185,7 +188,7 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
         self.assertEqual([choice.label for choice in choices], ["1080p", "720p"])
         self.assertEqual(display_quality_label(428), "480p")
 
-    def test_build_path_plan_sanitizes_components_and_keeps_youtube_id(self) -> None:
+    def test_build_path_plan_groups_by_channel_and_uses_clean_title(self) -> None:
         info = {
             "id": "abcdefghijk",
             "title": "Bad / Title: ok?",
@@ -196,6 +199,34 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
         plan = build_path_plan(info, Path("/youtube_storage"))
 
         self.assertEqual(plan.item_dir.parent.name, "Chan nel")
-        self.assertIn("2026-06-16 - Bad Title ok [yt-abcdefghijk]", plan.item_dir.name)
-        self.assertEqual(plan.video_path.suffix, ".mp4")
+        self.assertEqual(plan.item_dir.name, "Bad Title ok")
+        self.assertEqual(plan.video_path.name, "Bad Title ok.mp4")
+        self.assertNotIn("2026-06-16", plan.item_dir.name)
+        self.assertNotIn("abcdefghijk", plan.item_dir.name)
         self.assertEqual(plan.poster_path.name, "poster.jpg")
+
+    def test_apply_audio_language_remuxes_metadata_without_transcode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "Clip.mp4"
+            video_path.write_bytes(b"old")
+
+            def fake_run(cmd, **kwargs):
+                self.assertIn("-c", cmd)
+                self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+                self.assertIn("-metadata:s:a:0", cmd)
+                self.assertIn("language=rus", cmd)
+                Path(cmd[-1]).write_bytes(b"new")
+
+            with patch("youtube_downloads.subprocess.run", side_effect=fake_run) as run:
+                language = _apply_audio_language(video_path, "rus")
+
+            self.assertEqual(language, "rus")
+            self.assertEqual(video_path.read_bytes(), b"new")
+            run.assert_called_once()
+
+    def test_apply_audio_language_auto_skips_remux(self) -> None:
+        with patch("youtube_downloads.subprocess.run") as run:
+            language = _apply_audio_language(Path("Clip.mp4"), "auto")
+
+        self.assertIsNone(language)
+        run.assert_not_called()

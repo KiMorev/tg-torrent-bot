@@ -182,6 +182,7 @@ class AppSettings:
     youtube_max_duration_minutes: int
     youtube_max_height: int
     youtube_min_height: int
+    youtube_audio_language: str
     youtube_max_parallel: int
     youtube_max_queue_size: int
     youtube_max_queue_per_chat: int
@@ -354,6 +355,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> AppSettings:
         youtube_max_duration_minutes=max(1, env_int(env, "YOUTUBE_MAX_DURATION_MINUTES", 300)),
         youtube_max_height=max(144, min(1080, env_int(env, "YOUTUBE_MAX_HEIGHT", 1080))),
         youtube_min_height=max(0, min(1080, env_int(env, "YOUTUBE_MIN_HEIGHT", 640))),
+        youtube_audio_language=(env.get("YOUTUBE_AUDIO_LANGUAGE", "und").strip().lower() or "und"),
         youtube_max_parallel=max(1, env_int(env, "YOUTUBE_MAX_PARALLEL", 1)),
         youtube_max_queue_size=max(0, env_int(env, "YOUTUBE_MAX_QUEUE_SIZE", 0)),
         youtube_max_queue_per_chat=max(0, env_int(env, "YOUTUBE_MAX_QUEUE_PER_CHAT", 0)),

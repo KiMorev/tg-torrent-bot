@@ -529,6 +529,7 @@ YOUTUBE_DOWNLOAD_DIR=/youtube_storage
 YOUTUBE_DOWNLOADS_FILE=/data/youtube_downloads.json
 YOUTUBE_MAX_HEIGHT=1080
 YOUTUBE_MIN_HEIGHT=640
+YOUTUBE_AUDIO_LANGUAGE=und
 YOUTUBE_MAX_DURATION_MINUTES=300
 YOUTUBE_MAX_PARALLEL=1
 YOUTUBE_MAX_QUEUE_SIZE=0
@@ -608,8 +609,8 @@ YOUTUBE_MIN_FREE_GB=5
 Начальное правило naming:
 
 ```text
-/youtube_storage/<channel>/<YYYY-MM-DD> - <title> [yt-<video_id>]/
-  <YYYY-MM-DD> - <title> [yt-<video_id>].mp4
+/youtube_storage/<channel>/<title>/
+  <title>.mp4
   poster.jpg
   fanart.jpg
   info.json
@@ -619,10 +620,12 @@ YOUTUBE_MIN_FREE_GB=5
 
 - отдельная папка на ролик дает место для poster/background/metadata рядом с
   видео;
-- дата помогает сортировать выпуски одного канала;
-- `video_id` защищает от дублей и одинаковых названий;
-- `info.json` сохраняет исходные metadata `yt-dlp` для бота, даже если Plex не
-  использует его напрямую.
+- папка канала дает базовую группировку без перетаскивания канала в имя файла;
+- дата, `video_id`, URL и канал сохраняются в `info.json`, чтобы технические
+  идентификаторы не попадали в заголовок Plex-карточки;
+- `YOUTUBE_AUDIO_LANGUAGE=und` по умолчанию прописывает неопределенный язык
+  аудиодорожки через ffmpeg copy/remux, чтобы Plex не показывал ложный
+  "Английский"; при необходимости можно поставить `rus` или `auto`.
 
 Ожидаемое поведение Plex:
 
