@@ -7331,18 +7331,12 @@ async def _youtube_update_registered_cards(app: "Application") -> None:
             YOUTUBE_JOB_MESSAGES.pop(job_id, None)
 
 
-async def _youtube_finalize_job_cards(app: "Application", job_id: str, job: dict) -> None:
-    text = _youtube_job_card_text(job)
+async def _youtube_delete_job_cards(app: "Application", job_id: str) -> None:
     for chat_id, message_id in YOUTUBE_JOB_MESSAGES.pop(str(job_id), set()):
         try:
-            await app.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=_youtube_close_keyboard(),
-            )
+            await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
-            logger.debug("YouTube final status card edit failed job_id=%s", job_id, exc_info=True)
+            logger.debug("YouTube status card delete failed job_id=%s", job_id, exc_info=True)
 
 
 async def _youtube_status_update_loop(app: "Application") -> None:
@@ -7638,14 +7632,14 @@ async def _youtube_worker_once(app: "Application") -> None:
             duration_seconds=result.get("duration_seconds") or job.get("duration_seconds"),
         ) or job
         _youtube_record_history("youtube_download_completed", job)
-        await _youtube_finalize_job_cards(app, job_id, job)
+        await _youtube_delete_job_cards(app, job_id)
         await _youtube_send_completed_message(app, job)
         await _youtube_start_plex_poll_if_needed(app, job)
     except Exception as exc:
         error = _youtube_failure_message(exc)
         job = _youtube_update_job(job_id, status="failed", error=error, speed_bytes=0) or job
         _youtube_record_history("youtube_download_failed", job, error=error)
-        await _youtube_finalize_job_cards(app, job_id, job)
+        await _youtube_delete_job_cards(app, job_id)
         await _youtube_send_failed_message(app, job)
 
 

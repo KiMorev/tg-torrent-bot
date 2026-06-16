@@ -6999,7 +6999,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                     "channel": "Channel",
                     "duration_seconds": 120,
                 })),
-                patch.object(bot, "_youtube_finalize_job_cards", AsyncMock()) as final_cards,
+                patch.object(bot, "_youtube_delete_job_cards", AsyncMock()) as delete_cards,
                 patch.object(bot, "_youtube_start_plex_poll_if_needed", AsyncMock()) as plex_poll,
             ):
                 await bot._youtube_worker_once(app)
@@ -7010,7 +7010,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             events = [item["event"] for item in store.load_download_history(chat_id=100)]
             self.assertIn("youtube_download_started", events)
             self.assertIn("youtube_download_completed", events)
-            final_cards.assert_awaited_once()
+            delete_cards.assert_awaited_once()
             app.bot.send_message.assert_awaited_once()
             plex_poll.assert_awaited()
 
@@ -7041,7 +7041,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", Path(tmp)),
                 patch.object(bot, "YOUTUBE_MIN_FREE_GB", 0),
                 patch.object(bot, "_youtube_download_video", MagicMock(side_effect=bot.YouTubeDownloadError("boom"))),
-                patch.object(bot, "_youtube_finalize_job_cards", AsyncMock()) as final_cards,
+                patch.object(bot, "_youtube_delete_job_cards", AsyncMock()) as delete_cards,
             ):
                 await bot._youtube_worker_once(app)
 
@@ -7050,7 +7050,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("boom", jobs["yt_1"]["error"])
             history = store.load_download_history(chat_id=100)
             self.assertEqual(history[-1]["event"], "youtube_download_failed")
-            final_cards.assert_awaited_once()
+            delete_cards.assert_awaited_once()
             app.bot.send_message.assert_awaited_once()
 
     async def test_youtube_status_card_stays_registered_after_edit_timeout(self):
@@ -7076,6 +7076,18 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bot.YOUTUBE_JOB_MESSAGES["yt_1"], {(100, 77)})
             finally:
                 bot.YOUTUBE_JOB_MESSAGES.clear()
+
+    async def test_youtube_delete_job_cards_removes_registered_messages(self):
+        app = MagicMock()
+        app.bot.delete_message = AsyncMock()
+        bot.YOUTUBE_JOB_MESSAGES["yt_1"] = {(100, 77)}
+        try:
+            await bot._youtube_delete_job_cards(app, "yt_1")
+
+            app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=77)
+            self.assertNotIn("yt_1", bot.YOUTUBE_JOB_MESSAGES)
+        finally:
+            bot.YOUTUBE_JOB_MESSAGES.clear()
 
     async def test_new_text_query_prefills_personal_defaults(self):
         update = _make_message_update(chat_id=100)
