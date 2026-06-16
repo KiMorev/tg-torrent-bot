@@ -393,12 +393,13 @@ http://<NAS_IP>:8099/plex/webhook/health?token=<PLEX_WEBHOOK_TOKEN>
 | `YOUTUBE_DOWNLOAD_DIR` | Путь внутри контейнера, куда бот пишет файлы. По умолчанию `/youtube_storage`. |
 | `YOUTUBE_MAX_DURATION_MINUTES` | Максимальная длительность ролика. По умолчанию `300` минут. |
 | `YOUTUBE_MAX_HEIGHT` | Верхний предел качества без транскодирования. По умолчанию `1080`. |
+| `YOUTUBE_MIN_HEIGHT` | Нижний предел качества в кнопках. По умолчанию `640`, чтобы скрыть слишком низкие варианты. |
 | `YOUTUBE_MAX_PARALLEL` | Зарезервировано под будущую параллельность; в MVP активная загрузка всё равно одна. |
 | `YOUTUBE_MAX_QUEUE_SIZE`, `YOUTUBE_MAX_QUEUE_PER_CHAT` | Опциональные лимиты очереди; `0` означает без жёсткого лимита. Активная загрузка в MVP всё равно одна. |
 | `YOUTUBE_MIN_FREE_GB` | Минимум свободного места в YouTube-папке перед стартом загрузки. |
 | `YOUTUBE_PLEX_LIBRARY_NAME` | Имя отдельной Plex-библиотеки для роликов. По умолчанию `YouTube`. |
 | `YOUTUBE_PLEX_SECTION` | ID Plex-секции, если нужно задать явно. Если пусто, бот ищет секцию по `YOUTUBE_PLEX_LIBRARY_NAME`. |
-| `YOUTUBE_PLEX_REFRESH_AFTER_DOWNLOAD` | Принудительно вызвать refresh Plex-секции после скачивания. Обычно можно оставить `false`, если Plex сам сканирует папку при изменениях. |
+| `YOUTUBE_PLEX_REFRESH_AFTER_DOWNLOAD` | Принудительно вызвать refresh Plex-секции после скачивания. По умолчанию `true`, потому что bind mount не всегда сразу будит автоскан Plex. |
 | `YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD` | Ждать появления ролика в Plex и прислать отдельное уведомление. По умолчанию `true`. |
 
 Минимальная настройка на NAS:

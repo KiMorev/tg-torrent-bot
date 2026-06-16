@@ -112,13 +112,14 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.youtube_downloads_file, Path("/tmp/tg_torrent_drop/youtube_downloads.json"))
         self.assertEqual(settings.youtube_max_duration_minutes, 300)
         self.assertEqual(settings.youtube_max_height, 1080)
+        self.assertEqual(settings.youtube_min_height, 640)
         self.assertEqual(settings.youtube_max_parallel, 1)
         self.assertEqual(settings.youtube_max_queue_size, 0)
         self.assertEqual(settings.youtube_max_queue_per_chat, 0)
         self.assertEqual(settings.youtube_min_free_gb, 5.0)
         self.assertEqual(settings.youtube_plex_section, "")
         self.assertEqual(settings.youtube_plex_library_name, "YouTube")
-        self.assertFalse(settings.youtube_plex_refresh_after_download)
+        self.assertTrue(settings.youtube_plex_refresh_after_download)
         self.assertTrue(settings.youtube_plex_poll_after_download)
         self.assertEqual(settings.youtube_plex_poll_attempts, 20)
         self.assertEqual(settings.youtube_plex_poll_interval_seconds, 30.0)
@@ -170,6 +171,7 @@ class ConfigParsingTests(unittest.TestCase):
             "YOUTUBE_DOWNLOADS_FILE": "/cache/youtube.json",
             "YOUTUBE_MAX_DURATION_MINUTES": "0",
             "YOUTUBE_MAX_HEIGHT": "2160",
+            "YOUTUBE_MIN_HEIGHT": "2160",
             "YOUTUBE_MAX_PARALLEL": "0",
             "YOUTUBE_MAX_QUEUE_SIZE": "-1",
             "YOUTUBE_MAX_QUEUE_PER_CHAT": "-2",
@@ -230,6 +232,7 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(settings.youtube_downloads_file, Path("/cache/youtube.json"))
         self.assertEqual(settings.youtube_max_duration_minutes, 1)
         self.assertEqual(settings.youtube_max_height, 1080)
+        self.assertEqual(settings.youtube_min_height, 1080)
         self.assertEqual(settings.youtube_max_parallel, 1)
         self.assertEqual(settings.youtube_max_queue_size, 0)
         self.assertEqual(settings.youtube_max_queue_per_chat, 0)

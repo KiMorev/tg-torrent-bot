@@ -6924,6 +6924,45 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(history[-1]["source"], "youtube")
             finally:
                 bot.YOUTUBE_PREVIEWS.pop("tok123", None)
+                bot.YOUTUBE_JOB_MESSAGES.clear()
+
+    async def test_youtube_callback_still_queues_when_answer_times_out(self):
+        update = _make_callback_update(chat_id=100, callback_data="yt:dl:tok123:720")
+        update.callback_query.answer.side_effect = bot.TimedOut("Timed out")
+        context = _make_context()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            bot.YOUTUBE_PREVIEWS["tok123"] = {
+                "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "video_id": "abcdefghijk",
+                "title": "Test clip",
+                "channel": "Channel",
+                "duration_seconds": 120,
+                "qualities": [
+                    {
+                        "height": 720,
+                        "label": "720p",
+                        "format_id": "22",
+                        "filesize": 1000,
+                    }
+                ],
+            }
+            try:
+                with (
+                    patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                    patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                    patch.object(bot, "state_store", store),
+                    patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                ):
+                    await bot.youtube_callback(update, context)
+
+                jobs = store.load_youtube_downloads()
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(next(iter(jobs.values()))["status"], "queued")
+            finally:
+                bot.YOUTUBE_PREVIEWS.pop("tok123", None)
+                bot.YOUTUBE_JOB_MESSAGES.clear()
 
     async def test_youtube_worker_completes_queued_job(self):
         app = MagicMock()
@@ -6960,7 +6999,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                     "channel": "Channel",
                     "duration_seconds": 120,
                 })),
-                patch.object(bot, "_youtube_delete_job_cards", AsyncMock()),
+                patch.object(bot, "_youtube_finalize_job_cards", AsyncMock()) as final_cards,
                 patch.object(bot, "_youtube_start_plex_poll_if_needed", AsyncMock()) as plex_poll,
             ):
                 await bot._youtube_worker_once(app)
@@ -6971,7 +7010,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             events = [item["event"] for item in store.load_download_history(chat_id=100)]
             self.assertIn("youtube_download_started", events)
             self.assertIn("youtube_download_completed", events)
-            app.bot.send_message.assert_awaited()
+            final_cards.assert_awaited_once()
+            app.bot.send_message.assert_awaited_once()
             plex_poll.assert_awaited()
 
     async def test_youtube_worker_records_download_failure(self):
@@ -7001,7 +7041,7 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", Path(tmp)),
                 patch.object(bot, "YOUTUBE_MIN_FREE_GB", 0),
                 patch.object(bot, "_youtube_download_video", MagicMock(side_effect=bot.YouTubeDownloadError("boom"))),
-                patch.object(bot, "_youtube_delete_job_cards", AsyncMock()),
+                patch.object(bot, "_youtube_finalize_job_cards", AsyncMock()) as final_cards,
             ):
                 await bot._youtube_worker_once(app)
 
@@ -7010,7 +7050,32 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("boom", jobs["yt_1"]["error"])
             history = store.load_download_history(chat_id=100)
             self.assertEqual(history[-1]["event"], "youtube_download_failed")
-            app.bot.send_message.assert_awaited()
+            final_cards.assert_awaited_once()
+            app.bot.send_message.assert_awaited_once()
+
+    async def test_youtube_status_card_stays_registered_after_edit_timeout(self):
+        app = MagicMock()
+        app.bot.edit_message_text = AsyncMock(side_effect=bot.TimedOut("Timed out"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "downloading",
+                    "title": "Test clip",
+                    "downloaded_bytes": 10,
+                    "total_bytes": 100,
+                }
+            })
+            bot.YOUTUBE_JOB_MESSAGES["yt_1"] = {(100, 77)}
+            try:
+                with patch.object(bot, "state_store", store):
+                    await bot._youtube_update_registered_cards(app)
+
+                self.assertEqual(bot.YOUTUBE_JOB_MESSAGES["yt_1"], {(100, 77)})
+            finally:
+                bot.YOUTUBE_JOB_MESSAGES.clear()
 
     async def test_new_text_query_prefills_personal_defaults(self):
         update = _make_message_update(chat_id=100)

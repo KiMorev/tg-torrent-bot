@@ -24,6 +24,7 @@ import requests
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
 MAX_FILENAME_CHARS = 140
+DEFAULT_MIN_HEIGHT = 640
 
 
 class YouTubeDownloadError(Exception):
@@ -136,6 +137,25 @@ def _format_sort_key(fmt: dict[str, Any]) -> tuple[int, float, int]:
     return height, bitrate, size
 
 
+def display_quality_label(height: int) -> str:
+    value = int(height or 0)
+    if value >= 2160:
+        return "2160p"
+    if value >= 1440:
+        return "1440p"
+    if value >= 960:
+        return "1080p"
+    if value >= 640:
+        return "720p"
+    if value >= 426:
+        return "480p"
+    if value >= 320:
+        return "360p"
+    if value >= 214:
+        return "240p"
+    return "144p"
+
+
 def _is_progressive_mp4(fmt: dict[str, Any]) -> bool:
     return (
         fmt.get("ext") == "mp4"
@@ -178,7 +198,7 @@ def select_format(info: dict[str, Any], max_height: int) -> YouTubeFormatChoice:
                 YouTubeFormatChoice(
                     height=height,
                     format_id=fmt_id,
-                    label=f"{height}p",
+                    label=display_quality_label(height),
                     filesize=_format_size_hint(fmt),
                 ),
             ))
@@ -212,7 +232,7 @@ def select_format(info: dict[str, Any], max_height: int) -> YouTubeFormatChoice:
                 YouTubeFormatChoice(
                     height=height,
                     format_id=f"{video_id}+{audio_id}",
-                    label=f"{height}p",
+                    label=display_quality_label(height),
                     filesize=total_size,
                 ),
             ))
@@ -235,7 +255,7 @@ def select_format(info: dict[str, Any], max_height: int) -> YouTubeFormatChoice:
             return YouTubeFormatChoice(
                 height=height,
                 format_id=f"{video_id}+{audio_id}",
-                label=f"{height}p",
+                label=display_quality_label(height),
                 filesize=total_size,
             )
 
@@ -244,23 +264,32 @@ def select_format(info: dict[str, Any], max_height: int) -> YouTubeFormatChoice:
     )
 
 
-def compatible_quality_options(info: dict[str, Any], max_height: int = 1080) -> list[YouTubeFormatChoice]:
+def compatible_quality_options(
+    info: dict[str, Any],
+    max_height: int = 1080,
+    min_height: int = DEFAULT_MIN_HEIGHT,
+) -> list[YouTubeFormatChoice]:
     formats = [fmt for fmt in info.get("formats") or [] if isinstance(fmt, dict)]
     heights = sorted(
         {
             int(fmt.get("height") or 0)
             for fmt in formats
-            if int(fmt.get("height") or 0) > 0 and int(fmt.get("height") or 0) <= max_height
+            if int(fmt.get("height") or 0) >= int(min_height or 0)
+            and int(fmt.get("height") or 0) <= max_height
         },
         reverse=True,
     )
     choices: dict[int, YouTubeFormatChoice] = {}
+    seen_labels: set[str] = set()
     for height in heights:
         try:
             choice = select_format(info, height)
         except YouTubeUnsupportedError:
             continue
         if choice.height == height:
+            if choice.label in seen_labels:
+                continue
+            seen_labels.add(choice.label)
             choices[height] = choice
     return [choices[h] for h in sorted(choices.keys(), reverse=True)]
 
@@ -432,6 +461,7 @@ def download_video(
             "merge_output_format": "mp4",
             "noplaylist": True,
             "quiet": True,
+            "noprogress": True,
             "no_warnings": True,
             "progress_hooks": [_hook],
             "overwrites": True,

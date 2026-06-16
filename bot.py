@@ -394,6 +394,7 @@ YOUTUBE_DOWNLOADS_ENABLED = settings.youtube_downloads_enabled
 YOUTUBE_DOWNLOAD_DIR = settings.youtube_download_dir
 YOUTUBE_MAX_DURATION_MINUTES = settings.youtube_max_duration_minutes
 YOUTUBE_MAX_HEIGHT = settings.youtube_max_height
+YOUTUBE_MIN_HEIGHT = settings.youtube_min_height
 YOUTUBE_MAX_PARALLEL = settings.youtube_max_parallel
 YOUTUBE_MAX_QUEUE_SIZE = settings.youtube_max_queue_size
 YOUTUBE_MAX_QUEUE_PER_CHAT = settings.youtube_max_queue_per_chat
@@ -469,6 +470,9 @@ TASK_CARD_MESSAGES: dict[str, set[tuple[int, int]]] = {}
 YOUTUBE_PREVIEWS: dict[str, dict] = {}
 YOUTUBE_JOB_MESSAGES: dict[str, set[tuple[int, int]]] = {}
 YOUTUBE_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
+YOUTUBE_PROGRESS_SAVE_INTERVAL_SECONDS = 1.0
+YOUTUBE_STATUS_CARD_INTERVAL_SECONDS = 2.0
+YOUTUBE_WORKER_INTERVAL_SECONDS = 2.0
 MAX_TASK_NOTIFICATION_FAILURES = 3
 # Unix timestamp of next scheduled subscription check (set by the loop)
 _next_subscription_check_at: float | None = None
@@ -7299,14 +7303,6 @@ def _youtube_register_job_message(job_id: str, chat_id: int | None, message_id: 
     YOUTUBE_JOB_MESSAGES.setdefault(str(job_id), set()).add((chat_id, message_id))
 
 
-async def _youtube_delete_job_cards(app: "Application", job_id: str) -> None:
-    for chat_id, message_id in YOUTUBE_JOB_MESSAGES.pop(str(job_id), set()):
-        try:
-            await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception:
-            pass
-
-
 async def _youtube_update_registered_cards(app: "Application") -> None:
     jobs = _youtube_load_jobs()
     for job_id, targets in list(YOUTUBE_JOB_MESSAGES.items()):
@@ -7327,6 +7323,7 @@ async def _youtube_update_registered_cards(app: "Application") -> None:
                 )
                 remaining.add((chat_id, message_id))
             except Exception:
+                remaining.add((chat_id, message_id))
                 logger.debug("YouTube status card edit failed job_id=%s", job_id, exc_info=True)
         if remaining:
             YOUTUBE_JOB_MESSAGES[job_id] = remaining
@@ -7334,11 +7331,25 @@ async def _youtube_update_registered_cards(app: "Application") -> None:
             YOUTUBE_JOB_MESSAGES.pop(job_id, None)
 
 
+async def _youtube_finalize_job_cards(app: "Application", job_id: str, job: dict) -> None:
+    text = _youtube_job_card_text(job)
+    for chat_id, message_id in YOUTUBE_JOB_MESSAGES.pop(str(job_id), set()):
+        try:
+            await app.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=_youtube_close_keyboard(),
+            )
+        except Exception:
+            logger.debug("YouTube final status card edit failed job_id=%s", job_id, exc_info=True)
+
+
 async def _youtube_status_update_loop(app: "Application") -> None:
     while True:
         try:
             await _run_background_step("YouTube status cards", lambda: _youtube_update_registered_cards(app))
-            await asyncio.sleep(5)
+            await asyncio.sleep(YOUTUBE_STATUS_CARD_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
 
@@ -7369,6 +7380,7 @@ def _youtube_preview_text(preview: dict) -> str:
         f"Канал: {preview.get('channel') or 'неизвестно'}\n"
         f"Длительность: {_youtube_duration_text(preview.get('duration_seconds'))}\n"
         f"Доступно: {qualities or 'нет совместимых форматов'}\n\n"
+        f"Показаны только совместимые MP4/H.264/AAC от {YOUTUBE_MIN_HEIGHT}p без перекодирования.\n\n"
         "Выберите качество для скачивания."
     )
 
@@ -7404,7 +7416,7 @@ def _youtube_progress_hook(job_id: str):
         nonlocal last_saved_at
         status = str(payload.get("status") or "")
         now_ts = time.time()
-        if status == "downloading" and now_ts - last_saved_at < 2.0:
+        if status == "downloading" and now_ts - last_saved_at < YOUTUBE_PROGRESS_SAVE_INTERVAL_SECONDS:
             return
         fields: dict = {}
         if status == "downloading":
@@ -7626,14 +7638,14 @@ async def _youtube_worker_once(app: "Application") -> None:
             duration_seconds=result.get("duration_seconds") or job.get("duration_seconds"),
         ) or job
         _youtube_record_history("youtube_download_completed", job)
-        await _youtube_delete_job_cards(app, job_id)
+        await _youtube_finalize_job_cards(app, job_id, job)
         await _youtube_send_completed_message(app, job)
         await _youtube_start_plex_poll_if_needed(app, job)
     except Exception as exc:
         error = _youtube_failure_message(exc)
         job = _youtube_update_job(job_id, status="failed", error=error, speed_bytes=0) or job
         _youtube_record_history("youtube_download_failed", job, error=error)
-        await _youtube_delete_job_cards(app, job_id)
+        await _youtube_finalize_job_cards(app, job_id, job)
         await _youtube_send_failed_message(app, job)
 
 
@@ -7642,7 +7654,7 @@ async def _youtube_worker_loop(app: "Application") -> None:
     while True:
         try:
             await _run_background_step("YouTube worker", lambda: _youtube_worker_once(app))
-            await asyncio.sleep(5)
+            await asyncio.sleep(YOUTUBE_WORKER_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
 
@@ -7682,7 +7694,7 @@ async def youtube_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE,
             raise YouTubeUnsupportedError(
                 f"Видео длиннее лимита {YOUTUBE_MAX_DURATION_MINUTES} мин."
             )
-        choices = compatible_quality_options(info, YOUTUBE_MAX_HEIGHT)
+        choices = compatible_quality_options(info, YOUTUBE_MAX_HEIGHT, YOUTUBE_MIN_HEIGHT)
         if not choices:
             raise YouTubeUnsupportedError(
                 "Нет совместимых MP4/H.264/AAC форматов без перекодирования."
@@ -7733,9 +7745,9 @@ async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query:
         return
     if not _is_allowed(update):
-        await query.answer("Недоступно", show_alert=True)
+        await _safe_answer(query, "Недоступно", show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
 
     try:
         _, action, token, raw_height = (query.data or "").split(":", 3)

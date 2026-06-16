@@ -5,6 +5,7 @@ from youtube_downloads import (
     YouTubeUnsupportedError,
     build_path_plan,
     compatible_quality_options,
+    display_quality_label,
     extract_metadata,
     extract_youtube_video_id,
     find_youtube_url,
@@ -130,12 +131,59 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
                     "vcodec": "avc1.64001F",
                     "acodec": "mp4a.40.2",
                 },
+                {
+                    "format_id": "134",
+                    "ext": "mp4",
+                    "height": 360,
+                    "vcodec": "avc1.4d401e",
+                    "acodec": "none",
+                },
             ]
         }
 
         choices = compatible_quality_options(info, 1080)
 
         self.assertEqual([choice.height for choice in choices], [1080, 720])
+        self.assertEqual([choice.label for choice in choices], ["1080p", "720p"])
+
+    def test_quality_options_hide_low_heights_and_standardize_labels(self) -> None:
+        info = {
+            "formats": [
+                {
+                    "format_id": "960v",
+                    "ext": "mp4",
+                    "height": 960,
+                    "vcodec": "avc1.640028",
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "640v",
+                    "ext": "mp4",
+                    "height": 640,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "320v",
+                    "ext": "mp4",
+                    "height": 320,
+                    "vcodec": "avc1.4d4015",
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "140",
+                    "ext": "m4a",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                },
+            ]
+        }
+
+        choices = compatible_quality_options(info, 1080)
+
+        self.assertEqual([choice.height for choice in choices], [960, 640])
+        self.assertEqual([choice.label for choice in choices], ["1080p", "720p"])
+        self.assertEqual(display_quality_label(428), "480p")
 
     def test_build_path_plan_sanitizes_components_and_keeps_youtube_id(self) -> None:
         info = {
