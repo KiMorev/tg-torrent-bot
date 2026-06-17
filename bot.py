@@ -7731,9 +7731,26 @@ async def _youtube_set_collection_poster(section_id: str, job: dict) -> bool:
         rating_key = getattr(collection, "rating_key", "") if collection else ""
         if not rating_key:
             return False
-        await asyncio.to_thread(plex_client.upload_poster, rating_key, poster_path)
+        uploaded = await asyncio.to_thread(plex_client.upload_poster, rating_key, poster_path)
+        if not uploaded:
+            logger.warning(
+                "YouTube Plex collection poster upload returned false job_id=%s collection=%r rating_key=%s",
+                job.get("id"),
+                channel,
+                rating_key,
+            )
+            return False
+        locked = await asyncio.to_thread(plex_client.lock_collection_poster, section_id, rating_key)
+        if not locked:
+            logger.warning(
+                "YouTube Plex collection poster lock returned false job_id=%s collection=%r rating_key=%s",
+                job.get("id"),
+                channel,
+                rating_key,
+            )
+            return False
         logger.info(
-            "YouTube Plex collection poster set job_id=%s collection=%r rating_key=%s",
+            "YouTube Plex collection poster uploaded and locked job_id=%s collection=%r rating_key=%s",
             job.get("id"),
             channel,
             rating_key,

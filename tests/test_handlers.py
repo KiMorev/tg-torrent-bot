@@ -7089,6 +7089,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             poster_path.write_bytes(b"poster")
             plex = MagicMock()
             plex.find_section_collection.return_value = MagicMock(rating_key="collection-1")
+            plex.upload_poster.return_value = True
+            plex.lock_collection_poster.return_value = True
 
             with patch.object(bot, "plex_client", plex):
                 uploaded = await bot._youtube_set_collection_poster(
@@ -7103,6 +7105,30 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(uploaded)
             plex.find_section_collection.assert_called_once_with("9", "AcademeG")
             plex.upload_poster.assert_called_once_with("collection-1", poster_path)
+            plex.lock_collection_poster.assert_called_once_with("9", "collection-1")
+
+    async def test_youtube_set_collection_poster_fails_when_lock_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            poster_path = Path(tmp) / "poster.jpg"
+            poster_path.write_bytes(b"poster")
+            plex = MagicMock()
+            plex.find_section_collection.return_value = MagicMock(rating_key="collection-1")
+            plex.upload_poster.return_value = True
+            plex.lock_collection_poster.return_value = False
+
+            with patch.object(bot, "plex_client", plex):
+                uploaded = await bot._youtube_set_collection_poster(
+                    "9",
+                    {
+                        "id": "yt_1",
+                        "channel": "AcademeG",
+                        "item_dir": tmp,
+                    },
+                )
+
+        self.assertFalse(uploaded)
+        plex.upload_poster.assert_called_once_with("collection-1", poster_path)
+        plex.lock_collection_poster.assert_called_once_with("9", "collection-1")
 
     async def test_youtube_set_collection_poster_skips_missing_poster(self):
         plex = MagicMock()

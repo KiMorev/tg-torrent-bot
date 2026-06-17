@@ -263,6 +263,26 @@ class PlexClient:
             )
         return True
 
+    def _put_ok(self, path: str, **params: Any) -> bool:
+        url = f"{self._base}{path}"
+        try:
+            resp = self._session.put(url, params=params, timeout=_REQUEST_TIMEOUT)
+        except requests.Timeout as exc:
+            raise PlexTimeoutError(f"Timeout connecting to {path}") from exc
+        except requests.ConnectionError as exc:
+            raise PlexConnectionError(f"Connection failed: {exc}") from exc
+        except requests.RequestException as exc:
+            raise PlexAPIError(f"Request failed: {exc}", error_kind="other") from exc
+
+        if resp.status_code == 401:
+            raise PlexAuthError("Invalid Plex token (HTTP 401)")
+        if not resp.ok:
+            raise PlexAPIError(
+                f"HTTP {resp.status_code} from {path}",
+                error_kind="http",
+            )
+        return True
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -347,6 +367,16 @@ class PlexClient:
         with open(poster_path, "rb") as fh:
             data = fh.read()
         return self._post_ok(f"/library/metadata/{rating_key}/posters", data=data)
+
+    def lock_collection_poster(self, section_id: str, rating_key: str) -> bool:
+        if not section_id or not rating_key:
+            return False
+        return self._put_ok(
+            f"/library/sections/{section_id}/all",
+            type=18,
+            id=rating_key,
+            **{"thumb.locked": 1},
+        )
 
     def _ensure_section(self) -> str:
         if not self._section_id:

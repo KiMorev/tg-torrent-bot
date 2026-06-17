@@ -365,6 +365,20 @@ class PlexClientSectionTests(unittest.TestCase):
         self.assertEqual(mock_post.call_args.kwargs["data"], b"poster-data")
         self.assertEqual(mock_post.call_args.kwargs["timeout"], 10)
 
+    def test_lock_collection_poster_locks_thumb_field(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        with patch.object(client._session, "put", return_value=resp) as mock_put:
+            self.assertTrue(client.lock_collection_poster("9", "123"))
+
+        self.assertIn("/library/sections/9/all", mock_put.call_args.args[0])
+        self.assertEqual(mock_put.call_args.kwargs["params"]["type"], 18)
+        self.assertEqual(mock_put.call_args.kwargs["params"]["id"], "123")
+        self.assertEqual(mock_put.call_args.kwargs["params"]["thumb.locked"], 1)
+        self.assertEqual(mock_put.call_args.kwargs["timeout"], 10)
+
 
 # ---------------------------------------------------------------------------
 # PlexClient — get_all_movies
