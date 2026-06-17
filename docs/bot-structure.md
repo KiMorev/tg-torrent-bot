@@ -122,7 +122,7 @@
 | `gpt_client.py`, `gpt_features.py` | GPT-запросы и функции: did-you-mean, search failure advice, KP confidence, parse title, explain card, bulk candidate hints, `/new` release tie-break. |
 | `access_control.py` | Проверка разрешённых/admin chat ids и подпись заявки на доступ. |
 | `progressive_status.py` | Прогрессивные сообщения ожидания для поиска и голосового ввода. |
-| `scripts/setup_wizard.py` | Capability-first wizard установки, подсказки по ключам, Plex PIN auth, read-only проверки сервисов и генерация `.env`. |
+| `scripts/setup_wizard.py` | Capability-first wizard установки, подсказки по ключам, Plex PIN auth, read-only проверки сервисов, настройка YouTube-download env/mount-пути и генерация `.env`. |
 | `tests/conftest.py` | Bootstrap тестового окружения: изолированные `TMP_DIR`/`STATE_DIR` до импорта `bot.py`. |
 
 ## State files

@@ -9,10 +9,12 @@ from scripts.setup_wizard import (
     PlexPin,
     ProbeError,
     build_plex_auth_url,
+    configure_youtube,
     configure_plex,
     create_plex_pin,
     destination_share_name,
     extract_chat_candidates,
+    find_plex_section_by_title,
     format_env_value,
     installer_probe_url,
     normalize_ds_url,
@@ -82,6 +84,9 @@ class SetupWizardEnvTests(unittest.TestCase):
         self.assertIn("MOVIE_DISCOVERY_ENABLED=false", text)
         self.assertIn("VOICE_SEARCH_ENABLED=false", text)
         self.assertIn("GPT_ENABLED=false", text)
+        self.assertIn("YOUTUBE_DOWNLOADS_ENABLED=false", text)
+        self.assertIn("YOUTUBE_NAS_PATH=/volume1/youtube", text)
+        self.assertIn("YOUTUBE_PLEX_LIBRARY_NAME=YouTube", text)
 
     def test_render_env_contains_selected_integrations(self) -> None:
         values = self._config().__dict__.copy()
@@ -101,6 +106,10 @@ class SetupWizardEnvTests(unittest.TestCase):
             openai_api_key="sk-test",
             voice_search_enabled=True,
             gpt_enabled=True,
+            youtube_downloads_enabled=True,
+            youtube_nas_path="/volume1/youtube",
+            youtube_plex_section="9",
+            youtube_plex_library_name="YouTube",
         )
         config = InstallerConfig(**values)
 
@@ -115,6 +124,8 @@ class SetupWizardEnvTests(unittest.TestCase):
         self.assertIn("PLEX_AUTH_CLIENT_ID=client-1", text)
         self.assertIn("VOICE_SEARCH_ENABLED=true", text)
         self.assertIn("GPT_ENABLED=true", text)
+        self.assertIn("YOUTUBE_DOWNLOADS_ENABLED=true", text)
+        self.assertIn("YOUTUBE_PLEX_SECTION=9", text)
 
     def test_render_env_preserves_existing_unmanaged_values(self) -> None:
         text = render_env(
@@ -147,6 +158,9 @@ class SetupWizardEnvTests(unittest.TestCase):
         self.assertFalse(settings.movie_discovery_enabled)
         self.assertFalse(settings.voice_search_enabled)
         self.assertFalse(settings.gpt_enabled)
+        self.assertFalse(settings.youtube_downloads_enabled)
+        self.assertEqual(settings.youtube_download_dir, Path("/youtube_storage"))
+        self.assertEqual(settings.youtube_plex_library_name, "YouTube")
 
     def test_render_env_rejects_missing_required_values(self) -> None:
         config = InstallerConfig(
@@ -272,7 +286,7 @@ class SetupWizardProbeTests(unittest.TestCase):
 
         self.assertEqual(indexers, [{"id": "rutracker", "name": "Rutracker"}])
 
-    def test_probe_plex_returns_movie_and_show_sections(self) -> None:
+    def test_probe_plex_returns_all_sections(self) -> None:
         import xml.etree.ElementTree as ET
 
         identity = ET.fromstring("<MediaContainer machineIdentifier='m1' />")
@@ -280,6 +294,7 @@ class SetupWizardProbeTests(unittest.TestCase):
             "<MediaContainer>"
             "<Directory key='1' type='movie' title='Movies' />"
             "<Directory key='2' type='show' title='Shows' />"
+            "<Directory key='9' type='artist' title='YouTube' />"
             "</MediaContainer>"
         )
         with patch("scripts.setup_wizard._read_xml_url", side_effect=[identity, sections]):
@@ -290,8 +305,20 @@ class SetupWizardProbeTests(unittest.TestCase):
             [
                 {"key": "1", "title": "Movies", "type": "movie"},
                 {"key": "2", "title": "Shows", "type": "show"},
+                {"key": "9", "title": "YouTube", "type": "artist"},
             ],
         )
+
+    def test_find_plex_section_by_title_matches_case_insensitive(self) -> None:
+        section = find_plex_section_by_title(
+            [
+                {"key": "1", "title": "Movies", "type": "movie"},
+                {"key": "9", "title": "YouTube", "type": "movie"},
+            ],
+            "youtube",
+        )
+
+        self.assertEqual(section, {"key": "9", "title": "YouTube", "type": "movie"})
 
     def test_build_plex_auth_url_contains_client_code_and_product(self) -> None:
         url = build_plex_auth_url("client-1", "pin-code")
@@ -398,11 +425,33 @@ class SetupWizardProbeTests(unittest.TestCase):
             ),
         )
 
+    def test_configure_youtube_finds_plex_library_by_name(self) -> None:
+        console = FakeConsole(answers=["", "YouTube"])
+        with patch(
+            "scripts.setup_wizard.probe_plex",
+            return_value=[
+                {"key": "1", "title": "Movies", "type": "movie"},
+                {"key": "9", "title": "YouTube", "type": "movie"},
+            ],
+        ):
+            values = configure_youtube(
+                console,
+                {},
+                plex_url="http://plex.local:32400",
+                plex_token="token",
+                skip_checks=False,
+            )
+
+        self.assertTrue(values["youtube_downloads_enabled"])
+        self.assertEqual(values["youtube_nas_path"], "/volume1/youtube")
+        self.assertEqual(values["youtube_plex_section"], "9")
+        self.assertEqual(values["youtube_plex_library_name"], "YouTube")
+
 
 class SetupWizardInteractiveTests(unittest.TestCase):
     def test_run_interactive_skip_checks_collects_only_selected_integrations(self) -> None:
         console = FakeConsole(
-            booleans=[True, False, True, True, False, False, True],
+            booleans=[True, False, True, True, False, False, True, False],
             answers=[
                 "123:token",
                 "100",
@@ -430,6 +479,35 @@ class SetupWizardInteractiveTests(unittest.TestCase):
         self.assertIn("MOVIE_DISCOVERY_ENABLED=true", text)
         self.assertIn("OPENAI_API_KEY=sk-test", text)
         self.assertIn("VOICE_SEARCH_ENABLED=true", text)
+        self.assertIn("YOUTUBE_DOWNLOADS_ENABLED=false", text)
+
+    def test_run_interactive_skip_checks_collects_youtube_settings(self) -> None:
+        console = FakeConsole(
+            booleans=[False, False, False, False, False, False, False, True],
+            answers=[
+                "123:token",
+                "100",
+                "",
+                "tg_bot",
+                "secret",
+                "video",
+                "/volume1/youtube",
+                "YouTube",
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            result = run_interactive(Path(tmp), skip_checks=True, console=console)
+            text = (Path(tmp) / ".env").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertIn("YOUTUBE_DOWNLOADS_ENABLED=true", text)
+        self.assertIn("YOUTUBE_NAS_PATH=/volume1/youtube", text)
+        self.assertIn("YOUTUBE_DOWNLOAD_DIR=/youtube_storage", text)
+        self.assertIn("YOUTUBE_MAX_DURATION_MINUTES=300", text)
+        self.assertIn("YOUTUBE_MAX_HEIGHT=1080", text)
+        self.assertIn("YOUTUBE_MIN_HEIGHT=640", text)
+        self.assertIn("YOUTUBE_PLEX_LIBRARY_NAME=YouTube", text)
+        self.assertIn("YOUTUBE_PLEX_SECTION=", text)
 
     def test_install_script_removes_current_storage_mount_mode(self) -> None:
         install_text = Path("install.sh").read_text(encoding="utf-8")
@@ -437,6 +515,15 @@ class SetupWizardInteractiveTests(unittest.TestCase):
 
         self.assertIn("/volume1/video:/storage:rw", compose_text)
         self.assertIn("/volume1/video:/storage:r[ow]", install_text)
+
+    def test_install_script_guards_optional_youtube_mount(self) -> None:
+        install_text = Path("install.sh").read_text(encoding="utf-8")
+        compose_text = Path("compose.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("${YOUTUBE_NAS_PATH:-/volume1/youtube}:/youtube_storage:rw", compose_text)
+        self.assertIn("YOUTUBE_DOWNLOADS_ENABLED", install_text)
+        self.assertIn("/youtube_storage:r[ow]", install_text)
+        self.assertIn("папка YouTube для bind mount не найдена", install_text)
 
 
 if __name__ == "__main__":

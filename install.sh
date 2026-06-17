@@ -78,6 +78,39 @@ check_container() {
   fail "исправьте ошибку из логов и повторите запуск в $INSTALL_DIR"
 }
 
+env_value() {
+  key="$1"
+  if [ ! -f "$INSTALL_DIR/.env" ]; then
+    return 0
+  fi
+  sed -n "s/^${key}=//p" "$INSTALL_DIR/.env" | tail -n 1 | sed "s/^'//; s/'$//"
+}
+
+remove_youtube_mount() {
+  grep -v '/youtube_storage:r[ow][[:space:]]*$' \
+    "$INSTALL_DIR/compose.yaml" > "$INSTALL_DIR/compose.yaml.tmp"
+  mv "$INSTALL_DIR/compose.yaml.tmp" "$INSTALL_DIR/compose.yaml"
+}
+
+configure_youtube_mount() {
+  youtube_enabled="$(env_value YOUTUBE_DOWNLOADS_ENABLED | tr '[:upper:]' '[:lower:]')"
+  case "$youtube_enabled" in
+    1|true|yes|on)
+      youtube_path="$(env_value YOUTUBE_NAS_PATH)"
+      youtube_path="${youtube_path:-/volume1/youtube}"
+      if [ ! -d "$youtube_path" ]; then
+        say "YouTube-download включён, но папка $youtube_path не найдена."
+        say "Создайте в DSM shared folder youtube, выдайте боту права на запись, Plex — права на чтение, затем повторите install.sh."
+        fail "папка YouTube для bind mount не найдена"
+      fi
+      ;;
+    *)
+      say "YouTube-download выключен — убираю необязательный /youtube_storage mount."
+      remove_youtube_mount
+      ;;
+  esac
+}
+
 say "PlexLoader installer"
 say "Папка установки: $INSTALL_DIR"
 
@@ -116,6 +149,8 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
   fail ".env не создан, запуск контейнера отменён."
 fi
 
+configure_youtube_mount
+
 cd "$INSTALL_DIR"
 say "Запускаю PlexLoader..."
 compose_up
@@ -126,3 +161,6 @@ say "Готово. Проверьте в Telegram:"
 say "  /ping   — бот должен ответить pong"
 say "  /status — должен показать Download Station"
 say "  /admin  — должен открыть диагностику"
+if [ "$(env_value YOUTUBE_DOWNLOADS_ENABLED | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+  say "  /admin → YouTube — проверьте диагностику YouTube-блока"
+fi

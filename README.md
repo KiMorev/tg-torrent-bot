@@ -243,15 +243,15 @@ wget -qO- https://raw.githubusercontent.com/KiMorev/tg-torrent-bot/main/install.
 
 ### Что спросит мастер
 
-1. Какие возможности включить: Rutracker, Jackett, Plex, `/new`, Кинопоиск, TMDB, OpenAI.
+1. Какие возможности включить: Rutracker, Jackett, Plex, `/new`, Кинопоиск, TMDB, OpenAI, YouTube-download.
 2. `BOT_TOKEN`: откройте [@BotFather](https://t.me/BotFather), создайте бота командой `/newbot` и скопируйте token.
 3. Telegram `chat_id`: мастер попросит написать `/start` вашему боту и сам попробует прочитать `chat_id` через Telegram `getUpdates`. Ручной ввод нужен только если Telegram не отдаст update.
 4. DSM URL: по умолчанию `https://host.docker.internal:5001`. Это адрес DSM из контейнера; установщик умеет проверить его с NAS через локальный fallback.
 5. DSM account / password: пользователь Synology с доступом к Download Station.
 6. Папка назначения Download Station: обычно `video` или другая папка, настроенная в Download Station.
-7. Только для выбранных интеграций: логин/пароль Rutracker, Jackett URL/API key/indexers, Plex URL/token/movie-секция, API keys Кинопоиска/TMDB/OpenAI.
+7. Только для выбранных интеграций: логин/пароль Rutracker, Jackett URL/API key/indexers, Plex URL/token/movie-секция, API keys Кинопоиска/TMDB/OpenAI, путь NAS и имя Plex-библиотеки для YouTube.
 
-Перед каждым внешним параметром мастер коротко пишет, зачем он нужен, где его взять, пример значения и что будет недоступно, если возможность пропустить. Если DSM использует самоподписанный сертификат, мастер сам попробует fallback `DS_VERIFY_SSL=false`. Download Station проверяется логином, списком задач и best-effort проверкой shared folder для `DS_DESTINATION`; если проверка не проходит, установщик покажет причину и предложит ввести данные заново.
+Перед каждым внешним параметром мастер коротко пишет, зачем он нужен, где его взять, пример значения и что будет недоступно, если возможность пропустить. Если DSM использует самоподписанный сертификат, мастер сам попробует fallback `DS_VERIFY_SSL=false`. Download Station проверяется логином, списком задач и best-effort проверкой shared folder для `DS_DESTINATION`; если проверка не проходит, установщик покажет причину и предложит ввести данные заново. Если включён YouTube-download, `install.sh` проверит, что `YOUTUBE_NAS_PATH` уже существует; если блок выключен, установщик уберёт необязательный `/youtube_storage` mount из установленного `compose.yaml`.
 
 ### Ручной fallback
 
@@ -409,10 +409,10 @@ http://<NAS_IP>:8099/plex/webhook/health?token=<PLEX_WEBHOOK_TOKEN>
 1. В DSM создать shared folder `youtube`.
 2. Дать пользователю бота права на запись, Plex - права на чтение.
 3. В Plex добавить библиотеку `YouTube` типа `Другие видео` и указать `/volume1/youtube`.
-4. В `.env` задать `YOUTUBE_DOWNLOADS_ENABLED=true`, `YOUTUBE_NAS_PATH=/volume1/youtube`, `YOUTUBE_DOWNLOAD_DIR=/youtube_storage`.
-5. Применить конфигурацию: `docker compose up -d`. Для локальной сборки из checkout: `docker compose up -d --build`.
+4. В мастере установки включить YouTube-download, указать `YOUTUBE_NAS_PATH=/volume1/youtube` и имя Plex-библиотеки `YouTube`.
+5. Применить конфигурацию: `docker compose up -d`, если `.env` редактировался вручную. Для локальной сборки из checkout: `docker compose up -d --build`.
 
-Установщик пока не настраивает YouTube-блок автоматически: для первой проверки эти переменные задаются вручную в `.env`.
+Если Plex уже подключён в мастере, установщик попробует найти библиотеку `YouTube` и записать `YOUTUBE_PLEX_SECTION`. Если библиотека ещё не создана, установка не падает: бот позже попробует найти секцию по `YOUTUBE_PLEX_LIBRARY_NAME`.
 
 ### `/new`
 
@@ -507,7 +507,7 @@ volumes:
   - ${YOUTUBE_NAS_PATH:-/volume1/youtube}:/youtube_storage:rw
 ```
 
-Даже если `YOUTUBE_DOWNLOADS_ENABLED=false`, Docker всё равно должен увидеть существующую левую папку bind mount. На текущей схеме это `/volume1/youtube`; её лучше держать отдельной shared folder, а не подпапкой существующей `/volume1/video`, чтобы Plex не смешивал YouTube-ролики с фильмами и сериалами.
+При установке через `install.sh` этот mount остаётся только когда `YOUTUBE_DOWNLOADS_ENABLED=true`; в этом случае левая папка должна уже существовать, иначе установщик остановится с подсказкой. Если YouTube-download выключен, установщик убирает необязательный `/youtube_storage` mount из установленного `compose.yaml`, чтобы Docker не создал `/volume1/youtube` как обычную root-папку. При ручном запуске держите `/volume1/youtube` отдельной shared folder, а не подпапкой существующей `/volume1/video`, чтобы Plex не смешивал YouTube-ролики с фильмами и сериалами.
 
 ## Команды бота
 
