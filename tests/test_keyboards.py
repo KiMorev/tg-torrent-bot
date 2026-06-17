@@ -3,6 +3,8 @@ import unittest
 from keyboards import (
     _admin_diagnostics_detail_keyboard,
     _admin_diagnostics_keyboard,
+    _admin_broadcast_confirm_keyboard,
+    _admin_broadcast_templates_keyboard,
     _admin_kp_cache_cleared_keyboard,
     _admin_kp_cache_confirm_keyboard,
     _admin_kp_force_refresh_keyboard,
@@ -105,6 +107,37 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(buttons["👥 Пользователи"], "access:users_refresh")
         self.assertEqual(buttons["📋 Загрузки"], "task:list:all")
         self.assertEqual(buttons["🔔 Подписки"], "admin:subscriptions")
+        self.assertEqual(buttons["📣 Рассылка"], "admin:broadcast")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
+
+    def test_admin_broadcast_templates_keyboard_links_actions(self) -> None:
+        keyboard = _admin_broadcast_templates_keyboard()
+
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["✨ Новая функция"], "admin:broadcast_tpl:feature")
+        self.assertEqual(buttons["🛠 Технические работы"], "admin:broadcast_tpl:maintenance")
+        self.assertEqual(buttons["⚠️ Временная проблема"], "admin:broadcast_tpl:incident")
+        self.assertEqual(buttons["✅ Работа восстановлена"], "admin:broadcast_tpl:recovery")
+        self.assertEqual(buttons["⬅️ Назад"], "admin:home")
+        self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
+
+    def test_admin_broadcast_confirm_keyboard_requires_explicit_send(self) -> None:
+        keyboard = _admin_broadcast_confirm_keyboard()
+
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["✅ Отправить"], "admin:broadcast_send")
+        self.assertEqual(buttons["✏️ Изменить текст"], "admin:broadcast_edit")
+        self.assertEqual(buttons["⬅️ Назад"], "admin:broadcast")
         self.assertEqual(buttons["✖️ Закрыть"], "admin:close")
 
     def test_admin_panel_keyboard_movie_row_has_two_buttons(self) -> None:

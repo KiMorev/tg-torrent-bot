@@ -949,6 +949,85 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Сброшено", last_text)
         self.assertIn("2", last_text)
 
+    def test_admin_broadcast_recipients_use_all_allowed_chats(self):
+        fake_store = MagicMock()
+        fake_store.load_approved_chat_ids.return_value = {200, 400}
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100, 200}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "state_store", fake_store),
+        ):
+            self.assertEqual(bot._admin_broadcast_recipients(), [100, 200, 300, 400])
+
+    def test_admin_broadcast_template_prompts_for_text(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:broadcast_tpl:maintenance")
+        context = _make_context()
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_admin_broadcast_recipients", return_value=[100, 300]),
+        ):
+            result = asyncio.run(bot.admin_broadcast_template_selected(update, context))
+
+        self.assertEqual(result, bot.ADMIN_BROADCAST_TEXT)
+        self.assertEqual(context.user_data[bot._ADMIN_BROADCAST_TEMPLATE_KEY], "maintenance")
+        text = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Технические работы", text)
+        self.assertIn("Пришлите текст", text)
+
+    def test_admin_broadcast_text_builds_preview_without_sending(self):
+        update = _make_message_update(chat_id=300)
+        update.message.text = "Сегодня с 23:00 до 23:30 возможны перерывы."
+        context = _make_context({
+            bot._ADMIN_BROADCAST_TEMPLATE_KEY: "maintenance",
+        })
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_admin_broadcast_recipients", return_value=[100, 300]),
+        ):
+            result = asyncio.run(bot.admin_broadcast_text_received(update, context))
+
+        self.assertEqual(result, bot.ADMIN_BROADCAST_TEXT)
+        context.bot.send_message.assert_not_called()
+        update.message.reply_text.assert_awaited_once()
+        preview = update.message.reply_text.call_args.args[0]
+        self.assertIn("Предпросмотр рассылки", preview)
+        self.assertIn("Технические работы", preview)
+        self.assertIn("Сегодня с 23:00", preview)
+
+    def test_admin_broadcast_send_fans_out_and_reports_failures(self):
+        update = _make_callback_update(chat_id=300, callback_data="admin:broadcast_send")
+        context = _make_context({
+            bot._ADMIN_BROADCAST_TEMPLATE_KEY: "feature",
+            bot._ADMIN_BROADCAST_TEXT_KEY: "Появился новый раздел в /admin.",
+        })
+        context.bot.send_message = AsyncMock(side_effect=[
+            None,
+            bot.Forbidden("blocked"),
+            None,
+        ])
+
+        with (
+            patch.object(bot, "ADMIN_CHAT_IDS", {300}),
+            patch.object(bot, "_admin_broadcast_recipients", return_value=[100, 200, 300]),
+        ):
+            result = asyncio.run(bot.admin_broadcast_send(update, context))
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        self.assertEqual(context.bot.send_message.await_count, 3)
+        chat_ids = [call.kwargs["chat_id"] for call in context.bot.send_message.await_args_list]
+        self.assertEqual(chat_ids, [100, 200, 300])
+        first_text = context.bot.send_message.await_args_list[0].kwargs["text"]
+        self.assertIn("Новая функция", first_text)
+        self.assertIn("Появился новый раздел", first_text)
+        summary = update.callback_query.edit_message_text.call_args.args[0]
+        self.assertIn("Отправлено: 2 из 3", summary)
+        self.assertIn("200: blocked", summary)
+        self.assertNotIn(bot._ADMIN_BROADCAST_TEMPLATE_KEY, context.user_data)
+        self.assertNotIn(bot._ADMIN_BROADCAST_TEXT_KEY, context.user_data)
+
     def test_admin_panel_times_out_download_station_summary(self):
         async def slow_to_thread(_func, *args, **kwargs):
             await asyncio.sleep(0.05)

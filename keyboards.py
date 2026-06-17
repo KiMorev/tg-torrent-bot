@@ -194,6 +194,9 @@ def _admin_panel_keyboard(
             InlineKeyboardButton("🔔 Подписки", callback_data=_admin_callback("subscriptions")),
         ],
         [
+            InlineKeyboardButton("📣 Рассылка", callback_data=_admin_callback("broadcast")),
+        ],
+        [
             # Two movie-related drill-downs share a row to save vertical space on
             # mobile. «🎬 Новинки» opens the discovery-status screen (filters,
             # sources, KP cache management); «🎬 Трекеры новинок» opens the
@@ -223,6 +226,39 @@ def _admin_panel_keyboard(
 
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))])
     return InlineKeyboardMarkup(rows)
+
+
+def _admin_broadcast_templates_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✨ Новая функция", callback_data=_admin_callback("broadcast_tpl:feature"))],
+        [InlineKeyboardButton("🛠 Технические работы", callback_data=_admin_callback("broadcast_tpl:maintenance"))],
+        [InlineKeyboardButton("⚠️ Временная проблема", callback_data=_admin_callback("broadcast_tpl:incident"))],
+        [InlineKeyboardButton("✅ Работа восстановлена", callback_data=_admin_callback("broadcast_tpl:recovery"))],
+        [
+            InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home")),
+            InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close")),
+        ],
+    ])
+
+
+def _admin_broadcast_input_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("broadcast")),
+            InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close")),
+        ],
+    ])
+
+
+def _admin_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Отправить", callback_data=_admin_callback("broadcast_send"))],
+        [
+            InlineKeyboardButton("✏️ Изменить текст", callback_data=_admin_callback("broadcast_edit")),
+            InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("broadcast")),
+        ],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))],
+    ])
 
 
 def _admin_movie_status_keyboard(*, show_kp_buttons: bool) -> InlineKeyboardMarkup:

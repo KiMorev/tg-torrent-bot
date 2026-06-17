@@ -81,6 +81,9 @@ from keyboards import (
     _SRCH_QUALITY_OPTIONS,
     _admin_diagnostics_detail_keyboard,
     _admin_diagnostics_keyboard,
+    _admin_broadcast_confirm_keyboard,
+    _admin_broadcast_input_keyboard,
+    _admin_broadcast_templates_keyboard,
     _admin_kp_cache_cleared_keyboard,
     _admin_kp_cache_confirm_keyboard,
     _admin_kp_force_refresh_keyboard,
@@ -423,6 +426,7 @@ _movie_discovery_refresh_last_finished_at: float = 0.0
 KP_URL_FILTER = filters.Regex(KP_URL_RE)
 SEARCH_OPTIONS, SEARCH_ADVANCED, SEARCH_RESULTS, SEARCH_SEASON_SELECT, SEARCH_JACKETT_SELECT = range(5)
 SEARCH_PLEX_CONFIRM = 5  # Waiting for user to confirm/cancel Plex duplicate warning
+ADMIN_BROADCAST_TEXT = 20
 SETTINGS_CALLBACK_PREFIX = "settings"
 BOT_COMMANDS = [
     BotCommand("new", "Новинки фильмов"),
@@ -2023,6 +2027,299 @@ async def _build_admin_panel_text() -> str:
         lines.append("")
         lines.append(gpt_alert)
     return "\n".join(lines)
+
+
+_ADMIN_BROADCAST_TEMPLATE_KEY = "admin_broadcast_template"
+_ADMIN_BROADCAST_TEXT_KEY = "admin_broadcast_text"
+_ADMIN_BROADCAST_TEMPLATES = {
+    "feature": {
+        "title": "Новая функция",
+        "emoji": "✨",
+        "prompt": "Опишите, что появилось и как этим пользоваться.",
+    },
+    "maintenance": {
+        "title": "Технические работы",
+        "emoji": "🛠",
+        "prompt": "Укажите время работ, что может быть недоступно и когда всё вернётся.",
+    },
+    "incident": {
+        "title": "Временная проблема",
+        "emoji": "⚠️",
+        "prompt": "Опишите, что сломалось, что уже делается и есть ли обходной путь.",
+    },
+    "recovery": {
+        "title": "Работа восстановлена",
+        "emoji": "✅",
+        "prompt": "Напишите, что восстановлено и нужно ли пользователю что-то сделать.",
+    },
+}
+
+
+def _admin_broadcast_recipients() -> list[int]:
+    """Return chat_ids currently allowed to use the bot."""
+    return sorted(_all_allowed_chat_ids())
+
+
+def _admin_broadcast_template(template_id: str | None) -> dict | None:
+    if not template_id:
+        return None
+    return _ADMIN_BROADCAST_TEMPLATES.get(template_id)
+
+
+def _format_admin_broadcast_menu() -> str:
+    recipients = len(_admin_broadcast_recipients())
+    return (
+        "📣 <b>Рассылка</b>\n\n"
+        f"Получатели: <b>{recipients}</b> "
+        f"{_plural(recipients, 'чат', 'чата', 'чатов')} с доступом.\n\n"
+        "Выберите шаблон. Перед отправкой будет предпросмотр и подтверждение."
+    )
+
+
+def _format_admin_broadcast_prompt(template_id: str) -> str:
+    template = _admin_broadcast_template(template_id)
+    if not template:
+        return _format_admin_broadcast_menu()
+    recipients = len(_admin_broadcast_recipients())
+    return (
+        f"{template['emoji']} <b>Рассылка: {template['title']}</b>\n\n"
+        f"{template['prompt']}\n\n"
+        f"Получатели: <b>{recipients}</b> "
+        f"{_plural(recipients, 'чат', 'чата', 'чатов')}.\n"
+        "Пришлите текст одним сообщением."
+    )
+
+
+def _format_admin_broadcast_message(template_id: str, body: str) -> str:
+    template = _admin_broadcast_template(template_id)
+    if not template:
+        return body.strip()
+    return f"{template['emoji']} {template['title']}\n\n{body.strip()}"
+
+
+def _format_admin_broadcast_preview(template_id: str, body: str) -> str:
+    recipients = len(_admin_broadcast_recipients())
+    message = _format_admin_broadcast_message(template_id, body)
+    return (
+        "📣 Предпросмотр рассылки\n\n"
+        f"Получатели: {recipients} {_plural(recipients, 'чат', 'чата', 'чатов')}\n\n"
+        "-----\n"
+        f"{message}\n"
+        "-----\n\n"
+        "Отправить?"
+    )
+
+
+def _clear_admin_broadcast_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(_ADMIN_BROADCAST_TEMPLATE_KEY, None)
+    context.user_data.pop(_ADMIN_BROADCAST_TEXT_KEY, None)
+
+
+async def _reject_non_admin_callback(query) -> bool:
+    chat_id = query.message.chat.id if query.message else None
+    if _is_admin_chat(chat_id):
+        return False
+    await query.answer("Только для администратора", show_alert=True)
+    logger.warning("Rejected admin broadcast callback from chat_id=%s", chat_id)
+    return True
+
+
+async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if await _reject_non_admin_callback(query):
+        return ConversationHandler.END
+
+    await query.answer()
+    _clear_admin_broadcast_draft(context)
+    await _safe_edit_callback(
+        query,
+        _format_admin_broadcast_menu(),
+        parse_mode="HTML",
+        reply_markup=_admin_broadcast_templates_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def admin_broadcast_template_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if await _reject_non_admin_callback(query):
+        return ConversationHandler.END
+
+    await query.answer()
+    action = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
+    template_id = action.removeprefix("broadcast_tpl:")
+    if not _admin_broadcast_template(template_id):
+        await _safe_edit_callback(
+            query,
+            _format_admin_broadcast_menu(),
+            parse_mode="HTML",
+            reply_markup=_admin_broadcast_templates_keyboard(),
+        )
+        return ConversationHandler.END
+
+    context.user_data[_ADMIN_BROADCAST_TEMPLATE_KEY] = template_id
+    context.user_data.pop(_ADMIN_BROADCAST_TEXT_KEY, None)
+    await _safe_edit_callback(
+        query,
+        _format_admin_broadcast_prompt(template_id),
+        parse_mode="HTML",
+        reply_markup=_admin_broadcast_input_keyboard(),
+    )
+    return ADMIN_BROADCAST_TEXT
+
+
+async def admin_broadcast_text_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not _is_admin_chat(chat_id):
+        logger.warning("Rejected admin broadcast text from chat_id=%s", chat_id)
+        return ConversationHandler.END
+
+    template_id = context.user_data.get(_ADMIN_BROADCAST_TEMPLATE_KEY)
+    if not _admin_broadcast_template(template_id):
+        await update.message.reply_text(
+            _format_admin_broadcast_menu(),
+            parse_mode="HTML",
+            reply_markup=_admin_broadcast_templates_keyboard(),
+        )
+        return ConversationHandler.END
+
+    text = (update.message.text or "").strip()
+    if not text:
+        await update.message.reply_text(
+            "Текст пустой. Пришлите сообщение для рассылки.",
+            reply_markup=_admin_broadcast_input_keyboard(),
+        )
+        return ADMIN_BROADCAST_TEXT
+
+    context.user_data[_ADMIN_BROADCAST_TEXT_KEY] = text
+    await update.message.reply_text(
+        _format_admin_broadcast_preview(template_id, text),
+        reply_markup=_admin_broadcast_confirm_keyboard(),
+    )
+    return ADMIN_BROADCAST_TEXT
+
+
+async def admin_broadcast_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if await _reject_non_admin_callback(query):
+        return ConversationHandler.END
+
+    await query.answer()
+    template_id = context.user_data.get(_ADMIN_BROADCAST_TEMPLATE_KEY)
+    if not _admin_broadcast_template(template_id):
+        await _safe_edit_callback(
+            query,
+            _format_admin_broadcast_menu(),
+            parse_mode="HTML",
+            reply_markup=_admin_broadcast_templates_keyboard(),
+        )
+        return ConversationHandler.END
+
+    context.user_data.pop(_ADMIN_BROADCAST_TEXT_KEY, None)
+    await _safe_edit_callback(
+        query,
+        _format_admin_broadcast_prompt(template_id),
+        parse_mode="HTML",
+        reply_markup=_admin_broadcast_input_keyboard(),
+    )
+    return ADMIN_BROADCAST_TEXT
+
+
+async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if await _reject_non_admin_callback(query):
+        return ConversationHandler.END
+
+    await query.answer("Отправляю рассылку…")
+    template_id = context.user_data.get(_ADMIN_BROADCAST_TEMPLATE_KEY)
+    body = context.user_data.get(_ADMIN_BROADCAST_TEXT_KEY)
+    if not _admin_broadcast_template(template_id) or not body:
+        await _safe_edit_callback(
+            query,
+            "Черновик рассылки не найден. Выберите шаблон заново.",
+            reply_markup=_admin_broadcast_templates_keyboard(),
+        )
+        return ConversationHandler.END
+
+    recipients = _admin_broadcast_recipients()
+    if not recipients:
+        await _safe_edit_callback(
+            query,
+            "Нет получателей для рассылки.",
+            reply_markup=_admin_broadcast_templates_keyboard(),
+        )
+        _clear_admin_broadcast_draft(context)
+        return ConversationHandler.END
+
+    message = _format_admin_broadcast_message(template_id, body)
+    sent = 0
+    failed: list[str] = []
+    for recipient in recipients:
+        try:
+            await context.bot.send_message(chat_id=recipient, text=message)
+            sent += 1
+        except Exception as exc:
+            label, _is_permanent = await _classify_send_error(exc)
+            failed.append(f"{recipient}: {label}")
+            logger.warning(
+                "Admin broadcast delivery failed chat_id=%s label=%s error=%s",
+                recipient,
+                label,
+                exc,
+            )
+
+    _clear_admin_broadcast_draft(context)
+    lines = [
+        "📣 Рассылка завершена",
+        "",
+        f"Отправлено: {sent} из {len(recipients)}",
+    ]
+    if failed:
+        lines.append(f"Ошибок: {len(failed)}")
+        lines.extend(f"• {item}" for item in failed[:5])
+        if len(failed) > 5:
+            lines.append(f"• ...и ещё {len(failed) - 5}")
+    logger.info(
+        "Admin broadcast finished template=%s sent=%s failed=%s recipients=%s",
+        template_id,
+        sent,
+        len(failed),
+        len(recipients),
+    )
+    await _safe_edit_callback(
+        query,
+        "\n".join(lines),
+        reply_markup=_admin_broadcast_input_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def admin_broadcast_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    if await _reject_non_admin_callback(query):
+        return ConversationHandler.END
+
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else None
+    try:
+        if query.message:
+            await query.message.delete()
+    except Exception:
+        logger.debug("Failed to delete admin broadcast message", exc_info=True)
+    if chat_id:
+        asyncio.create_task(_send_auto_delete(context.bot, chat_id, "Закрыто"))
+    _clear_admin_broadcast_draft(context)
+    return ConversationHandler.END
 
 
 def _default_list_scope(chat_id: int | None) -> str:
@@ -26773,6 +27070,27 @@ def main() -> None:
     app.add_handler(CommandHandler("seasons", series_continue_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_broadcast_start, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:broadcast$"),
+            CallbackQueryHandler(admin_broadcast_template_selected, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:broadcast_tpl:"),
+        ],
+        states={
+            ADMIN_BROADCAST_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_text_received),
+                CallbackQueryHandler(admin_broadcast_send, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:broadcast_send$"),
+                CallbackQueryHandler(admin_broadcast_edit, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:broadcast_edit$"),
+                CallbackQueryHandler(admin_broadcast_start, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:broadcast$"),
+                CallbackQueryHandler(admin_broadcast_close, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:close$"),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(admin_broadcast_close, pattern=rf"^{ADMIN_CALLBACK_PREFIX}:close$"),
+        ],
+        per_user=True,
+        per_chat=True,
+        conversation_timeout=600,
+    ))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=f"^{ADMIN_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(access_callback, pattern=f"^{ACCESS_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
