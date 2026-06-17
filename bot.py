@@ -7283,7 +7283,7 @@ def _youtube_job_to_task(job: dict) -> dict:
     total = job.get("total_bytes") or job.get("estimated_size") or job.get("file_size") or 0
     task = {
         "id": job.get("id") or "",
-        "title": job.get("title") or job.get("video_id") or "YouTube",
+        "title": job.get("title") or "YouTube",
         "status": _youtube_task_status(str(job.get("status") or "")),
         "size": total,
         "type": "youtube",
@@ -7501,7 +7501,7 @@ def _youtube_delete_job(task_id: str) -> dict[str, object]:
             "files_deleted": 0,
             "already_missing": 0,
             "unsafe": 1,
-            "title": job.get("title") or job.get("video_id") or "YouTube",
+            "title": job.get("title") or "YouTube",
         }
 
     jobs.pop(job_id, None)
@@ -7520,7 +7520,7 @@ def _youtube_delete_job(task_id: str) -> dict[str, object]:
         "files_deleted": int(file_result.get("files_deleted") or 0),
         "already_missing": 1 if file_result.get("already_missing") else 0,
         "unsafe": 1 if file_result.get("unsafe_path") else 0,
-        "title": job.get("title") or job.get("video_id") or "YouTube",
+        "title": job.get("title") or "YouTube",
     }
 
 
@@ -7652,7 +7652,7 @@ def _youtube_pipeline_card_text(job: dict) -> str:
 
     lines = [
         "YouTube",
-        f"Название: {job.get('title') or job.get('video_id') or 'без названия'}",
+        f"Название: {job.get('title') or 'без названия'}",
     ]
     if job.get("quality"):
         lines.append(f"Качество: {job.get('quality')}")
@@ -7916,7 +7916,7 @@ async def _youtube_send_failed_message(app: "Application", job: dict) -> None:
         return
     text = (
         "⚠️ Не удалось скачать YouTube-видео\n"
-        f"Название: {job.get('title') or job.get('canonical_url') or 'YouTube'}\n"
+        f"Название: {job.get('title') or 'YouTube'}\n"
         f"Ошибка: {job.get('error') or 'неизвестно'}"
     )
     try:
@@ -24769,7 +24769,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _, job = _youtube_find_job(task_id)
         if not job:
             await query.edit_message_text(
-                f"YouTube-задача не найдена.\nID: {task_id}",
+                "YouTube-задача не найдена.",
                 reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
             )
             return
@@ -24779,7 +24779,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=_make_task_keyboard(task_id, _youtube_task_status(str(job.get("status") or "")), "youtube"),
             )
             return
-        title = job.get("title") or job.get("video_id") or "YouTube"
+        title = job.get("title") or "YouTube"
         await query.edit_message_text(
             (
                 "Удалить YouTube-ролик с NAS и убрать его из списка загрузок?\n"

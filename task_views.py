@@ -155,6 +155,10 @@ def _task_source_label(task: dict) -> str:
     return "📥 Download Station"
 
 
+def _is_youtube_task(task: dict) -> bool:
+    return (task.get("type") or "").lower() == "youtube"
+
+
 def _auto_delete_line(
     task: dict,
     *,
@@ -165,7 +169,7 @@ def _auto_delete_line(
     now: datetime | None,
     display_timezone: tzinfo,
 ) -> str:
-    if (task.get("type") or "").lower() == "youtube":
+    if _is_youtube_task(task):
         return ""
     if not auto_delete_enabled or auto_delete_after_hours <= 0:
         return ""
@@ -325,7 +329,9 @@ def format_tasks(
     visible_tasks = tasks[start: start + page_size]
 
     for index, task in enumerate(visible_tasks, start=start + 1):
-        title = task.get("title") or task.get("id") or "без названия"
+        title = task.get("title") or (
+            "YouTube" if _is_youtube_task(task) else task.get("id") or "без названия"
+        )
         transfer = task.get("additional", {}).get("transfer", {})
         downloaded = transfer.get("size_downloaded")
         total = task.get("size")
@@ -353,7 +359,8 @@ def format_tasks(
         )
         line = f"{index}. {_display_status_icon(task)} {title}\n" + "\n".join(task_lines)
         if task_id and scope == scope_all:
-            line += f"\n   ID: {task_id}"
+            if not _is_youtube_task(task):
+                line += f"\n   ID: {task_id}"
             owner = owners.get(str(task_id))
             label = (owner_labels or {}).get(owner, str(owner)) if owner else ""
             line += f"\n   Владелец: {label}" if label else "\n   Владелец: неизвестно"
@@ -402,9 +409,10 @@ def format_task_card(
         lines = [
             "Задача",
             f"Имя: {title}",
-            f"ID: {task_id}",
             f"Источник: {_task_source_label(task)}",
         ]
+        if not _is_youtube_task(task):
+            lines.insert(2, f"ID: {task_id}")
     else:
         lines = [
             "Загрузка",

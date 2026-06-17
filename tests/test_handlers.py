@@ -7000,6 +7000,17 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Скачивание аудио", text)
         self.assertNotIn("Сборка MP4", text)
 
+    def test_youtube_job_card_does_not_show_video_id_as_title(self):
+        text = bot._youtube_job_card_text({
+            "id": "yt_1",
+            "video_id": "abcdefghijk",
+            "status": "queued",
+            "quality": "720p",
+            "format_id": "22",
+        })
+
+        self.assertNotIn("abcdefghijk", text)
+
     def test_youtube_job_card_shows_retry_status(self):
         text = bot._youtube_job_card_text({
             "id": "yt_1",

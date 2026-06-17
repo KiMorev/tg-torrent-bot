@@ -179,6 +179,42 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("Все загрузки", text)
         self.assertIn("ID: tid1", text)
 
+    def test_format_tasks_all_scope_hides_youtube_task_id(self) -> None:
+        text = format_tasks(
+            [
+                {
+                    "id": "yt_1",
+                    "title": "YouTube Clip",
+                    "status": "finished",
+                    "size": 100,
+                    "type": "youtube",
+                }
+            ],
+            scope="all",
+            updated_at="12:00:00",
+            owners={"yt_1": 100},
+            scope_all="all",
+        )
+
+        self.assertIn("YouTube Clip", text)
+        self.assertNotIn("ID: yt_1", text)
+
+    def test_format_task_card_for_admin_hides_youtube_task_id(self) -> None:
+        text = format_task_card(
+            {
+                "id": "yt_1",
+                "title": "YouTube Clip",
+                "status": "finished",
+                "size": 100,
+                "type": "youtube",
+                "additional": {"transfer": {"size_downloaded": 100, "speed_download": 0}},
+            },
+            is_admin=True,
+        )
+
+        self.assertIn("YouTube Clip", text)
+        self.assertNotIn("ID: yt_1", text)
+
     def test_finished_task_shows_short_time_size_and_auto_delete_deadline(self) -> None:
         display_timezone = timezone(timedelta(hours=3), "MSK")
         finished_at = datetime(2026, 6, 2, 14, 20, tzinfo=display_timezone).timestamp()
