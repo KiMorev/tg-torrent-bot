@@ -23222,15 +23222,15 @@ async def _check_jackett_sub_via_rutracker_direct(
     key: str,
     sub: dict,
 ) -> bool:
-    """Check a Jackett subscription directly via Rutracker when possible.
+    """Check a Jackett subscription via direct Rutracker as a fallback.
 
     When the stored ``topic_url`` is a Rutracker topic URL and ``rutracker_client``
-    is available, uses the lightweight ``get_topic_title`` + ``download_torrent``
-    path instead of a full Jackett search.  This is faster, more precise, and
-    avoids Jackett availability issues for known Rutracker topics.
+    is available, uses the lightweight ``get_topic_title`` + ``download_torrent``.
+    This is intentionally a reserve path for Jackett failures; normal Jackett
+    subscriptions should be checked through Jackett first.
 
-    Returns True  → subscription handled; caller should skip the Jackett-search path.
-    Returns False → Rutracker unavailable/not configured; caller falls back to Jackett.
+    Returns True  → subscription handled by the fallback.
+    Returns False → fallback unavailable or failed.
     """
     topic_url = str(sub.get("topic_url") or "")
     topic_id = _extract_rutracker_topic_id(topic_url)
@@ -23270,8 +23270,8 @@ async def _check_jackett_sub_via_rutracker_direct(
         logger.info("Jackett/RT sub topic unavailable: key=%s topic=%s", key, topic_id)
         return True  # handled — stop checking this subscription
     except RutrackerError as e:
-        logger.warning("Rutracker direct check failed for sub %s (%s) — falling back to Jackett", key, e)
-        return False  # fall through to Jackett search
+        logger.warning("Rutracker direct fallback failed for sub %s (%s)", key, e)
+        return False
 
     # No new-episode info in title → nothing actionable
     new_info = _parse_episode_info(new_title)
@@ -23591,12 +23591,6 @@ async def _check_jackett_subscriptions(app: Application) -> None:
                 changed = True
                 continue
 
-            # Fast path: if the topic is on Rutracker, use the direct API instead of
-            # a full Jackett text search (cheaper, more reliable).
-            if await _check_jackett_sub_via_rutracker_direct(app, subs, key, sub):
-                changed = True
-                continue
-
             search_query = sub.get("query", "")
             if not search_query:
                 continue
@@ -23605,12 +23599,22 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             tracker_id = str(sub.get("tracker") or "").strip().lower() or None
             indexers_filter: list[str] | None = [tracker_id] if tracker_id else None
 
-            new_results = await asyncio.to_thread(
-                jackett_client.search,
-                search_query,
-                indexers=indexers_filter,
-                fetch_limit=JACKETT_FETCH_LIMIT,
-            )
+            try:
+                new_results = await asyncio.to_thread(
+                    jackett_client.search,
+                    search_query,
+                    indexers=indexers_filter,
+                    fetch_limit=JACKETT_FETCH_LIMIT,
+                )
+            except (JackettError, asyncio.TimeoutError) as e:
+                logger.warning(
+                    "Jackett subscription search failed for %s (%s); trying Rutracker direct fallback",
+                    key, e,
+                )
+                if await _check_jackett_sub_via_rutracker_direct(app, subs, key, sub):
+                    changed = True
+                continue
+
             candidate = select_jackett_subscription_candidate(sub, new_results)
             if candidate is None:
                 sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")

@@ -11242,7 +11242,7 @@ class ExtractRutrackerTopicIdTests(unittest.TestCase):
 
 
 class CheckJackettSubViaRutrackerDirectTests(unittest.TestCase):
-    """Unit tests for the Rutracker-direct fast path in Jackett subscription checks."""
+    """Unit tests for the Rutracker-direct fallback in Jackett subscription checks."""
 
     def setUp(self):
         self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})

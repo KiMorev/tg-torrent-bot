@@ -1,10 +1,10 @@
 """Tests for P0 subscription bug fixes (roadmap item 1.2).
 
 Bugs covered:
-  A. Jackett-fast-path (_check_jackett_sub_via_rutracker_direct) advanced
+  A. Rutracker-direct fallback helper advanced
      last_episode_end even when the DS download failed → next check saw
      same state and never retried.
-  B. Same function ignored notify_policy=final_only → users got
+  B. Same helper ignored notify_policy=final_only → users got
      intermediate per-episode pushes despite asking for final-only mode.
   C. _check_jackett_subscriptions silently advanced state on
      final_only even when auto-download failed → failed updates
@@ -86,7 +86,7 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
     def _run(self, sub: dict, *, ds_raises: Exception | None = None,
              new_title: str = "Show S1E1-5 of 10",
              task_id: str = "task-99") -> dict:
-        """Drive _check_jackett_sub_via_rutracker_direct with a stubbed
+        """Drive the Rutracker-direct fallback helper with a stubbed
         rutracker + ds client. Returns the resulting sub dict."""
         key = "jackett:abc"
         subs = {key: sub}
@@ -248,8 +248,7 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
         message so they can recover manually."""
         from jackett import JackettResult, JackettError
         sub_key = "jackett:bug-c"
-        # Use a non-rutracker topic_url so _check_jackett_sub_via_rutracker_direct
-        # short-circuits and we exercise the main Jackett-search path.
+        # Normal Jackett-search path; the direct fallback is unrelated here.
         sub = {
             "type": "jackett",
             "chat_id": 100,
@@ -549,6 +548,109 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
         self.assertEqual(stored["last_episode_end"], 5)
         self.assertEqual(download.await_count, 1)
         self.assertEqual(jackett.search.call_count, 1)
+
+
+class JackettSubscriptionSourcePriorityTests(unittest.TestCase):
+    """Jackett subscriptions should prefer Jackett and use direct Rutracker only as fallback."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = _make_store(self._tmp.name)
+        self._allowed_patch = patch.object(bot, "ALLOWED_CHAT_IDS", {100})
+        self._allowed_patch.start()
+
+    def tearDown(self):
+        self._allowed_patch.stop()
+        self._tmp.cleanup()
+
+    def _make_app(self):
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        return app
+
+    def test_rutracker_topic_uses_jackett_before_direct_fallback(self):
+        from jackett import JackettResult
+
+        sub_key = "jackett:rutracker"
+        self.store.save_topic_subscriptions({sub_key: _jackett_rt_sub(last_end=1, total=10)})
+        candidate = JackettResult(
+            title="Show S1E1-5 of 10",
+            size="10 GB",
+            seeders=10,
+            torrent_url="http://jk/x",
+            magnet_url=None,
+            tracker="rutracker",
+            topic_url="https://rutracker.org/forum/viewtopic.php?t=12345",
+        )
+        app = self._make_app()
+        jackett = MagicMock()
+        jackett.search.return_value = [candidate]
+        direct_fallback = AsyncMock(return_value=True)
+        download = AsyncMock(return_value="task-1")
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "select_jackett_subscription_candidate", return_value=candidate),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct", direct_fallback),
+            patch.object(bot, "_jackett_subscription_auto_download", download),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        jackett.search.assert_called_once_with(
+            "Show",
+            indexers=["rutracker"],
+            fetch_limit=bot.JACKETT_FETCH_LIMIT,
+        )
+        direct_fallback.assert_not_awaited()
+        download.assert_awaited_once_with(candidate, 100, app)
+        app.bot.send_message.assert_awaited_once()
+
+    def test_empty_jackett_results_do_not_use_direct_fallback(self):
+        sub_key = "jackett:rutracker-empty"
+        self.store.save_topic_subscriptions({sub_key: _jackett_rt_sub(last_end=1, total=10)})
+        app = self._make_app()
+        jackett = MagicMock()
+        jackett.search.return_value = []
+        direct_fallback = AsyncMock(return_value=True)
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct", direct_fallback),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        direct_fallback.assert_not_awaited()
+        app.bot.send_message.assert_not_awaited()
+        stored = self.store.load_topic_subscriptions()[sub_key]
+        self.assertIn("last_check", stored)
+
+    def test_jackett_error_uses_rutracker_direct_fallback(self):
+        from jackett import JackettError
+
+        sub_key = "jackett:rutracker-error"
+        self.store.save_topic_subscriptions({sub_key: _jackett_rt_sub(last_end=1, total=10)})
+        app = self._make_app()
+        jackett = MagicMock()
+        jackett.search.side_effect = JackettError("timeout")
+        direct_fallback = AsyncMock(return_value=True)
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct", direct_fallback),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        jackett.search.assert_called_once_with(
+            "Show",
+            indexers=["rutracker"],
+            fetch_limit=bot.JACKETT_FETCH_LIMIT,
+        )
+        direct_fallback.assert_awaited_once()
+        self.assertIs(direct_fallback.await_args.args[0], app)
+        self.assertEqual(direct_fallback.await_args.args[2], sub_key)
 
 
 class PendingDownloadSubscribePreserveTests(unittest.TestCase):
