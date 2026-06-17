@@ -221,6 +221,47 @@ class TaskViewTests(unittest.TestCase):
         self.assertIn("Скачано: 100.0 B", card_text)
         self.assertIn("Автоочистка: через 23 ч", card_text)
 
+    def test_youtube_finished_task_shows_source_without_auto_delete_deadline(self) -> None:
+        display_timezone = timezone(timedelta(hours=3), "MSK")
+        finished_at = datetime(2026, 6, 2, 14, 20, tzinfo=display_timezone).timestamp()
+        now = datetime(2026, 6, 2, 15, 20, tzinfo=display_timezone)
+        task = {
+            "id": "yt_1",
+            "title": "YouTube Clip",
+            "status": "finished",
+            "size": 100,
+            "type": "youtube",
+            "additional": {"transfer": {"size_downloaded": 100, "speed_download": 0}},
+        }
+
+        list_text = format_tasks(
+            [task],
+            scope="my",
+            updated_at="12:00:00",
+            owners={"yt_1": 100},
+            scope_all="all",
+            auto_delete_tasks={"yt_1": finished_at},
+            auto_delete_enabled=True,
+            auto_delete_statuses={"finished"},
+            auto_delete_after_hours=24,
+            now=now,
+            display_timezone=display_timezone,
+        )
+        card_text = format_task_card(
+            task,
+            auto_delete_tasks={"yt_1": finished_at},
+            auto_delete_enabled=True,
+            auto_delete_statuses={"finished"},
+            auto_delete_after_hours=24,
+            now=now,
+            display_timezone=display_timezone,
+        )
+
+        self.assertIn("Источник: ▶️ YouTube", list_text)
+        self.assertIn("Источник: ▶️ YouTube", card_text)
+        self.assertNotIn("Автоочистка:", list_text)
+        self.assertNotIn("Автоочистка:", card_text)
+
     def test_status_summary_counts_seeding_and_soft_complete_as_finished(self) -> None:
         tasks = [
             {"id": "active", "title": "Active", "status": "downloading", "size": 100},

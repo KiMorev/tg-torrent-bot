@@ -358,11 +358,12 @@ def _tasks_keyboard(
         task_id = task.get("id")
         if not task_id:
             continue
+        source_icon = "▶️ " if (task.get("type") or "").lower() == "youtube" else ""
 
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"🔎 {index}. {_short_title(task)}",
+                    f"🔎 {index}. {source_icon}{_short_title(task)}",
                     callback_data=_task_callback("info", task_id),
                 )
             ]
@@ -399,6 +400,21 @@ def _tasks_keyboard(
             ]
         )
 
+    youtube_tasks = [
+        task for task in tasks
+        if (task.get("type") or "").lower() == "youtube"
+        and (task.get("status") or "").lower() in {"finished", "error"}
+    ]
+    if youtube_tasks:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🧹 Удалить все YouTube-ролики",
+                    callback_data=_task_callback("delete_youtube_all_ask", scope),
+                )
+            ]
+        )
+
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
 
@@ -414,6 +430,10 @@ def _task_keyboard(
     rows = [[InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))]]
 
     if (task_type or "").lower() == "youtube":
+        if status in {"finished", "error"}:
+            rows.append(
+                [InlineKeyboardButton("🗑️ Удалить ролик", callback_data=_task_callback("delete_youtube_ask", task_id))]
+            )
         rows.append(
             [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))]
         )
@@ -547,6 +567,33 @@ def _delete_finished_confirm_keyboard(scope: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "🧹 Да, удалить завершенные",
                     callback_data=_task_callback("delete_finished", scope),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "↩️ К списку загрузок", callback_data=_task_callback("list", scope)
+                )
+            ],
+        ]
+    )
+
+
+def _delete_youtube_confirm_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗑️ Да, удалить ролик", callback_data=_task_callback("delete_youtube", task_id))],
+            [InlineKeyboardButton("↩️ Назад", callback_data=_task_callback("info", task_id))],
+        ]
+    )
+
+
+def _delete_youtube_all_confirm_keyboard(scope: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🧹 Да, удалить YouTube-ролики",
+                    callback_data=_task_callback("delete_youtube_all", scope),
                 )
             ],
             [

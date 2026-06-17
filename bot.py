@@ -90,6 +90,8 @@ from keyboards import (
     _access_callback,
     _delete_confirm_keyboard,
     _delete_finished_confirm_keyboard,
+    _delete_youtube_all_confirm_keyboard,
+    _delete_youtube_confirm_keyboard,
     _download_list_keyboard,
     _final_notification_keyboard,
     _finished_task_ids,
@@ -7356,6 +7358,223 @@ def _download_panel_tasks(ds_tasks: list[dict]) -> list[dict]:
 
 def _find_youtube_panel_task(task_id: str) -> dict | None:
     return _find_task(_youtube_panel_tasks(), task_id)
+
+
+def _youtube_find_job(task_id: str) -> tuple[str, dict | None]:
+    for job_id, job in _youtube_load_jobs().items():
+        if not isinstance(job, dict):
+            continue
+        if _youtube_job_task_id(job_id, job) == str(task_id):
+            return str(job_id), job
+    return "", None
+
+
+def _youtube_job_is_deletable(job: dict) -> bool:
+    return str(job.get("status") or "").lower() in _YOUTUBE_TERMINAL_STATUSES
+
+
+def _youtube_path_inside_root(path: Path) -> bool:
+    try:
+        root = Path(YOUTUBE_DOWNLOAD_DIR).resolve(strict=False)
+        target = path.resolve(strict=False)
+        return target.is_relative_to(root) and target != root
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _youtube_safe_item_dir(path: Path) -> bool:
+    if not _youtube_path_inside_root(path):
+        return False
+    try:
+        relative = path.resolve(strict=False).relative_to(Path(YOUTUBE_DOWNLOAD_DIR).resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return len(relative.parts) >= 2
+
+
+def _youtube_job_item_dir(job: dict) -> Path | None:
+    item_dir = str(job.get("item_dir") or "").strip()
+    if item_dir:
+        return Path(item_dir)
+    file_path = str(job.get("file_path") or "").strip()
+    if file_path:
+        return Path(file_path).parent
+    return None
+
+
+def _youtube_count_files(path: Path) -> int:
+    if path.is_file():
+        return 1
+    if not path.is_dir():
+        return 0
+    return sum(1 for item in path.rglob("*") if item.is_file())
+
+
+def _youtube_channel_has_media(channel_dir: Path) -> bool:
+    if not channel_dir.exists() or not channel_dir.is_dir():
+        return False
+    for child in channel_dir.iterdir():
+        if child.is_dir():
+            return True
+        if child.is_file() and child.suffix.lower() == ".mp4":
+            return True
+    return False
+
+
+def _youtube_cleanup_channel_dir(channel_dir: Path) -> None:
+    if not _youtube_path_inside_root(channel_dir):
+        return
+    if _youtube_channel_has_media(channel_dir):
+        return
+    for name in ("channel-poster.jpg", "channel-poster.png"):
+        with contextlib.suppress(FileNotFoundError, OSError):
+            (channel_dir / name).unlink()
+    with contextlib.suppress(OSError):
+        channel_dir.rmdir()
+
+
+def _youtube_delete_job_files(job: dict) -> dict[str, object]:
+    result: dict[str, object] = {
+        "files_deleted": 0,
+        "already_missing": False,
+        "unsafe_path": False,
+        "error": "",
+    }
+    item_dir = _youtube_job_item_dir(job)
+    if item_dir is None:
+        result["already_missing"] = True
+        return result
+
+    if not _youtube_safe_item_dir(item_dir):
+        result["unsafe_path"] = True
+        result["error"] = "unsafe_path"
+        return result
+
+    if item_dir.exists() and item_dir.is_dir():
+        result["files_deleted"] = _youtube_count_files(item_dir)
+        shutil.rmtree(item_dir)
+        _youtube_cleanup_channel_dir(item_dir.parent)
+        return result
+
+    file_path = Path(str(job.get("file_path") or ""))
+    if file_path and file_path.exists() and file_path.is_file() and _youtube_path_inside_root(file_path):
+        result["files_deleted"] = 1
+        file_path.unlink()
+        _youtube_cleanup_channel_dir(file_path.parent.parent)
+        return result
+
+    result["already_missing"] = True
+    _youtube_cleanup_channel_dir(item_dir.parent)
+    return result
+
+
+def _youtube_delete_job(task_id: str) -> dict[str, object]:
+    jobs = _youtube_load_jobs()
+    job_id = ""
+    job: dict | None = None
+    for current_id, current in jobs.items():
+        if isinstance(current, dict) and _youtube_job_task_id(str(current_id), current) == str(task_id):
+            job_id = str(current_id)
+            job = current
+            break
+    if not job_id or job is None:
+        return {"found": False, "deleted_jobs": 0, "files_deleted": 0, "already_missing": 0, "unsafe": 0}
+    if not _youtube_job_is_deletable(job):
+        return {"found": True, "active": True, "deleted_jobs": 0, "files_deleted": 0, "already_missing": 0, "unsafe": 0}
+
+    file_result = _youtube_delete_job_files(job)
+    if file_result.get("unsafe_path"):
+        _youtube_record_history(
+            "youtube_delete_skipped",
+            job,
+            unsafe_path=True,
+        )
+        return {
+            "found": True,
+            "deleted_jobs": 0,
+            "files_deleted": 0,
+            "already_missing": 0,
+            "unsafe": 1,
+            "title": job.get("title") or job.get("video_id") or "YouTube",
+        }
+
+    jobs.pop(job_id, None)
+    _youtube_save_jobs(jobs)
+    YOUTUBE_JOB_MESSAGES.pop(job_id, None)
+    _youtube_record_history(
+        "youtube_deleted",
+        job,
+        files_deleted=file_result.get("files_deleted"),
+        already_missing=file_result.get("already_missing"),
+        unsafe_path=file_result.get("unsafe_path"),
+    )
+    return {
+        "found": True,
+        "deleted_jobs": 1,
+        "files_deleted": int(file_result.get("files_deleted") or 0),
+        "already_missing": 1 if file_result.get("already_missing") else 0,
+        "unsafe": 1 if file_result.get("unsafe_path") else 0,
+        "title": job.get("title") or job.get("video_id") or "YouTube",
+    }
+
+
+def _youtube_deletable_job_ids_for_scope(chat_id: int | None, scope: str) -> list[str]:
+    scope = _normalize_list_scope(scope, chat_id)
+    is_admin = _is_admin_chat(chat_id)
+    job_ids: list[str] = []
+    for job_id, job in _youtube_load_jobs().items():
+        if not isinstance(job, dict) or not _youtube_job_is_deletable(job):
+            continue
+        if scope == TASK_LIST_SCOPE_ALL and is_admin:
+            job_ids.append(_youtube_job_task_id(str(job_id), job))
+            continue
+        if _youtube_job_owner(job) == chat_id:
+            job_ids.append(_youtube_job_task_id(str(job_id), job))
+    return job_ids
+
+
+def _youtube_delete_jobs(task_ids: list[str]) -> dict[str, int]:
+    summary = {
+        "deleted_jobs": 0,
+        "files_deleted": 0,
+        "already_missing": 0,
+        "unsafe": 0,
+        "active": 0,
+        "not_found": 0,
+    }
+    for task_id in task_ids:
+        result = _youtube_delete_job(task_id)
+        if not result.get("found"):
+            summary["not_found"] += 1
+            continue
+        if result.get("active"):
+            summary["active"] += 1
+            continue
+        summary["deleted_jobs"] += int(result.get("deleted_jobs") or 0)
+        summary["files_deleted"] += int(result.get("files_deleted") or 0)
+        summary["already_missing"] += int(result.get("already_missing") or 0)
+        summary["unsafe"] += int(result.get("unsafe") or 0)
+    return summary
+
+
+def _youtube_delete_summary_text(summary: dict[str, object], *, title: str | None = None) -> str:
+    deleted_jobs = int(summary.get("deleted_jobs") or 0)
+    if title:
+        head = "🗑️ YouTube-ролик удалён." if deleted_jobs else "⚠️ YouTube-ролик не удалён."
+    else:
+        head = "🧹 YouTube-ролики удалены." if deleted_jobs else "⚠️ YouTube-ролики не удалены."
+    lines = [head]
+    if title:
+        lines.append(f"Название: {title}")
+    lines.append(f"Записей очищено: {deleted_jobs}")
+    lines.append(f"Файлов удалено: {int(summary.get('files_deleted') or 0)}")
+    missing = int(summary.get("already_missing") or 0)
+    unsafe = int(summary.get("unsafe") or 0)
+    if missing:
+        lines.append(f"Уже отсутствовали на NAS: {missing}")
+    if unsafe:
+        lines.append(f"Пропущено из-за небезопасного пути: {unsafe}")
+    return "\n".join(lines)
 
 
 def _youtube_job_card_text(job: dict) -> str:
@@ -24339,6 +24558,115 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         page = max(0, min(page, total_pages - 1))
         total_count = len(tasks) if _is_admin_chat(chat_id) else None
         await _edit_download_panel(query, context, visible_tasks, scope, total_count=total_count, page=page)
+        return
+
+    if action == "delete_youtube_ask":
+        if not _can_access_task_id(chat_id, task_id):
+            await query.edit_message_text(
+                "Эта задача не относится к вашим загрузкам.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        _, job = _youtube_find_job(task_id)
+        if not job:
+            await query.edit_message_text(
+                f"YouTube-задача не найдена.\nID: {task_id}",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        if not _youtube_job_is_deletable(job):
+            await query.edit_message_text(
+                "Этот YouTube-ролик ещё активен. Дождитесь завершения загрузки.",
+                reply_markup=_make_task_keyboard(task_id, _youtube_task_status(str(job.get("status") or "")), "youtube"),
+            )
+            return
+        title = job.get("title") or job.get("video_id") or "YouTube"
+        await query.edit_message_text(
+            (
+                "Удалить YouTube-ролик с NAS и убрать его из списка загрузок?\n"
+                f"Название: {title}"
+            ),
+            reply_markup=_delete_youtube_confirm_keyboard(task_id),
+        )
+        return
+
+    if action == "delete_youtube":
+        if not _can_access_task_id(chat_id, task_id):
+            await query.edit_message_text(
+                "Эта задача не относится к вашим загрузкам.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        await _safe_edit_callback(query, "🗑️ Удаляю YouTube-ролик…")
+        summary = await asyncio.to_thread(_youtube_delete_job, task_id)
+        if not summary.get("found"):
+            await query.edit_message_text(
+                f"YouTube-задача не найдена.\nID: {task_id}",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        if summary.get("active"):
+            await query.edit_message_text(
+                "Этот YouTube-ролик ещё активен. Дождитесь завершения загрузки.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        scope = _default_list_scope(chat_id)
+        await query.edit_message_text(
+            _youtube_delete_summary_text(summary, title=str(summary.get("title") or "")),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", scope))],
+                [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+            ]),
+        )
+        return
+
+    if action == "delete_youtube_all_ask":
+        scope = _normalize_list_scope(task_id, chat_id)
+        job_ids = _youtube_deletable_job_ids_for_scope(chat_id, scope)
+        if not job_ids:
+            try:
+                ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
+            except DownloadStationError:
+                ds_tasks = []
+            tasks = _download_panel_tasks(ds_tasks)
+            visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
+            await query.edit_message_text(
+                "Завершённых YouTube-роликов сейчас нет.",
+                reply_markup=_tasks_keyboard(visible_tasks, scope=scope, is_admin=_is_admin_chat(chat_id)),
+            )
+            return
+        await query.edit_message_text(
+            (
+                "Удалить все завершённые и ошибочные YouTube-ролики из этого списка?\n\n"
+                f"Найдено: {len(job_ids)}"
+            ),
+            reply_markup=_delete_youtube_all_confirm_keyboard(scope),
+        )
+        return
+
+    if action == "delete_youtube_all":
+        scope = _normalize_list_scope(task_id, chat_id)
+        job_ids = _youtube_deletable_job_ids_for_scope(chat_id, scope)
+        await _safe_edit_callback(query, "🧹 Удаляю YouTube-ролики…")
+        summary = await asyncio.to_thread(_youtube_delete_jobs, job_ids)
+        try:
+            ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
+        except DownloadStationError:
+            ds_tasks = []
+        tasks = _download_panel_tasks(ds_tasks)
+        visible_tasks = _filter_tasks_for_scope(tasks, chat_id, scope)
+        total_count = len(tasks) if _is_admin_chat(chat_id) else None
+        await _edit_message_as_download_panel(
+            query,
+            context,
+            (
+                f"{_youtube_delete_summary_text(summary)}\n\n"
+                f"{_format_tasks(visible_tasks, scope=scope, total_count=total_count)}"
+            ),
+            reply_markup=_tasks_keyboard(visible_tasks, scope=scope, is_admin=_is_admin_chat(chat_id)),
+        )
+        DOWNLOAD_PANEL_HAD_ACTIVE[chat_id] = _has_active_tasks(visible_tasks)
         return
 
     if action == "delete_ask":

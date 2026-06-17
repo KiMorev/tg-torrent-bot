@@ -9392,7 +9392,185 @@ class StatusCommandTests(unittest.TestCase):
             if button.callback_data
         }
         self.assertIn("task:list:default", callbacks)
+        self.assertIn("task:delete_youtube_ask:yt_1", callbacks)
         self.assertNotIn("task:delete_ask:yt_1", callbacks)
+
+    def test_task_delete_youtube_removes_files_and_job_record(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item_dir = root / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            file_path = item_dir / "Clip.mp4"
+            file_path.write_bytes(b"mp4")
+            (item_dir / "poster.jpg").write_bytes(b"poster")
+            (root / "Channel" / "channel-poster.png").write_bytes(b"channel poster")
+
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "item_dir": str(item_dir),
+                    "file_path": str(file_path),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            self.assertFalse(item_dir.exists())
+            self.assertFalse((root / "Channel").exists())
+            self.assertEqual(store.load_youtube_downloads(), {})
+            history = store.load_download_history(chat_id=100)
+            self.assertEqual(history[-1]["event"], "youtube_deleted")
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("YouTube-ролик удалён", text)
+        self.assertIn("Файлов удалено: 2", text)
+
+    def test_task_delete_youtube_clears_record_when_files_are_already_missing(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing_dir = root / "Channel" / "Missing Clip"
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "Missing Clip",
+                    "item_dir": str(missing_dir),
+                    "file_path": str(missing_dir / "Missing Clip.mp4"),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            self.assertEqual(store.load_youtube_downloads(), {})
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Уже отсутствовали на NAS: 1", text)
+
+    def test_task_delete_youtube_keeps_record_for_unsafe_path(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "youtube"
+            root.mkdir()
+            outside = Path(tmp) / "outside" / "Clip"
+            outside.mkdir(parents=True)
+            (outside / "Clip.mp4").write_bytes(b"mp4")
+
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "Unsafe Clip",
+                    "item_dir": str(outside),
+                    "file_path": str(outside / "Clip.mp4"),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            self.assertIn("yt_1", store.load_youtube_downloads())
+            self.assertTrue((outside / "Clip.mp4").exists())
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("YouTube-ролик не удалён", text)
+        self.assertIn("Пропущено из-за небезопасного пути: 1", text)
+
+    def test_task_delete_youtube_all_removes_terminal_jobs_only(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube_all:mine")
+        context = _make_context()
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            done_dir = root / "Channel" / "Done"
+            failed_dir = root / "Channel" / "Failed"
+            active_dir = root / "Channel" / "Active"
+            for item_dir in (done_dir, failed_dir, active_dir):
+                item_dir.mkdir(parents=True)
+                (item_dir / f"{item_dir.name}.mp4").write_bytes(b"mp4")
+
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_done": {
+                    "id": "yt_done",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "Done",
+                    "item_dir": str(done_dir),
+                },
+                "yt_failed": {
+                    "id": "yt_failed",
+                    "chat_id": 100,
+                    "status": "failed",
+                    "title": "Failed",
+                    "item_dir": str(failed_dir),
+                },
+                "yt_active": {
+                    "id": "yt_active",
+                    "chat_id": 100,
+                    "status": "downloading",
+                    "title": "Active",
+                    "item_dir": str(active_dir),
+                },
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "ds_client", fake_ds),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            jobs = store.load_youtube_downloads()
+            self.assertEqual(set(jobs), {"yt_active"})
+            self.assertFalse(done_dir.exists())
+            self.assertFalse(failed_dir.exists())
+            self.assertTrue(active_dir.exists())
+
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("YouTube-ролики удалены", text)
+        self.assertIn("Записей очищено: 2", text)
+        self.assertIn("Active", text)
 
     def test_progress_panel_gets_final_update_when_last_task_finished(self):
         active_task = {

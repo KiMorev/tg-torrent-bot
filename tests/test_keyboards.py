@@ -806,23 +806,30 @@ class TasksKeyboardCloseTests(unittest.TestCase):
         last_row = keyboard.inline_keyboard[-1]
         self.assertEqual(last_row[0].text, "✖️ Закрыть")
 
-    def test_youtube_task_keyboard_is_read_only(self) -> None:
+    def test_youtube_task_keyboard_can_delete_finished_video(self) -> None:
         buttons = self._buttons(_task_keyboard("yt_1", status="finished", task_type="youtube"))
 
         self.assertEqual(buttons["🔄 Обновить статус"], "task:info:yt_1")
+        self.assertEqual(buttons["🗑️ Удалить ролик"], "task:delete_youtube_ask:yt_1")
         self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
-        self.assertNotIn("🗑️ Удалить", buttons)
         self.assertNotIn("▶️ Запустить", buttons)
         self.assertNotIn("⏸️ Пауза", buttons)
 
-    def test_tasks_keyboard_does_not_offer_finished_cleanup_for_youtube_only(self) -> None:
+    def test_youtube_task_keyboard_hides_delete_for_active_video(self) -> None:
+        buttons = self._buttons(_task_keyboard("yt_1", status="downloading", task_type="youtube"))
+
+        self.assertNotIn("🗑️ Удалить ролик", buttons)
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
+
+    def test_tasks_keyboard_offers_youtube_bulk_delete_separately(self) -> None:
         keyboard = _tasks_keyboard([
             {"id": "yt_1", "title": "Clip", "status": "finished", "type": "youtube"}
         ])
-        labels = self._labels(keyboard)
+        buttons = self._buttons(keyboard)
 
-        self.assertNotIn("🧹 Удалить завершенные", labels)
+        self.assertNotIn("🧹 Удалить завершенные", buttons)
+        self.assertEqual(buttons["🧹 Удалить все YouTube-ролики"], "task:delete_youtube_all_ask:all")
 
     def test_tasks_keyboard_with_admin_scope_still_has_close(self) -> None:
         keyboard = _tasks_keyboard([], scope="all", is_admin=True)

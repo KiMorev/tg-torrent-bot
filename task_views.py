@@ -146,6 +146,15 @@ def _finished_size(task: dict, transfer: dict) -> str:
     return _format_size(transfer.get("size_downloaded") or task.get("size"))
 
 
+def _task_source_label(task: dict) -> str:
+    task_type = (task.get("type") or "").lower()
+    if task_type == "youtube":
+        return "▶️ YouTube"
+    if task_type == "bt":
+        return "🧲 Download Station"
+    return "📥 Download Station"
+
+
 def _auto_delete_line(
     task: dict,
     *,
@@ -156,6 +165,8 @@ def _auto_delete_line(
     now: datetime | None,
     display_timezone: tzinfo,
 ) -> str:
+    if (task.get("type") or "").lower() == "youtube":
+        return ""
     if not auto_delete_enabled or auto_delete_after_hours <= 0:
         return ""
     if _task_status(task) not in (auto_delete_statuses or set()):
@@ -190,6 +201,7 @@ def _format_task_lines(
     display_timezone: tzinfo,
     indent: str,
 ) -> list[str]:
+    lines = [f"{indent}Источник: {_task_source_label(task)}"]
     if _is_finished_task(task):
         parts = [_finished_status_label(task)]
         finished_at = _format_finished_at(
@@ -202,7 +214,7 @@ def _format_task_lines(
             parts.append(finished_at)
         parts.append(_finished_size(task, transfer))
 
-        lines = [f"{indent}{' · '.join(parts)}"]
+        lines.append(f"{indent}{' · '.join(parts)}")
         auto_delete = _auto_delete_line(
             task,
             auto_delete_tasks=auto_delete_tasks,
@@ -216,11 +228,11 @@ def _format_task_lines(
             lines.append(f"{indent}{auto_delete}")
         return lines
 
-    lines = [
+    lines.extend([
         f"{indent}Статус: {user_task_status_label(task)}",
         f"{indent}Прогресс: {_progress_meter(percent)}",
         f"{indent}Скачано: {progress}",
-    ]
+    ])
     if _is_active_task(task):
         lines.append(f"{indent}Скорость: {speed}/s | Осталось: {eta}")
 
@@ -391,11 +403,13 @@ def format_task_card(
             "Задача",
             f"Имя: {title}",
             f"ID: {task_id}",
+            f"Источник: {_task_source_label(task)}",
         ]
     else:
         lines = [
             "Загрузка",
             f"Файл: {title}",
+            f"Источник: {_task_source_label(task)}",
         ]
     if _is_finished_task(task):
         parts = [_finished_status_label(task)]
