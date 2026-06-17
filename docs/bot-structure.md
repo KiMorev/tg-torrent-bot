@@ -19,7 +19,7 @@
 
 | Что меняем | Куда смотреть сначала | Обычно затронутые тесты |
 |---|---|---|
-| Команды Telegram, доступ, приветствие | `bot.py`: `main`, `start`, `help_command`, `_delete_command_message_safely`, `text_message_entry`; `access_control.py`; `keyboards.py` | `tests/test_handlers.py`, `tests/test_keyboards.py`, `tests/test_access_control.py` |
+| Команды Telegram, доступ, приветствие | `bot.py`: `main`, `start`, `help_command`, `_build_value_props`, `_delete_command_message_safely`, `text_message_entry`; стартовые тексты для авторизованных и ожидающих доступа показывают YouTube-сценарий только при `YOUTUBE_DOWNLOADS_ENABLED=true`; `access_control.py`; `keyboards.py` | `tests/test_handlers.py`, `tests/test_keyboards.py`, `tests/test_access_control.py` |
 | Кнопки и callback-data | `keyboards.py`; регистрация обработчиков в `bot.py::main`; правила в `AGENTS.md` | `tests/test_keyboards.py`, `tests/test_handlers.py` |
 | Поиск релизов | `bot.py`: `search_got_query`, `_run_search`, `search_*`; `search_intent.py`; `formatters.py`; `jackett.py`; `rutracker.py`; `kinopoisk.py`; `gpt_features.py` | `tests/test_handlers.py`, `tests/test_search_intent.py`, `tests/test_search_fallback.py`, `tests/test_search_quality_failure.py`, `tests/test_jackett.py`, `tests/test_rutracker_backoff.py` |
 | Скачивание и очередь | `bot.py`: `_download_and_add`, `search_direct_download`, `_do_process_magnet`, `_do_process_torrent`, `_run_pending_downloads_once`; `download_station.py`; `torrent_utils.py` | `tests/test_handlers.py`, `tests/test_background.py`, `tests/test_download_station_locking.py`, `tests/test_disk_space_guard.py`, `tests/test_torrent_utils.py` |
@@ -78,7 +78,7 @@
 | `srch:*` | `keyboards.py`, локально в search-блоке `bot.py`; `srch:mode:*` переключает настройку `Что скачать` без отдельного меню | `ConversationHandler` в `bot.py::main` |
 | `settings:*` | `bot.py::_settings_keyboard` | `settings_callback`: quality/audio/subs/preferred voices/reset для `/settings` |
 | `task:*` | `keyboards.py`, локально в `bot.py` для `task:norm_*` | `task_callback`: задачи Download Station, YouTube-удаление (`delete_youtube`, `delete_youtube_all`), закрытие сообщений и post-download переименование сериалов (`norm_plan`, `norm_apply`, `norm_pick`, `norm_season`, `norm_skip`) |
-| `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
+| `admin:*` | `keyboards.py`, admin-блок `bot.py` | `admin_callback`: панель, `admin:diagnostics`, `admin:diagnostics_back`, подробные `admin:diag_downloads` / `admin:diag_jackett` / `admin:diag_trackers` / `admin:diag_plex` / `admin:diag_youtube` / `admin:diag_ai`, refresh подробностей `admin:diag_refresh:*` |
 | `access:*` | `keyboards.py` | `access_callback`: approve/deny заявок, `/users` refresh, подтверждение и удаление доступа |
 | `sub:*` | `bot.py`, частично `keyboards.py` | `sub_callback`: список/отписка/настройка подписок; entry point `search_jackett_check_entry` |
 | `new:*` | `bot.py`, `keyboards.py` | `movie_new_*` callbacks; `new:open:<push_id>` открывает snapshot уведомления, старый `new:open` открывает текущий `/new`; `new:dl:*` входит в search conversation, `new:bulk:*` / `new:bulk_ok:*` / `new:push_back:*` обрабатываются глобально |

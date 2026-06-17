@@ -372,6 +372,7 @@ class HelpCommandTests(unittest.TestCase):
             patch.object(bot, "KINOPOISK_ENABLED", True),
             patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
             patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
         ):
             asyncio.run(help_command(update, context))
 
@@ -384,6 +385,7 @@ class HelpCommandTests(unittest.TestCase):
         self.assertIn("постером", text)
         self.assertIn("ссылкой на КП", text)
         self.assertIn("быстрыми кнопками скачивания", text)
+        self.assertIn("YouTube-ссылка", text)
 
     def test_help_for_regular_user_uses_download_queue_wording(self):
         update = _make_message_update(chat_id=100)
@@ -490,6 +492,7 @@ class StartCommandTests(unittest.TestCase):
             patch.object(bot, "KINOPOISK_ENABLED", True),
             patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
             patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
         ):
             asyncio.run(start(update, context))
 
@@ -503,6 +506,7 @@ class StartCommandTests(unittest.TestCase):
         self.assertNotIn("magnet-ссылку сообщением", text)
         # /status still mentioned as one of the entry points.
         self.assertIn("/status", text)
+        self.assertIn("YouTube-ссылку", text)
         # Order check: free-text search bullet comes BEFORE /new
         # (user prefers active "i know what i want" framing over discovery).
         self.assertLess(text.index("Пришлите название"), text.index("/new"))
@@ -546,6 +550,7 @@ class StartCommandTests(unittest.TestCase):
             patch.object(bot, "KINOPOISK_ENABLED", True),
             patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
             patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
             patch.object(bot, "_send_access_request_to_admins",
                         AsyncMock(return_value=False)),
         ):
@@ -563,6 +568,7 @@ class StartCommandTests(unittest.TestCase):
             any(marker in text for marker in ("🎬", "🔍", "▶️", "🔔")),
             "expected at least one value-prop bullet",
         )
+        self.assertIn("YouTube-ссылки", text)
 
 
 # ---------------------------------------------------------------------------
@@ -1804,6 +1810,7 @@ class AdminPanelTests(unittest.TestCase):
                 patch.object(bot, "MOVIE_DISCOVERY_ENABLED", True),
                 patch.object(bot, "PLEX_ENABLED", True),
                 patch.object(bot, "VOICE_SEARCH_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
             ):
                 asyncio.run(access_callback(update, context))
 
@@ -1814,6 +1821,7 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Доступ разрешён", text)
         self.assertIn("название фильма", text)
         self.assertIn("Кинопоиска", text)
+        self.assertIn("YouTube-ссылку", text)
         self.assertIn("/help", text)
         self.assertNotIn(".torrent файлом", text)
         self.assertNotIn("magnet-ссылку сообщением", text)

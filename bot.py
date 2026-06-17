@@ -710,6 +710,10 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
         bullets.append(
             "• 🎬 Подборка свежих фильмов и сериалов с рейтингом Кинопоиска — /new"
         )
+    if YOUTUBE_DOWNLOADS_ENABLED:
+        bullets.append(
+            "• ▶️ YouTube-ссылки — пришлите ролик, бот скачает его в отдельную очередь для Plex"
+        )
     if PLEX_ENABLED:
         bullets.append(
             "• ▶️ Открытие готового контента в Plex одной кнопкой"
@@ -722,6 +726,7 @@ def _build_value_props(*, joined: bool = True) -> str | list[str]:
 
 def _build_access_approved_text() -> str:
     """Message sent to a user immediately after admin approval."""
+    youtube_hint = ", либо YouTube-ссылку" if YOUTUBE_DOWNLOADS_ENABLED else ""
     return (
         "✅ Доступ разрешён.\n"
         "\n"
@@ -729,7 +734,7 @@ def _build_access_approved_text() -> str:
         f"{_build_value_props()}\n"
         "\n"
         "Напишите название фильма или сериала, отправьте ссылку Кинопоиска, "
-        ".torrent-файл или magnet-ссылку.\n"
+        f".torrent-файл, magnet-ссылку{youtube_hint}.\n"
         "Подробно по возможностям — /help."
     )
 
@@ -23360,6 +23365,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         main_bullets.append(
             "• 🎬 /new — свежие фильмы и сериалы с рейтингом КП, пометками «уже в Plex» и кнопкой скачать"
         )
+    if YOUTUBE_DOWNLOADS_ENABLED:
+        main_bullets.append(
+            "• ▶️ Пришлите YouTube-ссылку — скачаю ролик в отдельную очередь для Plex"
+        )
     if PLEX_ENABLED:
         main_bullets.append("• 📺 /seasons — докачать недостающие серии и сезоны")
     main_bullets.append("• 📋 /status — текущие загрузки и недавняя история")
@@ -23421,6 +23430,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if MOVIE_DISCOVERY_ENABLED and search_enabled:
         main_bullets.append(
             "• 🎬 /new — свежие фильмы и мультфильмы; в push можно скачать 1-3 новинки или все доступные"
+        )
+    if YOUTUBE_DOWNLOADS_ENABLED:
+        main_bullets.append(
+            "• ▶️ YouTube-ссылка — покажу доступные качества, скачаю ролик и добавлю в отдельную Plex-библиотеку"
         )
     if is_admin:
         main_bullets.append("• 📋 /status — все загрузки, переключатель «мои / все»")
