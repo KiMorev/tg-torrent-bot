@@ -85,6 +85,7 @@ class JsonStateStore:
         download_history_file: Path | None = None,
         jackett_guard_file: Path | None = None,
         youtube_downloads_file: Path | None = None,
+        youtube_plex_refresh_file: Path | None = None,
     ) -> None:
         self.approved_chat_ids_file = approved_chat_ids_file
         self.tracker_processed_file = tracker_processed_file
@@ -107,6 +108,7 @@ class JsonStateStore:
         self.download_history_file = download_history_file
         self.jackett_guard_file = jackett_guard_file
         self.youtube_downloads_file = youtube_downloads_file
+        self.youtube_plex_refresh_file = youtube_plex_refresh_file
         self.lock = threading.RLock()
 
     def load_json_file(self, path: Path, default: Any) -> Any:
@@ -536,6 +538,21 @@ class JsonStateStore:
             if isinstance(jobs[job_id], dict) and job_id
         }
         self.save_json_file(self.youtube_downloads_file, ordered, "YouTube downloads")
+
+    def load_youtube_plex_refresh_pending(self) -> dict:
+        if not self.youtube_plex_refresh_file:
+            return {}
+        payload = self.load_json_file(self.youtube_plex_refresh_file, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def save_youtube_plex_refresh_pending(self, payload: dict) -> None:
+        if not self.youtube_plex_refresh_file:
+            return
+        self.save_json_file(
+            self.youtube_plex_refresh_file,
+            payload if isinstance(payload, dict) else {},
+            "YouTube Plex refresh pending",
+        )
 
     def load_series_bulk_jobs(self) -> dict[str, dict]:
         """Load persistent series bulk plans.

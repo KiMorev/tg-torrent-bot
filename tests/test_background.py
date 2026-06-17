@@ -39,6 +39,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         pending_downloads_file=d / "pending_downloads.json",
         series_bulk_jobs_file=d / "series_bulk_jobs.json",
         download_history_file=d / "download_history.jsonl",
+        youtube_plex_refresh_file=d / "youtube_plex_refresh_pending.json",
     )
 
 

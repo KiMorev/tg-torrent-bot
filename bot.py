@@ -476,6 +476,11 @@ YOUTUBE_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
 YOUTUBE_PROGRESS_SAVE_INTERVAL_SECONDS = 1.0
 YOUTUBE_STATUS_CARD_INTERVAL_SECONDS = 2.0
 YOUTUBE_WORKER_INTERVAL_SECONDS = 2.0
+YOUTUBE_PLEX_REFRESH_RETRY_DELAYS_SECONDS = {
+    "transient": (60, 300, 900, 3600, 7200, 14400, 21600, 21600, 21600, 21600),
+    "refresh_false": (60, 300, 900),
+    "section_not_found": (300,),
+}
 MAX_TASK_NOTIFICATION_FAILURES = 3
 # Unix timestamp of next scheduled subscription check (set by the loop)
 _next_subscription_check_at: float | None = None
@@ -1294,6 +1299,7 @@ async def _run_task_maintenance_cycle(app: Application) -> None:
     await _run_background_step("task notifications", lambda: _run_task_notifications_once(app))
     await _run_background_step("auto-delete finished tasks", _run_auto_delete_finished_once)
     await _run_background_step("pending downloads", lambda: _run_pending_downloads_gated(app))
+    await _run_background_step("YouTube Plex refresh retry", _run_youtube_plex_refresh_retry_once)
     await _run_background_step("storage snapshot", lambda: _run_storage_snapshot_gated(app))
     await _run_background_step("stale state pruning", _run_prune_stale_state_once)
 
@@ -7575,11 +7581,12 @@ def _youtube_delete_summary_text(summary: dict[str, object], *, title: str | Non
     if unsafe:
         lines.append(f"Пропущено из-за небезопасного пути: {unsafe}")
     if deleted_jobs and "plex_refresh_started" in summary:
-        plex_line = (
-            "Plex: обновление библиотеки запущено."
-            if summary.get("plex_refresh_started")
-            else "Plex: не удалось запустить обновление библиотеки."
-        )
+        if summary.get("plex_refresh_started"):
+            plex_line = "Plex: обновление библиотеки запущено."
+        elif summary.get("plex_refresh_pending"):
+            plex_line = "Plex: обновление не удалось запустить, повторю фоном."
+        else:
+            plex_line = "Plex: не удалось запустить обновление библиотеки."
         lines.append(plex_line)
     return "\n".join(lines)
 
@@ -7926,23 +7933,189 @@ async def _youtube_plex_section_id() -> str:
     return await asyncio.to_thread(plex_client.find_section_by_title, YOUTUBE_PLEX_LIBRARY_NAME)
 
 
-async def _youtube_refresh_plex_after_delete() -> bool:
+def _load_youtube_plex_refresh_pending() -> dict:
+    load = getattr(state_store, "load_youtube_plex_refresh_pending", None)
+    if not callable(load):
+        return {}
+    payload = load()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_youtube_plex_refresh_pending(payload: dict) -> None:
+    save = getattr(state_store, "save_youtube_plex_refresh_pending", None)
+    if callable(save):
+        save(payload if isinstance(payload, dict) else {})
+
+
+def _youtube_plex_refresh_retry_delays(reason: str) -> tuple[int, ...]:
+    delays = YOUTUBE_PLEX_REFRESH_RETRY_DELAYS_SECONDS.get(str(reason or ""))
+    return tuple(delays or ())
+
+
+def _youtube_plex_refresh_failure_reason(exc: Exception) -> str:
+    kind = str(getattr(exc, "error_kind", "") or "").lower()
+    if kind == "auth":
+        return "permanent"
+    if kind in {"timeout", "network", "other", "xml"}:
+        return "transient"
+    if kind == "http":
+        match = re.search(r"HTTP\s+(\d+)", str(exc), flags=re.IGNORECASE)
+        if match and int(match.group(1)) >= 500:
+            return "transient"
+        return "permanent"
+    return "transient"
+
+
+async def _youtube_try_refresh_plex_after_delete() -> tuple[bool, str, str]:
     if not (PLEX_ENABLED and plex_client):
-        return False
+        return False, "disabled", ""
     try:
         section_id = await _youtube_plex_section_id()
-        if not section_id:
-            logger.warning("YouTube Plex refresh after delete skipped: library %r not found", YOUTUBE_PLEX_LIBRARY_NAME)
-            return False
+    except Exception as exc:
+        reason = _youtube_plex_refresh_failure_reason(exc)
+        logger.warning("YouTube Plex refresh after delete failed before section lookup: %s", exc, exc_info=True)
+        return False, reason, str(exc)
+    if not section_id:
+        logger.warning("YouTube Plex refresh after delete skipped: library %r not found", YOUTUBE_PLEX_LIBRARY_NAME)
+        return False, "section_not_found", f"library {YOUTUBE_PLEX_LIBRARY_NAME!r} not found"
+    try:
         refreshed = await asyncio.to_thread(plex_client.refresh_section, section_id)
-        if not refreshed:
-            logger.warning("YouTube Plex refresh after delete returned false section_id=%s", section_id)
-            return False
-        logger.info("YouTube Plex refresh after delete started section_id=%s", section_id)
-        return True
-    except Exception:
+    except Exception as exc:
+        reason = _youtube_plex_refresh_failure_reason(exc)
         logger.warning("YouTube Plex refresh after delete failed", exc_info=True)
+        return False, reason, str(exc)
+    if not refreshed:
+        logger.warning("YouTube Plex refresh after delete returned false section_id=%s", section_id)
+        return False, "refresh_false", f"refresh_section returned false for {section_id}"
+    logger.info("YouTube Plex refresh after delete started section_id=%s", section_id)
+    return True, "", ""
+
+
+def _queue_youtube_plex_refresh_retry(reason: str, error: str = "") -> bool:
+    reason = str(reason or "")
+    delays = _youtube_plex_refresh_retry_delays(reason)
+    if not delays:
         return False
+
+    now_ts = time.time()
+    pending = _load_youtube_plex_refresh_pending()
+    if pending:
+        created_at = str(pending.get("created_at") or _youtube_now())
+        try:
+            attempts = int(pending.get("attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        try:
+            next_retry_at = float(pending.get("next_retry_at") or 0)
+        except (TypeError, ValueError):
+            next_retry_at = 0
+        if str(pending.get("reason") or "") != reason:
+            attempts = 0
+            next_retry_at = 0
+    else:
+        created_at = _youtube_now()
+        attempts = 0
+        next_retry_at = 0
+
+    if next_retry_at <= now_ts:
+        next_retry_at = now_ts + delays[min(attempts, len(delays) - 1)]
+
+    _save_youtube_plex_refresh_pending({
+        "reason": reason,
+        "attempts": attempts,
+        "created_at": created_at,
+        "updated_at": _youtube_now(),
+        "next_retry_at": next_retry_at,
+        "last_error": str(error or ""),
+    })
+    logger.info(
+        "YouTube Plex refresh retry queued reason=%s attempts=%s next_retry_at=%s",
+        reason,
+        attempts,
+        next_retry_at,
+    )
+    return True
+
+
+async def _youtube_refresh_plex_after_delete() -> dict[str, object]:
+    started, reason, error = await _youtube_try_refresh_plex_after_delete()
+    if started:
+        _save_youtube_plex_refresh_pending({})
+        return {"started": True, "pending": False, "reason": ""}
+
+    pending = _queue_youtube_plex_refresh_retry(reason, error)
+    if not pending:
+        logger.warning("YouTube Plex refresh after delete will not be retried reason=%s error=%s", reason, error)
+    return {"started": False, "pending": pending, "reason": reason}
+
+
+async def _run_youtube_plex_refresh_retry_once() -> None:
+    pending = _load_youtube_plex_refresh_pending()
+    if not pending:
+        return
+
+    reason = str(pending.get("reason") or "")
+    delays = _youtube_plex_refresh_retry_delays(reason)
+    if not delays:
+        _save_youtube_plex_refresh_pending({})
+        return
+
+    now_ts = time.time()
+    try:
+        next_retry_at = float(pending.get("next_retry_at") or 0)
+    except (TypeError, ValueError):
+        next_retry_at = 0
+    if next_retry_at > now_ts:
+        return
+
+    started, failure_reason, error = await _youtube_try_refresh_plex_after_delete()
+    if started:
+        _save_youtube_plex_refresh_pending({})
+        logger.info("YouTube Plex refresh retry succeeded")
+        return
+
+    if not _youtube_plex_refresh_retry_delays(failure_reason):
+        _save_youtube_plex_refresh_pending({})
+        logger.warning(
+            "YouTube Plex refresh retry stopped reason=%s error=%s",
+            failure_reason,
+            error,
+        )
+        return
+
+    if failure_reason != reason:
+        attempts = 1
+    else:
+        try:
+            attempts = int(pending.get("attempts") or 0) + 1
+        except (TypeError, ValueError):
+            attempts = 1
+    delays = _youtube_plex_refresh_retry_delays(failure_reason)
+    if attempts >= len(delays):
+        _save_youtube_plex_refresh_pending({})
+        logger.warning(
+            "YouTube Plex refresh retry exhausted reason=%s attempts=%s error=%s",
+            failure_reason,
+            attempts,
+            error,
+        )
+        return
+
+    next_retry_at = now_ts + delays[attempts]
+    _save_youtube_plex_refresh_pending({
+        "reason": failure_reason,
+        "attempts": attempts,
+        "created_at": str(pending.get("created_at") or _youtube_now()),
+        "updated_at": _youtube_now(),
+        "next_retry_at": next_retry_at,
+        "last_error": str(error or ""),
+    })
+    logger.info(
+        "YouTube Plex refresh retry deferred reason=%s attempts=%s next_retry_at=%s",
+        failure_reason,
+        attempts,
+        next_retry_at,
+    )
 
 
 async def _youtube_find_in_plex(section_id: str, job: dict):
@@ -24638,7 +24811,9 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
         if int(summary.get("deleted_jobs") or 0) > 0:
-            summary["plex_refresh_started"] = await _youtube_refresh_plex_after_delete()
+            plex_refresh = await _youtube_refresh_plex_after_delete()
+            summary["plex_refresh_started"] = bool(plex_refresh.get("started"))
+            summary["plex_refresh_pending"] = bool(plex_refresh.get("pending"))
         scope = _default_list_scope(chat_id)
         await query.edit_message_text(
             _youtube_delete_summary_text(summary, title=str(summary.get("title") or "")),
@@ -24679,7 +24854,9 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _safe_edit_callback(query, "🧹 Удаляю YouTube-ролики…")
         summary = await asyncio.to_thread(_youtube_delete_jobs, job_ids)
         if int(summary.get("deleted_jobs") or 0) > 0:
-            summary["plex_refresh_started"] = await _youtube_refresh_plex_after_delete()
+            plex_refresh = await _youtube_refresh_plex_after_delete()
+            summary["plex_refresh_started"] = bool(plex_refresh.get("started"))
+            summary["plex_refresh_pending"] = bool(plex_refresh.get("pending"))
         try:
             ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError:

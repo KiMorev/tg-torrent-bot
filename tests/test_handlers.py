@@ -98,6 +98,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         download_history_file=d / "download_history.jsonl",
         jackett_guard_file=d / "jackett_guard.json",
         youtube_downloads_file=d / "youtube_downloads.json",
+        youtube_plex_refresh_file=d / "youtube_plex_refresh_pending.json",
     )
 
 
@@ -9510,6 +9511,127 @@ class StatusCommandTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Plex: обновление библиотеки запущено.", text)
 
+    def test_task_delete_youtube_queues_plex_refresh_retry_on_timeout(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+        plex = MagicMock()
+        plex.refresh_section.side_effect = bot.PlexTimeoutError("timeout")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item_dir = root / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            (item_dir / "Clip.mp4").write_bytes(b"mp4")
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "item_dir": str(item_dir),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            pending = store.load_youtube_plex_refresh_pending()
+
+        self.assertEqual(pending["reason"], "transient")
+        self.assertEqual(pending["attempts"], 0)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Plex: обновление не удалось запустить, повторю фоном.", text)
+
+    def test_task_delete_youtube_does_not_retry_permanent_plex_auth_error(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+        plex = MagicMock()
+        plex.refresh_section.side_effect = bot.PlexAuthError("bad token")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item_dir = root / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            (item_dir / "Clip.mp4").write_bytes(b"mp4")
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "item_dir": str(item_dir),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            pending = store.load_youtube_plex_refresh_pending()
+
+        self.assertEqual(pending, {})
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Plex: не удалось запустить обновление библиотеки.", text)
+
+    def test_task_delete_youtube_queues_short_retry_when_refresh_returns_false(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+        plex = MagicMock()
+        plex.refresh_section.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item_dir = root / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            (item_dir / "Clip.mp4").write_bytes(b"mp4")
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "item_dir": str(item_dir),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+            pending = store.load_youtube_plex_refresh_pending()
+
+        self.assertEqual(pending["reason"], "refresh_false")
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Plex: обновление не удалось запустить, повторю фоном.", text)
+
     def test_task_delete_youtube_keeps_record_for_unsafe_path(self):
         update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
         context = _make_context()
@@ -9660,6 +9782,56 @@ class StatusCommandTests(unittest.TestCase):
         plex.refresh_section.assert_called_once_with("9")
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Plex: обновление библиотеки запущено.", text)
+
+    def test_youtube_plex_refresh_retry_succeeds_and_clears_pending(self):
+        plex = MagicMock()
+        plex.refresh_section.return_value = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_plex_refresh_pending({
+                "reason": "transient",
+                "attempts": 0,
+                "next_retry_at": 0,
+                "last_error": "timeout",
+            })
+
+            with (
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+            ):
+                asyncio.run(bot._run_youtube_plex_refresh_retry_once())
+
+            self.assertEqual(store.load_youtube_plex_refresh_pending(), {})
+
+        plex.refresh_section.assert_called_once_with("9")
+
+    def test_youtube_plex_refresh_retry_stops_after_single_missing_section_retry(self):
+        plex = MagicMock()
+        plex.find_section_by_title.return_value = ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_youtube_plex_refresh_pending({
+                "reason": "section_not_found",
+                "attempts": 0,
+                "next_retry_at": 0,
+                "last_error": "library not found",
+            })
+
+            with (
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", ""),
+            ):
+                asyncio.run(bot._run_youtube_plex_refresh_retry_once())
+
+            self.assertEqual(store.load_youtube_plex_refresh_pending(), {})
+
+        plex.find_section_by_title.assert_called_once()
 
     def test_progress_panel_gets_final_update_when_last_task_finished(self):
         active_task = {

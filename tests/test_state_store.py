@@ -24,6 +24,7 @@ def _make_store(tmp_dir: str) -> JsonStateStore:
         download_history_file=d / "download_history.jsonl",
         jackett_guard_file=d / "jackett_guard.json",
         youtube_downloads_file=d / "youtube_downloads.json",
+        youtube_plex_refresh_file=d / "youtube_plex_refresh_pending.json",
     )
 
 
@@ -142,6 +143,18 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(loaded["yt_a"]["title"], "A")
         self.assertEqual(loaded["yt_b"]["status"], "queued")
         self.assertNotIn("bad", loaded)
+
+    def test_youtube_plex_refresh_pending_roundtrip(self) -> None:
+        payload = {
+            "reason": "transient",
+            "attempts": 1,
+            "next_retry_at": 1234.5,
+            "last_error": "timeout",
+        }
+
+        self.store.save_youtube_plex_refresh_pending(payload)
+
+        self.assertEqual(self.store.load_youtube_plex_refresh_pending(), payload)
 
     def test_series_bulk_jobs_roundtrip(self) -> None:
         jobs = {

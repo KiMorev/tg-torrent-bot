@@ -56,6 +56,7 @@ def build_app_context(settings: AppSettings) -> AppContext:
         download_history_file=settings.state_dir / "download_history.jsonl",
         jackett_guard_file=settings.state_dir / "jackett_guard.json",
         youtube_downloads_file=settings.youtube_downloads_file,
+        youtube_plex_refresh_file=settings.state_dir / "youtube_plex_refresh_pending.json",
     )
     rutracker_client = (
         RutrackerClient(
