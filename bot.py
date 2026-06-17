@@ -7574,6 +7574,13 @@ def _youtube_delete_summary_text(summary: dict[str, object], *, title: str | Non
         lines.append(f"Уже отсутствовали на NAS: {missing}")
     if unsafe:
         lines.append(f"Пропущено из-за небезопасного пути: {unsafe}")
+    if deleted_jobs and "plex_refresh_started" in summary:
+        plex_line = (
+            "Plex: обновление библиотеки запущено."
+            if summary.get("plex_refresh_started")
+            else "Plex: не удалось запустить обновление библиотеки."
+        )
+        lines.append(plex_line)
     return "\n".join(lines)
 
 
@@ -7917,6 +7924,25 @@ async def _youtube_plex_section_id() -> str:
     if YOUTUBE_PLEX_SECTION:
         return YOUTUBE_PLEX_SECTION
     return await asyncio.to_thread(plex_client.find_section_by_title, YOUTUBE_PLEX_LIBRARY_NAME)
+
+
+async def _youtube_refresh_plex_after_delete() -> bool:
+    if not (PLEX_ENABLED and plex_client):
+        return False
+    try:
+        section_id = await _youtube_plex_section_id()
+        if not section_id:
+            logger.warning("YouTube Plex refresh after delete skipped: library %r not found", YOUTUBE_PLEX_LIBRARY_NAME)
+            return False
+        refreshed = await asyncio.to_thread(plex_client.refresh_section, section_id)
+        if not refreshed:
+            logger.warning("YouTube Plex refresh after delete returned false section_id=%s", section_id)
+            return False
+        logger.info("YouTube Plex refresh after delete started section_id=%s", section_id)
+        return True
+    except Exception:
+        logger.warning("YouTube Plex refresh after delete failed", exc_info=True)
+        return False
 
 
 async def _youtube_find_in_plex(section_id: str, job: dict):
@@ -24611,6 +24637,8 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
             )
             return
+        if int(summary.get("deleted_jobs") or 0) > 0:
+            summary["plex_refresh_started"] = await _youtube_refresh_plex_after_delete()
         scope = _default_list_scope(chat_id)
         await query.edit_message_text(
             _youtube_delete_summary_text(summary, title=str(summary.get("title") or "")),
@@ -24650,6 +24678,8 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         job_ids = _youtube_deletable_job_ids_for_scope(chat_id, scope)
         await _safe_edit_callback(query, "🧹 Удаляю YouTube-ролики…")
         summary = await asyncio.to_thread(_youtube_delete_jobs, job_ids)
+        if int(summary.get("deleted_jobs") or 0) > 0:
+            summary["plex_refresh_started"] = await _youtube_refresh_plex_after_delete()
         try:
             ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError:

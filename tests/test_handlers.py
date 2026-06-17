@@ -9472,6 +9472,44 @@ class StatusCommandTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Уже отсутствовали на NAS: 1", text)
 
+    def test_task_delete_youtube_refreshes_plex_library(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
+        context = _make_context()
+        plex = MagicMock()
+        plex.refresh_section.return_value = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item_dir = root / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            (item_dir / "Clip.mp4").write_bytes(b"mp4")
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "YouTube Clip",
+                    "item_dir": str(item_dir),
+                }
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+        plex.refresh_section.assert_called_once_with("9")
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Plex: обновление библиотеки запущено.", text)
+
     def test_task_delete_youtube_keeps_record_for_unsafe_path(self):
         update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube:yt_1")
         context = _make_context()
@@ -9571,6 +9609,57 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("YouTube-ролики удалены", text)
         self.assertIn("Записей очищено: 2", text)
         self.assertIn("Active", text)
+
+    def test_task_delete_youtube_all_refreshes_plex_once(self):
+        update = _make_callback_update(chat_id=100, callback_data="task:delete_youtube_all:mine")
+        context = _make_context()
+        fake_ds = MagicMock()
+        fake_ds.list_tasks.return_value = []
+        plex = MagicMock()
+        plex.refresh_section.return_value = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_dir = root / "Channel" / "First"
+            second_dir = root / "Channel" / "Second"
+            for item_dir in (first_dir, second_dir):
+                item_dir.mkdir(parents=True)
+                (item_dir / f"{item_dir.name}.mp4").write_bytes(b"mp4")
+
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_first": {
+                    "id": "yt_first",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "First",
+                    "item_dir": str(first_dir),
+                },
+                "yt_second": {
+                    "id": "yt_second",
+                    "chat_id": 100,
+                    "status": "completed",
+                    "title": "Second",
+                    "item_dir": str(second_dir),
+                },
+            })
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "ds_client", fake_ds),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+            ):
+                asyncio.run(bot.task_callback(update, context))
+
+        plex.refresh_section.assert_called_once_with("9")
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Plex: обновление библиотеки запущено.", text)
 
     def test_progress_panel_gets_final_update_when_last_task_finished(self):
         active_task = {
