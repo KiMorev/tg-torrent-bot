@@ -384,7 +384,7 @@ def ask_optional_features(console: Console, env: dict[str, str]) -> dict[str, bo
             default=default_enabled(env, "KINOPOISK_API_KEY"),
         ),
         "tmdb": console.ask_yes_no(
-            "Включить TMDB API для точных эпизодов в /continue?",
+            "Включить TMDB API для точных эпизодов в /seasons?",
             default=default_enabled(env, "TMDB_API_TOKEN"),
         ),
         "openai": console.ask_yes_no(
@@ -1482,10 +1482,10 @@ def run_interactive(
                 previous_env,
                 name="TMDB API",
                 env_key="TMDB_API_TOKEN",
-                why="точное число эпизодов сезона для /continue.",
+                why="точное число эпизодов сезона для /seasons.",
                 where="themoviedb.org → Settings → API → API Read Access Token.",
                 example="TMDB_API_TOKEN=eyJhbGciOi...",
-                skip="да, /continue будет работать менее уверенно.",
+                skip="да, /seasons будет работать менее уверенно.",
                 probe=probe_tmdb,
                 skip_checks=skip_checks,
             )

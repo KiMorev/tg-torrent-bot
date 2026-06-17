@@ -1,3 +1,4 @@
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -28,7 +29,7 @@ def _compose_env_keys() -> set[str]:
     """Все имена переменных, объявленных в compose.yaml (паттерн ${VAR_NAME...})."""
     path = _project_root() / "compose.yaml"
     content = path.read_text(encoding="utf-8")
-    return set(re.findall(r"\$\{([A-Z_]+)[^}]*\}", content))
+    return set(re.findall(r"\$\{([A-Z0-9_]+)[^}]*\}", content))
 
 
 BASE_ENV = {
@@ -360,10 +361,53 @@ class DockerfileCoverageTest(unittest.TestCase):
 
 
 def _config_py_env_keys() -> set[str]:
-    """Имена переменных окружения, которые читает config.py (паттерн env.get / env_int / env_bool / env_float / required_env)."""
+    """Имена переменных окружения, которые читает config.py."""
     path = _project_root() / "config.py"
     content = path.read_text(encoding="utf-8")
-    return set(re.findall(r'(?:env\.get|env_int|env_bool|env_float|required_env|optional_secret_pair)\s*\(\s*env\s*,\s*"([A-Z_]+)"', content))
+    tree = ast.parse(content)
+    keys: set[str] = set()
+
+    class EnvKeyVisitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "env"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                keys.add(node.args[0].value)
+            if isinstance(node.func, ast.Name) and node.func.id in {
+                "env_int", "env_bool", "env_float", "required_env", "optional_secret_pair",
+            }:
+                for arg in node.args[1:3]:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        keys.add(arg.value)
+            self.generic_visit(node)
+
+    EnvKeyVisitor().visit(tree)
+    return keys
+
+
+_CONFIG_INTERNAL_ENV_KEYS = {
+    "ALLOWED_CHAT_ID",
+    "APPROVED_CHAT_IDS_FILE",
+    "AUTO_DELETE_TASKS_FILE",
+    "GPT_USAGE_FILE",
+    "NOTIFIED_TASKS_FILE",
+    "PENDING_DOWNLOADS_FILE",
+    "STORAGE_HISTORY_FILE",
+    "TASK_META_FILE",
+    "TASK_OWNERS_FILE",
+    "TMP_DIR",
+    "TOPIC_SUBSCRIPTIONS_FILE",
+    "TORRENT_TITLES_CACHE_FILE",
+    "TRACKERS_CACHE_FILE",
+    "TRACKERS_PROCESSED_FILE",
+    "VOICE_USAGE_FILE",
+}
 
 
 class ComposeEnvCoverageTest(unittest.TestCase):
@@ -393,7 +437,7 @@ class ComposeEnvCoverageTest(unittest.TestCase):
         но забыто в .env.example (и значит в compose.yaml тоже)."""
         config_keys = _config_py_env_keys()
         example_keys = _env_example_keys()
-        missing = config_keys - example_keys
+        missing = config_keys - example_keys - _CONFIG_INTERNAL_ENV_KEYS
         self.assertFalse(
             missing,
             f"Переменные читаются в config.py, но отсутствуют в .env.example: {sorted(missing)}",

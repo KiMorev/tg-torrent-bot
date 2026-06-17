@@ -467,6 +467,7 @@ JACKETT_WARMUP_TASK: asyncio.Task | None = None
 JACKETT_GUARDIAN_TASK: asyncio.Task | None = None
 YOUTUBE_WORKER_TASK: asyncio.Task | None = None
 YOUTUBE_STATUS_UPDATE_TASK: asyncio.Task | None = None
+BACKGROUND_SERVICE_TASKS: set[asyncio.Task] = set()
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 # Seconds to wait after DS task creation before injecting public trackers.
 # DS may not have fully initialised the task metadata immediately after create_torrent_file /
@@ -1274,6 +1275,23 @@ async def _run_tracker_background_once() -> None:
 
     if changed:
         _add_tracker_processed_ids(processed_ids)
+
+
+def _create_background_service_task(app: Application, coro) -> asyncio.Task | object:
+    task = asyncio.create_task(coro)
+    if isinstance(task, asyncio.Task):
+        BACKGROUND_SERVICE_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_SERVICE_TASKS.discard)
+    return task
+
+
+async def _cancel_background_service_tasks() -> None:
+    tasks = [task for task in BACKGROUND_SERVICE_TASKS if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    BACKGROUND_SERVICE_TASKS.clear()
 
 
 async def _run_background_step(label: str, step) -> None:
@@ -10984,6 +11002,11 @@ async def _safe_edit_callback(
     return await _retry_telegram_edit(edit_call, key=key, label=retry_label)
 
 
+def _current_callback_reply_markup(query):
+    message = getattr(query, "message", None)
+    return getattr(message, "reply_markup", None)
+
+
 async def _delete_message_safely(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -15185,9 +15208,14 @@ def _series_continue_subscription_map_for_chat(chat_id: int | None) -> dict[str,
         return {}
     out: dict[str, dict] = {}
     for sub_key, sub in subs.items():
-        if not isinstance(sub, dict) or sub.get("type") == "jackett":
+        if not isinstance(sub, dict):
             continue
         if sub.get("chat_id") != chat_id:
+            continue
+        if sub.get("type") == "jackett":
+            topic_id = _extract_rutracker_topic_id(str(sub.get("topic_url") or ""))
+            if topic_id:
+                out.setdefault(topic_id, sub)
             continue
         topic_id = str(sub.get("topic_id") or sub_key or "").strip()
         if topic_id:
@@ -22129,6 +22157,18 @@ async def plex_upgrade_download(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
+async def plex_upgrade_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plex:upgrade for magnet/torrent duplicate warnings."""
+    pending = context.user_data.get("plex_pending")
+    if isinstance(pending, dict) and pending.get("plex_old_season_key"):
+        logger.info(
+            "Plex standalone upgrade requested: old_season_rating_key=%s — auto-deletion "
+            "not yet implemented, keeping both versions",
+            pending.get("plex_old_season_key"),
+        )
+    await plex_confirm_standalone(update, context)
+
+
 async def plex_cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User cancelled download from Plex duplicate warning dialog (inside search flow)."""
     query = update.callback_query
@@ -22459,16 +22499,16 @@ def _format_subscription_datetime(value: object) -> str:
     return _format_subscription_dt(dt)
 
 
-def _subscription_source_text(sub: dict) -> str:
+def _subscription_tracking_text(sub: dict) -> str:
     if sub.get("type") != "jackett":
-        return "Rutracker"
+        return "по теме Rutracker"
 
     tracker = str(sub.get("tracker") or "").strip()
     if not tracker:
-        return "Jackett"
+        return "через Jackett"
     if tracker.lower() == "jackett":
-        return "Jackett"
-    return f"Jackett · {tracker}"
+        return "через Jackett"
+    return f"через Jackett · {tracker}"
 
 
 def _subscription_status_text(sub: dict) -> str:
@@ -22547,7 +22587,7 @@ def _build_subscriptions_view(chat_id: int | None) -> tuple[str, InlineKeyboardM
         notify_text, download_text = _subscription_policy_texts(sub)
         lines.append(
             f"\n{i}. 📺 <b>{html_module.escape(title)}</b>\n"
-            f"   Источник: {_subscription_source_text(sub)}\n"
+            f"   Как следим: {_subscription_tracking_text(sub)}\n"
             f"   Прогресс: {_subscription_progress_text(sub)}\n"
             f"   Уведомления: {notify_text}\n"
             f"   Скачивание: {download_text}\n"
@@ -22570,7 +22610,7 @@ def _build_subscriptions_view(chat_id: int | None) -> tuple[str, InlineKeyboardM
         notify_text, download_text = _subscription_policy_texts(sub)
         lines.append(
             f"\n{i}. 🌐 <b>{html_module.escape(title)}</b>\n"
-            f"   Источник: {html_module.escape(_subscription_source_text(sub))}\n"
+            f"   Как следим: {html_module.escape(_subscription_tracking_text(sub))}\n"
             f"   Прогресс: {_subscription_progress_text(sub)}\n"
             f"   Уведомления: {notify_text}\n"
             f"   Скачивание: {download_text}\n"
@@ -22632,7 +22672,7 @@ def _subscription_settings_text(sub_key: str, sub: dict, notice: str = "") -> st
         "⚙️ <b>Подписка</b>",
         f"{_subscription_icon(sub)} <b>{title}</b>",
         "",
-        f"Источник: {html_module.escape(_subscription_source_text(sub))}",
+        f"Как следим: {html_module.escape(_subscription_tracking_text(sub))}",
         f"Прогресс: {_subscription_progress_text(sub)}",
         "",
         "Сейчас:",
@@ -24577,7 +24617,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not chat or not message:
         return
 
-    progress_message = await context.bot.send_message(chat_id=chat.id, text="📋 Получаю список загрузок…")
+    progress_message = await context.bot.send_message(
+        chat_id=chat.id,
+        text="📋 Получаю список загрузок…",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
+        ]]),
+    )
     await _delete_command_message_safely(update, context, "status command")
 
     try:
@@ -24630,7 +24676,12 @@ async def movie_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if busy_mode
             else _movie_discovery_refresh_start_text()
         )
-        progress = await update.message.reply_text(progress_text)
+        progress = await update.message.reply_text(
+            progress_text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(BUTTON_CLOSE, callback_data="new:close"),
+            ]]),
+        )
         cache = await _refresh_movie_discovery_cache()
         visible_cards = _movie_discovery_confirmed_cards(cache)
         await _safe_edit_message(
@@ -24682,7 +24733,11 @@ async def movie_new_refresh_callback(update: Update, context: ContextTypes.DEFAU
         if busy_mode
         else _movie_discovery_refresh_start_text()
     )
-    await _safe_edit_callback(query, progress_text)
+    await _safe_edit_callback(
+        query,
+        progress_text,
+        reply_markup=_current_callback_reply_markup(query),
+    )
     logger.info("movie_discovery: /new render path=refresh_callback chat=%s — refreshing now", chat_id)
     cache = await _refresh_movie_discovery_cache()
     logger.info(
@@ -25452,7 +25507,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         scope = _normalize_list_scope(task_id, chat_id)
         DOWNLOAD_PANEL_PAGES.pop(chat_id, None)
         _forget_task_card_message(chat_id, message_id)
-        await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
+        await _safe_edit_callback(
+            query,
+            "📋 Обновляю список загрузок…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         try:
             ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -25471,7 +25530,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if action in ("page_prev", "page_next"):
         scope = _normalize_list_scope(task_id, chat_id)
         _forget_task_card_message(chat_id, message_id)
-        await _safe_edit_callback(query, "📋 Обновляю список загрузок…")
+        await _safe_edit_callback(
+            query,
+            "📋 Обновляю список загрузок…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         try:
             ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -25498,7 +25561,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
             )
             return
-        await _safe_edit_callback(query, "🔄 Повторяю YouTube-загрузку…")
+        await _safe_edit_callback(
+            query,
+            "🔄 Повторяю YouTube-загрузку…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         result = await asyncio.to_thread(_youtube_retry_job, task_id)
         if not result.get("found"):
             await query.edit_message_text(
@@ -25575,7 +25642,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
             )
             return
-        await _safe_edit_callback(query, "🗑️ Удаляю YouTube-ролик…")
+        await _safe_edit_callback(
+            query,
+            "🗑️ Удаляю YouTube-ролик…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         summary = await asyncio.to_thread(_youtube_delete_job, task_id)
         if not summary.get("found"):
             await query.edit_message_text(
@@ -25630,7 +25701,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if action == "delete_youtube_all":
         scope = _normalize_list_scope(task_id, chat_id)
         job_ids = _youtube_deletable_job_ids_for_scope(chat_id, scope)
-        await _safe_edit_callback(query, "🧹 Удаляю YouTube-ролики…")
+        await _safe_edit_callback(
+            query,
+            "🧹 Удаляю YouTube-ролики…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         summary = await asyncio.to_thread(_youtube_delete_jobs, job_ids)
         if int(summary.get("deleted_jobs") or 0) > 0:
             plex_refresh = await _youtube_refresh_plex_after_delete()
@@ -25673,7 +25748,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "delete_finished_ask":
         scope = _normalize_list_scope(task_id, chat_id)
-        await _safe_edit_callback(query, "🔎 Проверяю завершенные задачи…")
+        await _safe_edit_callback(
+            query,
+            "🔎 Проверяю завершенные задачи…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         try:
             ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -25702,7 +25781,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "delete_finished":
         scope = _normalize_list_scope(task_id, chat_id)
-        await _safe_edit_callback(query, "🧹 Удаляю завершенные задачи…")
+        await _safe_edit_callback(
+            query,
+            "🧹 Удаляю завершенные задачи…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         try:
             ds_tasks = await asyncio.to_thread(ds_client.list_tasks)
             visible_ds_tasks = _filter_tasks_for_scope(ds_tasks, chat_id, scope)
@@ -25757,7 +25840,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        await _safe_edit_callback(query, "➕ Добавляю public-трекеры…")
+        await _safe_edit_callback(
+            query,
+            "➕ Добавляю public-трекеры…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         try:
             tasks = await asyncio.to_thread(ds_client.list_tasks)
         except DownloadStationError as e:
@@ -25845,7 +25932,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "pause": "⏸️ Отправляю команду паузы…",
             "delete": "🗑️ Удаляю задачу…",
         }[action]
-        await _safe_edit_callback(query, action_progress)
+        await _safe_edit_callback(
+            query,
+            action_progress,
+            reply_markup=_current_callback_reply_markup(query),
+        )
         try:
             if action == "resume":
                 await asyncio.to_thread(ds_client.resume_task, task_id)
@@ -25917,7 +26008,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     youtube_task = _find_youtube_panel_task(task_id)
     if youtube_task:
-        await _safe_edit_callback(query, "🔎 Получаю задачу…")
+        await _safe_edit_callback(
+            query,
+            "🔎 Получаю задачу…",
+            reply_markup=_current_callback_reply_markup(query),
+        )
         status = (youtube_task.get("status") or "").lower()
         await query.edit_message_text(
             _format_task_card(youtube_task, chat_id),
@@ -25925,7 +26020,11 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    await _safe_edit_callback(query, "🔎 Получаю задачу…")
+    await _safe_edit_callback(
+        query,
+        "🔎 Получаю задачу…",
+        reply_markup=_current_callback_reply_markup(query),
+    )
     try:
         tasks = await asyncio.to_thread(ds_client.list_tasks)
     except DownloadStationError as e:
@@ -26182,11 +26281,15 @@ async def _process_magnet_uri(update: Update, context: ContextTypes.DEFAULT_TYPE
                     context.user_data["plex_pending"] = {
                         "type": "magnet",
                         "magnet_uri": magnet_uri,
+                        "plex_old_season_key": series_check.season.rating_key,
+                        "plex_action": series_check.action,
                     }
                     await _safe_edit_message(
                         progress_message,
                         _plex_series_confirm_text(series_check, dn_raw, req_quality),
-                        reply_markup=_plex_confirm_keyboard(),
+                        reply_markup=_plex_confirm_keyboard(
+                            show_upgrade=(series_check.action == "offer_upgrade")
+                        ),
                         parse_mode="HTML",
                     )
                     return
@@ -27372,11 +27475,15 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                         "type": "torrent",
                         "temp_path": str(temp_path),
                         "safe_name": safe_name,
+                        "plex_old_season_key": series_check.season.rating_key,
+                        "plex_action": series_check.action,
                     }
                     await _safe_edit_message(
                         progress_message,
                         _plex_series_confirm_text(series_check, original_name, req_quality),
-                        reply_markup=_plex_confirm_keyboard(),
+                        reply_markup=_plex_confirm_keyboard(
+                            show_upgrade=(series_check.action == "offer_upgrade")
+                        ),
                         parse_mode="HTML",
                     )
                     return
@@ -27457,20 +27564,20 @@ async def setup_bot_commands(app: Application) -> None:
     logger.info("Telegram command menu updated")
 
     if _tracker_background_enabled():
-        TRACKER_BACKGROUND_TASK = app.create_task(_tracker_background_loop())
+        TRACKER_BACKGROUND_TASK = _create_background_service_task(app, _tracker_background_loop())
 
     if _task_maintenance_enabled():
-        BACKGROUND_MONITOR_TASK = app.create_task(_task_maintenance_loop(app))
+        BACKGROUND_MONITOR_TASK = _create_background_service_task(app, _task_maintenance_loop(app))
 
-    PROGRESS_UPDATE_TASK = app.create_task(_progress_update_loop(app))
+    PROGRESS_UPDATE_TASK = _create_background_service_task(app, _progress_update_loop(app))
     logger.info("Progress update loop started, interval=%ss", PROGRESS_UPDATE_INTERVAL_SECONDS)
 
     if _subscription_monitor_enabled():
-        SUBSCRIPTION_MONITOR_TASK = app.create_task(_subscription_check_loop(app))
+        SUBSCRIPTION_MONITOR_TASK = _create_background_service_task(app, _subscription_check_loop(app))
         logger.info("Subscription check loop started, interval=%sh", SUBSCRIPTION_CHECK_INTERVAL_HOURS)
 
     if _movie_discovery_enabled():
-        MOVIE_DISCOVERY_TASK = app.create_task(_movie_discovery_loop(app))
+        MOVIE_DISCOVERY_TASK = _create_background_service_task(app, _movie_discovery_loop(app))
         logger.info("Movie discovery loop started, interval=%sh", MOVIE_DISCOVERY_INTERVAL_HOURS)
         # Note: separate pending-loop is no longer needed — the per-user 'seen'
         # diff is naturally self-healing: outside quiet hours we just skip the
@@ -27478,18 +27585,18 @@ async def setup_bot_commands(app: Application) -> None:
 
     if _youtube_downloads_enabled():
         _youtube_reset_interrupted_jobs()
-        YOUTUBE_WORKER_TASK = app.create_task(_youtube_worker_loop(app))
-        YOUTUBE_STATUS_UPDATE_TASK = app.create_task(_youtube_status_update_loop(app))
+        YOUTUBE_WORKER_TASK = _create_background_service_task(app, _youtube_worker_loop(app))
+        YOUTUBE_STATUS_UPDATE_TASK = _create_background_service_task(app, _youtube_status_update_loop(app))
         logger.info("YouTube downloads enabled: dir=%s max_height=%s", YOUTUBE_DOWNLOAD_DIR, YOUTUBE_MAX_HEIGHT)
 
     if _jackett_warmup_enabled():
-        JACKETT_WARMUP_TASK = app.create_task(_jackett_warmup_loop(app))
+        JACKETT_WARMUP_TASK = _create_background_service_task(app, _jackett_warmup_loop(app))
         logger.info("Jackett warmup loop started, interval=%ss", JACKETT_WARMUP_INTERVAL_SECONDS)
-        JACKETT_GUARDIAN_TASK = app.create_task(_jackett_guardian_loop(app))
+        JACKETT_GUARDIAN_TASK = _create_background_service_task(app, _jackett_guardian_loop(app))
         logger.info("Jackett guardian loop started")
 
     if PLEX_ENABLED:
-        app.create_task(_plex_cache_loop(app))
+        _create_background_service_task(app, _plex_cache_loop(app))
         logger.info("Plex library cache loop started, interval=%ss", _PLEX_CACHE_INTERVAL)
 
     if PLEX_WEBHOOK_ENABLED:
@@ -27509,7 +27616,19 @@ async def setup_bot_commands(app: Application) -> None:
 
 
 async def shutdown_background_services(app: Application) -> None:
-    global _PLEX_WEBHOOK_SERVER
+    global _PLEX_WEBHOOK_SERVER, BACKGROUND_MONITOR_TASK, TRACKER_BACKGROUND_TASK, PROGRESS_UPDATE_TASK
+    global SUBSCRIPTION_MONITOR_TASK, MOVIE_DISCOVERY_TASK, JACKETT_WARMUP_TASK, JACKETT_GUARDIAN_TASK
+    global YOUTUBE_WORKER_TASK, YOUTUBE_STATUS_UPDATE_TASK
+    await _cancel_background_service_tasks()
+    BACKGROUND_MONITOR_TASK = None
+    TRACKER_BACKGROUND_TASK = None
+    PROGRESS_UPDATE_TASK = None
+    SUBSCRIPTION_MONITOR_TASK = None
+    MOVIE_DISCOVERY_TASK = None
+    JACKETT_WARMUP_TASK = None
+    JACKETT_GUARDIAN_TASK = None
+    YOUTUBE_WORKER_TASK = None
+    YOUTUBE_STATUS_UPDATE_TASK = None
     if _PLEX_WEBHOOK_SERVER is not None:
         await _PLEX_WEBHOOK_SERVER.stop()
         _PLEX_WEBHOOK_SERVER = None
@@ -27520,7 +27639,7 @@ def main() -> None:
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(setup_bot_commands)
-        .post_shutdown(shutdown_background_services)
+        .post_stop(shutdown_background_services)
         .connect_timeout(30)
         .read_timeout(30)
         .write_timeout(30)
@@ -27565,7 +27684,6 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(task_callback, pattern=f"^{TASK_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(youtube_callback, pattern=f"^{YOUTUBE_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(series_continue_callback, pattern=f"^{CONTINUE_CALLBACK_PREFIX}:"))
-    app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     app.add_handler(CallbackQueryHandler(movie_new_refresh_callback, pattern=r"^new:refresh$"))
     app.add_handler(CallbackQueryHandler(movie_new_close_callback, pattern=r"^new:close$"))
     app.add_handler(CallbackQueryHandler(movie_new_subscribe_callback, pattern=r"^new:subscribe$"))
@@ -27734,8 +27852,10 @@ def main() -> None:
     )
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(sub_callback, pattern=f"^{SUB_CALLBACK_PREFIX}:"))
     # Global Plex confirmation handlers (for magnet/torrent, outside ConversationHandler)
     app.add_handler(CallbackQueryHandler(plex_confirm_standalone, pattern=r"^plex:confirm$"))
+    app.add_handler(CallbackQueryHandler(plex_upgrade_standalone, pattern=r"^plex:upgrade$"))
     app.add_handler(CallbackQueryHandler(plex_cancel_standalone, pattern=r"^plex:cancel$"))
     app.add_handler(MessageReactionHandler(reaction_easter_egg))
     app.add_error_handler(error_handler)

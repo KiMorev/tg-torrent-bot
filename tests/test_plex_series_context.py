@@ -372,6 +372,33 @@ class PlexUpgradeDownloadHandlerTests(unittest.IsolatedAsyncioTestCase):
         text = query.edit_message_text.await_args.args[0]
         self.assertIn("Данные потеряны", text)
 
+    async def test_standalone_upgrade_dispatches_magnet_pending(self):
+        query = MagicMock()
+        query.data = "plex:upgrade"
+        query.answer = AsyncMock()
+        query.message.chat.id = 100
+        ctx = MagicMock()
+        ctx.user_data = {
+            "plex_pending": {
+                "type": "magnet",
+                "magnet_uri": "magnet:?xt=urn:btih:test",
+                "plex_old_season_key": "season-key-42",
+                "plex_action": "offer_upgrade",
+            },
+        }
+        update = MagicMock(callback_query=query)
+
+        with patch.object(bot, "_do_process_magnet", AsyncMock()) as process:
+            await bot.plex_upgrade_standalone(update, ctx)
+
+        process.assert_awaited_once_with(
+            query.message,
+            ctx,
+            "magnet:?xt=urn:btih:test",
+            chat_id=100,
+        )
+        self.assertNotIn("plex_pending", ctx.user_data)
+
 
 # ─── pre-warm scheduling ───────────────────────────────────────────────
 

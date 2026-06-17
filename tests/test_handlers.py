@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from telegram.ext import CallbackQueryHandler, ConversationHandler
+
 # Provide the minimum env vars that bot.py needs at import time.
 os.environ.setdefault("BOT_TOKEN", "111:testtoken")
 os.environ.setdefault("ALLOWED_CHAT_IDS", "100")
@@ -1443,12 +1445,12 @@ class AdminPanelTests(unittest.TestCase):
         text = update.message.reply_text.call_args.args[0]
         self.assertIn("<b>Подписки</b> (2)", text)
         self.assertIn("Следующая проверка: сегодня 18:00", text)
-        self.assertIn("Источник: Rutracker", text)
+        self.assertIn("Как следим: по теме Rutracker", text)
         self.assertIn("Прогресс: 5 из 8 эп.", text)
         self.assertIn("Уведомления: только когда сезон завершится", text)
         self.assertIn("Скачивание: когда сезон завершится", text)
         self.assertIn("Статус: ждём финал сезона", text)
-        self.assertIn("Источник: Jackett · rutracker", text)
+        self.assertIn("Как следим: через Jackett · rutracker", text)
         self.assertIn("Проверено: 01.01 10:00", text)
         self.assertIn("Скачивание: не скачивать автоматически", text)
 
@@ -1496,6 +1498,7 @@ class AdminPanelTests(unittest.TestCase):
 
         text = update.callback_query.edit_message_text.call_args.args[0]
         self.assertIn("⚙️ <b>Подписка</b>", text)
+        self.assertIn("Как следим: по теме Rutracker", text)
         self.assertIn("Уведомления: <b>только когда сезон завершится</b>", text)
         self.assertIn("Скачивание: <b>когда сезон завершится</b>", text)
 
@@ -2523,6 +2526,30 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         lpo = last_kwargs.get("link_preview_options")
         self.assertIsNotNone(lpo, "link_preview_options must be set on refresh")
         self.assertTrue(lpo.is_disabled, "link preview must be disabled after refresh")
+
+    def test_movie_new_refresh_callback_keeps_keyboard_while_refreshing(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:refresh")
+        keyboard = bot.InlineKeyboardMarkup([[
+            bot.InlineKeyboardButton("🔄 Обновить", callback_data="new:refresh"),
+            bot.InlineKeyboardButton("✖️ Закрыть", callback_data="new:close"),
+        ]])
+        update.callback_query.message.reply_markup = keyboard
+        context = _make_context()
+        fake_cache = {
+            "cards": [{"title": "Тест", "year": 2026, "score": 0.8}],
+            "updated_at": "2026-05-14 22:00",
+        }
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", MagicMock(load_approved_chat_ids=MagicMock(return_value=set()))),
+            patch.object(bot, "_movie_discovery_enabled", return_value=True),
+            patch.object(bot, "_refresh_movie_discovery_cache", AsyncMock(return_value=fake_cache)),
+        ):
+            asyncio.run(movie_new_refresh_callback(update, context))
+
+        first_kwargs = update.callback_query.edit_message_text.call_args_list[0].kwargs
+        self.assertIs(first_kwargs["reply_markup"], keyboard)
 
 
 class MovieDiscoveryRefreshSingleFlightTests(unittest.IsolatedAsyncioTestCase):
@@ -9067,18 +9094,32 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("Подписка: " + bot.policies_summary_ru(sub), text)
         self.assertIn("Подписка: " + bot.policies_summary_ru(sub), detail)
 
-    def test_continue_subscription_map_ignores_other_users_and_jackett(self):
+    def test_continue_subscription_map_includes_jackett_rutracker_topics(self):
         store = MagicMock()
         store.load_topic_subscriptions.return_value = {
             "12345": {"chat_id": 200, "title": "Other user"},
             "67890": {"chat_id": 100, "title": "Mine"},
-            "jackett:1": {"chat_id": 100, "type": "jackett", "query": "The Rookie"},
+            "jackett:1": {
+                "chat_id": 100,
+                "type": "jackett",
+                "query": "The Rookie",
+                "topic_url": "https://rutracker.org/forum/viewtopic.php?t=54321",
+            },
+            "jackett:2": {
+                "chat_id": 100,
+                "type": "jackett",
+                "query": "Duplicate",
+                "topic_url": "https://rutracker.org/forum/viewtopic.php?t=67890",
+            },
+            "jackett:3": {"chat_id": 100, "type": "jackett", "query": "No topic"},
         }
 
         with patch.object(bot, "state_store", store):
             subs = bot._series_continue_subscription_map_for_chat(100)
 
-        self.assertEqual(subs, {"67890": {"chat_id": 100, "title": "Mine"}})
+        self.assertEqual(set(subs), {"67890", "54321"})
+        self.assertEqual(subs["67890"], {"chat_id": 100, "title": "Mine"})
+        self.assertEqual(subs["54321"]["query"], "The Rookie")
 
     def test_continue_empty_mine_can_switch_to_all(self):
         state = {"mine": [], "all": [self._candidate()], "scope": "mine", "page": 0}
@@ -9733,7 +9774,15 @@ class StatusCommandTests(unittest.TestCase):
         ):
             asyncio.run(status(update, context))
 
-        context.bot.send_message.assert_called_once_with(chat_id=100, text="📋 Получаю список загрузок…")
+        send_kwargs = context.bot.send_message.await_args.kwargs
+        self.assertEqual(send_kwargs["chat_id"], 100)
+        self.assertEqual(send_kwargs["text"], "📋 Получаю список загрузок…")
+        callbacks = {
+            button.callback_data
+            for row in send_kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertIn("task:close:", callbacks)
         context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
         self.assertIn("Film", progress_message.edit_text.call_args.args[0])
         self.assertEqual(bot.DOWNLOAD_PANEL_MESSAGES[100], 77)
@@ -10992,21 +11041,47 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
             allowed_updates=TELEGRAM_ALLOWED_UPDATES,
         )
 
+    def test_jackett_view_callback_reaches_conversation_before_sub_callback(self):
+        captured = []
+
+        with patch.object(bot, "_run_polling", side_effect=lambda app: captured.append(app)):
+            bot.main()
+
+        app = captured[0]
+        group_handlers = app.handlers[0]
+        conversation_index = next(
+            index
+            for index, handler in enumerate(group_handlers)
+            if isinstance(handler, ConversationHandler)
+            and any(
+                isinstance(entry, CallbackQueryHandler)
+                and entry.callback is bot.search_jackett_check_entry
+                for entry in handler.entry_points
+            )
+        )
+        sub_index = next(
+            index
+            for index, handler in enumerate(group_handlers)
+            if isinstance(handler, CallbackQueryHandler)
+            and handler.callback is bot.sub_callback
+        )
+
+        self.assertLess(conversation_index, sub_index)
+
     def test_setup_starts_subscription_loop_for_jackett_only_mode(self):
         app = MagicMock()
         app.bot.set_my_commands = AsyncMock()
         created: list[str] = []
 
-        def close_task(coro):
+        def close_task(_app, coro):
             created.append(coro.cr_code.co_name)
             coro.close()
             return MagicMock()
 
-        app.create_task.side_effect = close_task
-
         async def run():
             with (
                 patch.object(bot, "_cleanup_tmp_dir"),
+                patch.object(bot, "_create_background_service_task", side_effect=close_task),
                 patch.object(bot, "_tracker_background_enabled", return_value=False),
                 patch.object(bot, "_task_maintenance_enabled", return_value=False),
                 patch.object(bot, "ADMIN_CHAT_IDS", set()),
@@ -11033,16 +11108,15 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
         app.bot.set_my_commands = AsyncMock()
         created: list[str] = []
 
-        def close_task(coro):
+        def close_task(_app, coro):
             created.append(coro.cr_code.co_name)
             coro.close()
             return MagicMock()
 
-        app.create_task.side_effect = close_task
-
         async def run():
             with (
                 patch.object(bot, "_cleanup_tmp_dir"),
+                patch.object(bot, "_create_background_service_task", side_effect=close_task),
                 patch.object(bot, "_tracker_background_enabled", return_value=True),
                 patch.object(bot, "_task_maintenance_enabled", return_value=True),
                 patch.object(bot, "_subscription_monitor_enabled", return_value=False),
@@ -11055,6 +11129,37 @@ class SubscriptionLoopStartupTests(unittest.TestCase):
         self.assertIn("_tracker_background_loop", created)
         self.assertIn("_task_maintenance_loop", created)
         self.assertIn("_progress_update_loop", created)
+
+    def test_setup_manages_background_tasks_before_application_running(self):
+        async def fake_progress_loop(app):
+            await asyncio.sleep(60)
+
+        async def run():
+            app = MagicMock()
+            app.running = False
+            app.bot.set_my_commands = AsyncMock()
+            app.create_task = MagicMock()
+            with (
+                patch.object(bot, "BACKGROUND_SERVICE_TASKS", set()),
+                patch.object(bot, "_cleanup_tmp_dir"),
+                patch.object(bot, "_tracker_background_enabled", return_value=False),
+                patch.object(bot, "_task_maintenance_enabled", return_value=False),
+                patch.object(bot, "_subscription_monitor_enabled", return_value=False),
+                patch.object(bot, "_movie_discovery_enabled", return_value=False),
+                patch.object(bot, "_youtube_downloads_enabled", return_value=False),
+                patch.object(bot, "_jackett_warmup_enabled", return_value=False),
+                patch.object(bot, "PLEX_ENABLED", False),
+                patch.object(bot, "PLEX_WEBHOOK_ENABLED", False),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "_progress_update_loop", fake_progress_loop),
+            ):
+                await setup_bot_commands(app)
+                app.create_task.assert_not_called()
+                self.assertEqual(len(bot.BACKGROUND_SERVICE_TASKS), 1)
+                await bot.shutdown_background_services(app)
+                self.assertEqual(bot.BACKGROUND_SERVICE_TASKS, set())
+
+        asyncio.run(run())
 
     def test_check_runs_immediately_before_first_sleep(self):
         """_subscription_check_loop must call _check_subscriptions at startup,
