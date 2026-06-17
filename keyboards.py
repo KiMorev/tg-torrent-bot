@@ -153,6 +153,7 @@ def _youtube_preview_keyboard(
 
 def _youtube_close_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
@@ -160,6 +161,7 @@ def _youtube_close_keyboard() -> InlineKeyboardMarkup:
 def _youtube_plex_keyboard(plex_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)],
+        [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 

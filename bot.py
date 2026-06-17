@@ -7940,10 +7940,36 @@ def _youtube_delete_summary_text(summary: dict[str, object], *, title: str | Non
 
 
 def _youtube_job_card_text(job: dict) -> str:
-    text = _youtube_pipeline_card_text(job)
+    text = _youtube_pipeline_card_text(job, queue_position=job.get("queue_position"))
     if job.get("status") == "failed" and job.get("error"):
         text += f"\nОшибка: {job['error']}"
     return text
+
+
+def _youtube_job_sort_key(job: dict) -> str:
+    return str(job.get("created_at") or job.get("updated_at") or "")
+
+
+def _youtube_queue_position(jobs: dict[str, dict], job_id: str) -> tuple[int, int] | None:
+    running = [
+        job for job in jobs.values()
+        if isinstance(job, dict) and job.get("status") in {"fetching_metadata", "downloading", "processing"}
+    ]
+    queued = [
+        job for job in jobs.values()
+        if isinstance(job, dict) and job.get("status") == "queued"
+    ]
+    ordered = [
+        *sorted(running, key=_youtube_job_sort_key),
+        *sorted(queued, key=_youtube_job_sort_key),
+    ]
+    total = len(ordered)
+    if not job_id or not total:
+        return None
+    for index, job in enumerate(ordered, start=1):
+        if str(job.get("id") or "") == str(job_id):
+            return index, total
+    return None
 
 
 def _youtube_has_separate_audio(job: dict) -> bool:
@@ -7990,7 +8016,7 @@ def _youtube_retry_progress(job: dict) -> str:
     return f"Повтор {attempt}/{max_attempts}: {reason}"
 
 
-def _youtube_pipeline_card_text(job: dict) -> str:
+def _youtube_pipeline_card_text(job: dict, *, queue_position: tuple[int, int] | None = None) -> str:
     status = str(job.get("status") or "queued")
     separate_audio = _youtube_has_separate_audio(job)
     media_step = str(job.get("media_step") or "")
@@ -8005,7 +8031,10 @@ def _youtube_pipeline_card_text(job: dict) -> str:
     if job.get("quality"):
         lines.append(f"Качество: {job.get('quality')}")
     lines.append("")
-    lines.append(_youtube_stage_line(status != "queued", status == "queued", "В очереди"))
+    queue_label = "В очереди"
+    if status == "queued" and queue_position:
+        queue_label = f"В очереди: {queue_position[0]} из {queue_position[1]}"
+    lines.append(_youtube_stage_line(status != "queued", status == "queued", queue_label))
     lines.append(_youtube_stage_line(
         status in {"downloading", "processing", "completed"},
         status == "fetching_metadata",
@@ -8060,7 +8089,10 @@ async def _youtube_update_registered_cards(app: "Application") -> None:
             continue
         if job.get("status") in _YOUTUBE_TERMINAL_STATUSES:
             continue
-        text = _youtube_job_card_text(job)
+        text = _youtube_job_card_text({
+            **job,
+            "queue_position": _youtube_queue_position(jobs, str(job.get("id") or job_id)),
+        })
         remaining: set[tuple[int, int]] = set()
         for chat_id, message_id in list(targets):
             try:
@@ -8244,6 +8276,8 @@ async def _youtube_send_completed_message(app: "Application", job: dict) -> None
         "✅ Видео скачано",
         f"Название: {job.get('title') or 'YouTube'}",
     ]
+    if PLEX_ENABLED and YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD and plex_client:
+        lines.append("Жду появления в Plex и пришлю ссылку, когда ролик будет готов.")
     if job.get("quality"):
         lines.append(f"Качество: {job.get('quality')}")
     if job.get("file_size"):
@@ -8640,7 +8674,7 @@ async def _youtube_start_plex_poll_if_needed(app: "Application", job: dict) -> N
         try:
             hint = await app.bot.send_message(
                 chat_id=chat_id,
-                text="🔄 Ищем файл в библиотеке Plex — сообщу, как только появится.",
+                text="🔄 Жду появления ролика в Plex — сообщу, как только будет готов.",
                 reply_markup=_youtube_close_keyboard(),
             )
             hint_msg_id = getattr(hint, "message_id", None)
@@ -8892,7 +8926,15 @@ async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = _chat_id_from_query(query)
     message_id = _message_id_from_message(query.message) if query.message else None
     _youtube_register_job_message(job_id, chat_id, message_id)
-    await _safe_edit_callback(query, _youtube_job_card_text(job), reply_markup=_youtube_close_keyboard())
+    jobs = _youtube_load_jobs()
+    await _safe_edit_callback(
+        query,
+        _youtube_job_card_text({
+            **job,
+            "queue_position": _youtube_queue_position(jobs, job_id),
+        }),
+        reply_markup=_youtube_close_keyboard(),
+    )
 
 
 def _load_notified_tasks() -> dict[str, object]:

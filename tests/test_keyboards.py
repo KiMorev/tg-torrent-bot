@@ -201,6 +201,7 @@ class KeyboardTests(unittest.TestCase):
         }
 
         self.assertEqual(disabled_buttons["✖️ Закрыть"], "task:close:")
+        self.assertEqual(close_buttons["📚 К списку загрузок"], "task:list:default")
         self.assertEqual(close_buttons["✖️ Закрыть"], "task:close:")
 
     def test_youtube_plex_keyboard_has_plex_url_and_close(self) -> None:
@@ -213,6 +214,7 @@ class KeyboardTests(unittest.TestCase):
         }
 
         self.assertEqual(buttons["▶️ Смотреть в Plex"], "https://app.plex.tv/desktop")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
     def test_admin_panel_keyboard_kp_buttons_moved_to_drilldown(self) -> None:

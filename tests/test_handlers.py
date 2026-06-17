@@ -7202,6 +7202,36 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("abcdefghijk", text)
 
+    def test_youtube_job_card_shows_queue_position(self):
+        jobs = {
+            "yt_1": {
+                "id": "yt_1",
+                "status": "downloading",
+                "created_at": "2026-06-16T10:00:00+03:00",
+            },
+            "yt_2": {
+                "id": "yt_2",
+                "status": "queued",
+                "created_at": "2026-06-16T10:01:00+03:00",
+            },
+            "yt_3": {
+                "id": "yt_3",
+                "status": "queued",
+                "created_at": "2026-06-16T10:02:00+03:00",
+            },
+        }
+
+        queue_position = bot._youtube_queue_position(jobs, "yt_2")
+        text = bot._youtube_job_card_text({
+            **jobs["yt_2"],
+            "title": "Test clip",
+            "quality": "720p",
+            "queue_position": queue_position,
+        })
+
+        self.assertEqual(queue_position, (2, 3))
+        self.assertIn("⬇️ В очереди: 2 из 3", text)
+
     def test_youtube_job_card_shows_retry_status(self):
         text = bot._youtube_job_card_text({
             "id": "yt_1",
@@ -7404,6 +7434,56 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             delete_cards.assert_awaited_once()
             app.bot.send_message.assert_awaited_once()
             plex_poll.assert_awaited()
+
+    async def test_youtube_completed_message_mentions_plex_wait_without_path(self):
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD", True),
+            patch.object(bot, "plex_client", MagicMock()),
+        ):
+            await bot._youtube_send_completed_message(
+                app,
+                {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "title": "Test clip",
+                    "quality": "720p",
+                    "file_size": 1234,
+                },
+            )
+
+        text = app.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("✅ Видео скачано", text)
+        self.assertIn("Жду появления в Plex", text)
+        self.assertNotIn("NAS", text)
+
+    async def test_youtube_plex_wait_hint_uses_user_facing_text(self):
+        app = MagicMock()
+        hint = MagicMock()
+        hint.message_id = 77
+        app.bot.send_message = AsyncMock(return_value=hint)
+        future = asyncio.Future()
+        app.create_task = MagicMock(return_value=future)
+
+        try:
+            with (
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD", True),
+                patch.object(bot, "plex_client", MagicMock()),
+                patch.object(bot, "_youtube_plex_poll_after_finish", MagicMock(return_value=future)),
+            ):
+                await bot._youtube_start_plex_poll_if_needed(
+                    app,
+                    {"id": "yt_1", "chat_id": 100, "title": "Test clip"},
+                )
+        finally:
+            bot.YOUTUBE_PLEX_POLLING_TASKS.clear()
+
+        text = app.bot.send_message.await_args.kwargs["text"]
+        self.assertEqual(text, "🔄 Жду появления ролика в Plex — сообщу, как только будет готов.")
 
     async def test_youtube_worker_records_download_failure(self):
         app = MagicMock()
