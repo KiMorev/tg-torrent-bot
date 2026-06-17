@@ -1,13 +1,14 @@
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from youtube_downloads import (
     _apply_audio_language,
     _apply_mp4_metadata,
     _cleanup_failed_download,
     _download_with_retries,
+    _extract_channel_avatar_from_page,
     YouTubeDownloadError,
     YouTubePathPlan,
     YouTubeUnsupportedError,
@@ -18,6 +19,8 @@ from youtube_downloads import (
     extract_youtube_video_id,
     find_youtube_url,
     select_format,
+    write_channel_poster,
+    write_sidecars,
 )
 
 
@@ -357,3 +360,110 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
             self.assertEqual(plan.video_path.read_bytes(), b"ready")
             self.assertTrue(plan.poster_path.exists())
             self.assertFalse((item_dir / "Clip.mp4.part").exists())
+
+    def test_write_channel_poster_uses_direct_channel_thumbnail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+
+            response = MagicMock()
+            response.content = b"jpeg"
+            response.headers = {"content-type": "image/jpeg"}
+            response.raise_for_status.return_value = None
+
+            with patch("youtube_downloads.requests.get", return_value=response) as get:
+                poster = write_channel_poster(
+                    {
+                        "channel": "Channel",
+                        "channel_thumbnail": "https://img.example/avatar.jpg",
+                    },
+                    plan,
+                )
+
+            self.assertEqual(poster, item_dir.parent / "channel-poster.jpg")
+            self.assertEqual(poster.read_bytes(), b"jpeg")
+            get.assert_called_once_with("https://img.example/avatar.jpg", timeout=20)
+
+    def test_write_channel_poster_generates_fallback_png_when_avatar_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+
+            poster = write_channel_poster({"channel": "AcademeG"}, plan)
+
+            self.assertEqual(poster, item_dir.parent / "channel-poster.png")
+            self.assertTrue(poster.exists())
+            self.assertEqual(poster.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_extract_channel_avatar_from_page_reads_og_image(self) -> None:
+        response = MagicMock()
+        response.text = '<meta content="https://yt3.example/avatar.jpg?x=1&amp;y=2" property="og:image">'
+        response.raise_for_status.return_value = None
+
+        with patch("youtube_downloads.requests.get", return_value=response) as get:
+            avatar = _extract_channel_avatar_from_page("https://www.youtube.com/@channel")
+
+        self.assertEqual(avatar, "https://yt3.example/avatar.jpg?x=1&y=2")
+        get.assert_called_once_with(
+            "https://www.youtube.com/@channel",
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+
+    def test_write_sidecars_returns_channel_poster_and_keeps_video_poster(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+            choice = select_format({
+                "formats": [{
+                    "format_id": "22",
+                    "ext": "mp4",
+                    "height": 720,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "mp4a.40.2",
+                }]
+            }, 720)
+
+            response = MagicMock()
+            response.content = b"jpeg"
+            response.headers = {"content-type": "image/jpeg"}
+            response.raise_for_status.return_value = None
+
+            with patch("youtube_downloads.requests.get", return_value=response):
+                channel_poster = write_sidecars(
+                    {
+                        "id": "abcdefghijk",
+                        "title": "Clip",
+                        "channel": "Channel",
+                        "thumbnail": "https://img.example/video.jpg",
+                        "channel_thumbnail": "https://img.example/avatar.jpg",
+                    },
+                    choice,
+                    "https://www.youtube.com/watch?v=abcdefghijk",
+                    plan,
+                )
+
+            self.assertEqual(plan.poster_path.read_bytes(), b"jpeg")
+            self.assertEqual(channel_poster, item_dir.parent / "channel-poster.jpg")
+            self.assertEqual(channel_poster.read_bytes(), b"jpeg")

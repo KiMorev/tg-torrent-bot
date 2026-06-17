@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -457,10 +460,13 @@ def safe_info_json(info: dict[str, Any], choice: YouTubeFormatChoice, canonical_
         "id": info.get("id"),
         "title": info.get("title"),
         "channel": info.get("channel") or info.get("uploader"),
+        "channel_id": info.get("channel_id") or info.get("uploader_id"),
+        "channel_url": info.get("channel_url") or info.get("uploader_url"),
         "duration": info.get("duration"),
         "upload_date": info.get("upload_date"),
         "webpage_url": canonical_url,
         "thumbnail": info.get("thumbnail"),
+        "channel_thumbnail": _direct_channel_thumbnail(info),
         "selected_quality": choice.label,
         "selected_format_id": choice.format_id,
     }
@@ -470,15 +476,14 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _download_thumbnail_as_jpeg(url: str, poster_path: Path, fanart_path: Path) -> None:
+def _download_image_as_jpeg(url: str, target_path: Path) -> None:
     if not url:
         return
     response = requests.get(url, timeout=20)
     response.raise_for_status()
     content_type = (response.headers.get("content-type") or "").lower()
     if "jpeg" in content_type or "jpg" in content_type:
-        poster_path.write_bytes(response.content)
-        fanart_path.write_bytes(response.content)
+        target_path.write_bytes(response.content)
         return
 
     ffmpeg = shutil.which("ffmpeg")
@@ -488,22 +493,302 @@ def _download_thumbnail_as_jpeg(url: str, poster_path: Path, fanart_path: Path) 
         raw_path = Path(tmp_dir) / "thumb"
         raw_path.write_bytes(response.content)
         subprocess.run(
-            [ffmpeg, "-y", "-i", str(raw_path), str(poster_path)],
+            [ffmpeg, "-y", "-i", str(raw_path), str(target_path)],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+
+def _download_thumbnail_as_jpeg(url: str, poster_path: Path, fanart_path: Path) -> None:
+    _download_image_as_jpeg(url, poster_path)
     if poster_path.exists():
         fanart_path.write_bytes(poster_path.read_bytes())
 
 
-def write_sidecars(info: dict[str, Any], choice: YouTubeFormatChoice, canonical_url: str, plan: YouTubePathPlan) -> None:
+_CYRILLIC_TO_LATIN = str.maketrans({
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E", "Ё": "E",
+    "Ж": "ZH", "З": "Z", "И": "I", "Й": "Y", "К": "K", "Л": "L", "М": "M",
+    "Н": "N", "О": "O", "П": "P", "Р": "R", "С": "S", "Т": "T", "У": "U",
+    "Ф": "F", "Х": "H", "Ц": "TS", "Ч": "CH", "Ш": "SH", "Щ": "SCH",
+    "Ъ": "", "Ы": "Y", "Ь": "", "Э": "E", "Ю": "YU", "Я": "YA",
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+})
+
+_FONT_5X7 = {
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    "C": ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    "G": ("01111", "10000", "10000", "10011", "10001", "10001", "01111"),
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "I": ("11111", "00100", "00100", "00100", "00100", "00100", "11111"),
+    "J": ("00111", "00010", "00010", "00010", "10010", "10010", "01100"),
+    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    "W": ("10001", "10001", "10001", "10101", "10101", "10101", "01010"),
+    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+    "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+    "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    "5": ("11111", "10000", "10000", "11110", "00001", "00001", "11110"),
+    "6": ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
+    " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
+    "-": ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
+    ".": ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
+    "&": ("01100", "10010", "10100", "01000", "10101", "10010", "01101"),
+}
+
+
+def _direct_channel_thumbnail(info: dict[str, Any]) -> str:
+    for key in ("channel_thumbnail", "uploader_thumbnail", "channel_avatar", "uploader_avatar", "avatar"):
+        value = str(info.get(key) or "").strip()
+        if value.startswith("http"):
+            return value
+    return ""
+
+
+def _channel_page_url(info: dict[str, Any]) -> str:
+    for key in ("channel_url", "uploader_url"):
+        value = str(info.get(key) or "").strip()
+        if value.startswith("http"):
+            return value
+    channel_id = str(info.get("channel_id") or info.get("uploader_id") or "").strip()
+    if channel_id:
+        return f"https://www.youtube.com/channel/{channel_id}"
+    return ""
+
+
+def _decode_jsonish_url(raw: str) -> str:
+    try:
+        return json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        return raw.replace("\\u0026", "&").replace("\\/", "/")
+
+
+def _extract_channel_avatar_from_page(channel_url: str) -> str:
+    if not channel_url:
+        return ""
+    response = requests.get(
+        channel_url,
+        timeout=20,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    response.raise_for_status()
+    html = response.text
+    for meta_tag in re.findall(r"<meta\b[^>]*>", html, flags=re.IGNORECASE):
+        if not re.search(r'(?:property|name)=["\'](?:og:image|twitter:image)["\']', meta_tag, flags=re.IGNORECASE):
+            continue
+        content_match = re.search(r'content=["\']([^"\']+)["\']', meta_tag, flags=re.IGNORECASE)
+        if content_match:
+            return content_match.group(1).replace("&amp;", "&")
+
+    for avatar_block in re.findall(r'"avatar"\s*:\s*\{\s*"thumbnails"\s*:\s*\[(.*?)\]', html):
+        urls = re.findall(r'"url"\s*:\s*"([^"]+)"', avatar_block)
+        if urls:
+            return _decode_jsonish_url(urls[-1])
+    return ""
+
+
+def _channel_poster_paths(channel_dir: Path) -> tuple[Path, Path]:
+    return channel_dir / "channel-poster.jpg", channel_dir / "channel-poster.png"
+
+
+def _transliterated_ascii(value: str) -> str:
+    value = value.translate(_CYRILLIC_TO_LATIN)
+    cleaned = []
+    for char in value.upper():
+        cleaned.append(char if char in _FONT_5X7 else " ")
+    text = re.sub(r"\s+", " ", "".join(cleaned)).strip()
+    return text or "YOUTUBE"
+
+
+def _wrap_poster_text(text: str, max_chars: int, max_lines: int = 4) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        while len(word) > max_chars:
+            lines.append(word[:max_chars])
+            word = word[max_chars:]
+        current = word
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    return lines[:max_lines] or ["YOUTUBE"]
+
+
+def _blend(a: tuple[int, int, int], b: tuple[int, int, int], ratio: float) -> tuple[int, int, int]:
+    return tuple(int(a[i] + (b[i] - a[i]) * ratio) for i in range(3))
+
+
+def _draw_rect(pixels: bytearray, width: int, height: int, x: int, y: int, w: int, h: int, color: tuple[int, int, int]) -> None:
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(width, x + w)
+    y1 = min(height, y + h)
+    if x0 >= x1 or y0 >= y1:
+        return
+    row = bytes(color) * (x1 - x0)
+    for yy in range(y0, y1):
+        start = (yy * width + x0) * 3
+        pixels[start:start + len(row)] = row
+
+
+def _draw_text(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    text: str,
+    x: int,
+    y: int,
+    scale: int,
+    color: tuple[int, int, int],
+) -> int:
+    cursor = x
+    for char in text:
+        glyph = _FONT_5X7.get(char, _FONT_5X7[" "])
+        for row_index, row in enumerate(glyph):
+            for col_index, bit in enumerate(row):
+                if bit == "1":
+                    _draw_rect(
+                        pixels,
+                        width,
+                        height,
+                        cursor + col_index * scale,
+                        y + row_index * scale,
+                        scale,
+                        scale,
+                        color,
+                    )
+        cursor += 6 * scale
+    return cursor - x
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _write_png(path: Path, width: int, height: int, pixels: bytearray) -> None:
+    rows = []
+    stride = width * 3
+    for y in range(height):
+        rows.append(b"\x00" + bytes(pixels[y * stride:(y + 1) * stride]))
+    raw = b"".join(rows)
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(raw, 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _write_fallback_channel_poster(channel: str, output_path: Path) -> None:
+    width, height = 1000, 1500
+    digest = hashlib.sha256(channel.encode("utf-8", errors="ignore")).digest()
+    base = (35 + digest[0] % 80, 35 + digest[1] % 80, 45 + digest[2] % 80)
+    accent = (120 + digest[3] % 100, 120 + digest[4] % 100, 120 + digest[5] % 100)
+    dark = (12, 16, 22)
+    pixels = bytearray(width * height * 3)
+    for y in range(height):
+        ratio = y / max(1, height - 1)
+        color = _blend(base, dark, ratio * 0.8)
+        row = bytes(color) * width
+        start = y * width * 3
+        pixels[start:start + len(row)] = row
+    _draw_rect(pixels, width, height, 0, 0, width, 18, accent)
+    _draw_rect(pixels, width, height, 0, height - 18, width, 18, accent)
+
+    text = _transliterated_ascii(channel)
+    scale = 18
+    lines = _wrap_poster_text(text, max_chars=8, max_lines=4)
+    if max(len(line) for line in lines) > 8:
+        scale = 14
+        lines = _wrap_poster_text(text, max_chars=11, max_lines=4)
+    line_height = 9 * scale
+    block_height = len(lines) * line_height
+    y = height // 2 - block_height // 2
+    for line in lines:
+        text_width = len(line) * 6 * scale - scale
+        _draw_text(pixels, width, height, line, (width - text_width) // 2, y, scale, (245, 248, 250))
+        y += line_height
+
+    label = "YOUTUBE"
+    small_scale = 8
+    label_width = len(label) * 6 * small_scale - small_scale
+    _draw_text(pixels, width, height, label, (width - label_width) // 2, height - 170, small_scale, (210, 220, 230))
+    _write_png(output_path, width, height, pixels)
+
+
+def write_channel_poster(info: dict[str, Any], plan: YouTubePathPlan) -> Path | None:
+    channel = str(info.get("channel") or info.get("uploader") or "YouTube").strip() or "YouTube"
+    jpg_path, png_path = _channel_poster_paths(plan.item_dir.parent)
+    if jpg_path.exists():
+        return jpg_path
+    if png_path.exists():
+        return png_path
+
+    avatar_url = _direct_channel_thumbnail(info)
+    if not avatar_url:
+        try:
+            avatar_url = _extract_channel_avatar_from_page(_channel_page_url(info))
+        except Exception:
+            avatar_url = ""
+    if avatar_url:
+        try:
+            _download_image_as_jpeg(avatar_url, jpg_path)
+            if jpg_path.exists():
+                return jpg_path
+        except Exception:
+            pass
+
+    try:
+        _write_fallback_channel_poster(channel, png_path)
+        return png_path if png_path.exists() else None
+    except Exception:
+        return None
+
+
+def write_sidecars(info: dict[str, Any], choice: YouTubeFormatChoice, canonical_url: str, plan: YouTubePathPlan) -> Path | None:
     _write_json(plan.info_path, safe_info_json(info, choice, canonical_url))
     try:
         _download_thumbnail_as_jpeg(str(info.get("thumbnail") or ""), plan.poster_path, plan.fanart_path)
     except Exception:
         # Artwork is nice-to-have; the downloaded video is the MVP result.
         pass
+    return write_channel_poster(info, plan)
+
 
 
 def _find_final_video(plan: YouTubePathPlan) -> Path:
@@ -667,11 +952,13 @@ def download_video(
         canonical_url=canonical_url,
         audio_language=audio_language,
     )
-    write_sidecars(info, choice, canonical_url, plan)
+    channel_poster_path = write_sidecars(info, choice, canonical_url, plan)
     return {
         "video_id": info.get("id"),
         "title": info.get("title"),
         "channel": info.get("channel") or info.get("uploader"),
+        "channel_id": info.get("channel_id") or info.get("uploader_id"),
+        "channel_url": info.get("channel_url") or info.get("uploader_url"),
         "duration_seconds": info.get("duration"),
         "quality": choice.label,
         "format_id": choice.format_id,
@@ -679,5 +966,6 @@ def download_video(
         "file_path": str(final_path),
         "file_size": final_path.stat().st_size,
         "item_dir": str(plan.item_dir),
+        "channel_poster_path": str(channel_poster_path) if channel_poster_path else "",
         "audio_language": applied_audio_language,
     }

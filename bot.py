@@ -7233,11 +7233,14 @@ def _youtube_history_fields(job: dict) -> dict:
         "canonical_url": job.get("canonical_url") or job.get("url"),
         "title": job.get("title"),
         "channel": job.get("channel"),
+        "channel_id": job.get("channel_id"),
+        "channel_url": job.get("channel_url"),
         "duration_seconds": job.get("duration_seconds"),
         "quality": job.get("quality"),
         "format_id": job.get("format_id"),
         "file_path": job.get("file_path"),
         "file_size": job.get("file_size"),
+        "channel_poster_path": job.get("channel_poster_path"),
     }
     return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {})}
 
@@ -7723,7 +7726,12 @@ async def _youtube_set_collection_poster(section_id: str, job: dict) -> bool:
     if not item_dir_value:
         return False
     item_dir = Path(item_dir_value)
-    poster_path = item_dir / "poster.jpg"
+    poster_path_value = str(job.get("channel_poster_path") or "").strip()
+    poster_path = Path(poster_path_value) if poster_path_value else item_dir.parent / "channel-poster.jpg"
+    if not poster_path.exists() and poster_path.suffix.lower() == ".jpg":
+        poster_path = poster_path.with_suffix(".png")
+    if not poster_path.exists():
+        poster_path = item_dir / "poster.jpg"
     if not poster_path.exists():
         return False
     try:
@@ -7907,7 +7915,10 @@ async def _youtube_worker_once(app: "Application") -> None:
             quality=result.get("quality") or job.get("quality"),
             title=result.get("title") or job.get("title"),
             channel=result.get("channel") or job.get("channel"),
+            channel_id=result.get("channel_id") or job.get("channel_id"),
+            channel_url=result.get("channel_url") or job.get("channel_url"),
             duration_seconds=result.get("duration_seconds") or job.get("duration_seconds"),
+            channel_poster_path=result.get("channel_poster_path") or job.get("channel_poster_path"),
         ) or job
         _youtube_record_history("youtube_download_completed", job)
         await _youtube_delete_job_cards(app, job_id)

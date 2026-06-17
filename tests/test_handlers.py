@@ -7085,7 +7085,9 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_youtube_set_collection_poster_uploads_channel_poster(self):
         with tempfile.TemporaryDirectory() as tmp:
-            poster_path = Path(tmp) / "poster.jpg"
+            item_dir = Path(tmp) / "Clip"
+            item_dir.mkdir()
+            poster_path = Path(tmp) / "channel-poster.png"
             poster_path.write_bytes(b"poster")
             plex = MagicMock()
             plex.find_section_collection.return_value = MagicMock(rating_key="collection-1")
@@ -7098,7 +7100,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "id": "yt_1",
                         "channel": "AcademeG",
-                        "item_dir": tmp,
+                        "item_dir": str(item_dir),
+                        "channel_poster_path": str(poster_path),
                     },
                 )
 
@@ -7109,7 +7112,9 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_youtube_set_collection_poster_fails_when_lock_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
-            poster_path = Path(tmp) / "poster.jpg"
+            item_dir = Path(tmp) / "Clip"
+            item_dir.mkdir()
+            poster_path = Path(tmp) / "channel-poster.png"
             poster_path.write_bytes(b"poster")
             plex = MagicMock()
             plex.find_section_collection.return_value = MagicMock(rating_key="collection-1")
@@ -7122,7 +7127,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "id": "yt_1",
                         "channel": "AcademeG",
-                        "item_dir": tmp,
+                        "item_dir": str(item_dir),
+                        "channel_poster_path": str(poster_path),
                     },
                 )
 
