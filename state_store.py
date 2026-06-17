@@ -5,7 +5,7 @@ import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 logger = logging.getLogger("tg_torrent_drop")
@@ -538,6 +538,25 @@ class JsonStateStore:
             if isinstance(jobs[job_id], dict) and job_id
         }
         self.save_json_file(self.youtube_downloads_file, ordered, "YouTube downloads")
+
+    def update_youtube_downloads(self, mutator: Callable[[dict[str, dict]], Any]) -> Any:
+        if not self.youtube_downloads_file:
+            return mutator({})
+        with self.lock:
+            payload = self.load_json_file(self.youtube_downloads_file, {})
+            jobs: dict[str, dict] = {}
+            if isinstance(payload, dict):
+                for job_id, job in payload.items():
+                    if isinstance(job, dict) and job_id:
+                        jobs[str(job_id)] = job
+            result = mutator(jobs)
+            ordered = {
+                str(job_id): jobs[job_id]
+                for job_id in sorted(jobs.keys())
+                if isinstance(jobs[job_id], dict) and job_id
+            }
+            self.save_json_file(self.youtube_downloads_file, ordered, "YouTube downloads")
+            return result
 
     def load_youtube_plex_refresh_pending(self) -> dict:
         if not self.youtube_plex_refresh_file:

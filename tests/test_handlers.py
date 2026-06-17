@@ -6983,6 +6983,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 "title": "Test clip",
                 "channel": "Channel",
                 "duration_seconds": 120,
+                "chat_id": 100,
+                "created_ts": bot.time.time(),
                 "qualities": [
                     {
                         "height": 720,
@@ -7027,6 +7029,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
                 "title": "Test clip",
                 "channel": "Channel",
                 "duration_seconds": 120,
+                "chat_id": 100,
+                "created_ts": bot.time.time(),
                 "qualities": [
                     {
                         "height": 720,
@@ -7051,6 +7055,106 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 bot.YOUTUBE_PREVIEWS.pop("tok123", None)
                 bot.YOUTUBE_JOB_MESSAGES.clear()
+
+    async def test_youtube_callback_rejects_preview_from_another_chat(self):
+        update = _make_callback_update(chat_id=100, callback_data="yt:dl:tok123:720")
+        context = _make_context()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            bot.YOUTUBE_PREVIEWS["tok123"] = {
+                "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "video_id": "abcdefghijk",
+                "title": "Test clip",
+                "channel": "Channel",
+                "duration_seconds": 120,
+                "chat_id": 200,
+                "created_ts": bot.time.time(),
+                "qualities": [
+                    {
+                        "height": 720,
+                        "label": "720p",
+                        "format_id": "22",
+                        "filesize": 1000,
+                    }
+                ],
+            }
+            try:
+                with (
+                    patch.object(bot, "ALLOWED_CHAT_IDS", {100, 200}),
+                    patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                    patch.object(bot, "state_store", store),
+                    patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                ):
+                    await bot.youtube_callback(update, context)
+
+                self.assertEqual(store.load_youtube_downloads(), {})
+                text = update.callback_query.edit_message_text.await_args.args[0]
+                self.assertIn("YouTube", text)
+            finally:
+                bot.YOUTUBE_PREVIEWS.pop("tok123", None)
+                bot.YOUTUBE_JOB_MESSAGES.clear()
+
+    def test_youtube_cleanup_previews_removes_expired_and_caps_size(self):
+        original = dict(bot.YOUTUBE_PREVIEWS)
+        try:
+            bot.YOUTUBE_PREVIEWS.clear()
+            bot.YOUTUBE_PREVIEWS["old"] = {"created_ts": 1}
+            for index in range(55):
+                bot.YOUTUBE_PREVIEWS[f"new_{index}"] = {"created_ts": 1000 + index}
+
+            bot._youtube_cleanup_previews(now_ts=1000 + bot.YOUTUBE_PREVIEW_TTL_SECONDS + 1)
+
+            self.assertNotIn("old", bot.YOUTUBE_PREVIEWS)
+            self.assertLessEqual(len(bot.YOUTUBE_PREVIEWS), bot.YOUTUBE_PREVIEW_MAX_ITEMS)
+            self.assertIn("new_54", bot.YOUTUBE_PREVIEWS)
+        finally:
+            bot.YOUTUBE_PREVIEWS.clear()
+            bot.YOUTUBE_PREVIEWS.update(original)
+
+    async def test_youtube_find_in_plex_prefers_path_with_video_id(self):
+        wanted = MagicMock()
+        wanted.title = "Clip"
+        wanted.file_paths = ["/volume1/youtube/Channel/Clip [abcdefghijk]/Clip.mp4"]
+        other = MagicMock()
+        other.title = "Clip"
+        other.file_paths = ["/volume1/youtube/Other/Clip [zzzzzzzzzzz]/Clip.mp4"]
+        plex = MagicMock()
+        plex.get_section_videos.return_value = [other, wanted]
+
+        with patch.object(bot, "plex_client", plex):
+            found = await bot._youtube_find_in_plex(
+                "9",
+                {
+                    "video_id": "abcdefghijk",
+                    "file_path": "/youtube_storage/Channel/Clip [abcdefghijk]/Clip.mp4",
+                    "item_dir": "/youtube_storage/Channel/Clip [abcdefghijk]",
+                },
+            )
+
+        self.assertIs(found, wanted)
+
+    async def test_youtube_find_in_plex_does_not_pick_ambiguous_basename(self):
+        first = MagicMock()
+        first.title = "Clip"
+        first.file_paths = ["/volume1/youtube/A/Clip.mp4"]
+        second = MagicMock()
+        second.title = "Clip"
+        second.file_paths = ["/volume1/youtube/B/Clip.mp4"]
+        plex = MagicMock()
+        plex.get_section_videos.return_value = [first, second]
+
+        with patch.object(bot, "plex_client", plex):
+            found = await bot._youtube_find_in_plex(
+                "9",
+                {
+                    "video_id": "",
+                    "file_path": "/youtube_storage/Channel/Clip.mp4",
+                    "item_dir": "/youtube_storage/Channel/Clip",
+                },
+            )
+
+        self.assertIsNone(found)
 
     def test_youtube_job_card_shows_separate_audio_checklist(self):
         text = bot._youtube_job_card_text({

@@ -54,6 +54,16 @@ TRANSIENT_DOWNLOAD_ERROR_MARKERS = (
     "server returned 503",
     "server returned 504",
 )
+TECHNICAL_ERROR_MARKERS = (
+    "googlevideo.com",
+    "httpsconnection",
+    "httpconnection",
+    "traceback",
+    "signature",
+    "403 forbidden",
+    "http error 403",
+    "urlopen error",
+)
 
 
 class YouTubeDownloadError(Exception):
@@ -87,6 +97,23 @@ def _friendly_download_error(exc: Exception) -> str:
     return f"Не удалось скачать видео: {reason}. Повторите позже."
 
 
+def sanitize_youtube_error(exc: Exception, *, action: str = "скачать видео") -> str:
+    text = str(exc or "").strip()
+    lower = text.lower()
+    if _is_transient_download_error(exc):
+        reason = _download_retry_reason(exc)
+        return f"Не удалось {action}: {reason}. Повторите позже."
+    if "private video" in lower or "sign in" in lower or "login" in lower:
+        return f"Не удалось {action}: YouTube требует вход или ограничил доступ к ролику."
+    if "not available" in lower or "unavailable" in lower:
+        return f"Не удалось {action}: ролик недоступен для скачивания."
+    if any(marker in lower for marker in TECHNICAL_ERROR_MARKERS):
+        return f"Не удалось {action}: YouTube не отдал файл в поддерживаемом виде. Попробуйте позже."
+    if text and len(text) <= 180 and "\n" not in text:
+        return f"Не удалось {action}: {text}"
+    return f"Не удалось {action}: неизвестная ошибка YouTube."
+
+
 def _download_with_retries(
     run_download: Callable[[], None],
     *,
@@ -100,7 +127,7 @@ def _download_with_retries(
             return
         except Exception as exc:
             if not _is_transient_download_error(exc):
-                raise YouTubeDownloadError(f"Не удалось скачать видео: {exc}") from exc
+                raise YouTubeDownloadError(sanitize_youtube_error(exc, action="скачать видео")) from exc
             if attempt >= max_attempts:
                 raise YouTubeDownloadError(_friendly_download_error(exc)) from exc
             if progress_hook:
@@ -410,7 +437,7 @@ def extract_metadata(url: str) -> dict[str, Any]:
     except YouTubeDownloadError:
         raise
     except Exception as exc:
-        raise YouTubeDownloadError(f"Не удалось получить данные YouTube: {exc}") from exc
+        raise YouTubeDownloadError(sanitize_youtube_error(exc, action="получить данные YouTube")) from exc
 
     if not isinstance(info, dict):
         raise YouTubeDownloadError("YouTube вернул неожиданный ответ.")
@@ -449,7 +476,10 @@ def build_path_plan(info: dict[str, Any], output_root: Path) -> YouTubePathPlan:
 
     title = _safe_component(info.get("title"), video_id)
     channel = _safe_component(info.get("channel") or info.get("uploader"), "YouTube")
-    item_dir = Path(output_root) / channel / title
+    suffix = f" [{video_id}]"
+    max_title_len = max(1, MAX_FILENAME_CHARS - len(suffix))
+    folder_title = title[:max_title_len].rstrip(" .") or video_id
+    item_dir = Path(output_root) / channel / f"{folder_title}{suffix}"
     video_path = item_dir / f"{title}.mp4"
     return YouTubePathPlan(
         item_dir=item_dir,
@@ -1033,6 +1063,7 @@ def download_video(
 ) -> dict[str, Any]:
     if not shutil.which("ffmpeg"):
         raise YouTubeToolMissingError("ffmpeg не установлен в контейнере.")
+    _normalize_audio_language(audio_language)
     info = extract_metadata(url)
     video_id = str(info.get("id") or extract_youtube_video_id(url) or "")
     if not VIDEO_ID_RE.match(video_id):
@@ -1085,13 +1116,24 @@ def download_video(
         final_path.replace(plan.video_path)
         final_path = plan.video_path
 
-    applied_audio_language = _apply_mp4_metadata(
-        final_path,
-        info=info,
-        canonical_url=canonical_url,
-        audio_language=audio_language,
-    )
-    channel_poster_path = write_sidecars(info, choice, canonical_url, plan)
+    postprocess_warnings: list[str] = []
+    applied_audio_language = None
+    try:
+        applied_audio_language = _apply_mp4_metadata(
+            final_path,
+            info=info,
+            canonical_url=canonical_url,
+            audio_language=audio_language,
+        )
+    except YouTubeDownloadError as exc:
+        postprocess_warnings.append(str(exc))
+    except Exception:
+        postprocess_warnings.append("Не удалось проставить MP4 metadata через ffmpeg.")
+    channel_poster_path = None
+    try:
+        channel_poster_path = write_sidecars(info, choice, canonical_url, plan)
+    except Exception:
+        postprocess_warnings.append("Не удалось записать metadata/обложку для Plex.")
     return {
         "video_id": info.get("id"),
         "title": info.get("title"),
@@ -1107,4 +1149,5 @@ def download_video(
         "item_dir": str(plan.item_dir),
         "channel_poster_path": str(channel_poster_path) if channel_poster_path else "",
         "audio_language": applied_audio_language,
+        "postprocess_warning": "; ".join(postprocess_warnings),
     }

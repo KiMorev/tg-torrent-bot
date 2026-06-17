@@ -304,6 +304,7 @@ from youtube_downloads import (
     extract_metadata as _youtube_extract_metadata,
     extract_youtube_video_id,
     find_youtube_url,
+    sanitize_youtube_error as _youtube_sanitize_error,
 )
 
 
@@ -477,6 +478,8 @@ TASK_CARD_MESSAGES: dict[str, set[tuple[int, int]]] = {}
 YOUTUBE_PREVIEWS: dict[str, dict] = {}
 YOUTUBE_JOB_MESSAGES: dict[str, set[tuple[int, int]]] = {}
 YOUTUBE_PLEX_POLLING_TASKS: dict[str, "asyncio.Task[None] | None"] = {}
+YOUTUBE_PREVIEW_TTL_SECONDS = 600
+YOUTUBE_PREVIEW_MAX_ITEMS = 50
 YOUTUBE_PROGRESS_SAVE_INTERVAL_SECONDS = 1.0
 YOUTUBE_STATUS_CARD_INTERVAL_SECONDS = 2.0
 YOUTUBE_WORKER_INTERVAL_SECONDS = 2.0
@@ -7510,6 +7513,33 @@ def _youtube_duration_text(seconds: object) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def _youtube_preview_created_ts(preview: dict) -> float:
+    try:
+        return float(preview.get("created_ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _youtube_cleanup_previews(now_ts: float | None = None) -> None:
+    now_ts = time.time() if now_ts is None else now_ts
+    expired = [
+        token
+        for token, preview in YOUTUBE_PREVIEWS.items()
+        if not isinstance(preview, dict)
+        or now_ts - _youtube_preview_created_ts(preview) > YOUTUBE_PREVIEW_TTL_SECONDS
+    ]
+    for token in expired:
+        YOUTUBE_PREVIEWS.pop(token, None)
+    if len(YOUTUBE_PREVIEWS) <= YOUTUBE_PREVIEW_MAX_ITEMS:
+        return
+    ordered = sorted(
+        YOUTUBE_PREVIEWS.items(),
+        key=lambda item: _youtube_preview_created_ts(item[1]) if isinstance(item[1], dict) else 0.0,
+    )
+    for token, _preview in ordered[:len(YOUTUBE_PREVIEWS) - YOUTUBE_PREVIEW_MAX_ITEMS]:
+        YOUTUBE_PREVIEWS.pop(token, None)
+
+
 def _youtube_load_jobs() -> dict[str, dict]:
     load = getattr(state_store, "load_youtube_downloads", None)
     if not callable(load):
@@ -7523,16 +7553,27 @@ def _youtube_save_jobs(jobs: dict[str, dict]) -> None:
         save(jobs)
 
 
-def _youtube_update_job(job_id: str, **fields) -> dict | None:
+def _youtube_mutate_jobs(mutator):
+    update = getattr(type(state_store), "update_youtube_downloads", None)
+    if callable(update):
+        return state_store.update_youtube_downloads(mutator)
     jobs = _youtube_load_jobs()
-    job = jobs.get(str(job_id))
-    if not isinstance(job, dict):
-        return None
-    job.update({key: value for key, value in fields.items() if value is not None})
-    job["updated_at"] = _youtube_now()
-    jobs[str(job_id)] = job
+    result = mutator(jobs)
     _youtube_save_jobs(jobs)
-    return job
+    return result
+
+
+def _youtube_update_job(job_id: str, **fields) -> dict | None:
+    def _mutate(jobs: dict[str, dict]) -> dict | None:
+        job = jobs.get(str(job_id))
+        if not isinstance(job, dict):
+            return None
+        job.update({key: value for key, value in fields.items() if value is not None})
+        job["updated_at"] = _youtube_now()
+        jobs[str(job_id)] = job
+        return dict(job)
+
+    return _youtube_mutate_jobs(_mutate)
 
 
 def _youtube_history_fields(job: dict) -> dict:
@@ -7551,6 +7592,7 @@ def _youtube_history_fields(job: dict) -> dict:
         "file_path": job.get("file_path"),
         "file_size": job.get("file_size"),
         "channel_poster_path": job.get("channel_poster_path"),
+        "postprocess_warning": job.get("postprocess_warning"),
     }
     return {k: _history_jsonable(v) for k, v in fields.items() if v not in (None, "", [], {})}
 
@@ -7777,14 +7819,7 @@ def _youtube_delete_job_files(job: dict) -> dict[str, object]:
 
 
 def _youtube_delete_job(task_id: str) -> dict[str, object]:
-    jobs = _youtube_load_jobs()
-    job_id = ""
-    job: dict | None = None
-    for current_id, current in jobs.items():
-        if isinstance(current, dict) and _youtube_job_task_id(str(current_id), current) == str(task_id):
-            job_id = str(current_id)
-            job = current
-            break
+    job_id, job = _youtube_find_job(task_id)
     if not job_id or job is None:
         return {"found": False, "deleted_jobs": 0, "files_deleted": 0, "already_missing": 0, "unsafe": 0}
     if not _youtube_job_is_deletable(job):
@@ -7806,8 +7841,19 @@ def _youtube_delete_job(task_id: str) -> dict[str, object]:
             "title": job.get("title") or "YouTube",
         }
 
-    jobs.pop(job_id, None)
-    _youtube_save_jobs(jobs)
+    def _mutate(jobs: dict[str, dict]) -> bool:
+        current = jobs.get(job_id)
+        if not isinstance(current, dict):
+            return False
+        if _youtube_job_task_id(job_id, current) != str(task_id):
+            return False
+        if not _youtube_job_is_deletable(current):
+            return False
+        jobs.pop(job_id, None)
+        return True
+
+    if not _youtube_mutate_jobs(_mutate):
+        return {"found": False, "deleted_jobs": 0, "files_deleted": 0, "already_missing": 0, "unsafe": 0}
     YOUTUBE_JOB_MESSAGES.pop(job_id, None)
     _youtube_record_history(
         "youtube_deleted",
@@ -8088,7 +8134,7 @@ def _youtube_failure_message(exc: Exception) -> str:
         return f"YouTube-download включён, но контейнер не готов: {text}"
     if isinstance(exc, (YouTubeUnsupportedError, YouTubeDownloadError)):
         return text
-    return f"Не удалось обработать YouTube-ссылку: {text}"
+    return _youtube_sanitize_error(exc, action="обработать YouTube-ссылку")
 
 
 def _youtube_check_download_dir() -> None:
@@ -8202,6 +8248,8 @@ async def _youtube_send_completed_message(app: "Application", job: dict) -> None
         lines.append(f"Качество: {job.get('quality')}")
     if job.get("file_size"):
         lines.append(f"Размер: {_format_size(job.get('file_size'))}")
+    if job.get("postprocess_warning"):
+        lines.append(f"Предупреждение: {job.get('postprocess_warning')}")
     try:
         await app.bot.send_message(
             chat_id=chat_id,
@@ -8425,14 +8473,28 @@ async def _youtube_find_in_plex(section_id: str, job: dict):
         return None
     videos = await asyncio.to_thread(plex_client.get_section_videos, section_id)
     video_id = str(job.get("video_id") or "")
-    file_name = Path(str(job.get("file_path") or "")).name
+    file_path = Path(str(job.get("file_path") or ""))
+    file_name = file_path.name
+    item_dir = Path(str(job.get("item_dir") or "")) if job.get("item_dir") else None
+    item_dir_name = item_dir.name if item_dir else ""
+    channel_dir_name = item_dir.parent.name if item_dir and item_dir.parent else ""
+    file_name_matches = {}
     for video in videos:
         title = getattr(video, "title", "") or ""
         paths = getattr(video, "file_paths", []) or []
         if video_id and (video_id in title or any(video_id in str(path) for path in paths)):
             return video
-        if file_name and any(Path(str(path)).name == file_name for path in paths):
-            return video
+        for raw_path in paths:
+            path = Path(str(raw_path))
+            if not file_name or path.name != file_name:
+                continue
+            if item_dir_name and path.parent.name == item_dir_name:
+                if not channel_dir_name or path.parent.parent.name == channel_dir_name:
+                    return video
+            key = str(getattr(video, "rating_key", "") or id(video))
+            file_name_matches.setdefault(key, video)
+    if len(file_name_matches) == 1:
+        return next(iter(file_name_matches.values()))
     return None
 
 
@@ -8639,6 +8701,7 @@ async def _youtube_worker_once(app: "Application") -> None:
             channel_url=result.get("channel_url") or job.get("channel_url"),
             duration_seconds=result.get("duration_seconds") or job.get("duration_seconds"),
             channel_poster_path=result.get("channel_poster_path") or job.get("channel_poster_path"),
+            postprocess_warning=result.get("postprocess_warning") or "",
         ) or job
         _youtube_record_history("youtube_download_completed", job)
         await _youtube_delete_job_cards(app, job_id)
@@ -8663,18 +8726,19 @@ async def _youtube_worker_loop(app: "Application") -> None:
 
 
 def _youtube_reset_interrupted_jobs() -> None:
-    jobs = _youtube_load_jobs()
-    changed = False
-    for job in jobs.values():
-        if not isinstance(job, dict):
-            continue
-        if job.get("status") in {"fetching_metadata", "downloading", "processing"}:
-            job["status"] = "queued"
-            job["updated_at"] = _youtube_now()
-            job["error"] = "Возобновлено после перезапуска контейнера."
-            changed = True
-    if changed:
-        _youtube_save_jobs(jobs)
+    def _mutate(jobs: dict[str, dict]) -> bool:
+        changed = False
+        for job in jobs.values():
+            if not isinstance(job, dict):
+                continue
+            if job.get("status") in {"fetching_metadata", "downloading", "processing"}:
+                job["status"] = "queued"
+                job["updated_at"] = _youtube_now()
+                job["error"] = "Возобновлено после перезапуска контейнера."
+                changed = True
+        return changed
+
+    _youtube_mutate_jobs(_mutate)
 
 
 async def youtube_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> int:
@@ -8685,6 +8749,8 @@ async def youtube_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return ConversationHandler.END
 
+    _youtube_cleanup_previews()
+    chat_id = update.effective_chat.id if update.effective_chat else None
     status = await update.message.reply_text(
         "⏳ Получаю данные YouTube…",
         reply_markup=_youtube_close_keyboard(),
@@ -8721,7 +8787,10 @@ async def youtube_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 for choice in choices
             ],
         }
+        preview["chat_id"] = chat_id
+        preview["created_ts"] = time.time()
         YOUTUBE_PREVIEWS[token] = preview
+        _youtube_cleanup_previews()
         keyboard = _youtube_preview_keyboard(
             token,
             [(choice.height, f"⬇️ {choice.label}") for choice in choices],
@@ -8764,11 +8833,21 @@ async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not _youtube_downloads_enabled():
         await _safe_edit_callback(query, "YouTube-download сейчас отключён.", reply_markup=_youtube_close_keyboard())
         return
+    _youtube_cleanup_previews()
+    chat_id = _chat_id_from_query(query)
     preview = YOUTUBE_PREVIEWS.get(token)
     if not isinstance(preview, dict):
         await _safe_edit_callback(
             query,
             "Предпросмотр устарел. Пришлите YouTube-ссылку ещё раз.",
+            reply_markup=_youtube_close_keyboard(),
+        )
+        return
+    preview_chat_id = _background_chat_id(preview.get("chat_id"))
+    if preview_chat_id is not None and chat_id != preview_chat_id:
+        await _safe_edit_callback(
+            query,
+            "Этот предпросмотр создан в другом чате. Пришлите YouTube-ссылку ещё раз.",
             reply_markup=_youtube_close_keyboard(),
         )
         return
@@ -8779,7 +8858,6 @@ async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not isinstance(choice, dict):
         await _safe_edit_callback(query, "Это качество больше недоступно.", reply_markup=_youtube_close_keyboard())
         return
-    chat_id = _chat_id_from_query(query)
     limit_message = _youtube_queue_limit_message(chat_id)
     if limit_message:
         await _safe_edit_callback(query, limit_message, reply_markup=_youtube_close_keyboard())
@@ -8807,9 +8885,7 @@ async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "speed_bytes": 0,
         "error": "",
     }
-    jobs = _youtube_load_jobs()
-    jobs[job_id] = job
-    _youtube_save_jobs(jobs)
+    _youtube_mutate_jobs(lambda jobs: jobs.__setitem__(job_id, job))
     YOUTUBE_PREVIEWS.pop(token, None)
     _youtube_record_history("youtube_download_queued", job)
 

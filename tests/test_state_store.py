@@ -144,6 +144,21 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(loaded["yt_b"]["status"], "queued")
         self.assertNotIn("bad", loaded)
 
+    def test_update_youtube_downloads_mutates_under_store_lock(self) -> None:
+        self.store.save_youtube_downloads({"yt_1": {"status": "queued", "title": "A"}})
+
+        def mutate(jobs: dict[str, dict]) -> str:
+            jobs["yt_1"]["status"] = "completed"
+            jobs["yt_2"] = {"status": "queued", "title": "B"}
+            return "ok"
+
+        result = self.store.update_youtube_downloads(mutate)
+
+        loaded = self.store.load_youtube_downloads()
+        self.assertEqual(result, "ok")
+        self.assertEqual(loaded["yt_1"]["status"], "completed")
+        self.assertEqual(loaded["yt_2"]["title"], "B")
+
     def test_youtube_plex_refresh_pending_roundtrip(self) -> None:
         payload = {
             "reason": "transient",

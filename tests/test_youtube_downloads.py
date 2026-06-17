@@ -16,9 +16,11 @@ from youtube_downloads import (
     build_path_plan,
     compatible_quality_options,
     display_quality_label,
+    download_video,
     extract_metadata,
     extract_youtube_video_id,
     find_youtube_url,
+    sanitize_youtube_error,
     select_format,
     write_channel_poster,
     write_sidecars,
@@ -208,11 +210,23 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
         plan = build_path_plan(info, Path("/youtube_storage"))
 
         self.assertEqual(plan.item_dir.parent.name, "Chan nel")
-        self.assertEqual(plan.item_dir.name, "Bad Title ok")
+        self.assertEqual(plan.item_dir.name, "Bad Title ok [abcdefghijk]")
         self.assertEqual(plan.video_path.name, "Bad Title ok.mp4")
         self.assertNotIn("2026-06-16", plan.item_dir.name)
-        self.assertNotIn("abcdefghijk", plan.item_dir.name)
+        self.assertIn("abcdefghijk", plan.item_dir.name)
         self.assertEqual(plan.poster_path.name, "poster.jpg")
+
+    def test_build_path_plan_keeps_video_id_when_title_is_long(self) -> None:
+        info = {
+            "id": "abcdefghijk",
+            "title": "A" * 180,
+            "channel": "Channel",
+        }
+
+        plan = build_path_plan(info, Path("/youtube_storage"))
+
+        self.assertTrue(plan.item_dir.name.endswith("[abcdefghijk]"))
+        self.assertLessEqual(len(plan.item_dir.name), 140)
 
     def test_apply_audio_language_remuxes_metadata_without_transcode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -320,6 +334,72 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
         self.assertIn("сетевой таймаут YouTube", text)
         self.assertNotIn("HTTPSConnection", text)
         self.assertNotIn("googlevideo.com", text)
+
+    def test_sanitize_youtube_error_hides_non_transient_technical_url(self) -> None:
+        text = sanitize_youtube_error(
+            RuntimeError("HTTP Error 403: https://rr4---sn.googlevideo.com/videoplayback?sig=secret"),
+            action="скачать видео",
+        )
+
+        self.assertIn("Не удалось скачать видео", text)
+        self.assertNotIn("googlevideo", text)
+        self.assertNotIn("sig=secret", text)
+
+    def test_download_video_keeps_file_when_metadata_postprocess_fails(self) -> None:
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def download(self, _urls):
+                target = Path(self.options["outtmpl"].replace("%(ext)s", "mp4"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"video")
+
+        fake_module = MagicMock()
+        fake_module.YoutubeDL = FakeYoutubeDL
+        info = {
+            "id": "abcdefghijk",
+            "title": "Clip",
+            "channel": "Channel",
+            "duration": 120,
+            "formats": [
+                {
+                    "format_id": "22",
+                    "ext": "mp4",
+                    "height": 720,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "mp4a.40.2",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("youtube_downloads.shutil.which", return_value="ffmpeg"),
+                patch("youtube_downloads.extract_metadata", return_value=info),
+                patch("youtube_downloads._import_ytdlp", return_value=fake_module),
+                patch(
+                    "youtube_downloads._apply_mp4_metadata",
+                    side_effect=YouTubeDownloadError("metadata failed"),
+                ),
+                patch("youtube_downloads.write_sidecars", return_value=None),
+            ):
+                result = download_video(
+                    "https://www.youtube.com/watch?v=abcdefghijk",
+                    output_root=Path(tmp),
+                    max_height=720,
+                )
+
+            self.assertTrue(Path(result["file_path"]).exists())
+            self.assertEqual(result["file_size"], 5)
+            self.assertIn("metadata failed", result["postprocess_warning"])
+            self.assertIn("[abcdefghijk]", result["item_dir"])
 
     def test_cleanup_failed_download_removes_partial_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
