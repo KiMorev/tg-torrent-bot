@@ -31,6 +31,8 @@ from keyboards import (
     _tasks_keyboard,
     _youtube_close_keyboard,
     _youtube_disabled_keyboard,
+    _youtube_duplicate_keyboard,
+    _youtube_failed_keyboard,
     _youtube_plex_keyboard,
     _youtube_preview_keyboard,
     tracker_selection_label,
@@ -214,6 +216,36 @@ class KeyboardTests(unittest.TestCase):
         }
 
         self.assertEqual(buttons["▶️ Смотреть в Plex"], "https://app.plex.tv/desktop")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_youtube_failed_keyboard_can_retry(self) -> None:
+        keyboard = _youtube_failed_keyboard("yt_1")
+
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["🔄 Повторить"], "task:retry_youtube:yt_1")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
+        self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
+
+    def test_youtube_duplicate_keyboard_can_open_plex_or_retry(self) -> None:
+        keyboard = _youtube_duplicate_keyboard(
+            plex_url="https://app.plex.tv/desktop",
+            retry_task_id="yt_1",
+        )
+
+        buttons = {
+            button.text: button.callback_data or button.url
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["▶️ Смотреть в Plex"], "https://app.plex.tv/desktop")
+        self.assertEqual(buttons["🔄 Повторить"], "task:retry_youtube:yt_1")
         self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
 
@@ -850,6 +882,13 @@ class TasksKeyboardCloseTests(unittest.TestCase):
         self.assertEqual(buttons["✖️ Закрыть"], "task:close:")
         self.assertNotIn("▶️ Запустить", buttons)
         self.assertNotIn("⏸️ Пауза", buttons)
+
+    def test_youtube_task_keyboard_can_retry_failed_video(self) -> None:
+        buttons = self._buttons(_task_keyboard("yt_1", status="error", task_type="youtube"))
+
+        self.assertEqual(buttons["🔄 Повторить"], "task:retry_youtube:yt_1")
+        self.assertEqual(buttons["🗑️ Удалить ролик"], "task:delete_youtube_ask:yt_1")
+        self.assertEqual(buttons["📚 К списку загрузок"], "task:list:default")
 
     def test_youtube_task_keyboard_hides_delete_for_active_video(self) -> None:
         buttons = self._buttons(_task_keyboard("yt_1", status="downloading", task_type="youtube"))

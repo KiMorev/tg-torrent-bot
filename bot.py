@@ -123,6 +123,8 @@ from keyboards import (
     _tasks_keyboard,
     _youtube_close_keyboard,
     _youtube_disabled_keyboard,
+    _youtube_duplicate_keyboard,
+    _youtube_failed_keyboard,
     _youtube_plex_keyboard,
     _youtube_preview_keyboard,
     users_keyboard,
@@ -299,6 +301,7 @@ from youtube_downloads import (
     YouTubeFormatChoice,
     YouTubeToolMissingError,
     YouTubeUnsupportedError,
+    build_path_plan as _youtube_build_path_plan,
     compatible_quality_options,
     download_video as _youtube_download_video,
     extract_metadata as _youtube_extract_metadata,
@@ -7752,6 +7755,137 @@ def _youtube_job_item_dir(job: dict) -> Path | None:
     return None
 
 
+_YOUTUBE_FRAGMENT_MP4_RE = re.compile(r"\.f\d+\.mp4$", re.IGNORECASE)
+
+
+def _youtube_ready_video_path_in_dir(item_dir: Path, preferred_path: Path | None = None) -> Path | None:
+    if not _youtube_safe_item_dir(item_dir) or not item_dir.exists() or not item_dir.is_dir():
+        return None
+    if (
+        preferred_path
+        and preferred_path.exists()
+        and preferred_path.is_file()
+        and preferred_path.suffix.lower() == ".mp4"
+        and _youtube_path_inside_root(preferred_path)
+    ):
+        return preferred_path
+    for path in sorted(item_dir.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.suffix.lower() != ".mp4":
+            continue
+        name = path.name.lower()
+        if name.startswith(".") or ".metadata.tmp" in name or _YOUTUBE_FRAGMENT_MP4_RE.search(name):
+            continue
+        return path
+    return None
+
+
+def _youtube_job_ready_video_path(job: dict) -> Path | None:
+    item_dir = _youtube_job_item_dir(job)
+    preferred_path = None
+    raw_file_path = str(job.get("file_path") or "").strip()
+    if raw_file_path:
+        preferred_path = Path(raw_file_path)
+    if item_dir is None:
+        return None
+    return _youtube_ready_video_path_in_dir(item_dir, preferred_path)
+
+
+def _youtube_candidate_item_dirs(video_id: str, info: dict | None = None) -> list[Path]:
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        return []
+    root = Path(YOUTUBE_DOWNLOAD_DIR)
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        try:
+            resolved = str(path.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        candidates.append(path)
+
+    if isinstance(info, dict):
+        try:
+            _add(_youtube_build_path_plan({**info, "id": video_id}, root).item_dir)
+        except Exception:
+            pass
+
+    try:
+        channel_dirs = list(root.iterdir()) if root.exists() and root.is_dir() else []
+    except OSError:
+        channel_dirs = []
+    for channel_dir in channel_dirs:
+        if not channel_dir.is_dir():
+            continue
+        try:
+            items = list(channel_dir.iterdir())
+        except OSError:
+            continue
+        for item in items:
+            if item.is_dir() and video_id in item.name:
+                _add(item)
+    return candidates
+
+
+def _youtube_cleanup_partial_item_dir(item_dir: Path) -> int:
+    if not _youtube_safe_item_dir(item_dir) or not item_dir.exists() or not item_dir.is_dir():
+        return 0
+    ready_path = _youtube_ready_video_path_in_dir(item_dir)
+    if ready_path is not None:
+        return 0
+    files_deleted = _youtube_count_files(item_dir)
+    shutil.rmtree(item_dir)
+    _youtube_cleanup_channel_dir(item_dir.parent)
+    return files_deleted
+
+
+def _youtube_existing_download_for_video(video_id: str, info: dict | None = None) -> dict[str, object] | None:
+    partial_dirs: list[Path] = []
+    for item_dir in _youtube_candidate_item_dirs(video_id, info):
+        if not _youtube_safe_item_dir(item_dir) or not item_dir.exists() or not item_dir.is_dir():
+            continue
+        preferred_path = None
+        if isinstance(info, dict):
+            try:
+                plan = _youtube_build_path_plan({**info, "id": video_id}, Path(YOUTUBE_DOWNLOAD_DIR))
+                if plan.item_dir.resolve(strict=False) == item_dir.resolve(strict=False):
+                    preferred_path = plan.video_path
+            except Exception:
+                preferred_path = None
+        ready_path = _youtube_ready_video_path_in_dir(item_dir, preferred_path)
+        if ready_path is not None:
+            return {
+                "status": "completed",
+                "video_id": video_id,
+                "title": (info or {}).get("title") or "YouTube",
+                "channel": (info or {}).get("channel") or (info or {}).get("uploader") or "",
+                "file_path": str(ready_path),
+                "item_dir": str(item_dir),
+                "file_size": ready_path.stat().st_size,
+            }
+        partial_dirs.append(item_dir)
+
+    cleaned_files = 0
+    cleaned_dirs = 0
+    for item_dir in partial_dirs:
+        deleted = _youtube_cleanup_partial_item_dir(item_dir)
+        if deleted or not item_dir.exists():
+            cleaned_files += deleted
+            cleaned_dirs += 1
+    if cleaned_dirs:
+        return {
+            "status": "partial_cleaned",
+            "video_id": video_id,
+            "cleaned_dirs": cleaned_dirs,
+            "cleaned_files": cleaned_files,
+        }
+    return None
+
+
 def _youtube_count_files(path: Path) -> int:
     if path.is_file():
         return 1
@@ -7870,6 +8004,64 @@ def _youtube_delete_job(task_id: str) -> dict[str, object]:
         "unsafe": 1 if file_result.get("unsafe_path") else 0,
         "title": job.get("title") or "YouTube",
     }
+
+
+def _youtube_retry_job(task_id: str) -> dict[str, object]:
+    job_id, job = _youtube_find_job(task_id)
+    if not job_id or job is None:
+        return {"found": False}
+    if str(job.get("status") or "").lower() != "failed":
+        return {"found": True, "retryable": False, "job": dict(job)}
+
+    video_id = str(job.get("video_id") or extract_youtube_video_id(str(job.get("canonical_url") or job.get("url") or "")) or "")
+    existing = _youtube_existing_download_for_video(video_id, job) if video_id else None
+    if isinstance(existing, dict) and existing.get("status") == "completed":
+        file_size = int(existing.get("file_size") or 0)
+        updated = _youtube_update_job(
+            job_id,
+            status="completed",
+            error="",
+            downloaded_bytes=file_size,
+            total_bytes=file_size,
+            speed_bytes=0,
+            eta_seconds=0,
+            retry_attempt=0,
+            retry_max_attempts=0,
+            retry_reason="",
+            file_path=str(existing.get("file_path") or ""),
+            file_size=file_size,
+            item_dir=str(existing.get("item_dir") or ""),
+        ) or job
+        _youtube_record_history("youtube_retry_completed_existing", updated)
+        return {"found": True, "retryable": True, "completed": True, "job": updated}
+
+    cleaned_files = int((existing or {}).get("cleaned_files") or 0) if isinstance(existing, dict) else 0
+    item_dir = _youtube_job_item_dir(job)
+    if item_dir is not None:
+        cleaned_files += _youtube_cleanup_partial_item_dir(item_dir)
+
+    updated = _youtube_update_job(
+        job_id,
+        status="queued",
+        error="",
+        downloaded_bytes=0,
+        total_bytes=int(job.get("estimated_size") or 0),
+        speed_bytes=0,
+        eta_seconds=0,
+        retry_attempt=0,
+        retry_max_attempts=0,
+        retry_reason="",
+        media_step="",
+        video_done=False,
+        audio_done=False,
+        file_path="",
+        file_size=0,
+        item_dir="",
+        channel_poster_path="",
+        postprocess_warning="",
+    ) or job
+    _youtube_record_history("youtube_download_requeued", updated, cleaned_files=cleaned_files)
+    return {"found": True, "retryable": True, "completed": False, "job": updated, "cleaned_files": cleaned_files}
 
 
 def _youtube_deletable_job_ids_for_scope(chat_id: int | None, scope: str) -> list[str]:
@@ -8303,8 +8495,9 @@ async def _youtube_send_failed_message(app: "Application", job: dict) -> None:
         f"Название: {job.get('title') or 'YouTube'}\n"
         f"Ошибка: {job.get('error') or 'неизвестно'}"
     )
+    keyboard = _youtube_failed_keyboard(str(job.get("id") or "")) if job.get("id") else _youtube_close_keyboard()
     try:
-        await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=_youtube_close_keyboard())
+        await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
     except Exception:
         logger.warning("YouTube failure notification failed job_id=%s", job.get("id"), exc_info=True)
 
@@ -8685,6 +8878,107 @@ async def _youtube_start_plex_poll_if_needed(app: "Application", job: dict) -> N
         YOUTUBE_PLEX_POLLING_TASKS[job_id] = task
 
 
+async def _youtube_plex_url_for_job(job: dict) -> str:
+    if not (PLEX_ENABLED and plex_client):
+        return ""
+    try:
+        section_id = await _youtube_plex_section_id()
+        if not section_id:
+            return ""
+        found = await _youtube_find_in_plex(section_id, job)
+        if found is None:
+            return ""
+        machine_id = _plex_machine_id
+        if not machine_id:
+            try:
+                machine_id = await asyncio.to_thread(plex_client.get_machine_id)
+            except Exception:
+                machine_id = ""
+        rating_key = getattr(found, "rating_key", "")
+        return _plex_deep_link(rating_key, machine_id) if rating_key and machine_id else ""
+    except Exception:
+        logger.debug("YouTube duplicate Plex lookup failed video_id=%s", job.get("video_id"), exc_info=True)
+        return ""
+
+
+def _youtube_duplicate_status_text(job: dict) -> str:
+    status = str(job.get("status") or "").lower()
+    if status == "queued":
+        return "Этот ролик уже стоит в очереди YouTube-загрузок."
+    if status in {"fetching_metadata", "downloading", "processing"}:
+        return "Этот ролик уже скачивается."
+    return "Этот ролик уже есть в YouTube-загрузках."
+
+
+async def _youtube_existing_download_response(
+    info: dict,
+    *,
+    chat_id: int | None,
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    video_id = str(info.get("id") or "").strip()
+    if not video_id:
+        return None
+
+    jobs = _youtube_load_jobs()
+    matching_jobs = [
+        (job_id, job)
+        for job_id, job in jobs.items()
+        if isinstance(job, dict) and str(job.get("video_id") or "") == video_id
+    ]
+    matching_jobs.sort(key=lambda item: _youtube_job_sort_key(item[1]), reverse=True)
+
+    for _job_id, job in matching_jobs:
+        if str(job.get("status") or "").lower() in _YOUTUBE_ACTIVE_STATUSES:
+            return (
+                _youtube_duplicate_status_text(job),
+                _youtube_duplicate_keyboard(),
+            )
+
+    for _job_id, job in matching_jobs:
+        if str(job.get("status") or "").lower() != "completed":
+            continue
+        ready_path = _youtube_job_ready_video_path(job)
+        if ready_path is None:
+            continue
+        job = {**job, "file_path": str(ready_path), "item_dir": str(ready_path.parent)}
+        plex_url = await _youtube_plex_url_for_job(job)
+        if plex_url:
+            text = "Этот ролик уже скачан и есть в Plex."
+        else:
+            text = "Этот ролик уже скачан. В Plex пока не нашёл."
+        return text, _youtube_duplicate_keyboard(plex_url=plex_url)
+
+    for _job_id, job in matching_jobs:
+        if str(job.get("status") or "").lower() != "failed":
+            continue
+        owner = _youtube_job_owner(job)
+        if owner is not None and chat_id != owner and not _is_admin_chat(chat_id):
+            continue
+        task_id = _youtube_job_task_id(_job_id, job)
+        return (
+            "Этот ролик уже есть в YouTube-задачах, но последняя попытка завершилась ошибкой.",
+            _youtube_duplicate_keyboard(retry_task_id=task_id),
+        )
+
+    existing = _youtube_existing_download_for_video(video_id, info)
+    if not isinstance(existing, dict) or existing.get("status") != "completed":
+        return None
+
+    job_like = {
+        "video_id": video_id,
+        "title": existing.get("title") or info.get("title") or "YouTube",
+        "channel": existing.get("channel") or info.get("channel") or info.get("uploader") or "",
+        "file_path": str(existing.get("file_path") or ""),
+        "item_dir": str(existing.get("item_dir") or ""),
+    }
+    plex_url = await _youtube_plex_url_for_job(job_like)
+    if plex_url:
+        text = "Этот ролик уже скачан и есть в Plex."
+    else:
+        text = "Этот ролик уже скачан. В Plex пока не нашёл."
+    return text, _youtube_duplicate_keyboard(plex_url=plex_url)
+
+
 async def _youtube_worker_once(app: "Application") -> None:
     jobs = _youtube_load_jobs()
     running = [
@@ -8792,6 +9086,16 @@ async def youtube_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE,
     )
     try:
         info = await asyncio.to_thread(_youtube_extract_metadata, url)
+        duplicate_response = await _youtube_existing_download_response(info, chat_id=chat_id)
+        if duplicate_response is not None:
+            duplicate_text, duplicate_keyboard = duplicate_response
+            await _safe_edit_message(
+                status,
+                duplicate_text,
+                reply_markup=duplicate_keyboard,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            return ConversationHandler.END
         duration = int(info.get("duration") or 0)
         if duration and duration > YOUTUBE_MAX_DURATION_MINUTES * 60:
             raise YouTubeUnsupportedError(
@@ -25185,6 +25489,53 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         page = max(0, min(page, total_pages - 1))
         total_count = len(tasks) if _is_admin_chat(chat_id) else None
         await _edit_download_panel(query, context, visible_tasks, scope, total_count=total_count, page=page)
+        return
+
+    if action == "retry_youtube":
+        if not _can_access_task_id(chat_id, task_id):
+            await query.edit_message_text(
+                "Эта задача не относится к вашим загрузкам.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        await _safe_edit_callback(query, "🔄 Повторяю YouTube-загрузку…")
+        result = await asyncio.to_thread(_youtube_retry_job, task_id)
+        if not result.get("found"):
+            await query.edit_message_text(
+                "YouTube-задача не найдена.",
+                reply_markup=_task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+            )
+            return
+        job = result.get("job") if isinstance(result.get("job"), dict) else None
+        if not result.get("retryable") or job is None:
+            status = _youtube_task_status(str((job or {}).get("status") or ""))
+            await query.edit_message_text(
+                "Эту YouTube-задачу сейчас нельзя повторить.",
+                reply_markup=_make_task_keyboard(task_id, status, "youtube"),
+            )
+            return
+        if result.get("completed"):
+            plex_url = await _youtube_plex_url_for_job(job)
+            text = "✅ Видео уже скачано."
+            if plex_url:
+                text += "\nРолик есть в Plex."
+            else:
+                text += "\nВ Plex пока не нашёл."
+            await query.edit_message_text(
+                text,
+                reply_markup=_youtube_plex_keyboard(plex_url) if plex_url else _youtube_close_keyboard(),
+            )
+            return
+
+        jobs = _youtube_load_jobs()
+        _youtube_register_job_message(task_id, chat_id, message_id)
+        await query.edit_message_text(
+            _youtube_job_card_text({
+                **job,
+                "queue_position": _youtube_queue_position(jobs, task_id),
+            }),
+            reply_markup=_youtube_close_keyboard(),
+        )
         return
 
     if action == "delete_youtube_ask":

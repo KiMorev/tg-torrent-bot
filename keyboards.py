@@ -166,6 +166,29 @@ def _youtube_plex_keyboard(plex_url: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _youtube_failed_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Повторить", callback_data=_task_callback("retry_youtube", task_id))],
+        [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))],
+        [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+    ])
+
+
+def _youtube_duplicate_keyboard(
+    *,
+    plex_url: str = "",
+    retry_task_id: str = "",
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if plex_url:
+        rows.append([InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)])
+    if retry_task_id:
+        rows.append([InlineKeyboardButton("🔄 Повторить", callback_data=_task_callback("retry_youtube", retry_task_id))])
+    rows.append([InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
 def _admin_panel_keyboard(
     *,
     show_plex_unmatched: bool = False,
@@ -468,6 +491,10 @@ def _task_keyboard(
     rows = [[InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))]]
 
     if (task_type or "").lower() == "youtube":
+        if status == "error":
+            rows.append(
+                [InlineKeyboardButton("🔄 Повторить", callback_data=_task_callback("retry_youtube", task_id))]
+            )
         if status in {"finished", "error"}:
             rows.append(
                 [InlineKeyboardButton("🗑️ Удалить ролик", callback_data=_task_callback("delete_youtube_ask", task_id))]

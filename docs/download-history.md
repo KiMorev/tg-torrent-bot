@@ -20,6 +20,8 @@
 - `plex_found` - Plex нашёл фильм или сезон после скачивания;
 - `plex_not_found` - Plex не подтвердил появление за окно ожидания;
 - `youtube_download_queued` - пользователь подтвердил скачивание YouTube-ролика;
+- `youtube_download_requeued` - ошибочная YouTube-задача возвращена в очередь через кнопку повторения;
+- `youtube_retry_completed_existing` - при повторении бот нашёл уже готовый MP4 и пометил YouTube-задачу завершённой без перекачки;
 - `youtube_download_started` - YouTube worker начал скачивание;
 - `youtube_download_completed` - файл YouTube-ролика сохранён на NAS;
 - `youtube_download_failed` - metadata/download/remux завершились ошибкой;

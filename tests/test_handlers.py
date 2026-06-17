@@ -7232,6 +7232,45 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue_position, (2, 3))
         self.assertIn("⬇️ В очереди: 2 из 3", text)
 
+    def test_youtube_retry_job_requeues_failed_and_cleans_partial_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "youtube"
+            item_dir = root / "Channel" / "Clip [abcdefghijk]"
+            item_dir.mkdir(parents=True)
+            (item_dir / "Clip.mp4.part").write_bytes(b"part")
+            (item_dir / "Clip.f137.mp4").write_bytes(b"fragment")
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 100,
+                    "status": "failed",
+                    "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                    "video_id": "abcdefghijk",
+                    "title": "Clip",
+                    "channel": "Channel",
+                    "item_dir": str(item_dir),
+                    "file_path": str(item_dir / "Clip.mp4"),
+                    "estimated_size": 123,
+                    "error": "boom",
+                }
+            })
+
+            with (
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+            ):
+                result = bot._youtube_retry_job("yt_1")
+
+            job = store.load_youtube_downloads()["yt_1"]
+            self.assertTrue(result["retryable"])
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["error"], "")
+            self.assertEqual(job["total_bytes"], 123)
+            self.assertFalse(item_dir.exists())
+            history = store.load_download_history(chat_id=100)
+            self.assertEqual(history[-1]["event"], "youtube_download_requeued")
+
     def test_youtube_job_card_shows_retry_status(self):
         text = bot._youtube_job_card_text({
             "id": "yt_1",
@@ -7253,6 +7292,138 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(text, "Не удалось скачать видео: сетевой таймаут YouTube. Повторите позже.")
+
+    async def test_youtube_link_existing_completed_job_shows_plex_button(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "https://youtu.be/abcdefghijk"
+        status = MagicMock()
+        status.message_id = 77
+        status.edit_text = AsyncMock()
+        update.message.reply_text.return_value = status
+        context = _make_context()
+        info = {
+            "id": "abcdefghijk",
+            "title": "Clip",
+            "channel": "Channel",
+            "duration": 120,
+            "formats": [
+                {
+                    "format_id": "22",
+                    "ext": "mp4",
+                    "height": 720,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "mp4a.40.2",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "youtube"
+            item_dir = root / "Channel" / "Clip [abcdefghijk]"
+            item_dir.mkdir(parents=True)
+            file_path = item_dir / "Clip.mp4"
+            file_path.write_bytes(b"mp4")
+            store = _make_store(tmp)
+            store.save_youtube_downloads({
+                "yt_1": {
+                    "id": "yt_1",
+                    "chat_id": 200,
+                    "status": "completed",
+                    "canonical_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                    "video_id": "abcdefghijk",
+                    "title": "Clip",
+                    "channel": "Channel",
+                    "item_dir": str(item_dir),
+                    "file_path": str(file_path),
+                }
+            })
+            plex_video = MagicMock()
+            plex_video.rating_key = "plex-key"
+            plex_video.title = "Clip"
+            plex_video.file_paths = ["/volume1/youtube/Channel/Clip [abcdefghijk]/Clip.mp4"]
+            plex = MagicMock()
+            plex.get_section_videos.return_value = [plex_video]
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100, 200}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "YOUTUBE_PLEX_SECTION", "9"),
+                patch.object(bot, "_plex_machine_id", "machine-1"),
+                patch.object(bot, "plex_client", plex),
+                patch.object(bot, "_youtube_extract_metadata", MagicMock(return_value=info)),
+            ):
+                result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        text = status.edit_text.await_args.args[0]
+        self.assertIn("уже скачан и есть в Plex", text)
+        keyboard = status.edit_text.await_args.kwargs["reply_markup"]
+        buttons = {
+            button.text: button.callback_data or button.url
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        self.assertIn("▶️ Смотреть в Plex", buttons)
+        self.assertIn("metadata%2Fplex-key", buttons["▶️ Смотреть в Plex"])
+
+    async def test_youtube_link_cleans_orphan_partial_folder_and_shows_preview(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "https://youtu.be/abcdefghijk"
+        status = MagicMock()
+        status.message_id = 77
+        status.edit_text = AsyncMock()
+        update.message.reply_text.return_value = status
+        context = _make_context()
+        info = {
+            "id": "abcdefghijk",
+            "title": "Clip",
+            "channel": "Channel",
+            "duration": 120,
+            "formats": [
+                {
+                    "format_id": "22",
+                    "ext": "mp4",
+                    "height": 720,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "mp4a.40.2",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "youtube"
+            item_dir = root / "Channel" / "Clip [abcdefghijk]"
+            item_dir.mkdir(parents=True)
+            (item_dir / "Clip.mp4.part").write_bytes(b"part")
+            (item_dir / "Clip.f137.mp4").write_bytes(b"fragment")
+            store = _make_store(tmp)
+
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "YOUTUBE_DOWNLOADS_ENABLED", True),
+                patch.object(bot, "YOUTUBE_DOWNLOAD_DIR", root),
+                patch.object(bot, "_youtube_extract_metadata", MagicMock(return_value=info)),
+            ):
+                result = await bot.text_message_entry(update, context)
+
+            self.assertFalse(item_dir.exists())
+
+        self.assertEqual(result, bot.ConversationHandler.END)
+        text = status.edit_text.await_args.args[0]
+        self.assertIn("Выберите качество для скачивания", text)
+        keyboard = status.edit_text.await_args.kwargs["reply_markup"]
+        callbacks = {
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+        self.assertTrue(any(callback.startswith("yt:dl:") for callback in callbacks))
 
     def test_youtube_progress_hook_marks_second_stream_as_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7440,6 +7611,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
         app.bot.send_message = AsyncMock()
 
         with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
             patch.object(bot, "PLEX_ENABLED", True),
             patch.object(bot, "YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD", True),
             patch.object(bot, "plex_client", MagicMock()),
@@ -7470,6 +7643,8 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
                 patch.object(bot, "PLEX_ENABLED", True),
                 patch.object(bot, "YOUTUBE_PLEX_POLL_AFTER_DOWNLOAD", True),
                 patch.object(bot, "plex_client", MagicMock()),
@@ -7523,6 +7698,14 @@ class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(history[-1]["event"], "youtube_download_failed")
             delete_cards.assert_awaited_once()
             app.bot.send_message.assert_awaited_once()
+            keyboard = app.bot.send_message.await_args.kwargs["reply_markup"]
+            callbacks = {
+                button.callback_data
+                for row in keyboard.inline_keyboard
+                for button in row
+                if button.callback_data
+            }
+            self.assertIn("task:retry_youtube:yt_1", callbacks)
 
     async def test_youtube_status_card_stays_registered_after_edit_timeout(self):
         app = MagicMock()
