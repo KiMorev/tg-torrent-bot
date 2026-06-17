@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from youtube_downloads import (
     _apply_audio_language,
     _apply_mp4_metadata,
+    _channel_poster_contrast_colors,
     _cleanup_failed_download,
     _download_with_retries,
     _extract_channel_avatar_from_page,
@@ -378,7 +379,13 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
             response.headers = {"content-type": "image/jpeg"}
             response.raise_for_status.return_value = None
 
-            with patch("youtube_downloads.requests.get", return_value=response) as get:
+            with (
+                patch("youtube_downloads.requests.get", return_value=response) as get,
+                patch(
+                    "youtube_downloads._write_avatar_portrait_poster",
+                    side_effect=lambda raw_path, target_path: target_path.write_bytes(b"portrait"),
+                ) as write_poster,
+            ):
                 poster = write_channel_poster(
                     {
                         "channel": "Channel",
@@ -388,8 +395,84 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
                 )
 
             self.assertEqual(poster, item_dir.parent / "channel-poster.jpg")
-            self.assertEqual(poster.read_bytes(), b"jpeg")
+            self.assertEqual(poster.read_bytes(), b"portrait")
             get.assert_called_once_with("https://img.example/avatar.jpg", timeout=20)
+            self.assertEqual(write_poster.call_args.args[1], poster)
+
+    def test_write_channel_poster_rebuilds_existing_square_avatar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            legacy_poster = item_dir.parent / "channel-poster.jpg"
+            legacy_poster.write_bytes(b"square")
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+
+            response = MagicMock()
+            response.content = b"jpeg"
+            response.raise_for_status.return_value = None
+
+            with (
+                patch("youtube_downloads._image_is_portrait_poster", return_value=False),
+                patch("youtube_downloads.requests.get", return_value=response),
+                patch(
+                    "youtube_downloads._write_avatar_portrait_poster",
+                    side_effect=lambda raw_path, target_path: target_path.write_bytes(b"portrait"),
+                ),
+            ):
+                poster = write_channel_poster(
+                    {
+                        "channel": "Channel",
+                        "channel_thumbnail": "https://img.example/avatar.jpg",
+                    },
+                    plan,
+                )
+
+            self.assertEqual(poster, legacy_poster)
+            self.assertEqual(legacy_poster.read_bytes(), b"portrait")
+
+    def test_channel_poster_contrast_colors_choose_opposite_mat(self) -> None:
+        with patch("youtube_downloads._image_average_rgb", return_value=(240, 240, 240)):
+            self.assertEqual(_channel_poster_contrast_colors(Path("avatar"))[0], "0x111820")
+        with patch("youtube_downloads._image_average_rgb", return_value=(20, 20, 20)):
+            self.assertEqual(_channel_poster_contrast_colors(Path("avatar"))[0], "white")
+
+    def test_write_channel_poster_falls_back_when_portrait_generation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item_dir = Path(tmp) / "Channel" / "Clip"
+            item_dir.mkdir(parents=True)
+            plan = YouTubePathPlan(
+                item_dir=item_dir,
+                video_path=item_dir / "Clip.mp4",
+                poster_path=item_dir / "poster.jpg",
+                fanart_path=item_dir / "fanart.jpg",
+                info_path=item_dir / "info.json",
+            )
+
+            response = MagicMock()
+            response.content = b"jpeg"
+            response.raise_for_status.return_value = None
+
+            with (
+                patch("youtube_downloads.requests.get", return_value=response),
+                patch("youtube_downloads._write_avatar_portrait_poster", side_effect=RuntimeError("ffmpeg failed")),
+            ):
+                poster = write_channel_poster(
+                    {
+                        "channel": "AcademeG",
+                        "channel_thumbnail": "https://img.example/avatar.jpg",
+                    },
+                    plan,
+                )
+
+            self.assertEqual(poster, item_dir.parent / "channel-poster.png")
+            self.assertTrue(poster.exists())
+            self.assertEqual(poster.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
     def test_write_channel_poster_generates_fallback_png_when_avatar_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -450,7 +533,13 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
             response.headers = {"content-type": "image/jpeg"}
             response.raise_for_status.return_value = None
 
-            with patch("youtube_downloads.requests.get", return_value=response):
+            with (
+                patch("youtube_downloads.requests.get", return_value=response),
+                patch(
+                    "youtube_downloads._write_avatar_portrait_poster",
+                    side_effect=lambda raw_path, target_path: target_path.write_bytes(b"portrait"),
+                ),
+            ):
                 channel_poster = write_sidecars(
                     {
                         "id": "abcdefghijk",
@@ -466,4 +555,4 @@ class YouTubeDownloadHelperTests(unittest.TestCase):
 
             self.assertEqual(plan.poster_path.read_bytes(), b"jpeg")
             self.assertEqual(channel_poster, item_dir.parent / "channel-poster.jpg")
-            self.assertEqual(channel_poster.read_bytes(), b"jpeg")
+            self.assertEqual(channel_poster.read_bytes(), b"portrait")

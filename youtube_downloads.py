@@ -29,6 +29,11 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
 MAX_FILENAME_CHARS = 140
 DEFAULT_MIN_HEIGHT = 640
+CHANNEL_POSTER_WIDTH = 1000
+CHANNEL_POSTER_HEIGHT = 1500
+CHANNEL_POSTER_AVATAR_SIZE = 760
+CHANNEL_POSTER_MAT_SIZE = 820
+CHANNEL_POSTER_PLATE_SIZE = 860
 DOWNLOAD_RETRY_DELAYS_SECONDS = (5.0, 15.0)
 TRANSIENT_DOWNLOAD_ERROR_MARKERS = (
     "timed out",
@@ -506,6 +511,140 @@ def _download_thumbnail_as_jpeg(url: str, poster_path: Path, fanart_path: Path) 
         fanart_path.write_bytes(poster_path.read_bytes())
 
 
+def _image_dimensions(path: Path) -> tuple[int, int] | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0:s=x",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        raw = result.stdout.strip().splitlines()[0]
+        width, height = raw.split("x", 1)
+        return int(width), int(height)
+    except Exception:
+        return None
+
+
+def _image_is_portrait_poster(path: Path) -> bool:
+    dimensions = _image_dimensions(path)
+    if dimensions is None:
+        return True
+    width, height = dimensions
+    if width <= 0 or height <= 0:
+        return False
+    ratio = width / height
+    return height > width and abs(ratio - (2 / 3)) <= 0.08
+
+
+def _image_average_rgb(path: Path) -> tuple[int, int, int] | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-vf",
+                "scale=1:1",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=20,
+        )
+    except Exception:
+        return None
+    if len(result.stdout) < 3:
+        return None
+    return result.stdout[0], result.stdout[1], result.stdout[2]
+
+
+def _channel_poster_contrast_colors(path: Path) -> tuple[str, str, str]:
+    rgb = _image_average_rgb(path)
+    if rgb is None:
+        return "0x111820", "white", "-0.34"
+
+    red, green, blue = rgb
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    if luminance >= 128:
+        return "0x111820", "white", "-0.38"
+    return "white", "0x111820", "-0.22"
+
+
+def _write_avatar_portrait_poster(raw_path: Path, target_path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is unavailable")
+
+    mat_color, border_color, background_brightness = _channel_poster_contrast_colors(raw_path)
+    filter_complex = (
+        f"[0:v]scale={CHANNEL_POSTER_WIDTH}:{CHANNEL_POSTER_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop={CHANNEL_POSTER_WIDTH}:{CHANNEL_POSTER_HEIGHT},"
+        f"boxblur=40:1,eq=brightness={background_brightness}:saturation=0.65[bg];"
+        f"[0:v]scale={CHANNEL_POSTER_AVATAR_SIZE}:{CHANNEL_POSTER_AVATAR_SIZE}:force_original_aspect_ratio=decrease,"
+        f"pad={CHANNEL_POSTER_MAT_SIZE}:{CHANNEL_POSTER_MAT_SIZE}:(ow-iw)/2:(oh-ih)/2:color={mat_color},"
+        f"pad={CHANNEL_POSTER_PLATE_SIZE}:{CHANNEL_POSTER_PLATE_SIZE}:(ow-iw)/2:(oh-ih)/2:color={border_color}[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+    )
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(raw_path),
+            "-filter_complex",
+            filter_complex,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "3",
+            str(target_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+
+
+def _download_channel_avatar_poster(url: str, target_path: Path) -> bool:
+    if not url:
+        return False
+    response = requests.get(url, timeout=20)
+    response.raise_for_status()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        raw_path = Path(tmp_dir) / "channel-avatar"
+        raw_path.write_bytes(response.content)
+        _write_avatar_portrait_poster(raw_path, target_path)
+    return target_path.exists()
+
+
 _CYRILLIC_TO_LATIN = str.maketrans({
     "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E", "Ё": "E",
     "Ж": "ZH", "З": "Z", "И": "I", "Й": "Y", "К": "K", "Л": "L", "М": "M",
@@ -754,9 +893,9 @@ def _write_fallback_channel_poster(channel: str, output_path: Path) -> None:
 def write_channel_poster(info: dict[str, Any], plan: YouTubePathPlan) -> Path | None:
     channel = str(info.get("channel") or info.get("uploader") or "YouTube").strip() or "YouTube"
     jpg_path, png_path = _channel_poster_paths(plan.item_dir.parent)
-    if jpg_path.exists():
+    if jpg_path.exists() and _image_is_portrait_poster(jpg_path):
         return jpg_path
-    if png_path.exists():
+    if png_path.exists() and _image_is_portrait_poster(png_path):
         return png_path
 
     avatar_url = _direct_channel_thumbnail(info)
@@ -767,7 +906,7 @@ def write_channel_poster(info: dict[str, Any], plan: YouTubePathPlan) -> Path | 
             avatar_url = ""
     if avatar_url:
         try:
-            _download_image_as_jpeg(avatar_url, jpg_path)
+            _download_channel_avatar_poster(avatar_url, jpg_path)
             if jpg_path.exists():
                 return jpg_path
         except Exception:
