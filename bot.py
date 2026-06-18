@@ -438,6 +438,7 @@ BOT_COMMANDS = [
     BotCommand("settings", "Предпочтения поиска"),
     BotCommand("seasons", "Докачать серии и сезоны"),
     BotCommand("status", "Список загрузок"),
+    BotCommand("normalize", "Переименовать серии для Plex"),
     BotCommand("help", "Справка по боту"),
     BotCommand("id", "Показать мой chat_id"),
     BotCommand("ping", "Проверка связи"),
@@ -6554,11 +6555,36 @@ def _plex_series_confirm_text(
     )
 
 
-def _make_task_keyboard(task_id: str, status: str = "", task_type: str = "") -> InlineKeyboardMarkup:
+def _task_normalization_button_visible(task: dict | None) -> bool:
+    if not task or not PLEX_ENABLED:
+        return False
+    if (task.get("type") or "").lower() != "bt":
+        return False
+    task_id = str(task.get("id") or "")
+    if not task_id:
+        return False
+
+    status = (task.get("status") or "").lower()
+    notification_status = "finished" if _is_complete_despite_error(task) else status
+    if notification_status not in {"finished", "seeding"}:
+        return False
+
+    decision = _inspect_completed_task_normalization(task, _get_task_meta(task_id))
+    return _normalization_blocks_plex(decision)
+
+
+def _make_task_keyboard(
+    task_id: str,
+    status: str = "",
+    task_type: str = "",
+    *,
+    task: dict | None = None,
+) -> InlineKeyboardMarkup:
     """Bot-level wrapper: injects tracker-button visibility state into the stateless _task_keyboard."""
     return _task_keyboard(
         task_id, status, task_type,
         show_trackers=_tracker_button_visible(task_id, status, task_type),
+        show_normalization=_task_normalization_button_visible(task),
     )
 
 
@@ -6938,6 +6964,53 @@ def _normalization_poll_recipients(task_id: str, chat_id: int | None) -> set[int
     return recipients
 
 
+async def _normalization_entry_screen(
+    task_id: str,
+    chat_id: int | None,
+    *,
+    retry_callback: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    if not _can_access_task_id(chat_id, task_id):
+        return (
+            "Эта задача не относится к вашим загрузкам.",
+            _task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
+
+    try:
+        tasks = await asyncio.to_thread(ds_client.list_tasks)
+    except DownloadStationError:
+        return (
+            _download_station_user_error_text("Не удалось получить задачу.", task_id=task_id),
+            _task_error_keyboard(retry_callback=retry_callback, list_scope=_default_list_scope(chat_id)),
+        )
+
+    task = _find_task(tasks, task_id)
+    if not task:
+        return (
+            f"Задача не найдена.\nID: {task_id}",
+            _task_error_keyboard(list_scope=_default_list_scope(chat_id)),
+        )
+
+    decision = await asyncio.to_thread(
+        _inspect_completed_task_normalization,
+        task,
+        _get_task_meta(task_id),
+    )
+    if _normalization_blocks_plex(decision):
+        return _format_normalization_notification(task, decision), _normalization_keyboard(task_id, decision)
+
+    status = (task.get("status") or "").lower()
+    reason = (
+        "Не нашёл видеофайлы этой задачи в /storage."
+        if decision.get("status") == "files_unavailable"
+        else "Нормализация сейчас не нужна: файлы уже выглядят совместимыми с Plex или не похожи на серии."
+    )
+    return (
+        f"{reason}\n\n{_format_task_card(task, chat_id)}",
+        _make_task_keyboard(task_id, status, task.get("type", ""), task=task),
+    )
+
+
 async def _handle_normalization_callback(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -6946,6 +7019,15 @@ async def _handle_normalization_callback(
     chat_id: int | None,
 ) -> None:
     task_id, season = _split_task_id_and_season(raw_task_id)
+    if action == "norm_open":
+        text, keyboard = await _normalization_entry_screen(
+            task_id,
+            chat_id,
+            retry_callback=query.data or None,
+        )
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+
     if not _can_access_task_id(chat_id, task_id):
         await query.edit_message_text(
             "Эта задача не относится к вашим загрузкам.",
@@ -9406,7 +9488,7 @@ def _explicit_notification_chat_ids() -> set[int]:
     return parse_chat_ids(NOTIFY_CHAT_IDS_RAW)
 
 
-def _notification_recipients(task_id: str) -> set[int]:
+def _notification_recipients(task_id: str, *, include_card_viewers: bool = True) -> set[int]:
     """Resolve who should receive a notification for ``task_id``.
 
     Primary path delegates to ``task_policies.notification_recipients`` which
@@ -9430,6 +9512,9 @@ def _notification_recipients(task_id: str) -> set[int]:
         fallback_chat_ids=_all_allowed_chat_ids(),
         allowed_chat_ids=_all_allowed_chat_ids(),
     )
+    if not include_card_viewers:
+        return recipients
+
     card_chat_ids = {chat_id for chat_id, _ in TASK_CARD_MESSAGES.get(str(task_id), set())}
     if card_chat_ids:
         allowed = _all_allowed_chat_ids()
@@ -9857,6 +9942,7 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
             )
             continue
 
+        base_recipients = _notification_recipients(task_id, include_card_viewers=False)
         recipients = _notification_recipients(task_id)
 
         # Also notify any users who subscribed via "🔔 Уведомить когда готово".
@@ -9868,6 +9954,7 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
                         sub_chat_id = _background_chat_id(sub_id_str)
                         if sub_chat_id is not None:
                             recipients.add(sub_chat_id)
+                            base_recipients.add(sub_chat_id)
                     except (TypeError, ValueError):
                         pass
 
@@ -9894,6 +9981,15 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
                 task_meta,
             )
         normalization_blocks_plex = _normalization_blocks_plex(normalization_decision)
+        if normalization_blocks_plex:
+            recipients = base_recipients
+            if not recipients:
+                logger.info(
+                    "Task normalization notification skipped task=%s status=%s key=%s: "
+                    "no owner/explicit/fallback recipients (card viewers ignored)",
+                    task_id, status, notification_key,
+                )
+                continue
 
         # Determine if Plex polling should start for this task. We must atomically
         # reserve the _PLEX_POLLING_TASKS slot BEFORE the first await below — otherwise
@@ -10656,7 +10752,7 @@ async def _task_card_refresh_loop(app, chat_id: int, message_id: int, task_id: s
                     chat_id=chat_id,
                     message_id=message_id,
                     text=_format_task_card(task, chat_id),
-                    reply_markup=_make_task_keyboard(task_id, status, task.get("type", "")),
+                    reply_markup=_make_task_keyboard(task_id, status, task.get("type", ""), task=task),
                 )
             except BadRequest as e:
                 err = str(e).lower()
@@ -25916,7 +26012,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if (task.get("type") or "").lower() != "bt":
             await query.edit_message_text(
                 f"Public-трекеры доступны только для BT-задач.\n\n{_format_task_card(task, chat_id)}",
-                reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
+                reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", ""), task=task),
             )
             return
 
@@ -25932,7 +26028,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         tracker_lines = _tracker_result_lines(tracker_result) or ["Public-трекеры: выключены"]
         await query.edit_message_text(
             "\n".join(["Трекеры обновлены.", *tracker_lines, "", _format_task_card(task, chat_id)]),
-            reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
+            reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", ""), task=task),
         )
         _register_task_card_from_query(query, task_id)
         return
@@ -26041,7 +26137,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if task:
             await query.edit_message_text(
                 f"{notice}\n\n{_format_task_card(task, chat_id)}",
-                reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", "")),
+                reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", ""), task=task),
             )
             _register_task_card_from_query(query, task_id)
         else:
@@ -26100,13 +26196,35 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     status = (task.get("status") or "").lower()
     await query.edit_message_text(
         _format_task_card(task, chat_id),
-        reply_markup=_make_task_keyboard(task_id, status, task.get("type", "")),
+        reply_markup=_make_task_keyboard(task_id, status, task.get("type", ""), task=task),
     )
     _register_task_card_from_query(query, task_id)
 
     # Start auto-refresh while the task is actively transferring
     if status in _ACTIVE_STATUSES and chat_id and message_id:
         _start_task_card_refresh(context.application, chat_id, message_id, task_id)
+
+
+async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        logger.warning("Rejected /normalize from chat_id=%s", _chat_id(update))
+        await _reply_access_pending(update, context)
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not context.args:
+        await update.message.reply_text(
+            "Укажите id задачи, например: /normalize dbid_421\n"
+            "ID можно взять из карточки загрузки в /status."
+        )
+        await _delete_command_message_safely(update, context, "normalize command")
+        return
+
+    task_id = context.args[0].strip()
+    progress_message = await update.message.reply_text("🔎 Проверяю файлы задачи…")
+    await _delete_command_message_safely(update, context, "normalize command")
+    text, keyboard = await _normalization_entry_screen(task_id, chat_id)
+    await _safe_edit_message(progress_message, text, reply_markup=keyboard)
 
 
 async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -27708,6 +27826,7 @@ def main() -> None:
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("bulk", series_bulk_command))
     app.add_handler(CommandHandler("seasons", series_continue_command))
+    app.add_handler(CommandHandler("normalize", normalize_command))
     app.add_handler(CommandHandler("resume", resume))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(ConversationHandler(

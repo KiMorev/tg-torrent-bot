@@ -96,6 +96,22 @@ class KeyboardTests(unittest.TestCase):
         }
         self.assertNotIn("🗑️ Удалить задачу", buttons)
 
+    def test_task_keyboard_can_offer_filename_normalization(self) -> None:
+        keyboard = _task_keyboard(
+            "tid1",
+            status="seeding",
+            task_type="bt",
+            show_normalization=True,
+        )
+
+        buttons = {
+            button.text: button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["🛠 Переименовать для Plex"], "task:norm_open:tid1")
+
     def test_admin_panel_keyboard_links_core_sections(self) -> None:
         keyboard = _admin_panel_keyboard()
 

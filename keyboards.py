@@ -486,6 +486,7 @@ def _task_keyboard(
     task_type: str = "",
     *,
     show_trackers: bool = False,
+    show_normalization: bool = False,
 ) -> InlineKeyboardMarkup:
     status = status.lower()
     rows = [[InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))]]
@@ -517,6 +518,11 @@ def _task_keyboard(
     if show_trackers:
         rows.append(
             [InlineKeyboardButton("➕ Добавить трекеры", callback_data=_task_callback("trackers", task_id))]
+        )
+
+    if show_normalization:
+        rows.append(
+            [InlineKeyboardButton("🛠 Переименовать для Plex", callback_data=_task_callback("norm_open", task_id))]
         )
 
     rows.append(

@@ -349,6 +349,81 @@ class NotificationDeduplicationTests(unittest.TestCase):
         self.assertIn("✅ Переименовать для Plex", labels)
         poll.assert_not_called()
 
+    def test_normalization_notification_ignores_passive_task_card_viewer(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Тайны следствия", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Тайны следствия"
+        show_dir.mkdir(parents=True)
+        for name in [
+            "1. Мягкая лапа смерти (1 сер.) - hdtv1080p.mkv",
+            "1. Мягкая лапа смерти (2 сер.) - hdtv1080p.mkv",
+        ]:
+            (show_dir / name).write_bytes(b"")
+
+        bot.TASK_CARD_MESSAGES["tid1"] = {(999, 42)}
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"seeding"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", False),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {999}),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+            patch.object(
+                bot,
+                "_get_task_meta",
+                return_value={
+                    "kind": "series",
+                    "title": "Тайны следствия 1 сезон",
+                    "series_query": "Тайны следствия",
+                    "season_num": 1,
+                },
+            ),
+        ):
+            with self.assertLogs("tg_torrent_drop", level="INFO") as captured:
+                asyncio.run(_run_task_notifications_once(mock_app))
+
+        joined = "\n".join(captured.output)
+        self.assertIn("card viewers ignored", joined)
+        mock_app.bot.send_message.assert_not_awaited()
+
+    def test_task_card_keyboard_offers_normalization_for_renamable_series(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Тайны следствия", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Тайны следствия"
+        show_dir.mkdir(parents=True)
+        for name in [
+            "1. Мягкая лапа смерти (1 сер.) - hdtv1080p.mkv",
+            "1. Мягкая лапа смерти (2 сер.) - hdtv1080p.mkv",
+        ]:
+            (show_dir / name).write_bytes(b"")
+
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+            patch.object(bot, "_tracker_button_visible", return_value=False),
+            patch.object(
+                bot,
+                "_get_task_meta",
+                return_value={
+                    "kind": "series",
+                    "title": "Тайны следствия 1 сезон",
+                    "series_query": "Тайны следствия",
+                    "season_num": 1,
+                },
+            ),
+        ):
+            keyboard = bot._make_task_keyboard("tid1", "seeding", "bt", task=task)
+
+        labels = [button.text for row in keyboard.inline_keyboard for button in row]
+        self.assertIn("🛠 Переименовать для Plex", labels)
+
     def test_already_plex_episode_names_keep_polling(self) -> None:
         task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Show", "size": 0}
         storage_root = Path(self._tmp.name) / "storage"
