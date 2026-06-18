@@ -6596,6 +6596,7 @@ def _notification_keyboard(task_id: str, status: str = "", task_type: str = "") 
 
 
 _NORMALIZATION_SEASON_CHOICES = tuple(range(1, 11))
+_NORMALIZATION_CANDIDATE_LIMIT = 10
 
 
 def _normalization_callback(action: str, task_id: str, season: int | None = None) -> str:
@@ -6964,6 +6965,71 @@ def _normalization_poll_recipients(task_id: str, chat_id: int | None) -> set[int
     return recipients
 
 
+def _normalization_candidates(tasks: list[dict], chat_id: int | None) -> list[dict]:
+    candidates: list[dict] = []
+    for task in tasks:
+        task_id = str(task.get("id") or "")
+        if not task_id or not _can_access_task_id(chat_id, task_id):
+            continue
+        if not _task_normalization_button_visible(task):
+            continue
+        candidates.append(task)
+    return candidates
+
+
+def _normalization_candidates_keyboard(
+    candidates: list[dict],
+    chat_id: int | None,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for task in candidates[:_NORMALIZATION_CANDIDATE_LIMIT]:
+        task_id = str(task.get("id") or "")
+        if not task_id:
+            continue
+        rows.append([InlineKeyboardButton(
+            f"🛠 {_short_title(task, limit=54)}",
+            callback_data=_normalization_callback("norm_open", task_id),
+        )])
+    rows.append([InlineKeyboardButton(
+        BUTTON_DOWNLOAD_LIST,
+        callback_data=_task_callback("list", _default_list_scope(chat_id)),
+    )])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _normalization_candidates_screen(
+    chat_id: int | None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    try:
+        tasks = await asyncio.to_thread(ds_client.list_tasks)
+    except DownloadStationError:
+        return (
+            _download_station_user_error_text("Не удалось получить список загрузок."),
+            _task_error_keyboard(retry_callback=_task_callback("norm_list", ""), list_scope=_default_list_scope(chat_id)),
+        )
+
+    candidates = await asyncio.to_thread(_normalization_candidates, tasks, chat_id)
+    if not candidates:
+        return (
+            "Сейчас нет загрузок, где бот видит безопасное переименование для Plex.\n\n"
+            "Если такая задача появится, кнопка будет в её карточке в /status.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", _default_list_scope(chat_id)))],
+                [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
+            ]),
+        )
+
+    suffix = ""
+    if len(candidates) > _NORMALIZATION_CANDIDATE_LIMIT:
+        suffix = f"\n\nПоказаны первые {_NORMALIZATION_CANDIDATE_LIMIT} из {len(candidates)}."
+    return (
+        "Выберите загрузку, где нужно исправить имена серий для Plex."
+        f"{suffix}",
+        _normalization_candidates_keyboard(candidates, chat_id),
+    )
+
+
 async def _normalization_entry_screen(
     task_id: str,
     chat_id: int | None,
@@ -7019,6 +7085,11 @@ async def _handle_normalization_callback(
     chat_id: int | None,
 ) -> None:
     task_id, season = _split_task_id_and_season(raw_task_id)
+    if action == "norm_list":
+        text, keyboard = await _normalization_candidates_screen(chat_id)
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+
     if action == "norm_open":
         text, keyboard = await _normalization_entry_screen(
             task_id,
@@ -26213,11 +26284,10 @@ async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not context.args:
-        await update.message.reply_text(
-            "Укажите id задачи, например: /normalize dbid_421\n"
-            "ID можно взять из карточки загрузки в /status."
-        )
+        progress_message = await update.message.reply_text("🔎 Ищу загрузки для переименования…")
         await _delete_command_message_safely(update, context, "normalize command")
+        text, keyboard = await _normalization_candidates_screen(chat_id)
+        await _safe_edit_message(progress_message, text, reply_markup=keyboard)
         return
 
     task_id = context.args[0].strip()

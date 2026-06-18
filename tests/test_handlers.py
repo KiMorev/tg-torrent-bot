@@ -169,6 +169,60 @@ def _make_context(user_data: dict | None = None):
 
 
 class NormalizeCommandTests(unittest.TestCase):
+    def test_normalize_command_without_id_lists_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.remember_task_owner("tid1", 100)
+            storage_root = Path(tmp) / "storage"
+            show_dir = storage_root / "Тайны следствия"
+            show_dir.mkdir(parents=True)
+            for name in [
+                "1. Мягкая лапа смерти (1 сер.) - hdtv1080p.mkv",
+                "1. Мягкая лапа смерти (2 сер.) - hdtv1080p.mkv",
+            ]:
+                (show_dir / name).write_bytes(b"")
+
+            task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Тайны следствия", "size": 0}
+            mock_ds = MagicMock()
+            mock_ds.list_tasks.return_value = [task]
+            update = _make_command_update(text="/normalize")
+            context = _make_context()
+            context.args = []
+            progress = MagicMock()
+            progress.edit_text = AsyncMock()
+            update.message.reply_text.return_value = progress
+
+            with (
+                patch.object(bot, "ds_client", mock_ds),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+                patch.object(
+                    bot,
+                    "_get_task_meta",
+                    return_value={
+                        "kind": "series",
+                        "title": "Тайны следствия 1 сезон",
+                        "series_query": "Тайны следствия",
+                        "season_num": 1,
+                    },
+                ),
+            ):
+                asyncio.run(bot.normalize_command(update, context))
+
+            update.message.reply_text.assert_awaited_once_with("🔎 Ищу загрузки для переименования…")
+            progress.edit_text.assert_awaited_once()
+            text = progress.edit_text.await_args.args[0]
+            self.assertIn("Выберите загрузку", text)
+            buttons = {
+                button.text: button.callback_data
+                for row in progress.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+                for button in row
+            }
+            candidate_label = next(label for label in buttons if label.startswith("🛠 "))
+            self.assertEqual(buttons[candidate_label], "task:norm_open:tid1")
+
     def test_normalize_command_opens_rename_screen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = _make_store(tmp)
