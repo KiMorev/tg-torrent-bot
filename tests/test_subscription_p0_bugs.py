@@ -289,6 +289,59 @@ class JackettSubsSeasonCompleteFailedDownloadTests(unittest.TestCase):
         text = app.bot.send_message.await_args.kwargs.get("text", "")
         self.assertIn("вручную", text.lower())
 
+    def test_failed_auto_download_keeps_state_for_next_retry_after_notification(self):
+        from jackett import JackettResult, JackettError
+
+        sub_key = "jackett:retry-download"
+        sub = {
+            "type": "jackett",
+            "version": bot.JACKETT_SUBSCRIPTION_SCHEMA,
+            "chat_id": 100,
+            "query": "Show",
+            "title": "Show S1E1-1 of 10",
+            "tracker": "kinozal",
+            "topic_url": "https://kinozal.tv/topic/77",
+            "notify_policy": bot.NOTIFY_EACH_UPDATE,
+            "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
+            "last_episode_end": 1,
+            "total_episodes": 10,
+            "last_check": "2026-05-01 10:00",
+            "seen_titles": [],
+        }
+        self.store.save_topic_subscriptions({sub_key: sub})
+
+        candidate = JackettResult(
+            title="Show S1E1-5 of 10", size="10 GB", seeders=10,
+            torrent_url="http://jk/x", magnet_url=None,
+            tracker="kinozal", topic_url="https://kinozal.tv/topic/77",
+        )
+        app = MagicMock()
+        app.bot.send_message = AsyncMock()
+        jackett = MagicMock()
+        jackett.search.return_value = [candidate]
+        jackett.search_with_statuses = None
+        download = AsyncMock(side_effect=[JackettError("DS unavailable"), "task-2"])
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "select_jackett_subscription_candidate", return_value=candidate),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct",
+                         AsyncMock(return_value=False)),
+            patch.object(bot, "_jackett_subscription_auto_download", download),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+            stored = self.store.load_topic_subscriptions()[sub_key]
+            self.assertEqual(stored["last_episode_end"], 1)
+            self.assertEqual(download.await_count, 1)
+
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        stored = self.store.load_topic_subscriptions()[sub_key]
+        self.assertEqual(stored["last_episode_end"], 5)
+        self.assertEqual(download.await_count, 2)
+        self.assertEqual(jackett.search.call_count, 2)
+
     def test_empty_task_id_counts_as_failed_download(self):
         """An empty task_id is not a successful DS auto-download."""
         from jackett import JackettResult
@@ -650,6 +703,36 @@ class JackettSubscriptionSourcePriorityTests(unittest.TestCase):
         )
         direct_fallback.assert_awaited_once()
         self.assertIs(direct_fallback.await_args.args[0], app)
+        self.assertEqual(direct_fallback.await_args.args[2], sub_key)
+
+    def test_failed_selected_indexer_empty_results_uses_direct_fallback(self):
+        from jackett import JackettIndexerStatus
+
+        sub_key = "jackett:rutracker-partial-failure"
+        self.store.save_topic_subscriptions({sub_key: _jackett_rt_sub(last_end=1, total=10)})
+        app = self._make_app()
+        jackett = MagicMock()
+        jackett.search_with_statuses.return_value = (
+            [],
+            [JackettIndexerStatus("rutracker", "RuTracker", 1, 0, "timeout")],
+        )
+        jackett.search.side_effect = AssertionError("search() fallback should not be needed")
+        direct_fallback = AsyncMock(return_value=True)
+
+        with (
+            patch.object(bot, "state_store", self.store),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "_check_jackett_sub_via_rutracker_direct", direct_fallback),
+        ):
+            asyncio.run(bot._check_jackett_subscriptions(app))
+
+        jackett.search_with_statuses.assert_called_once_with(
+            "Show",
+            indexers=["rutracker"],
+            fetch_limit=bot.JACKETT_FETCH_LIMIT,
+        )
+        jackett.search.assert_not_called()
+        direct_fallback.assert_awaited_once()
         self.assertEqual(direct_fallback.await_args.args[2], sub_key)
 
 

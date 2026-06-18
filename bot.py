@@ -23600,12 +23600,39 @@ async def _check_jackett_subscriptions(app: Application) -> None:
             indexers_filter: list[str] | None = [tracker_id] if tracker_id else None
 
             try:
-                new_results = await asyncio.to_thread(
-                    jackett_client.search,
-                    search_query,
-                    indexers=indexers_filter,
-                    fetch_limit=JACKETT_FETCH_LIMIT,
-                )
+                indexer_statuses = []
+                search_with_statuses = getattr(jackett_client, "search_with_statuses", None)
+                if callable(search_with_statuses):
+                    response = await asyncio.to_thread(
+                        search_with_statuses,
+                        search_query,
+                        indexers=indexers_filter,
+                        fetch_limit=JACKETT_FETCH_LIMIT,
+                    )
+                    if isinstance(response, tuple) and len(response) == 2:
+                        new_results = list(response[0] or [])
+                        indexer_statuses = list(response[1] or [])
+                    else:
+                        logger.debug(
+                            "Jackett subscription search_with_statuses returned unexpected shape; "
+                            "falling back to search()"
+                        )
+                        new_results = await asyncio.to_thread(
+                            jackett_client.search,
+                            search_query,
+                            indexers=indexers_filter,
+                            fetch_limit=JACKETT_FETCH_LIMIT,
+                        )
+                else:
+                    new_results = await asyncio.to_thread(
+                        jackett_client.search,
+                        search_query,
+                        indexers=indexers_filter,
+                        fetch_limit=JACKETT_FETCH_LIMIT,
+                    )
+                    get_statuses = getattr(jackett_client, "get_last_indexer_statuses", None)
+                    if callable(get_statuses):
+                        indexer_statuses = list(get_statuses() or [])
             except (JackettError, asyncio.TimeoutError) as e:
                 logger.warning(
                     "Jackett subscription search failed for %s (%s); trying Rutracker direct fallback",
@@ -23617,6 +23644,18 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
             candidate = select_jackett_subscription_candidate(sub, new_results)
             if candidate is None:
+                failed_statuses = _jackett_failed_statuses_for_selection(
+                    indexer_statuses, indexers_filter or []
+                )
+                if not new_results and failed_statuses:
+                    logger.warning(
+                        "Jackett subscription search had failed indexers for %s (%s); "
+                        "trying Rutracker direct fallback",
+                        key, _jackett_failed_statuses_text(failed_statuses),
+                    )
+                    if await _check_jackett_sub_via_rutracker_direct(app, subs, key, sub):
+                        changed = True
+                    continue
                 sub["last_check"] = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
                 changed = True
                 continue
@@ -23800,6 +23839,15 @@ async def _check_jackett_subscriptions(app: Application) -> None:
 
             if sent:
                 checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+                if download_attempted_and_failed:
+                    sub["last_check"] = checked_at
+                    changed = True
+                    logger.info(
+                        "Jackett subscription %s: notification sent after failed auto-download; "
+                        "keeping state for retry",
+                        key,
+                    )
+                    continue
                 if sub.get("version") == JACKETT_SUBSCRIPTION_SCHEMA:
                     apply_jackett_subscription_match(sub, candidate, checked_at)
                 else:
