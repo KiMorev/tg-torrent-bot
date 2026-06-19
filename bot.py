@@ -172,6 +172,7 @@ from series_continue import (
     SeriesCatchUpCandidate,
     SeriesMetadataSeason,
     SeriesMissingSeasonCandidate,
+    SeriesTopicUpdateCheck,
     build_series_catch_up_candidates,
     build_series_missing_season_candidates,
     identity_from_plex_show,
@@ -16139,7 +16140,7 @@ def _series_continue_alternatives_text(results: list[dict], search_query: str) -
         "🔍 <b>Похожие раздачи</b>",
         "",
         f"Запрос: {html_module.escape(search_query)}",
-        "Это уже другая тема, поэтому бот скачает её как обновлённую раздачу.",
+        "⬇️ скачает выбранную раздачу и при неполном сезоне сохранит подписку; 🔔 только подпишет на выбранную тему.",
         "",
     ]
     for offset, result in enumerate(results, start=1):
@@ -16166,7 +16167,11 @@ def _series_continue_alternatives_keyboard(
             InlineKeyboardButton(
                 f"⬇️ {offset}",
                 callback_data=f"{CONTINUE_CALLBACK_PREFIX}:alt_dl:{scope}:{candidate_index}:{offset - 1}",
-            )
+            ),
+            InlineKeyboardButton(
+                f"🔔 {offset}",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:alt_sub:{scope}:{candidate_index}:{offset - 1}",
+            ),
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{CONTINUE_CALLBACK_PREFIX}:list:{scope}:{page}")])
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
@@ -16190,7 +16195,7 @@ def _series_continue_no_new_alternative_text(
     lines = [
         f"📺 <b>{title}</b>",
         "",
-        "В выбранной раздаче нет новых серий для докачки.",
+        "В выбранной раздаче нет недостающих для Plex серий.",
         f"Plex уже покрывает серии до {baseline}, а раздача содержит до {topic_end}{total_suffix}.",
         "",
         f"Раздача: <b>{release_title}</b>",
@@ -16214,6 +16219,53 @@ def _series_continue_no_new_alternative_text(
             "Загрузку в Download Station не запускаю.",
         ])
     return "\n".join(lines)
+
+
+def _series_continue_result_episode_info(result: dict) -> tuple[int, int] | None:
+    return _parse_episode_info(str(result.get("title") or ""))
+
+
+def _series_continue_result_is_partial(result: dict) -> bool:
+    episode_info = _series_continue_result_episode_info(result)
+    return bool(episode_info and episode_info[0] < episode_info[1])
+
+
+def _series_continue_result_covers_missing(
+    candidate: SeriesCatchUpCandidate,
+    result: dict,
+) -> bool | None:
+    episode_info = _series_continue_result_episode_info(result)
+    if episode_info is None:
+        return None
+    topic_end, _topic_total = episode_info
+    completeness = resolve_series_completeness(candidate)
+    if completeness.missing_episode_numbers:
+        return any(number <= topic_end for number in completeness.missing_episode_numbers)
+    baseline = max(
+        int(candidate.present_count or 0),
+        int(candidate.history_last_episode_end or 0),
+    )
+    return topic_end > baseline
+
+
+def _series_continue_no_new_check_from_result(
+    candidate: SeriesCatchUpCandidate,
+    result: dict,
+) -> SeriesTopicUpdateCheck:
+    episode_info = _series_continue_result_episode_info(result)
+    topic_end, topic_total = episode_info or (0, 0)
+    baseline = max(
+        int(candidate.present_count or 0),
+        int(candidate.history_last_episode_end or 0),
+    )
+    return SeriesTopicUpdateCheck(
+        action="no_update",
+        reason_for_user="",
+        topic_episode_end=topic_end,
+        topic_total=topic_total,
+        baseline_episode_end=baseline,
+        topic_title=str(result.get("title") or ""),
+    )
 
 
 def _series_continue_task_matches_candidate(task: dict, candidate: SeriesCatchUpCandidate) -> bool:
@@ -16479,12 +16531,12 @@ async def _series_continue_download_alternative(
         return
     result = alternatives[alt_index]
     result_title = str(result.get("title") or "")
-    episode_info = _parse_episode_info(result_title)
+    covers_missing = _series_continue_result_covers_missing(candidate, result)
     update_check = resolve_same_topic_update(candidate, result_title)
-    if update_check.action == "no_update":
+    if covers_missing is False or (covers_missing is None and update_check.action == "no_update"):
         saved_sub = None
         subscription_error = ""
-        if episode_info and episode_info[0] < episode_info[1]:
+        if _series_continue_result_is_partial(result):
             try:
                 _saved_key, saved_sub = _save_subscription_for_result(
                     context,
@@ -16497,11 +16549,16 @@ async def _series_continue_download_alternative(
             except RuntimeError as exc:
                 logger.info("Series continue: no-new alternative subscription failed: %s", exc)
                 subscription_error = _subscription_save_user_error_text(downloaded=False)
+        no_new_check = (
+            _series_continue_no_new_check_from_result(candidate, result)
+            if covers_missing is False
+            else update_check
+        )
         await query.edit_message_text(
             _series_continue_no_new_alternative_text(
                 candidate,
                 result,
-                update_check,
+                no_new_check,
                 saved_sub=saved_sub,
                 subscription_error=subscription_error,
             ),
@@ -16514,7 +16571,7 @@ async def _series_continue_download_alternative(
             ),
         )
         return
-    subscribe = bool(episode_info and episode_info[0] < episode_info[1])
+    subscribe = _series_continue_result_is_partial(result)
     await _series_continue_add_download_result(
         query,
         context,
@@ -16524,6 +16581,59 @@ async def _series_continue_download_alternative(
         index=index,
         page=page,
         success_subscription_text="Буду следить за новыми сериями в этой раздаче.",
+    )
+
+
+async def _series_continue_subscribe_alternative(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    candidate: SeriesCatchUpCandidate,
+    *,
+    scope: str,
+    index: int,
+    page: int,
+    alt_index: int,
+) -> None:
+    state = _series_continue_state(context)
+    alternatives = state.get(_series_continue_alt_key(scope, index))
+    if not isinstance(alternatives, list) or alt_index < 0 or alt_index >= len(alternatives):
+        await query.edit_message_text(
+            "Список похожих раздач устарел. Запустите поиск похожих ещё раз.",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+        )
+        return
+    result = alternatives[alt_index]
+    if not _series_continue_result_is_partial(result):
+        await query.edit_message_text(
+            "Выбранная раздача выглядит полной, подписка на будущие серии для неё не нужна. Можно скачать её или выбрать другую раздачу.",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+        )
+        return
+    try:
+        _saved_key, saved_sub = _save_subscription_for_result(
+            context,
+            result,
+            chat_id=_chat_id_from_query(query),
+            notify_policy=NOTIFY_EACH_UPDATE,
+            download_policy=DOWNLOAD_AUTO_EACH_UPDATE,
+            seen_results=alternatives,
+        )
+    except RuntimeError as exc:
+        logger.info("Series continue: alternative subscription failed: %s", exc)
+        await query.edit_message_text(
+            f"⚠️ {_subscription_save_user_error_text(downloaded=False)}.",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+        )
+        return
+    title = html_module.escape(str(result.get("title") or "раздача")[:160])
+    policy = html_module.escape(policies_summary_ru(saved_sub))
+    await query.edit_message_text(
+        "🔔 <b>Подписка сохранена</b>\n\n"
+        f"Раздача: <b>{title}</b>\n"
+        f"Режим: {policy}\n\n"
+        "Текущую раздачу не скачиваю. Буду следить за обновлениями этой темы.",
+        parse_mode="HTML",
+        reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
     )
 
 
@@ -16895,7 +17005,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    if action in {"subscribe_topic", "search_alt", "alt_dl"}:
+    if action in {"subscribe_topic", "search_alt", "alt_dl", "alt_sub"}:
         scope = _series_continue_scope_part(parts, 2)
         try:
             index = int(parts[3]) if len(parts) > 3 else -1
@@ -16935,6 +17045,17 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
             alt_index = int(parts[4]) if len(parts) > 4 else -1
         except ValueError:
             alt_index = -1
+        if action == "alt_sub":
+            await _series_continue_subscribe_alternative(
+                query,
+                context,
+                candidates[index],
+                scope=scope,
+                index=index,
+                page=page,
+                alt_index=alt_index,
+            )
+            return
         await _series_continue_download_alternative(
             query,
             context,

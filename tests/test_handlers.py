@@ -9798,6 +9798,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
         self.assertIn("Похожие раздачи", text)
         self.assertIn("cont:alt_dl:all:0:0", self._callbacks(keyboard))
+        self.assertIn("cont:alt_sub:all:0:0", self._callbacks(keyboard))
 
     def test_continue_plex_only_empty_alternatives_retry_search_without_subscribe(self):
         candidate = self._candidate(topic_id="", source="plex")
@@ -9938,11 +9939,109 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertEqual(save_sub.call_args.kwargs["notify_policy"], bot.NOTIFY_EACH_UPDATE)
         self.assertEqual(save_sub.call_args.kwargs["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
         text = update.callback_query.edit_message_text.await_args.args[0]
-        self.assertIn("нет новых серий", text)
+        self.assertIn("нет недостающих для Plex серий", text)
         self.assertIn("Подписка сохранена", text)
         self.assertIn("Download Station не запускаю", text)
         callbacks = self._callbacks(update.callback_query.edit_message_text.await_args.kwargs["reply_markup"])
         self.assertIn("cont:search_alt:all:0", callbacks)
+
+    def test_continue_subscribe_alternative_saves_subscription_without_download(self):
+        candidate = self._candidate(topic_id="", source="plex")
+        alt = {
+            "source": "rutracker",
+            "topic_id": "999",
+            "title": "The Rookie S8E1-6 of 8 WEB-DL 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=999",
+            "tracker_name": "rutracker",
+            "quality": "1080p",
+        }
+        state = {
+            "mine": [],
+            "all": [candidate],
+            "scope": "all",
+            "page": 0,
+            "continue_state:alt:all:0": [alt],
+        }
+        update = _make_callback_update(chat_id=100, callback_data="cont:alt_sub:all:0:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        save_sub = MagicMock(return_value=(
+            "999",
+            {
+                "notify_policy": bot.NOTIFY_EACH_UPDATE,
+                "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
+            },
+        ))
+        attempt_download = AsyncMock()
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_save_subscription_for_result", save_sub),
+                patch.object(bot, "_attempt_pending_download", attempt_download),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        attempt_download.assert_not_awaited()
+        save_sub.assert_called_once()
+        self.assertEqual(save_sub.call_args.kwargs["chat_id"], 100)
+        self.assertEqual(save_sub.call_args.kwargs["notify_policy"], bot.NOTIFY_EACH_UPDATE)
+        self.assertEqual(save_sub.call_args.kwargs["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Подписка сохранена", text)
+        self.assertIn("Текущую раздачу не скачиваю", text)
+
+    def test_continue_plex_only_alternative_without_missing_episodes_does_not_download(self):
+        candidate = bot.replace(
+            self._candidate(topic_id="", source="plex"),
+            present_count=4,
+            present_episode_numbers=(1, 2, 3, 4),
+            known_total=8,
+            history_last_episode_end=0,
+        )
+        alt = {
+            "source": "rutracker",
+            "topic_id": "999",
+            "title": "The Rookie S8E1-4 of 8 WEB-DL 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=999",
+            "tracker_name": "rutracker",
+            "quality": "1080p",
+        }
+        state = {
+            "mine": [],
+            "all": [candidate],
+            "scope": "all",
+            "page": 0,
+            "continue_state:alt:all:0": [alt],
+        }
+        update = _make_callback_update(chat_id=100, callback_data="cont:alt_dl:all:0:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        attempt_download = AsyncMock()
+        save_sub = MagicMock(return_value=(
+            "999",
+            {
+                "notify_policy": bot.NOTIFY_EACH_UPDATE,
+                "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
+            },
+        ))
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_series_continue_active_task", AsyncMock(return_value=None)),
+                patch.object(bot, "_attempt_pending_download", attempt_download),
+                patch.object(bot, "_save_subscription_for_result", save_sub),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        attempt_download.assert_not_awaited()
+        save_sub.assert_called_once()
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Подписка сохранена", text)
+        self.assertIn("Download Station не запускаю", text)
 
 
 # ---------------------------------------------------------------------------
