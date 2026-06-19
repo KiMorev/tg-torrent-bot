@@ -16154,6 +16154,49 @@ def _series_continue_alternatives_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _series_continue_no_new_alternative_text(
+    candidate: SeriesCatchUpCandidate,
+    result: dict,
+    update_check,
+    *,
+    saved_sub: dict | None = None,
+    subscription_error: str = "",
+) -> str:
+    title = html_module.escape(_series_continue_candidate_title(candidate))
+    release_title = html_module.escape(str(result.get("title") or "раздача")[:160])
+    baseline = int(getattr(update_check, "baseline_episode_end", 0) or 0)
+    topic_end = int(getattr(update_check, "topic_episode_end", 0) or 0)
+    topic_total = int(getattr(update_check, "topic_total", 0) or 0)
+    total_suffix = f" из {topic_total}" if topic_total > 0 else ""
+    lines = [
+        f"📺 <b>{title}</b>",
+        "",
+        "В выбранной раздаче нет новых серий для докачки.",
+        f"Plex уже покрывает серии до {baseline}, а раздача содержит до {topic_end}{total_suffix}.",
+        "",
+        f"Раздача: <b>{release_title}</b>",
+    ]
+    if saved_sub:
+        policy = html_module.escape(policies_summary_ru(saved_sub))
+        lines.extend([
+            "",
+            f"🔔 Подписка сохранена: {policy}",
+            "Загрузку в Download Station не запускаю.",
+        ])
+    elif subscription_error:
+        lines.extend([
+            "",
+            f"⚠️ {html_module.escape(subscription_error)}.",
+            "Загрузку в Download Station не запускаю.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Загрузку в Download Station не запускаю.",
+        ])
+    return "\n".join(lines)
+
+
 def _series_continue_task_matches_candidate(task: dict, candidate: SeriesCatchUpCandidate) -> bool:
     if str(task.get("status") or "").lower() not in _ACTIVE_STATUSES:
         return False
@@ -16416,7 +16459,42 @@ async def _series_continue_download_alternative(
         )
         return
     result = alternatives[alt_index]
-    episode_info = _parse_episode_info(str(result.get("title") or ""))
+    result_title = str(result.get("title") or "")
+    episode_info = _parse_episode_info(result_title)
+    update_check = resolve_same_topic_update(candidate, result_title)
+    if update_check.action == "no_update":
+        saved_sub = None
+        subscription_error = ""
+        if episode_info and episode_info[0] < episode_info[1]:
+            try:
+                _saved_key, saved_sub = _save_subscription_for_result(
+                    context,
+                    result,
+                    chat_id=_chat_id_from_query(query),
+                    notify_policy=NOTIFY_EACH_UPDATE,
+                    download_policy=DOWNLOAD_AUTO_EACH_UPDATE,
+                    seen_results=alternatives,
+                )
+            except RuntimeError as exc:
+                logger.info("Series continue: no-new alternative subscription failed: %s", exc)
+                subscription_error = _subscription_save_user_error_text(downloaded=False)
+        await query.edit_message_text(
+            _series_continue_no_new_alternative_text(
+                candidate,
+                result,
+                update_check,
+                saved_sub=saved_sub,
+                subscription_error=subscription_error,
+            ),
+            parse_mode="HTML",
+            reply_markup=_series_continue_action_keyboard(
+                scope,
+                index,
+                page,
+                search_alt=True,
+            ),
+        )
+        return
     subscribe = bool(episode_info and episode_info[0] < episode_info[1])
     await _series_continue_add_download_result(
         query,

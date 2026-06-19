@@ -9853,6 +9853,62 @@ class SeriesContinueCommandTests(unittest.TestCase):
         text = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("Буду следить", text)
 
+    def test_continue_download_alternative_without_new_episodes_saves_subscription_only(self):
+        candidate = bot.replace(
+            self._candidate(),
+            present_count=6,
+            known_total=8,
+            history_last_episode_end=6,
+        )
+        alt = {
+            "source": "rutracker",
+            "topic_id": "999",
+            "title": "The Rookie S8E1-6 of 8 WEB-DL 1080p",
+            "url": "https://rutracker.org/forum/viewtopic.php?t=999",
+            "tracker_name": "rutracker",
+            "quality": "1080p",
+        }
+        state = {
+            "mine": [candidate],
+            "all": [candidate],
+            "scope": "all",
+            "page": 0,
+            "continue_state:alt:all:0": [alt],
+        }
+        update = _make_callback_update(chat_id=100, callback_data="cont:alt_dl:all:0:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        attempt_download = AsyncMock()
+        save_sub = MagicMock(return_value=(
+            "999",
+            {
+                "notify_policy": bot.NOTIFY_EACH_UPDATE,
+                "download_policy": bot.DOWNLOAD_AUTO_EACH_UPDATE,
+            },
+        ))
+
+        async def run():
+            with (
+                self._allowed_context(),
+                patch.object(bot, "_series_continue_active_task", AsyncMock(return_value=None)),
+                patch.object(bot, "_attempt_pending_download", attempt_download),
+                patch.object(bot, "_save_subscription_for_result", save_sub),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        attempt_download.assert_not_awaited()
+        save_sub.assert_called_once()
+        self.assertEqual(save_sub.call_args.kwargs["chat_id"], 100)
+        self.assertEqual(save_sub.call_args.kwargs["notify_policy"], bot.NOTIFY_EACH_UPDATE)
+        self.assertEqual(save_sub.call_args.kwargs["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("нет новых серий", text)
+        self.assertIn("Подписка сохранена", text)
+        self.assertIn("Download Station не запускаю", text)
+        callbacks = self._callbacks(update.callback_query.edit_message_text.await_args.kwargs["reply_markup"])
+        self.assertIn("cont:search_alt:all:0", callbacks)
+
 
 # ---------------------------------------------------------------------------
 # status command tests
