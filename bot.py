@@ -169,6 +169,7 @@ from search_intent import (
     parse_search_intent_with_gpt,
 )
 from series_continue import (
+    PlexSeriesIdentity,
     SeriesCatchUpCandidate,
     SeriesMetadataSeason,
     SeriesMissingSeasonCandidate,
@@ -15325,8 +15326,7 @@ def _series_continue_scope_part(parts: list[str], index: int, default: str = "mi
     return scope if scope in CONTINUE_SCOPES else default
 
 
-def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate | SeriesMissingSeasonCandidate) -> str:
-    identity = candidate.identity
+def _series_continue_show_key(identity: PlexSeriesIdentity) -> str:
     show_key = (
         identity.plex_rating_key
         or identity.plex_guid
@@ -15335,12 +15335,26 @@ def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate | SeriesMis
         or identity.imdb_id
         or title_match_key(identity.title)
     )
+    return show_key
+
+
+def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate | SeriesMissingSeasonCandidate) -> str:
+    show_key = _series_continue_show_key(candidate.identity)
     kind = "missing" if isinstance(candidate, SeriesMissingSeasonCandidate) else "incomplete"
     return f"{kind}:{show_key}:S{candidate.season_number:02d}"
 
 
-def _plex_season_subscription_key(chat_id: int, candidate: SeriesCatchUpCandidate) -> str:
-    raw = f"{chat_id}:{_series_continue_candidate_key(candidate)}"
+def _series_continue_season_subscription_season_key(
+    candidate: SeriesCatchUpCandidate | SeriesMissingSeasonCandidate,
+) -> str:
+    return f"incomplete:{_series_continue_show_key(candidate.identity)}:S{candidate.season_number:02d}"
+
+
+def _plex_season_subscription_key(
+    chat_id: int,
+    candidate: SeriesCatchUpCandidate | SeriesMissingSeasonCandidate,
+) -> str:
+    raw = f"{chat_id}:{_series_continue_season_subscription_season_key(candidate)}"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
     return f"plex_season:{digest}"
 
@@ -15368,6 +15382,21 @@ def _series_continue_identity_from_subscription(sub: dict) -> "PlexSeriesIdentit
         title=str(sub.get("series_title") or sub.get("title") or ""),
         original_title=str(sub.get("original_title") or ""),
         year=_series_continue_int(sub.get("year")),
+    )
+
+
+def _series_continue_candidate_from_missing_season(
+    candidate: SeriesMissingSeasonCandidate,
+) -> SeriesCatchUpCandidate:
+    return SeriesCatchUpCandidate(
+        identity=candidate.identity,
+        season_number=candidate.season_number,
+        present_count=0,
+        present_episode_numbers=(),
+        known_total=_series_continue_int(candidate.episode_count),
+        quality=candidate.quality,
+        source="plex_missing",
+        history_chat_ids=candidate.history_chat_ids,
     )
 
 
@@ -15420,7 +15449,7 @@ def _series_continue_season_subscription_payload(
         "title": f"{title} S{candidate.season_number:02d}",
         "series_title": title,
         "season": candidate.season_number,
-        "season_key": _series_continue_candidate_key(candidate),
+        "season_key": _series_continue_season_subscription_season_key(candidate),
         "present_count": int(candidate.present_count or 0),
         "present_episode_numbers": present_numbers,
         "known_total": int(candidate.known_total or 0),
@@ -15607,17 +15636,21 @@ def _series_continue_season_subscription_map_for_chat(chat_id: int | None) -> di
     return out
 
 
-def _series_continue_subscription_for_candidate(state: dict, candidate: SeriesCatchUpCandidate) -> dict | None:
-    topic_id = str(candidate.topic_id or "").strip()
-    subs = state.get("topic_subscriptions")
-    if topic_id and isinstance(subs, dict):
-        sub = subs.get(topic_id)
-        if isinstance(sub, dict):
-            return sub
+def _series_continue_subscription_for_candidate(
+    state: dict,
+    candidate: SeriesCatchUpCandidate | SeriesMissingSeasonCandidate,
+) -> dict | None:
+    if isinstance(candidate, SeriesCatchUpCandidate):
+        topic_id = str(candidate.topic_id or "").strip()
+        subs = state.get("topic_subscriptions")
+        if topic_id and isinstance(subs, dict):
+            sub = subs.get(topic_id)
+            if isinstance(sub, dict):
+                return sub
     season_subs = state.get("season_subscriptions")
     if not isinstance(season_subs, dict):
         return None
-    sub = season_subs.get(_series_continue_candidate_key(candidate))
+    sub = season_subs.get(_series_continue_season_subscription_season_key(candidate))
     return sub if isinstance(sub, dict) else None
 
 
@@ -15721,6 +15754,19 @@ def _series_continue_missing_group_seasons(group: dict) -> tuple[int, ...]:
         for candidate in group.get("candidates", [])
         if isinstance(candidate, SeriesMissingSeasonCandidate)
     )
+
+
+def _series_continue_missing_candidate_for_season(
+    group: dict,
+    season_number: int,
+) -> SeriesMissingSeasonCandidate | None:
+    for candidate in group.get("candidates", []):
+        if (
+            isinstance(candidate, SeriesMissingSeasonCandidate)
+            and candidate.season_number == season_number
+        ):
+            return candidate
+    return None
 
 
 def _series_continue_missing_group_present_seasons(group: dict) -> tuple[int, ...]:
@@ -15950,6 +15996,10 @@ def _series_continue_missing_detail_keyboard(
             rows.append([InlineKeyboardButton(
                 f"🔎 Только S{season:02d}",
                 callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_bulk:{scope}:{index}:{season}",
+            )])
+            rows.append([InlineKeyboardButton(
+                f"🔔 Следить за S{season:02d}",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:missing_subscribe:{scope}:{index}:{season}",
             )])
         rows.append([InlineKeyboardButton(
             "🙈 Скрыть",
@@ -16670,6 +16720,47 @@ async def _series_continue_subscribe_season(
     )
 
 
+async def _series_continue_subscribe_missing_season(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    candidate: SeriesMissingSeasonCandidate,
+    *,
+    scope: str,
+    index: int,
+    page: int,
+    group: dict,
+) -> None:
+    catch_up_candidate = _series_continue_candidate_from_missing_season(candidate)
+    try:
+        _saved_key, saved_sub = _save_plex_season_subscription(
+            catch_up_candidate,
+            chat_id=_chat_id_from_query(query),
+            notify_policy=NOTIFY_EACH_UPDATE,
+            download_policy=DOWNLOAD_AUTO_EACH_UPDATE,
+        )
+    except RuntimeError as exc:
+        logger.info("Series continue: missing season subscription failed: %s", exc)
+        await query.edit_message_text(
+            f"⚠️ {_subscription_save_user_error_text(downloaded=False)}.",
+            reply_markup=_series_continue_missing_detail_keyboard(scope, index, page, group),
+        )
+        return
+    state = _series_continue_state(context)
+    state["season_subscriptions"] = _series_continue_season_subscription_map_for_chat(_chat_id_from_query(query))
+    title = html_module.escape(_series_continue_candidate_title(catch_up_candidate))
+    policy = html_module.escape(policies_summary_ru(saved_sub))
+    await query.edit_message_text(
+        "🔔 <b>Подписка на отсутствующий сезон сохранена</b>\n\n"
+        f"Сериал: <b>{title}</b>\n"
+        f"Сезон: S{candidate.season_number:02d}\n"
+        f"Режим: {policy}\n\n"
+        "Буду искать раздачу этого сезона. "
+        "Уверенное совпадение скачаю автоматически, спорные варианты пришлю сообщением.",
+        parse_mode="HTML",
+        reply_markup=_series_continue_missing_detail_keyboard(scope, index, page, group),
+    )
+
+
 async def _series_continue_search_alternatives(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -17163,6 +17254,42 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
             seasons,
             scope=scope,
             page=page,
+        )
+        return
+
+    if action == "missing_subscribe":
+        scope = _series_continue_scope_part(parts, 2, default="missing")
+        try:
+            index = int(parts[3]) if len(parts) > 3 else -1
+        except ValueError:
+            index = -1
+        groups = _series_continue_missing_groups(state, scope)
+        if index < 0 or index >= len(groups):
+            await query.edit_message_text(
+                "Кандидат устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        season = _series_continue_int(parts[4] if len(parts) > 4 else 0)
+        group = groups[index]
+        candidate = _series_continue_missing_candidate_for_season(group, season)
+        if candidate is None:
+            await query.edit_message_text(
+                "Сезон устарел. Обновите список.",
+                reply_markup=_series_continue_close_keyboard(),
+            )
+            return
+        page = max(0, index // CONTINUE_PAGE_SIZE)
+        state["scope"] = scope
+        state["page"] = page
+        await _series_continue_subscribe_missing_season(
+            query,
+            context,
+            candidate,
+            scope=scope,
+            index=index,
+            page=page,
+            group=group,
         )
         return
 
@@ -24678,7 +24805,7 @@ def _plex_season_subscription_update_from_candidate(sub: dict, candidate: Series
         "known_total": int(candidate.known_total or 0),
         "total_episodes": int(candidate.known_total or sub.get("total_episodes") or 0),
         "quality": candidate.quality or sub.get("quality") or "",
-        "season_key": _series_continue_candidate_key(candidate),
+        "season_key": _series_continue_season_subscription_season_key(candidate),
     }
     handled_end = max(
         _series_continue_int(sub.get("last_episode_end")),
@@ -24708,7 +24835,7 @@ async def _plex_season_subscription_candidates_for_chat(
         scope="all",
         known_totals_by_show=known_totals,
     )
-    candidate_map = {_series_continue_candidate_key(candidate): candidate for candidate in candidates}
+    candidate_map = {_series_continue_season_subscription_season_key(candidate): candidate for candidate in candidates}
     complete_keys: set[str] = set()
     for show in shows:
         identity = identity_from_plex_show(show)
@@ -24731,7 +24858,7 @@ async def _plex_season_subscription_candidates_for_chat(
             )
             completeness = resolve_series_completeness(candidate)
             if not completeness.missing_episode_numbers and int(candidate.present_count or 0) >= known_total:
-                complete_keys.add(_series_continue_candidate_key(candidate))
+                complete_keys.add(_series_continue_season_subscription_season_key(candidate))
     return candidate_map, complete_keys
 
 

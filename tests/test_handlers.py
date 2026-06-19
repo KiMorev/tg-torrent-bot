@@ -9366,6 +9366,8 @@ class SeriesContinueCommandTests(unittest.TestCase):
         self.assertIn("cont:missing_bulk:missing:0:all", callbacks)
         self.assertIn("cont:missing_bulk:missing:0:7", callbacks)
         self.assertIn("cont:missing_bulk:missing:0:9", callbacks)
+        self.assertIn("cont:missing_subscribe:missing:0:7", callbacks)
+        self.assertIn("cont:missing_subscribe:missing:0:9", callbacks)
         self.assertNotIn("🔔 Следить за сериалом", self._button_texts(keyboard))
 
     def test_continue_missing_detail_shows_conflicting_episode_counts(self):
@@ -9530,6 +9532,46 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         build_plan.assert_awaited_once()
         self.assertEqual(context.user_data["srch_series_bulk_target_seasons"], [7])
+
+    def test_continue_missing_subscribe_saves_plex_season_subscription(self):
+        missing = self._missing_candidate(season=7)
+        state = {"raw_mine": [], "raw_all": [], "raw_missing": [missing], "scope": "missing", "page": 0}
+        bot._series_continue_refresh_hidden_views(state, set())
+        update = _make_callback_update(chat_id=100, callback_data="cont:missing_subscribe:missing:0:7")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_topic_subscriptions.return_value = {}
+
+        async def run():
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        store.save_topic_subscriptions.assert_called_once()
+        saved = store.save_topic_subscriptions.call_args.args[0]
+        self.assertEqual(len(saved), 1)
+        key, sub = next(iter(saved.items()))
+        self.assertTrue(key.startswith("plex_season:"))
+        self.assertEqual(sub["type"], bot.PLEX_SEASON_SUBSCRIPTION_TYPE)
+        self.assertEqual(sub["chat_id"], 100)
+        self.assertEqual(sub["series_title"], "The Rookie")
+        self.assertEqual(sub["season"], 7)
+        self.assertEqual(sub["season_key"], "incomplete:1000:S07")
+        self.assertEqual(bot._series_continue_candidate_key(missing), "missing:1000:S07")
+        self.assertEqual(sub["present_count"], 0)
+        self.assertEqual(sub["known_total"], 18)
+        self.assertEqual(sub["last_episode_end"], 0)
+        self.assertEqual(sub["notify_policy"], bot.NOTIFY_EACH_UPDATE)
+        self.assertEqual(sub["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Подписка на отсутствующий сезон сохранена", text)
+        self.assertIn("Уверенное совпадение скачаю автоматически", text)
 
     def test_continue_hidden_missing_key_does_not_hide_incomplete_candidate(self):
         from series_continue import PlexSeriesIdentity, SeriesCatchUpCandidate, SeriesMissingSeasonCandidate

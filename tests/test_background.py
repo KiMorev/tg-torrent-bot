@@ -1726,6 +1726,41 @@ class SubscriptionCheckTests(unittest.TestCase):
         self.assertEqual(updated["last_handled_episode_end"], 6)
         self.assertIn("last_handled_signature", updated)
 
+    def test_plex_season_subscription_uses_stored_missing_season_payload(self) -> None:
+        candidate = self._season_candidate(present_count=0)
+        self._store.save_topic_subscriptions({
+            "plex_season:abc": self._season_subscription(candidate),
+        })
+        mock_rt = MagicMock()
+        mock_rt.search.return_value = [
+            self._rt_result("999", "The Rookie S8E1-8 of 8 WEB-DL 1080p"),
+        ]
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        attempt_download = AsyncMock(return_value=("dbid_1", "torrent-файл"))
+
+        with (
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "rutracker_client", mock_rt),
+            patch.object(
+                bot,
+                "_plex_season_subscription_candidates_for_chat",
+                AsyncMock(return_value=({}, set())),
+            ),
+            patch.object(bot, "_attempt_pending_download", attempt_download),
+            patch.object(bot, "_remember_task_owner"),
+            patch.object(bot, "_remember_task_meta"),
+            patch.object(bot, "_record_download_added_history"),
+            patch.object(bot, "_schedule_task_notification_fast_wake"),
+        ):
+            asyncio.run(bot._check_plex_season_subscriptions(mock_app))
+
+        mock_rt.search.assert_called_once()
+        attempt_download.assert_awaited_once()
+        updated = self._store.load_topic_subscriptions()["plex_season:abc"]
+        self.assertEqual(updated["last_episode_end"], 8)
+        self.assertEqual(updated["last_handled_episode_end"], 8)
+
     def test_plex_season_subscription_complete_in_plex_removes_subscription(self) -> None:
         candidate = self._season_candidate(present_count=4)
         self._store.save_topic_subscriptions({
