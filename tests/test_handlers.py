@@ -929,7 +929,7 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("Админ-панель", text)
         self.assertIn("📊 <b>Состояние</b>", text)
         self.assertIn("• Загрузки: 3 всего · 1 активных · 1 завершённых · 1 ошибок", text)
-        self.assertIn("• Подписки: 2 всего · Rutracker 1 · Jackett 1", text)
+        self.assertIn("• Подписки: 2 всего · Rutracker 1 · Plex-сезоны 0 · Jackett 1", text)
         self.assertIn("⚙️ <b>Правила и интеграции</b>", text)
         self.assertIn("🟢 Rutracker", text)
         self.assertIn("🔴 Кинопоиск", text)
@@ -1538,6 +1538,17 @@ class AdminPanelTests(unittest.TestCase):
                     "notify_policy": NOTIFY_EACH_UPDATE,
                     "download_policy": DOWNLOAD_NOTIFY_ONLY,
                 },
+                "plex_season:abc": {
+                    "type": bot.PLEX_SEASON_SUBSCRIPTION_TYPE,
+                    "chat_id": 100,
+                    "title": "The Rookie S08",
+                    "series_title": "The Rookie",
+                    "season": 8,
+                    "last_episode_end": 4,
+                    "total_episodes": 8,
+                    "notify_policy": NOTIFY_EACH_UPDATE,
+                    "download_policy": DOWNLOAD_NOTIFY_ONLY,
+                },
             })
             next_check = datetime.now(bot.DISPLAY_TIMEZONE).replace(
                 hour=18, minute=0, second=0, microsecond=0
@@ -1552,13 +1563,16 @@ class AdminPanelTests(unittest.TestCase):
                 asyncio.run(subs_command(update, context))
 
         text = update.message.reply_text.call_args.args[0]
-        self.assertIn("<b>Подписки</b> (2)", text)
+        self.assertIn("<b>Подписки</b> (3)", text)
         self.assertIn("Следующая проверка: сегодня 18:00", text)
         self.assertIn("Как следим: по теме Rutracker", text)
         self.assertIn("Прогресс: 5 из 8 эп.", text)
         self.assertIn("Уведомления: только когда сезон завершится", text)
         self.assertIn("Скачивание: когда сезон завершится", text)
         self.assertIn("Статус: ждём финал сезона", text)
+        self.assertIn("Как следим: по неполному сезону Plex", text)
+        self.assertIn("The Rookie S08", text)
+        self.assertIn("Прогресс: 4 из 8 эп.", text)
         self.assertIn("Как следим: через Jackett · rutracker", text)
         self.assertIn("Проверено: 01.01 10:00", text)
         self.assertIn("Скачивание: не скачивать автоматически", text)
@@ -1572,8 +1586,10 @@ class AdminPanelTests(unittest.TestCase):
         callbacks = {button.text: button.callback_data for button in buttons}
         self.assertEqual(callbacks["⚙️ 1. Настроить"], "sub:settings:123")
         self.assertEqual(callbacks["🔕 1. Отписаться"], "sub:unsub:123")
-        self.assertEqual(callbacks["⚙️ 2. Настроить"], "sub:settings:jackett:abc")
-        self.assertEqual(callbacks["🔕 2. Отписаться"], "sub:jackett_unsub:jackett:abc")
+        self.assertEqual(callbacks["⚙️ 2. Настроить"], "sub:settings:plex_season:abc")
+        self.assertEqual(callbacks["🔕 2. Отписаться"], "sub:unsub:plex_season:abc")
+        self.assertEqual(callbacks["⚙️ 3. Настроить"], "sub:settings:jackett:abc")
+        self.assertEqual(callbacks["🔕 3. Отписаться"], "sub:jackett_unsub:jackett:abc")
         self.assertEqual(callbacks["✖️ Закрыть"], "task:close:")
         self.assertFalse(any("jackett_view" in value for value in callbacks.values()))
 
@@ -9606,6 +9622,7 @@ class SeriesContinueCommandTests(unittest.TestCase):
         callbacks = self._callbacks(keyboard)
         self.assertIn("The Rookie", text)
         self.assertIn("Сезон: 8", text)
+        self.assertIn("cont:subscribe_season:all:0", callbacks)
         self.assertIn("cont:hide:all:0", callbacks)
         self.assertIn("cont:list:all:0", callbacks)
         self.assertIn("task:close:", callbacks)
@@ -9625,8 +9642,43 @@ class SeriesContinueCommandTests(unittest.TestCase):
         keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
         callbacks = self._callbacks(keyboard)
         self.assertIn("cont:search_alt:all:0", callbacks)
+        self.assertIn("cont:subscribe_season:all:0", callbacks)
         self.assertIn("cont:hide:all:0", callbacks)
         self.assertNotIn("cont:update_topic:all:0", callbacks)
+
+    def test_continue_subscribe_season_saves_plex_season_subscription(self):
+        candidate = self._candidate(topic_id="", source="plex")
+        state = {"mine": [], "all": [candidate], "scope": "all", "page": 0}
+        update = _make_callback_update(chat_id=100, callback_data="cont:subscribe_season:all:0")
+        context = _make_context(user_data={bot.CONTINUE_STATE_KEY: state})
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_topic_subscriptions.return_value = {}
+
+        async def run():
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+            ):
+                await bot.series_continue_callback(update, context)
+
+        asyncio.run(run())
+
+        store.save_topic_subscriptions.assert_called_once()
+        saved = store.save_topic_subscriptions.call_args.args[0]
+        self.assertEqual(len(saved), 1)
+        key, sub = next(iter(saved.items()))
+        self.assertTrue(key.startswith("plex_season:"))
+        self.assertEqual(sub["type"], bot.PLEX_SEASON_SUBSCRIPTION_TYPE)
+        self.assertEqual(sub["chat_id"], 100)
+        self.assertEqual(sub["series_title"], "The Rookie")
+        self.assertEqual(sub["season"], 8)
+        self.assertEqual(sub["notify_policy"], bot.NOTIFY_EACH_UPDATE)
+        self.assertEqual(sub["download_policy"], bot.DOWNLOAD_AUTO_EACH_UPDATE)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Подписка на сезон сохранена", text)
+        self.assertIn("Уверенное совпадение скачаю автоматически", text)
 
     def test_continue_same_topic_downloads_and_subscribes_when_updated(self):
         candidate = self._candidate()

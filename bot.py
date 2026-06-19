@@ -453,6 +453,7 @@ CONTINUE_CALLBACK_PREFIX = "cont"
 CONTINUE_PAGE_SIZE = 10
 CONTINUE_STATE_KEY = "continue_state"
 CONTINUE_SCOPES = {"mine", "all", "hidden_mine", "hidden_all", "missing", "hidden_missing"}
+PLEX_SEASON_SUBSCRIPTION_TYPE = "plex_season"
 _SERIES_CONTINUE_TOTALS_COMPLETE_KEY = "__complete__"
 _SERIES_CONTINUE_TOTALS_FETCHED_AT_KEY = "__fetched_at__"
 _SERIES_CONTINUE_TOTALS_CACHE_VERSION_KEY = "__version__"
@@ -1476,16 +1477,20 @@ def _format_admin_tasks_line(tasks: list[dict] | None, error: str = "") -> str:
 
 def _format_admin_subscriptions_line() -> str:
     subs = state_store.load_topic_subscriptions()
-    rutracker_count = sum(1 for sub in subs.values() if sub.get("type") != "jackett")
+    rutracker_count = sum(1 for sub in subs.values() if sub.get("type") not in {"jackett", PLEX_SEASON_SUBSCRIPTION_TYPE})
     jackett_count = sum(1 for sub in subs.values() if sub.get("type") == "jackett")
-    total = rutracker_count + jackett_count
+    season_count = sum(1 for sub in subs.values() if sub.get("type") == PLEX_SEASON_SUBSCRIPTION_TYPE)
+    total = rutracker_count + jackett_count + season_count
 
     next_check = ""
     if _next_subscription_check_at is not None:
         next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
         next_check = f"\n  Следующая проверка: {next_dt.strftime('%d.%m %H:%M')}"
 
-    return f"• Подписки: {total} всего · Rutracker {rutracker_count} · Jackett {jackett_count}{next_check}"
+    return (
+        f"• Подписки: {total} всего · Rutracker {rutracker_count} · "
+        f"Plex-сезоны {season_count} · Jackett {jackett_count}{next_check}"
+    )
 
 
 def _subscription_owner_label(chat_id: int | None, approved_users: dict[int, dict] | None = None) -> str:
@@ -1521,6 +1526,17 @@ def _admin_subscriptions_keyboard(subs: dict[str, dict]) -> InlineKeyboardMarkup
                 InlineKeyboardButton(
                     f"🗑️ {index}. Jackett",
                     callback_data=f"{SUB_CALLBACK_PREFIX}:admin_jackett_unsub:{key}",
+                ),
+                InlineKeyboardButton(
+                    mode_label,
+                    callback_data=f"{SUB_CALLBACK_PREFIX}:admin_set_mode:{key}",
+                ),
+            ])
+        elif sub.get("type") == PLEX_SEASON_SUBSCRIPTION_TYPE:
+            rows.append([
+                InlineKeyboardButton(
+                    f"🗑️ {index}. Plex-сезон",
+                    callback_data=f"{SUB_CALLBACK_PREFIX}:admin_unsub:{key}",
                 ),
                 InlineKeyboardButton(
                     mode_label,
@@ -1577,6 +1593,22 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
                 f"   Серии: {ep_end} из {total}\n"
                 f"   Режим: {mode_label}\n"
                 f"   Запрос: {query_text}\n"
+                f"   Проверено: {last_check}"
+            )
+            continue
+        if sub.get("type") == PLEX_SEASON_SUBSCRIPTION_TYPE:
+            title = html_module.escape(_format_sub_title(sub.get("title", "") or key))
+            quality = html_module.escape(str(sub.get("quality") or "—"))
+            ep_end = html_module.escape(str(sub.get("last_episode_end", "?")))
+            total = html_module.escape(str(sub.get("total_episodes", "?")))
+            last_check = html_module.escape(str(sub.get("last_check") or "—"))
+            lines.append(
+                f"\n{index}. 📺 <b>Plex-сезон</b>\n"
+                f"   Владелец: {owner}\n"
+                f"   Сезон: {title}\n"
+                f"   Серии: {ep_end} из {total}\n"
+                f"   Качество: {quality}\n"
+                f"   Режим: {mode_label}\n"
                 f"   Проверено: {last_check}"
             )
             continue
@@ -15213,6 +15245,7 @@ async def _series_continue_build_state(
         "page": 0,
         "raw_missing": raw_missing,
     }
+    state["season_subscriptions"] = _series_continue_season_subscription_map_for_chat(chat_id)
     _series_continue_refresh_hidden_views(state, _series_continue_hidden_keys_for_chat(chat_id))
     context.user_data[CONTINUE_STATE_KEY] = state
     return state
@@ -15237,6 +15270,7 @@ async def _series_continue_build_missing_state(
         scope="all",
     )
     state["topic_subscriptions"] = _series_continue_subscription_map_for_chat(chat_id)
+    state["season_subscriptions"] = _series_continue_season_subscription_map_for_chat(chat_id)
     state["scope"] = "missing"
     state["page"] = 0
     _series_continue_refresh_hidden_views(state, _series_continue_hidden_keys_for_chat(chat_id))
@@ -15257,6 +15291,7 @@ def _series_continue_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
         "hidden_all": [],
         "hidden_missing": [],
         "topic_subscriptions": {},
+        "season_subscriptions": {},
         "scope": "mine",
         "page": 0,
     }
@@ -15302,6 +15337,144 @@ def _series_continue_candidate_key(candidate: SeriesCatchUpCandidate | SeriesMis
     )
     kind = "missing" if isinstance(candidate, SeriesMissingSeasonCandidate) else "incomplete"
     return f"{kind}:{show_key}:S{candidate.season_number:02d}"
+
+
+def _plex_season_subscription_key(chat_id: int, candidate: SeriesCatchUpCandidate) -> str:
+    raw = f"{chat_id}:{_series_continue_candidate_key(candidate)}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"plex_season:{digest}"
+
+
+def _series_continue_identity_payload(identity) -> dict:
+    return {
+        "plex_rating_key": identity.plex_rating_key,
+        "plex_guid": identity.plex_guid,
+        "imdb_id": identity.imdb_id,
+        "tmdb_id": identity.tmdb_id,
+        "tvdb_id": identity.tvdb_id,
+        "title": identity.title,
+        "original_title": identity.original_title,
+        "year": identity.year,
+    }
+
+
+def _series_continue_identity_from_subscription(sub: dict) -> "PlexSeriesIdentity":
+    return PlexSeriesIdentity(
+        plex_rating_key=str(sub.get("plex_rating_key") or ""),
+        plex_guid=str(sub.get("plex_guid") or ""),
+        imdb_id=str(sub.get("imdb_id") or ""),
+        tmdb_id=str(sub.get("tmdb_id") or ""),
+        tvdb_id=str(sub.get("tvdb_id") or ""),
+        title=str(sub.get("series_title") or sub.get("title") or ""),
+        original_title=str(sub.get("original_title") or ""),
+        year=_series_continue_int(sub.get("year")),
+    )
+
+
+def _series_continue_candidate_from_season_subscription(sub: dict) -> SeriesCatchUpCandidate:
+    present_numbers = tuple(
+        sorted({
+            _series_continue_int(number)
+            for number in (sub.get("present_episode_numbers") or [])
+            if _series_continue_int(number) > 0
+        })
+    )
+    return SeriesCatchUpCandidate(
+        identity=_series_continue_identity_from_subscription(sub),
+        season_number=_series_continue_int(sub.get("season")),
+        present_count=_series_continue_int(sub.get("present_count")),
+        present_episode_numbers=present_numbers,
+        known_total=_series_continue_int(sub.get("known_total") or sub.get("total_episodes")),
+        quality=str(sub.get("quality") or ""),
+        source="plex_subscription",
+        history_last_episode_end=_series_continue_int(sub.get("last_episode_end")),
+    )
+
+
+def _series_continue_season_subscription_payload(
+    candidate: SeriesCatchUpCandidate,
+    *,
+    chat_id: int,
+    notify_policy: str,
+    download_policy: str,
+) -> dict:
+    notify_policy, download_policy = _coerce_subscription_policies(
+        notify_policy,
+        download_policy,
+    )
+    identity_payload = _series_continue_identity_payload(candidate.identity)
+    present_numbers = sorted({
+        _series_continue_int(number)
+        for number in candidate.present_episode_numbers
+        if _series_continue_int(number) > 0
+    })
+    handled_end = max(
+        int(candidate.present_count or 0),
+        int(candidate.history_last_episode_end or 0),
+        max(present_numbers, default=0),
+    )
+    title = _series_continue_candidate_title(candidate)
+    payload = {
+        "type": PLEX_SEASON_SUBSCRIPTION_TYPE,
+        "chat_id": chat_id,
+        "title": f"{title} S{candidate.season_number:02d}",
+        "series_title": title,
+        "season": candidate.season_number,
+        "season_key": _series_continue_candidate_key(candidate),
+        "present_count": int(candidate.present_count or 0),
+        "present_episode_numbers": present_numbers,
+        "known_total": int(candidate.known_total or 0),
+        "last_episode_end": handled_end,
+        "total_episodes": int(candidate.known_total or 0),
+        "quality": candidate.quality,
+        "added_at": datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M"),
+        "last_check": None,
+        "notify_policy": notify_policy,
+        "download_policy": download_policy,
+    }
+    payload.update(identity_payload)
+    return payload
+
+
+def _save_plex_season_subscription(
+    candidate: SeriesCatchUpCandidate,
+    *,
+    chat_id: int | None,
+    notify_policy: str | None = None,
+    download_policy: str | None = None,
+) -> tuple[str, dict]:
+    if chat_id is None:
+        raise RuntimeError("Не удалось определить чат для подписки на сезон.")
+    notify_policy = notify_policy or NOTIFY_EACH_UPDATE
+    download_policy = download_policy or DOWNLOAD_AUTO_EACH_UPDATE
+    key = _plex_season_subscription_key(chat_id, candidate)
+    subs = state_store.load_topic_subscriptions()
+    previous = subs.get(key) if isinstance(subs.get(key), dict) else {}
+    payload = _series_continue_season_subscription_payload(
+        candidate,
+        chat_id=chat_id,
+        notify_policy=notify_policy,
+        download_policy=download_policy,
+    )
+    if isinstance(previous, dict):
+        for field in ("last_handled_signature", "last_options_signature", "last_handled_episode_end"):
+            if previous.get(field):
+                payload[field] = previous[field]
+        payload["last_episode_end"] = max(
+            _series_continue_int(payload.get("last_episode_end")),
+            _series_continue_int(previous.get("last_episode_end")),
+        )
+        payload["total_episodes"] = max(
+            _series_continue_int(payload.get("total_episodes")),
+            _series_continue_int(previous.get("total_episodes")),
+        )
+        payload["known_total"] = max(
+            _series_continue_int(payload.get("known_total")),
+            _series_continue_int(previous.get("known_total")),
+        )
+    subs[key] = payload
+    state_store.save_topic_subscriptions(subs)
+    return key, payload
 
 
 def _series_continue_hidden_keys_for_chat(chat_id: int | None) -> set[str]:
@@ -15410,14 +15583,41 @@ def _series_continue_subscription_map_for_chat(chat_id: int | None) -> dict[str,
     return out
 
 
+def _series_continue_season_subscription_map_for_chat(chat_id: int | None) -> dict[str, dict]:
+    if chat_id is None:
+        return {}
+    try:
+        subs = state_store.load_topic_subscriptions()
+    except Exception:
+        logger.warning("Failed to load season subscriptions for series continue", exc_info=True)
+        return {}
+    if not isinstance(subs, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for sub in subs.values():
+        if not isinstance(sub, dict):
+            continue
+        if sub.get("type") != PLEX_SEASON_SUBSCRIPTION_TYPE:
+            continue
+        if sub.get("chat_id") != chat_id:
+            continue
+        season_key = str(sub.get("season_key") or "").strip()
+        if season_key:
+            out[season_key] = sub
+    return out
+
+
 def _series_continue_subscription_for_candidate(state: dict, candidate: SeriesCatchUpCandidate) -> dict | None:
     topic_id = str(candidate.topic_id or "").strip()
-    if not topic_id:
-        return None
     subs = state.get("topic_subscriptions")
-    if not isinstance(subs, dict):
+    if topic_id and isinstance(subs, dict):
+        sub = subs.get(topic_id)
+        if isinstance(sub, dict):
+            return sub
+    season_subs = state.get("season_subscriptions")
+    if not isinstance(season_subs, dict):
         return None
-    sub = subs.get(topic_id)
+    sub = season_subs.get(_series_continue_candidate_key(candidate))
     return sub if isinstance(sub, dict) else None
 
 
@@ -16035,6 +16235,13 @@ def _series_continue_detail_keyboard(
     if not hidden_view:
         rows.append([
             InlineKeyboardButton(
+                "🔔 Следить за сезоном",
+                callback_data=f"{CONTINUE_CALLBACK_PREFIX}:subscribe_season:{scope}:{index}",
+            )
+        ])
+    if not hidden_view:
+        rows.append([
+            InlineKeyboardButton(
                 "🙈 Скрыть",
                 callback_data=f"{CONTINUE_CALLBACK_PREFIX}:hide:{scope}:{index}",
             )
@@ -16420,8 +16627,47 @@ async def _series_continue_subscribe_same_topic(
         await query.edit_message_text(
             _friendly_error("rutracker", str(exc), include_detail=False),
             parse_mode="HTML",
-            reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+        reply_markup=_series_continue_action_keyboard(scope, index, page, retry=True),
+    )
+
+
+async def _series_continue_subscribe_season(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    candidate: SeriesCatchUpCandidate,
+    *,
+    scope: str,
+    index: int,
+    page: int,
+) -> None:
+    try:
+        _saved_key, saved_sub = _save_plex_season_subscription(
+            candidate,
+            chat_id=_chat_id_from_query(query),
+            notify_policy=NOTIFY_EACH_UPDATE,
+            download_policy=DOWNLOAD_AUTO_EACH_UPDATE,
         )
+    except RuntimeError as exc:
+        logger.info("Series continue: season subscription failed: %s", exc)
+        await query.edit_message_text(
+            f"⚠️ {_subscription_save_user_error_text(downloaded=False)}.",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+        )
+        return
+    state = _series_continue_state(context)
+    state["season_subscriptions"] = _series_continue_season_subscription_map_for_chat(_chat_id_from_query(query))
+    title = html_module.escape(_series_continue_candidate_title(candidate))
+    policy = html_module.escape(policies_summary_ru(saved_sub))
+    await query.edit_message_text(
+        "🔔 <b>Подписка на сезон сохранена</b>\n\n"
+        f"Сериал: <b>{title}</b>\n"
+        f"Сезон: S{candidate.season_number:02d}\n"
+        f"Режим: {policy}\n\n"
+        "Буду искать раздачи с сериями, которых ещё нет в Plex. "
+        "Уверенное совпадение скачаю автоматически, спорные варианты пришлю сообщением.",
+        parse_mode="HTML",
+        reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+    )
 
 
 async def _series_continue_search_alternatives(
@@ -17005,7 +17251,7 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    if action in {"subscribe_topic", "search_alt", "alt_dl", "alt_sub"}:
+    if action in {"subscribe_topic", "subscribe_season", "search_alt", "alt_dl", "alt_sub"}:
         scope = _series_continue_scope_part(parts, 2)
         try:
             index = int(parts[3]) if len(parts) > 3 else -1
@@ -17023,6 +17269,16 @@ async def series_continue_callback(update: Update, context: ContextTypes.DEFAULT
         state["page"] = page
         if action == "subscribe_topic":
             await _series_continue_subscribe_same_topic(
+                query,
+                context,
+                candidates[index],
+                scope=scope,
+                index=index,
+                page=page,
+            )
+            return
+        if action == "subscribe_season":
+            await _series_continue_subscribe_season(
                 query,
                 context,
                 candidates[index],
@@ -22885,6 +23141,8 @@ def _format_subscription_datetime(value: object) -> str:
 
 
 def _subscription_tracking_text(sub: dict) -> str:
+    if sub.get("type") == PLEX_SEASON_SUBSCRIPTION_TYPE:
+        return "по неполному сезону Plex"
     if sub.get("type") != "jackett":
         return "по теме Rutracker"
 
@@ -22932,6 +23190,8 @@ def _subscription_title(sub_key: str, sub: dict) -> str:
 
 
 def _subscription_icon(sub: dict) -> str:
+    if sub.get("type") == PLEX_SEASON_SUBSCRIPTION_TYPE:
+        return "📺"
     return "🌐" if sub.get("type") == "jackett" else "📺"
 
 
@@ -24391,13 +24651,392 @@ async def _deliver_rutracker_subscription_notification(
     return True
 
 
+def _plex_season_subscription_signature(result: dict) -> str:
+    topic_id = str(result.get("topic_id") or "").strip()
+    if not topic_id:
+        topic_id = _extract_rutracker_topic_id(str(result.get("url") or ""))
+    episode_info = _series_continue_result_episode_info(result)
+    episode_end = episode_info[0] if episode_info else 0
+    title = str(result.get("title") or "")
+    return f"{topic_id}:{episode_end}:{title}"
+
+
+def _plex_season_subscription_options_signature(results: list[dict]) -> str:
+    return "|".join(_plex_season_subscription_signature(result) for result in results[:3])
+
+
+def _plex_season_subscription_update_from_candidate(sub: dict, candidate: SeriesCatchUpCandidate) -> bool:
+    changed = False
+    present_numbers = sorted({
+        _series_continue_int(number)
+        for number in candidate.present_episode_numbers
+        if _series_continue_int(number) > 0
+    })
+    updates = {
+        "present_count": int(candidate.present_count or 0),
+        "present_episode_numbers": present_numbers,
+        "known_total": int(candidate.known_total or 0),
+        "total_episodes": int(candidate.known_total or sub.get("total_episodes") or 0),
+        "quality": candidate.quality or sub.get("quality") or "",
+        "season_key": _series_continue_candidate_key(candidate),
+    }
+    handled_end = max(
+        _series_continue_int(sub.get("last_episode_end")),
+        int(candidate.present_count or 0),
+        int(candidate.history_last_episode_end or 0),
+        max(present_numbers, default=0),
+    )
+    updates["last_episode_end"] = handled_end
+    for key, value in updates.items():
+        if sub.get(key) != value:
+            sub[key] = value
+            changed = True
+    return changed
+
+
+async def _plex_season_subscription_candidates_for_chat(
+    chat_id: int | None,
+) -> tuple[dict[str, SeriesCatchUpCandidate], set[str]]:
+    shows = await _series_continue_plex_shows_with_seasons()
+    load_history = getattr(state_store, "load_download_history", None)
+    history = load_history() if callable(load_history) else []
+    known_totals = await _series_continue_known_totals_by_show(shows, history)
+    candidates = build_series_catch_up_candidates(
+        shows,
+        history,
+        chat_id=chat_id,
+        scope="all",
+        known_totals_by_show=known_totals,
+    )
+    candidate_map = {_series_continue_candidate_key(candidate): candidate for candidate in candidates}
+    complete_keys: set[str] = set()
+    for show in shows:
+        identity = identity_from_plex_show(show)
+        show_totals = known_totals.get(str(getattr(show, "rating_key", "") or ""), {})
+        for season_number, season in (show.seasons or {}).items():
+            season_number = _series_continue_int(season_number)
+            if season_number <= 0:
+                continue
+            known_total = _series_continue_int(show_totals.get(season_number) or show_totals.get(str(season_number)))
+            if known_total <= 0:
+                continue
+            candidate = SeriesCatchUpCandidate(
+                identity=identity,
+                season_number=season_number,
+                present_count=int(getattr(season, "episode_count", 0) or 0),
+                present_episode_numbers=tuple(getattr(season, "episode_numbers", ()) or ()),
+                known_total=known_total,
+                quality=str(getattr(season, "resolution", "") or ""),
+                source="plex",
+            )
+            completeness = resolve_series_completeness(candidate)
+            if not completeness.missing_episode_numbers and int(candidate.present_count or 0) >= known_total:
+                complete_keys.add(_series_continue_candidate_key(candidate))
+    return candidate_map, complete_keys
+
+
+async def _plex_season_subscription_search_results(candidate: SeriesCatchUpCandidate) -> list[dict]:
+    if rutracker_client is None:
+        return []
+    search_query = _series_continue_search_query(candidate)
+    raw_results = await asyncio.to_thread(rutracker_client.search, search_query)
+    return [_series_continue_result_from_rutracker(result) for result in raw_results]
+
+
+def _plex_season_subscription_select_result(
+    sub: dict,
+    candidate: SeriesCatchUpCandidate,
+    results: list[dict],
+) -> tuple[dict | None, list[dict]]:
+    uncertain: list[dict] = []
+    last_handled_signature = str(sub.get("last_handled_signature") or "")
+    last_handled_episode_end = _series_continue_int(sub.get("last_handled_episode_end"))
+    for result in results:
+        covers_missing = _series_continue_result_covers_missing(candidate, result)
+        if covers_missing is True:
+            episode_info = _series_continue_result_episode_info(result)
+            if episode_info and episode_info[0] <= last_handled_episode_end:
+                continue
+            signature = _plex_season_subscription_signature(result)
+            if signature != last_handled_signature:
+                return result, uncertain
+            continue
+        if covers_missing is None:
+            uncertain.append(result)
+    return None, uncertain[:3]
+
+
+def _plex_season_subscription_keyboard(
+    key: str,
+    result: dict,
+    *,
+    task_id: str = "",
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if task_id:
+        rows.append([InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id))])
+    topic_url = str(result.get("url") or "")
+    if topic_url:
+        rows.append([InlineKeyboardButton("🔍 Открыть тему", url=topic_url)])
+    rows.append([InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{key}")])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_plex_season_subscription_update(
+    app: Application,
+    key: str,
+    sub: dict,
+    result: dict,
+    *,
+    task_id: str = "",
+    method: str = "",
+    download_failed: bool = False,
+) -> bool:
+    chat_id = _background_chat_id(sub.get("chat_id"))
+    if chat_id is None:
+        return True
+    title = str(sub.get("title") or sub.get("series_title") or key)
+    result_title = str(result.get("title") or "раздача")
+    episode_info = _series_continue_result_episode_info(result)
+    progress = ""
+    if episode_info:
+        progress = f"\nСерии: до {episode_info[0]} из {episode_info[1]}"
+    if task_id:
+        text = (
+            f"🔔 Подписка на сезон «{title}» нашла докачку.\n\n"
+            f"{result_title}{progress}\n\n"
+            f"Задача добавлена в Download Station: {method}."
+        )
+    elif download_failed:
+        text = (
+            f"🔔 Подписка на сезон «{title}» нашла докачку, но авто-загрузка не удалась.\n\n"
+            f"{result_title}{progress}\n\n"
+            "Можно открыть тему вручную или дождаться следующей проверки."
+        )
+    else:
+        text = (
+            f"🔔 Найдена докачка для сезона «{title}».\n\n"
+            f"{result_title}{progress}\n\n"
+            "Авто-загрузка отключена для этой подписки."
+        )
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=_plex_season_subscription_keyboard(key, result, task_id=task_id),
+        )
+    except Exception:
+        logger.warning("Failed to notify chat %s for Plex season subscription %s", chat_id, key, exc_info=True)
+        return False
+    return True
+
+
+async def _send_plex_season_subscription_options(
+    app: Application,
+    key: str,
+    sub: dict,
+    results: list[dict],
+) -> bool:
+    chat_id = _background_chat_id(sub.get("chat_id"))
+    if chat_id is None:
+        return True
+    title = str(sub.get("title") or sub.get("series_title") or key)
+    lines = [
+        f"🔔 Для сезона «{title}» нашёл похожие раздачи.",
+        "",
+        "Я не уверен, что они закрывают недостающие серии в Plex, поэтому не скачиваю автоматически.",
+        "",
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, result in enumerate(results[:3], 1):
+        result_title = str(result.get("title") or "раздача")
+        lines.append(f"{index}. {result_title}")
+        url = str(result.get("url") or "")
+        if url:
+            rows.append([InlineKeyboardButton(f"🔍 {index}. Открыть тему", url=url)])
+    rows.append([InlineKeyboardButton("🔕 Отписаться", callback_data=f"{SUB_CALLBACK_PREFIX}:unsub:{key}")])
+    rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to notify chat %s for Plex season subscription options %s",
+            chat_id,
+            key,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def _record_plex_season_subscription_task(
+    app: Application,
+    sub: dict,
+    result: dict,
+    *,
+    task_id: str,
+    method: str,
+) -> None:
+    chat_id = _background_chat_id(sub.get("chat_id"))
+    if chat_id is None or not task_id:
+        return
+    _remember_task_owner(task_id, chat_id)
+    _remember_task_meta(task_id, _build_task_meta_from_result(result, source="plex_season_sub"))
+    _record_download_added_history(
+        task_id,
+        chat_id,
+        result,
+        method=method,
+        meta_source="plex_season_sub",
+        subscribe=True,
+        notify_policy=sub.get("notify_policy"),
+        download_policy=sub.get("download_policy"),
+    )
+    _schedule_task_notification_fast_wake(app, f"plex_season_sub:{task_id}")
+
+
+async def _check_plex_season_subscriptions(app: Application) -> None:
+    subs = state_store.load_topic_subscriptions()
+    season_subs = {
+        key: sub for key, sub in subs.items()
+        if isinstance(sub, dict) and sub.get("type") == PLEX_SEASON_SUBSCRIPTION_TYPE
+    }
+    if not season_subs:
+        return
+
+    logger.debug("Checking %d Plex season subscription(s)", len(season_subs))
+    changed = False
+    candidates_by_chat: dict[int | None, tuple[dict[str, SeriesCatchUpCandidate], set[str]]] = {}
+
+    for key, sub in list(season_subs.items()):
+        try:
+            chat_id = _background_chat_id(sub.get("chat_id"))
+            if chat_id is None:
+                subs.pop(key, None)
+                changed = True
+                continue
+
+            if chat_id not in candidates_by_chat:
+                candidates_by_chat[chat_id] = await _plex_season_subscription_candidates_for_chat(chat_id)
+            candidate_map, complete_keys = candidates_by_chat[chat_id]
+            season_key = str(sub.get("season_key") or "")
+            if season_key in complete_keys:
+                subs.pop(key, None)
+                changed = True
+                logger.info("Plex season subscription completed from Plex state: key=%s", key)
+                continue
+            candidate = candidate_map.get(season_key)
+            if candidate is None:
+                candidate = _series_continue_candidate_from_season_subscription(sub)
+            else:
+                changed = _plex_season_subscription_update_from_candidate(sub, candidate) or changed
+
+            if candidate.season_number <= 0:
+                continue
+            checked_at = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+            if rutracker_client is None:
+                sub["last_check"] = checked_at
+                changed = True
+                continue
+
+            results = await _plex_season_subscription_search_results(candidate)
+            selected, uncertain = _plex_season_subscription_select_result(sub, candidate, results)
+            if selected is None:
+                options_signature = _plex_season_subscription_options_signature(uncertain)
+                if uncertain and options_signature and options_signature != sub.get("last_options_signature"):
+                    if await _send_plex_season_subscription_options(app, key, sub, uncertain):
+                        sub["last_options_signature"] = options_signature
+                        changed = True
+                sub["last_check"] = checked_at
+                changed = True
+                continue
+
+            from subscription_policy import should_download, should_notify
+            episode_info = _series_continue_result_episode_info(selected)
+            topic_end = episode_info[0] if episode_info else 0
+            topic_total = episode_info[1] if episode_info else 0
+            is_complete = bool(episode_info and topic_total > 0 and topic_end >= topic_total)
+            wants_download = should_download(sub, is_complete=is_complete)
+            wants_notify = should_notify(sub, is_complete=is_complete)
+
+            task_id = ""
+            method = ""
+            download_failed = False
+            if wants_download:
+                entry = _pending_download_entry_from_result(
+                    selected,
+                    chat_id=chat_id,
+                    subscribe=False,
+                    error="",
+                )
+                try:
+                    task_id, method = await _attempt_pending_download(entry)
+                    _record_plex_season_subscription_task(
+                        app,
+                        sub,
+                        selected,
+                        task_id=task_id,
+                        method=method,
+                    )
+                    logger.info(
+                        "Plex season subscription auto-download: key=%s task_id=%s title=%s",
+                        key,
+                        task_id,
+                        selected.get("title"),
+                    )
+                except Exception as exc:
+                    download_failed = True
+                    logger.warning("Plex season subscription auto-download failed for %s: %s", key, exc)
+
+            if wants_notify or download_failed:
+                sent = await _send_plex_season_subscription_update(
+                    app,
+                    key,
+                    sub,
+                    selected,
+                    task_id=task_id,
+                    method=method,
+                    download_failed=download_failed,
+                )
+                if not sent:
+                    continue
+
+            if not download_failed:
+                sub["last_handled_signature"] = _plex_season_subscription_signature(selected)
+                if topic_end > 0:
+                    sub["last_episode_end"] = max(_series_continue_int(sub.get("last_episode_end")), topic_end)
+                    sub["last_handled_episode_end"] = max(
+                        _series_continue_int(sub.get("last_handled_episode_end")),
+                        topic_end,
+                    )
+                if topic_total > 0:
+                    sub["total_episodes"] = topic_total
+                    sub["known_total"] = max(_series_continue_int(sub.get("known_total")), topic_total)
+                sub.pop("last_options_signature", None)
+            sub["last_check"] = checked_at
+            changed = True
+
+        except Exception:
+            logger.warning("Error checking Plex season subscription %s", key, exc_info=True)
+
+    if changed:
+        state_store.save_topic_subscriptions(subs)
+
+
 async def _check_subscriptions(app: Application) -> None:
     if not rutracker_client:
+        await _check_plex_season_subscriptions(app)
         await _check_jackett_subscriptions(app)
         return
 
     subs = state_store.load_topic_subscriptions()
     if not subs:
+        await _check_plex_season_subscriptions(app)
         await _check_jackett_subscriptions(app)
         return
 
@@ -24405,7 +25044,7 @@ async def _check_subscriptions(app: Application) -> None:
     changed = False
 
     for topic_id, sub in list(subs.items()):
-        if sub.get("type") == "jackett":
+        if sub.get("type") in {"jackett", PLEX_SEASON_SUBSCRIPTION_TYPE}:
             continue
         if sub.get("unavailable_at"):
             continue
@@ -24520,6 +25159,7 @@ async def _check_subscriptions(app: Application) -> None:
     if changed:
         state_store.save_topic_subscriptions(subs)
 
+    await _check_plex_season_subscriptions(app)
     await _check_jackett_subscriptions(app)
 
 
