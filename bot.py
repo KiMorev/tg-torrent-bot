@@ -5169,7 +5169,7 @@ async def _plex_ensure_show_seasons(show: "PlexShow") -> dict[int, "PlexSeason"]
 
 
 async def _plex_ensure_show_seasons_lite(
-    show: "PlexShow", *, focus_season: int | None,
+    show: "PlexShow", *, focus_season: int | None, require_episode_numbers: bool = False,
 ) -> dict[int, "PlexSeason"]:
     """R.2 optimisation #1: lazy season-fetch that only reads episode files
     for the season the user is actively checking. Other seasons return with
@@ -5194,7 +5194,12 @@ async def _plex_ensure_show_seasons_lite(
         if focus_season is None or focus_season not in show.seasons:
             return show.seasons
         cached_season = show.seasons[focus_season]
-        if cached_season.resolution:
+        has_required_episode_numbers = (
+            not require_episode_numbers
+            or int(getattr(cached_season, "episode_count", 0) or 0) <= 0
+            or bool(getattr(cached_season, "episode_numbers", ()) or ())
+        )
+        if cached_season.resolution and has_required_episode_numbers:
             return show.seasons
         # Cached but missing resolution for the requested season → top up
         # by fetching just this one season's episode files. Cheap: 1 request.
@@ -5211,7 +5216,11 @@ async def _plex_ensure_show_seasons_lite(
                          show.title, exc)
             return show.seasons
         refreshed = top_up.get(focus_season)
-        if refreshed and refreshed.resolution:
+        if refreshed and (
+            refreshed.resolution
+            or refreshed.file_paths
+            or getattr(refreshed, "episode_numbers", ())
+        ):
             show.seasons[focus_season] = refreshed
         return show.seasons
 
@@ -14677,6 +14686,16 @@ async def _series_continue_plex_shows_with_seasons() -> list["PlexShow"]:
             continue
         seen_ids.add(marker)
         await _plex_ensure_show_seasons_lite(show, focus_season=None)
+        for season_number, season in list((show.seasons or {}).items()):
+            if int(getattr(season, "episode_count", 0) or 0) <= 0:
+                continue
+            if getattr(season, "episode_numbers", ()) or ():
+                continue
+            await _plex_ensure_show_seasons_lite(
+                show,
+                focus_season=int(season_number),
+                require_episode_numbers=True,
+            )
         if show.seasons:
             shows.append(show)
     return shows

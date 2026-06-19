@@ -118,6 +118,7 @@ class PlexSeason:
     episode_count: int                        # leafCount from Plex
     file_paths: list[str] = field(default_factory=list)   # all episode .file paths
     resolution: str = ""                      # best across episodes ("4k"/"1080"/…)
+    episode_numbers: tuple[int, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -532,36 +533,43 @@ class PlexClient:
                 or season_num in fetch_resolution_for
             )
             if should_fetch:
-                file_paths, resolution = self._fetch_season_episode_files(season_key)
+                file_paths, resolution, episode_numbers = _normalise_episode_fetch_result(
+                    self._fetch_season_episode_files(season_key)
+                )
             else:
-                file_paths, resolution = [], ""
+                file_paths, resolution, episode_numbers = [], "", ()
             seasons[season_num] = PlexSeason(
                 rating_key=season_key,
                 season_number=season_num,
                 episode_count=episode_count,
                 file_paths=file_paths,
                 resolution=resolution,
+                episode_numbers=episode_numbers,
             )
         return seasons
 
-    def _fetch_season_episode_files(self, season_rating_key: str) -> tuple[list[str], str]:
-        """Return (file_paths, best_resolution) for episodes of a single season.
+    def _fetch_season_episode_files(self, season_rating_key: str) -> tuple[list[str], str, tuple[int, ...]]:
+        """Return (file_paths, best_resolution, episode_numbers) for one season.
 
         Best-effort: missing data or transient failures yield an empty list +
         empty resolution; the caller can fall back to substring match later.
         """
         if not season_rating_key:
-            return [], ""
+            return [], "", ()
         try:
             root = self._get(f"/library/metadata/{season_rating_key}/children")
         except Exception as exc:
             logger.debug("Plex season children fetch failed for %s: %s",
                          season_rating_key, exc)
-            return [], ""
+            return [], "", ()
 
         files: list[str] = []
+        episode_numbers: set[int] = set()
         best_resolution = ""
         for video in root.findall("Video"):
+            episode_number = _safe_positive_int(video.get("index"))
+            if episode_number:
+                episode_numbers.add(episode_number)
             for media in video.findall("Media"):
                 if not best_resolution:
                     cand = _normalise_resolution(media.get("videoResolution", ""))
@@ -571,7 +579,7 @@ class PlexClient:
                     fp = part.get("file", "")
                     if fp:
                         files.append(fp)
-        return files, best_resolution
+        return files, best_resolution, tuple(sorted(episode_numbers))
 
 
 # ------------------------------------------------------------------
@@ -609,6 +617,36 @@ def _parse_video(video: ElementTree.Element) -> PlexMovie:
         file_paths=file_paths,
         guid=video.get("guid", ""),
     )
+
+
+def _normalise_episode_fetch_result(value: object) -> tuple[list[str], str, tuple[int, ...]]:
+    if not isinstance(value, tuple):
+        return [], "", ()
+    if len(value) == 2:
+        files, resolution = value
+        episode_numbers = ()
+    elif len(value) >= 3:
+        files, resolution, episode_numbers = value[:3]
+    else:
+        return [], "", ()
+    if not isinstance(files, list):
+        files = []
+    numbers = tuple(
+        sorted({
+            parsed
+            for parsed in (_safe_positive_int(item) for item in (episode_numbers or ()))
+            if parsed
+        })
+    )
+    return files, str(resolution or ""), numbers
+
+
+def _safe_positive_int(value: object) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _parse_show(directory: ElementTree.Element) -> PlexShow:

@@ -670,17 +670,17 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         )
         season1_episodes = (
             '<MediaContainer>'
-            '<Video><Media videoResolution="1080">'
+            '<Video index="1"><Media videoResolution="1080">'
             '<Part file="/video/Show/S01/E01.mkv"/>'
             '</Media></Video>'
-            '<Video><Media videoResolution="1080">'
+            '<Video index="2"><Media videoResolution="1080">'
             '<Part file="/video/Show/S01/E02.mkv"/>'
             '</Media></Video>'
             '</MediaContainer>'
         )
         season2_episodes = (
             '<MediaContainer>'
-            '<Video><Media videoResolution="2160">'
+            '<Video index="1"><Media videoResolution="2160">'
             '<Part file="/video/Show/S02/E01.mkv"/>'
             '</Media></Video>'
             '</MediaContainer>'
@@ -696,7 +696,9 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         self.assertEqual(seasons[1].episode_count, 10)
         self.assertEqual(seasons[1].resolution, "1080")
         self.assertEqual(len(seasons[1].file_paths), 2)
+        self.assertEqual(seasons[1].episode_numbers, (1, 2))
         self.assertEqual(seasons[2].resolution, "4k")
+        self.assertEqual(seasons[2].episode_numbers, (1,))
 
     def test_skips_specials_season_zero(self):
         client = _make_client()

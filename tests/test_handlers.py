@@ -8552,6 +8552,41 @@ class SeriesContinueCommandTests(unittest.TestCase):
             seeders=10,
         )
 
+    def test_continue_plex_shows_top_up_episode_numbers(self):
+        from plex import PlexShow, PlexSeason
+
+        show = PlexShow(
+            "The Rookie",
+            2018,
+            "show-key",
+            seasons={5: PlexSeason("season-key-5", 5, 4, [], "1080")},
+        )
+        plex = MagicMock()
+        plex.get_show_seasons_lite.return_value = {
+            5: PlexSeason(
+                "season-key-5",
+                5,
+                4,
+                [],
+                "1080",
+                episode_numbers=(1, 2, 4, 5),
+            )
+        }
+
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "plex_client", plex),
+            patch.object(bot, "_plex_shows_library", {("the rookie", 2018): show}),
+        ):
+            shows = asyncio.run(bot._series_continue_plex_shows_with_seasons())
+
+        self.assertEqual(shows, [show])
+        plex.get_show_seasons_lite.assert_called_once_with(
+            "show-key",
+            fetch_resolution_for=[5],
+        )
+        self.assertEqual(show.seasons[5].episode_numbers, (1, 2, 4, 5))
+
     def test_continue_active_task_matches_possessive_apostrophe_title(self):
         from series_continue import PlexSeriesIdentity, SeriesCatchUpCandidate
 

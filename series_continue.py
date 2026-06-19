@@ -150,12 +150,13 @@ def build_series_catch_up_candidates(
                 candidate = _candidate_from_history(identity, season, history_entry, known_total)
                 if _candidate_needs_catch_up(candidate):
                     candidates.append(candidate)
-            elif not mine_only and known_total > int(season.episode_count or 0):
+            elif not mine_only and _season_needs_catch_up(season, known_total):
                 candidates.append(
                     SeriesCatchUpCandidate(
                         identity=identity,
                         season_number=season_number,
                         present_count=int(season.episode_count or 0),
+                        present_episode_numbers=_season_episode_numbers(season),
                         known_total=known_total,
                         quality=season.resolution or "",
                         source="plex",
@@ -259,18 +260,23 @@ def resolve_series_completeness(
         if present_episode_numbers is None
         else present_episode_numbers
     )
-    gap = _missing_inside_present_range(present)
-    if gap:
-        return SeriesCompleteness(
-            confidence="gap",
-            reason_for_user=f"В Plex есть пропуск в сезоне: не хватает {', '.join(map(str, gap))}.",
-            missing_episode_numbers=gap,
-            known_total=_safe_int(known_total) or candidate.known_total,
-        )
-
     total = _safe_int(known_total)
     if total <= 0:
         total = candidate.known_total
+    gap = _missing_inside_present_range(present)
+    if gap:
+        missing = _missing_after_present(
+            present,
+            int(candidate.present_count or 0),
+            total,
+        ) if total > 0 else gap
+        return SeriesCompleteness(
+            confidence="gap",
+            reason_for_user=f"В Plex есть пропуск в сезоне: не хватает {', '.join(map(str, missing))}.",
+            missing_episode_numbers=missing,
+            known_total=total,
+        )
+
     present_count = int(candidate.present_count or 0)
     if total > 0 and present_count < total:
         return SeriesCompleteness(
@@ -345,10 +351,34 @@ def resolve_same_topic_update(
     )
 
 
+def _season_needs_catch_up(season: PlexSeason, known_total: int) -> bool:
+    present = _season_episode_numbers(season)
+    if present and _missing_inside_present_range(present):
+        return True
+    if known_total > 0:
+        return bool(_missing_after_present(
+            present,
+            int(getattr(season, "episode_count", 0) or 0),
+            known_total,
+        ))
+    return False
+
+
 def _candidate_needs_catch_up(candidate: SeriesCatchUpCandidate) -> bool:
+    present = _normalise_episode_numbers(candidate.present_episode_numbers)
+    if present and _missing_inside_present_range(present):
+        return True
     if candidate.known_total > 0:
-        return candidate.present_count < candidate.known_total
+        return bool(_missing_after_present(
+            present,
+            int(candidate.present_count or 0),
+            candidate.known_total,
+        ))
     return bool(candidate.topic_id)
+
+
+def _season_episode_numbers(season: PlexSeason) -> tuple[int, ...]:
+    return _normalise_episode_numbers(getattr(season, "episode_numbers", ()) or ())
 
 
 def _candidate_from_history(
@@ -364,6 +394,7 @@ def _candidate_from_history(
         identity=identity,
         season_number=season.season_number,
         present_count=int(season.episode_count or 0),
+        present_episode_numbers=_season_episode_numbers(season),
         known_total=known_total,
         quality=str(entry.get("quality") or season.resolution or ""),
         source="history",

@@ -96,6 +96,19 @@ class GetShowSeasonsLiteTests(unittest.TestCase):
         self.assertEqual(seasons[1].resolution, "")
         self.assertEqual(seasons[3].resolution, "")
 
+    def test_focus_fetch_carries_episode_numbers(self):
+        c = self._client()
+
+        with (
+            patch.object(c, "_get", return_value=self._fake_seasons_xml()),
+            patch.object(c, "_fetch_season_episode_files",
+                         return_value=([], "1080", (1, 2, 4))),
+        ):
+            seasons = c.get_show_seasons_lite("show1", fetch_resolution_for=[2])
+
+        self.assertEqual(seasons[2].episode_numbers, (1, 2, 4))
+        self.assertEqual(seasons[1].episode_numbers, ())
+
     def test_empty_key_returns_empty(self):
         c = self._client()
         self.assertEqual(c.get_show_seasons_lite("", fetch_resolution_for=[1]), {})
@@ -150,6 +163,24 @@ class EnsureShowSeasonsLiteTests(unittest.IsolatedAsyncioTestCase):
         )
         # The top-up merged into the show's cached dict.
         self.assertEqual(res[2].resolution, "2160")
+
+    async def test_top_up_fires_when_episode_numbers_required(self):
+        show = self._show(with_focus=True)
+        fake_client = MagicMock()
+        fake_client.get_show_seasons_lite.return_value = {
+            2: PlexSeason("k2", 2, 10, [], "1080", episode_numbers=(1, 2, 4)),
+        }
+        with patch.object(bot, "plex_client", fake_client):
+            res = await bot._plex_ensure_show_seasons_lite(
+                show,
+                focus_season=2,
+                require_episode_numbers=True,
+            )
+
+        fake_client.get_show_seasons_lite.assert_called_once_with(
+            "showkey", fetch_resolution_for=[2]
+        )
+        self.assertEqual(res[2].episode_numbers, (1, 2, 4))
 
     async def test_cold_cache_fetches_focus_only(self):
         show = PlexShow("Test Show", 2024, "showkey", seasons={})

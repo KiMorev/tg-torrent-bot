@@ -87,7 +87,13 @@ class PlexSeriesIdentityTests(unittest.TestCase):
 
 
 class SeriesCatchUpCandidateBuilderTests(unittest.TestCase):
-    def _show(self, *, episode_count: int = 8, resolution: str = "1080") -> PlexShow:
+    def _show(
+        self,
+        *,
+        episode_count: int = 8,
+        resolution: str = "1080",
+        episode_numbers: tuple[int, ...] = (),
+    ) -> PlexShow:
         return PlexShow(
             title="The Rookie",
             original_title="The Rookie",
@@ -99,6 +105,7 @@ class SeriesCatchUpCandidateBuilderTests(unittest.TestCase):
                     season_number=8,
                     episode_count=episode_count,
                     resolution=resolution,
+                    episode_numbers=episode_numbers,
                 )
             },
         )
@@ -209,6 +216,39 @@ class SeriesCatchUpCandidateBuilderTests(unittest.TestCase):
         self.assertEqual(len(all_candidates), 1)
         self.assertEqual(all_candidates[0].source, "plex")
         self.assertEqual(all_candidates[0].known_total, 10)
+
+    def test_plex_only_candidate_keeps_episode_numbers(self):
+        show = self._show(episode_count=3, episode_numbers=(1, 2, 4))
+
+        candidates = build_series_catch_up_candidates(
+            [show],
+            [],
+            chat_id=100,
+            scope="all",
+            known_totals_by_show={"show-1": {8: 4}},
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].present_episode_numbers, (1, 2, 4))
+        completeness = resolve_series_completeness(candidates[0])
+        self.assertEqual(completeness.confidence, "gap")
+        self.assertEqual(completeness.missing_episode_numbers, (3,))
+
+    def test_plex_only_gap_is_candidate_even_when_count_matches_total(self):
+        show = self._show(episode_count=4, episode_numbers=(1, 2, 4, 5))
+
+        candidates = build_series_catch_up_candidates(
+            [show],
+            [],
+            chat_id=100,
+            scope="all",
+            known_totals_by_show={"show-1": {8: 4}},
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].present_episode_numbers, (1, 2, 4, 5))
+        completeness = resolve_series_completeness(candidates[0])
+        self.assertEqual(completeness.missing_episode_numbers, (3,))
 
     def test_mine_scope_filters_other_users_history(self):
         history = [{
@@ -344,6 +384,18 @@ class SeriesCompletenessResolverTests(unittest.TestCase):
 
         self.assertEqual(result.confidence, "gap")
         self.assertEqual(result.missing_episode_numbers, (3,))
+
+    def test_gap_with_known_total_reports_tail_too(self):
+        result = resolve_series_completeness(
+            self._candidate(
+                present_episode_numbers=(1, 2, 4),
+                present_count=3,
+                known_total=5,
+            )
+        )
+
+        self.assertEqual(result.confidence, "gap")
+        self.assertEqual(result.missing_episode_numbers, (3, 5))
 
     def test_known_total_detects_missing_tail(self):
         result = resolve_series_completeness(
