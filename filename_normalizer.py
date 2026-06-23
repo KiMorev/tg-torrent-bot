@@ -26,7 +26,7 @@ NAMING_UNSAFE_ARC = "unsafe_arc"
 NAMING_MIXED = "mixed"
 NAMING_UNKNOWN_NON_PLEX = "unknown_non_plex"
 
-PLEX_EPISODE_RE = re.compile(r"(?i)\bS\d{1,2}E\d{1,3}\b")
+PLEX_EPISODE_RE = re.compile(r"(?i)\bS\d{1,2}[\s._-]?E\d{1,3}\b")
 ARC_EPISODE_RE = re.compile(
     r"^\s*(?P<arc>\d{1,3})\.\s+"
     r"(?P<title>.+?)\s*"

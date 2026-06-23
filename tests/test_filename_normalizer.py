@@ -4,6 +4,7 @@ from pathlib import Path
 
 from filename_normalizer import (
     NAMING_MIXED,
+    NAMING_PLEX_READY,
     NAMING_UNSAFE_ARC,
     NAMING_UNKNOWN_NON_PLEX,
     apply_rename_plan,
@@ -134,6 +135,17 @@ class FilenameNormalizerTests(unittest.TestCase):
             Path("Show - S01E02 - Next.mkv"),
         ]
 
+        self.assertFalse(has_arc_episode_filenames(files))
+
+    def test_inspection_accepts_dotted_season_episode_marker(self):
+        files = [
+            Path("Бригада.2002.S01.E01.1080i.BDRemux.mkv"),
+            Path("Бригада.2002.S01.E02.1080i.BDRemux.mkv"),
+        ]
+
+        inspection = inspect_series_filenames(files)
+
+        self.assertEqual(inspection.status, NAMING_PLEX_READY)
         self.assertFalse(has_arc_episode_filenames(files))
 
 
