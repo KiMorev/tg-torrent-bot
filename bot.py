@@ -10785,6 +10785,17 @@ def _register_task_card_from_query(query, task_id: str | None) -> None:
     _register_task_card_message(_chat_id_from_query(query), _message_id_from_message(message), task_id)
 
 
+def _register_task_card_from_query_if_active(query, task: dict, task_id: str | None) -> None:
+    message = getattr(query, "message", None)
+    chat_id = _chat_id_from_query(query)
+    message_id = _message_id_from_message(message) if message else None
+    if (task.get("status") or "").lower() in _ACTIVE_STATUSES:
+        _register_task_card_message(chat_id, message_id, task_id)
+    else:
+        _forget_download_panel_message(chat_id, message_id)
+        _forget_task_card_message(chat_id, message_id)
+
+
 def _forget_task_card_message(chat_id: int | None, message_id: int | None, task_id: str | None = None) -> None:
     if not isinstance(chat_id, int) or not isinstance(message_id, int):
         return
@@ -27086,7 +27097,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "\n".join(["Трекеры обновлены.", *tracker_lines, "", _format_task_card(task, chat_id)]),
             reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", ""), task=task),
         )
-        _register_task_card_from_query(query, task_id)
+        _register_task_card_from_query_if_active(query, task, task_id)
         return
 
     if action == "sub_notify":
@@ -27195,7 +27206,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"{notice}\n\n{_format_task_card(task, chat_id)}",
                 reply_markup=_make_task_keyboard(task_id, task.get("status", ""), task.get("type", ""), task=task),
             )
-            _register_task_card_from_query(query, task_id)
+            _register_task_card_from_query_if_active(query, task, task_id)
         else:
             await query.edit_message_text(
                 f"{notice}\nID: {task_id}",
@@ -27254,7 +27265,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _format_task_card(task, chat_id),
         reply_markup=_make_task_keyboard(task_id, status, task.get("type", ""), task=task),
     )
-    _register_task_card_from_query(query, task_id)
+    _register_task_card_from_query_if_active(query, task, task_id)
 
     # Start auto-refresh while the task is actively transferring
     if status in _ACTIVE_STATUSES and chat_id and message_id:

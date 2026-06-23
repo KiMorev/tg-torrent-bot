@@ -955,6 +955,53 @@ class NotificationSelfHealingTests(unittest.TestCase):
         notified = self._store.load_notified_tasks()["tid1"]
         self.assertEqual(notified["sent"], ["100", "999"])
 
+    def test_finished_task_card_viewer_is_not_added_to_notification_recipients(self) -> None:
+        self._store.remember_task_owner("tid1", 999)
+        task = {"id": "tid1", "status": "finished", "type": "bt", "title": "T", "size": 0}
+
+        update = MagicMock()
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = 100
+        update.message = None
+        message = MagicMock()
+        message.chat_id = 100
+        message.chat = MagicMock()
+        message.chat.id = 100
+        message.message_id = 42
+        query = MagicMock()
+        query.data = bot._task_callback("info", "tid1")
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message = message
+        update.callback_query = query
+
+        mock_app = MagicMock()
+        mock_app.bot.send_message = AsyncMock()
+        mock_app.bot.delete_message = AsyncMock()
+        context = MagicMock()
+        context.application = mock_app
+        context.bot = mock_app.bot
+        mock_ds = MagicMock()
+        mock_ds.list_tasks.return_value = [task]
+
+        with (
+            patch.object(bot, "ds_client", mock_ds),
+            patch.object(bot, "state_store", self._store),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"finished"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", False),
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100, 999}),
+            patch.object(bot, "ADMIN_CHAT_IDS", {100}),
+            patch.object(bot, "PLEX_ENABLED", False),
+        ):
+            asyncio.run(bot.task_callback(update, context))
+            self.assertNotIn("tid1", bot.TASK_CARD_MESSAGES)
+
+            asyncio.run(_run_task_notifications_once(mock_app))
+
+        mock_app.bot.send_message.assert_awaited_once()
+        self.assertEqual(mock_app.bot.send_message.await_args.kwargs.get("chat_id"), 999)
+
 
 class TaskNotificationDeliveryTests(unittest.TestCase):
     """Regression: transient Telegram errors must NOT count against the
