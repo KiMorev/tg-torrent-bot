@@ -5,6 +5,7 @@ from pathlib import Path
 from filename_normalizer import (
     NAMING_MIXED,
     NAMING_PLEX_READY,
+    NAMING_RENAMABLE_ARC,
     NAMING_UNSAFE_ARC,
     NAMING_UNKNOWN_NON_PLEX,
     apply_rename_plan,
@@ -90,6 +91,34 @@ class FilenameNormalizerTests(unittest.TestCase):
 
             self.assertIsNone(plan)
             self.assertTrue(has_arc_episode_filenames(files))
+
+    def test_arc_episode_plan_supports_combined_episode_parts(self):
+        files = [
+            Path("1. Истинные ценности (1,2 сер.) - hdtv1080p.mkv"),
+            Path("2. Операция Доктор (1,2 сер.) - hdtv1080p.mkv"),
+            Path("3. Работа над ошибками (1,2 сер.) - hdtv1080p.mkv"),
+        ]
+
+        inspection = inspect_series_filenames(files)
+        plan = build_arc_episode_rename_plan(
+            show_title="Тайны следствия",
+            season=4,
+            files=files,
+            source_root=Path("."),
+        )
+
+        self.assertEqual(inspection.status, NAMING_RENAMABLE_ARC)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            [item.target_path.name for item in plan.items],
+            [
+                "Тайны следствия - S04E01-E02 - Истинные ценности.mkv",
+                "Тайны следствия - S04E03-E04 - Операция Доктор.mkv",
+                "Тайны следствия - S04E05-E06 - Работа над ошибками.mkv",
+            ],
+        )
+        self.assertEqual(plan.items[0].episode_numbers, (1, 2))
 
     def test_inspection_marks_missing_arc_parts_unsafe(self):
         files = [

@@ -30,7 +30,8 @@ PLEX_EPISODE_RE = re.compile(r"(?i)\bS\d{1,2}[\s._-]?E\d{1,3}\b")
 ARC_EPISODE_RE = re.compile(
     r"^\s*(?P<arc>\d{1,3})\.\s+"
     r"(?P<title>.+?)\s*"
-    r"\(\s*(?P<part>\d{1,3})\s*(?:сер(?:\.|ия|ии|ий)?|эп(?:\.|изод)?)\s*\)"
+    r"\(\s*(?P<parts>\d{1,3}(?:\s*[,;+\-–—]\s*\d{1,3})*)\s*"
+    r"(?:сер(?:\.|ия|ии|ий)?|эп(?:\.|изод)?)\s*\)"
     r"\s*(?:[-–—]\s*.*)?$",
     re.IGNORECASE,
 )
@@ -54,6 +55,7 @@ class RenameItem:
     episode_title: str
     arc_number: int
     part_number: int
+    episode_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -114,19 +116,36 @@ def sanitize_filename_part(value: str) -> str:
     return cleaned or "Episode"
 
 
-def _parse_arc_episode(path: Path) -> tuple[int, str, int] | None:
+def _parse_arc_parts(value: str) -> tuple[int, ...] | None:
+    parts: list[int] = []
+    for raw in re.split(r"\s*[,;+\-–—]\s*", value or ""):
+        if not raw:
+            return None
+        try:
+            part = int(raw)
+        except ValueError:
+            return None
+        if part <= 0 or part in parts:
+            return None
+        parts.append(part)
+    return tuple(parts) if parts else None
+
+
+def _parse_arc_episode(path: Path) -> tuple[int, str, tuple[int, ...]] | None:
     match = ARC_EPISODE_RE.match(path.stem)
     if not match:
         return None
     try:
         arc = int(match.group("arc"))
-        part = int(match.group("part"))
     except (TypeError, ValueError):
         return None
-    title = sanitize_filename_part(match.group("title"))
-    if arc <= 0 or part <= 0 or not title:
+    parts = _parse_arc_parts(match.group("parts") or "")
+    if parts is None:
         return None
-    return arc, title, part
+    title = sanitize_filename_part(match.group("title"))
+    if arc <= 0 or not title:
+        return None
+    return arc, title, parts
 
 
 def _single_parent(paths: list[Path]) -> Path | None:
@@ -136,14 +155,16 @@ def _single_parent(paths: list[Path]) -> Path | None:
     return None
 
 
-def _arc_parts_are_contiguous(parsed: list[tuple[int, str, int, Path]]) -> bool:
+def _arc_parts_are_contiguous(parsed: list[tuple[int, str, tuple[int, ...], Path]]) -> bool:
     by_arc: dict[int, set[int]] = {}
-    for arc, _episode_title, part, _path in parsed:
-        by_arc.setdefault(arc, set()).add(part)
-    if sum(len(parts) for parts in by_arc.values()) != len(parsed):
-        return False
+    for arc, _episode_title, parts, _path in parsed:
+        seen = by_arc.setdefault(arc, set())
+        for part in parts:
+            if part in seen:
+                return False
+            seen.add(part)
     for parts in by_arc.values():
-        expected = set(range(1, len(parts) + 1))
+        expected = set(range(1, max(parts) + 1))
         if parts != expected:
             return False
     return True
@@ -173,7 +194,7 @@ def inspect_series_filenames(files: list[Path]) -> FilenameInspection:
             suspicious_files=suspicious,
         )
 
-    parsed: list[tuple[int, str, int, Path]] = []
+    parsed: list[tuple[int, str, tuple[int, ...], Path]] = []
     for path in video_files:
         item = _parse_arc_episode(path)
         if item is None:
@@ -190,8 +211,8 @@ def inspect_series_filenames(files: list[Path]) -> FilenameInspection:
                 files=tuple(video_files),
                 suspicious_files=suspicious,
             )
-        arc, episode_title, part = item
-        parsed.append((arc, episode_title, part, path))
+        arc, episode_title, parts = item
+        parsed.append((arc, episode_title, parts, path))
 
     if len(video_files) < 2:
         return FilenameInspection(
@@ -236,13 +257,13 @@ def build_arc_episode_rename_plan(
     if all(is_plex_episode_filename(path) for path in video_files):
         return None
 
-    parsed: list[tuple[int, str, int, Path]] = []
+    parsed: list[tuple[int, str, tuple[int, ...], Path]] = []
     for path in video_files:
         item = _parse_arc_episode(path)
         if item is None:
             return None
-        arc, episode_title, part = item
-        parsed.append((arc, episode_title, part, path))
+        arc, episode_title, parts = item
+        parsed.append((arc, episode_title, parts, path))
 
     if not _arc_parts_are_contiguous(parsed):
         return None
@@ -254,22 +275,33 @@ def build_arc_episode_rename_plan(
     target_dir = root / f"Season {season:02d}"
 
     items: list[RenameItem] = []
-    for episode_number, (arc, episode_title, part, source_path) in enumerate(
-        sorted(parsed, key=lambda item: (item[0], item[2], str(item[3]).casefold())),
-        start=1,
+    episode_number = 1
+    for arc, episode_title, parts, source_path in sorted(
+        parsed,
+        key=lambda item: (item[0], min(item[2]), str(item[3]).casefold()),
     ):
+        episode_numbers = tuple(range(episode_number, episode_number + len(parts)))
+        episode_number += len(parts)
+        first_episode = episode_numbers[0]
+        last_episode = episode_numbers[-1]
+        episode_marker = (
+            f"S{season:02d}E{first_episode:02d}"
+            if first_episode == last_episode
+            else f"S{season:02d}E{first_episode:02d}-E{last_episode:02d}"
+        )
         target_name = (
-            f"{title} - S{season:02d}E{episode_number:02d} - "
+            f"{title} - {episode_marker} - "
             f"{sanitize_filename_part(episode_title)}{source_path.suffix}"
         )
         items.append(
             RenameItem(
                 source_path=source_path,
                 target_path=target_dir / target_name,
-                episode_number=episode_number,
+                episode_number=first_episode,
                 episode_title=episode_title,
                 arc_number=arc,
-                part_number=part,
+                part_number=parts[0],
+                episode_numbers=episode_numbers,
             )
         )
 
