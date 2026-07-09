@@ -1833,6 +1833,46 @@ class AdminPanelTests(unittest.TestCase):
         }
         self.assertEqual(buttons["⚙️ 1. Настроить"], "sub:settings:123")
 
+    def test_new_unsub_from_photo_notification_uses_new_text_message(self):
+        update = _make_callback_update(chat_id=100, callback_data="sub:new_unsub")
+        update.callback_query.message.text = None
+        update.callback_query.message.caption = "New movie notification"
+        context = _make_context()
+        new_message = MagicMock()
+        new_message.chat_id = 100
+        new_message.chat = MagicMock()
+        new_message.chat.id = 100
+        new_message.message_id = 99
+        context.bot.send_message.return_value = new_message
+        settings = {"movie_subscriptions": {"100": {"subscribed_at": "ts"}}}
+
+        def fake_create_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _make_store(tmp)
+            store.save_topic_subscriptions({})
+            with (
+                patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+                patch.object(bot, "ADMIN_CHAT_IDS", set()),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_load_movie_discovery_settings", side_effect=lambda: settings),
+                patch.object(bot, "_save_movie_discovery_settings", side_effect=settings.update),
+                patch.object(bot.asyncio, "create_task", MagicMock(side_effect=fake_create_task)),
+            ):
+                asyncio.run(sub_callback(update, context))
+
+        self.assertNotIn("100", settings["movie_subscriptions"])
+        context.bot.send_message.assert_awaited_once()
+        update.callback_query.message.delete.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+        context.bot.edit_message_text.assert_awaited_once()
+        kwargs = context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 100)
+        self.assertEqual(kwargs["message_id"], 99)
+        self.assertIn("Подписок пока нет", kwargs["text"])
+
     def test_non_owner_cannot_open_subscription_settings(self):
         update = _make_callback_update(chat_id=100, callback_data="sub:settings:123")
         context = _make_context()
@@ -4628,6 +4668,69 @@ class MovieNotificationDownloadCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.user_data["srch_source"], "movie_discovery_notification")
         download.assert_awaited_once()
         self.assertEqual(download.await_args.kwargs["_movie_handled_cards"], [item["card"]])
+
+    async def test_single_download_from_photo_notification_uses_new_text_message(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:dl:abc123def0:0")
+        update.callback_query.message.text = None
+        update.callback_query.message.caption = "New movie notification"
+        context = _make_context()
+        new_message = MagicMock()
+        new_message.chat_id = 100
+        new_message.chat = MagicMock()
+        new_message.chat.id = 100
+        new_message.message_id = 99
+        context.bot.send_message.return_value = new_message
+        item = self._item()
+        download = AsyncMock(return_value=bot.SEARCH_RESULTS)
+
+        with (
+            patch.object(bot, "_is_allowed", return_value=True),
+            patch.object(bot, "_load_movie_notification_snapshot", return_value={"items": [item]}),
+            patch.object(bot, "_download_and_add", download),
+        ):
+            state = await bot.movie_new_notification_download(update, context)
+
+        self.assertEqual(state, bot.SEARCH_RESULTS)
+        context.bot.send_message.assert_awaited_once()
+        update.callback_query.message.delete.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+        redirected_query = download.await_args.args[0]
+        self.assertIs(redirected_query.message, new_message)
+        self.assertEqual(download.await_args.kwargs["_movie_handled_cards"], [item["card"]])
+
+    async def test_bulk_confirm_from_photo_notification_uses_new_text_message(self):
+        update = _make_callback_update(chat_id=100, callback_data="new:bulk:abc123def0")
+        update.callback_query.message.text = None
+        update.callback_query.message.caption = "New movie notification"
+        context = _make_context()
+        new_message = MagicMock()
+        new_message.chat_id = 100
+        new_message.chat = MagicMock()
+        new_message.chat.id = 100
+        new_message.message_id = 99
+        context.bot.send_message.return_value = new_message
+        item = self._item()
+
+        with (
+            patch.object(bot, "_is_allowed", return_value=True),
+            patch.object(bot, "_load_movie_notification_snapshot", return_value={"items": [item]}),
+        ):
+            await bot.movie_new_notification_bulk_confirm(update, context)
+
+        context.bot.send_message.assert_awaited_once()
+        update.callback_query.message.delete.assert_awaited_once()
+        update.callback_query.edit_message_text.assert_not_called()
+        context.bot.edit_message_text.assert_awaited_once()
+        kwargs = context.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 100)
+        self.assertEqual(kwargs["message_id"], 99)
+        self.assertIn("Скачать все", kwargs["text"])
+        callbacks = {
+            button.text: button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(callbacks["✅ Скачать 1"], "new:bulk_ok:abc123def0")
 
     async def test_bulk_run_marks_successful_cards_handled(self):
         update = _make_callback_update(chat_id=100, callback_data="new:bulk_ok:abc123def0")

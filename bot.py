@@ -23604,10 +23604,15 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = query.message.chat.id if query.message else None
 
     if action == "new_unsub":
+        work_query = await _movie_notification_text_query(
+            query,
+            context,
+            "⏳ Отключаю уведомления /new…",
+        )
         if chat_id:
             _set_movie_subscription(chat_id, False)
         text, keyboard = _build_subscriptions_view(chat_id)
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await work_query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
         asyncio.create_task(_send_auto_delete(context.bot, chat_id, "🔕 Уведомления о новинках отключены"))
         return
 
@@ -26124,6 +26129,76 @@ def _movie_notification_stale_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _movie_notification_callback_needs_text_message(message) -> bool:
+    text = getattr(message, "text", None)
+    if isinstance(text, str) and text:
+        return False
+    caption = getattr(message, "caption", None)
+    if isinstance(caption, str) and caption:
+        return True
+    photo = getattr(message, "photo", None)
+    return isinstance(photo, (list, tuple)) and bool(photo)
+
+
+class _RedirectedCallbackQuery:
+    def __init__(self, query, message, bot) -> None:
+        self._query = query
+        self._bot = bot
+        self.message = message
+        self.data = getattr(query, "data", None)
+
+    async def answer(self, *args, **kwargs):
+        return await self._query.answer(*args, **kwargs)
+
+    async def edit_message_text(self, text: str, **kwargs):
+        chat_id = _chat_id_from_message(self.message)
+        message_id = _message_id_from_message(self.message)
+        if chat_id is not None and message_id is not None:
+            return await self._bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                **kwargs,
+            )
+        edit_text = getattr(self.message, "edit_text", None)
+        if callable(edit_text):
+            return await edit_text(text, **kwargs)
+        return await self._query.edit_message_text(text, **kwargs)
+
+
+async def _movie_notification_text_query(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    initial_text: str,
+):
+    message = getattr(query, "message", None)
+    if not _movie_notification_callback_needs_text_message(message):
+        return query
+    chat_id = _chat_id_from_message(message)
+    if chat_id is None:
+        return query
+    new_message = await context.bot.send_message(
+        chat_id=chat_id,
+        text=initial_text,
+    )
+    try:
+        await message.delete()
+    except Exception:
+        logger.debug("Failed to delete /new photo notification before text handoff", exc_info=True)
+    return _RedirectedCallbackQuery(query, new_message, context.bot)
+
+
+async def _movie_notification_download_query(query, context: ContextTypes.DEFAULT_TYPE):
+    return await _movie_notification_text_query(
+        query,
+        context,
+        (
+            "⏳ Добавляю загрузку\n\n"
+            "Сейчас получаю torrent-файл и передаю задачу в очередь скачивания."
+        ),
+    )
+
+
 def _movie_notification_bulk_keyboard(push_id: str, count: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if count > 0:
@@ -26216,6 +26291,11 @@ async def movie_new_notification_bulk_confirm(update: Update, context: ContextTy
         await query.answer("Недоступно", show_alert=True)
         return
     await query.answer()
+    work_query = await _movie_notification_text_query(
+        query,
+        context,
+        "⏳ Готовлю список загрузок…",
+    )
     chat_id = query.message.chat.id if query.message else None
     try:
         push_id = (query.data or "").split(":")[2]
@@ -26223,14 +26303,14 @@ async def movie_new_notification_bulk_confirm(update: Update, context: ContextTy
         push_id = ""
     snapshot = _load_movie_notification_snapshot(push_id, chat_id)
     if not snapshot:
-        await query.edit_message_text(
+        await work_query.edit_message_text(
             "Уведомление устарело. Откройте свежий список /new.",
             reply_markup=_movie_notification_stale_keyboard(),
         )
         return
     items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
     text, count = _movie_notification_confirm_text(items)
-    await query.edit_message_text(
+    await work_query.edit_message_text(
         text,
         reply_markup=_movie_notification_bulk_keyboard(push_id, count),
         parse_mode="HTML",
@@ -26245,12 +26325,13 @@ async def movie_new_notification_download(update: Update, context: ContextTypes.
         await query.answer("Недоступно", show_alert=True)
         return ConversationHandler.END
     await query.answer()
+    work_query = await _movie_notification_download_query(query, context)
     chat_id = query.message.chat.id if query.message else None
     try:
         _prefix, _action, push_id, index_raw = (query.data or "").split(":", 3)
         index = int(index_raw)
     except (ValueError, IndexError):
-        await query.edit_message_text(
+        await work_query.edit_message_text(
             "Не удалось разобрать кнопку скачивания.",
             reply_markup=_movie_notification_stale_keyboard(),
         )
@@ -26258,7 +26339,7 @@ async def movie_new_notification_download(update: Update, context: ContextTypes.
     snapshot = _load_movie_notification_snapshot(push_id, chat_id)
     items = snapshot.get("items") if isinstance(snapshot, dict) and isinstance(snapshot.get("items"), list) else []
     if not (0 <= index < len(items)):
-        await query.edit_message_text(
+        await work_query.edit_message_text(
             "Уведомление устарело. Откройте свежий список /new.",
             reply_markup=_movie_notification_stale_keyboard(),
         )
@@ -26267,13 +26348,13 @@ async def movie_new_notification_download(update: Update, context: ContextTypes.
     card = item.get("card") if isinstance(item.get("card"), dict) else {}
     result = item.get("result") if isinstance(item.get("result"), dict) else None
     if card.get("in_plex"):
-        await query.edit_message_text(
+        await work_query.edit_message_text(
             "Этот фильм уже есть в Plex. Откройте /new, если хотите выбрать другую новинку.",
             reply_markup=_movie_notification_stale_keyboard(),
         )
         return ConversationHandler.END
     if result is None:
-        await query.edit_message_text(
+        await work_query.edit_message_text(
             "По этой новинке нет доступной раздачи. Откройте /new и выберите другой фильм.",
             reply_markup=_movie_notification_stale_keyboard(),
         )
@@ -26287,7 +26368,7 @@ async def movie_new_notification_download(update: Update, context: ContextTypes.
     context.user_data["srch_source"] = "movie_discovery_notification"
     context.user_data["srch_banner"] = "🎬 Раздача из уведомления /new"
     return await _download_and_add(
-        query,
+        work_query,
         context,
         0,
         subscribe=False,
