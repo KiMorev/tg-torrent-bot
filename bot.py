@@ -5422,12 +5422,95 @@ def _plex_web_details_link(rating_key: str = "", machine_id: str = "") -> str:
     )
 
 
-def _format_unmatched_entry_link(entry) -> str:
+def _load_unmatched_source_history() -> list[dict]:
+    load = getattr(state_store, "load_download_history", None)
+    if not callable(load):
+        return []
+    history = load()
+    if not isinstance(history, list):
+        return []
+    return [
+        item for item in history
+        if isinstance(item, dict)
+        and item.get("event") == "download_added"
+        and _history_safe_topic_url(item.get("topic_url"))
+    ]
+
+
+def _unmatched_entry_topic_url(entry, history: list[dict]) -> str:
+    entry_year = getattr(entry, "year", 0) or 0
+    try:
+        entry_year = int(entry_year)
+    except (TypeError, ValueError):
+        entry_year = 0
+
+    entry_title_keys = {
+        title_match_key(value)
+        for value in (
+            getattr(entry, "title", ""),
+            getattr(entry, "original_title", ""),
+        )
+        if title_match_key(value)
+    }
+    file_paths = getattr(entry, "file_paths", None) or []
+    topic_urls: set[str] = set()
+    same_year_topic_urls: set[str] = set()
+
+    for item in history:
+        topic_url = _history_safe_topic_url(item.get("topic_url"))
+        if not topic_url:
+            continue
+
+        item_year = item.get("year") or 0
+        try:
+            item_year = int(item_year)
+        except (TypeError, ValueError):
+            item_year = 0
+        matched = False
+        if isinstance(entry, PlexShow):
+            series_key = title_match_key(item.get("series_query"))
+            matched = bool(series_key and series_key in entry_title_keys)
+        else:
+            history_title = str(item.get("title") or "").strip()
+            matched = bool(history_title) and any(
+                _plex_file_path_matches_ds_title(path, history_title)
+                or _plex_file_path_matches_ds_title(path.casefold(), history_title.casefold())
+                for path in file_paths
+            )
+            if not matched and str(item.get("kind") or "").lower() != "series":
+                canonical_key = title_match_key(item.get("canonical_title"))
+                matched = bool(
+                    canonical_key
+                    and canonical_key in entry_title_keys
+                    and (not entry_year or not item_year or entry_year == item_year)
+                )
+
+        if matched:
+            topic_urls.add(topic_url)
+            if entry_year and item_year and entry_year == item_year:
+                same_year_topic_urls.add(topic_url)
+
+    if len(topic_urls) == 1:
+        return next(iter(topic_urls))
+    if len(same_year_topic_urls) == 1:
+        return next(iter(same_year_topic_urls))
+    return ""
+
+
+def _format_unmatched_entry_link(entry, history: list[dict] | None = None) -> str:
     label = html_module.escape(_format_unmatched_short_label(entry))
     url = _plex_web_details_link(getattr(entry, "rating_key", ""), _plex_machine_id)
     if not url:
-        return f"<code>{label}</code>"
-    return f'<a href="{html_module.escape(url, quote=True)}">{label}</a>'
+        entry_link = f"<code>{label}</code>"
+    else:
+        entry_link = f'<a href="{html_module.escape(url, quote=True)}">{label}</a>'
+
+    topic_url = _unmatched_entry_topic_url(entry, history or [])
+    if not topic_url:
+        return entry_link
+    return (
+        f'{entry_link} — <a href="{html_module.escape(topic_url, quote=True)}">раздача</a>'
+    )
 
 
 def _plex_cache_info() -> dict:
@@ -5684,6 +5767,7 @@ def _format_unmatched_list(movies: list, shows: list) -> str:
     if not movies and not shows:
         return "✅ <b>Все файлы Plex успешно сматчены.</b>"
 
+    history = _load_unmatched_source_history()
     lines: list[str] = [
         "📋 <b>Несматченные файлы в Plex</b>",
         "",
@@ -5691,7 +5775,7 @@ def _format_unmatched_list(movies: list, shows: list) -> str:
 
     def _bullets(items: list, limit: int = 25) -> list[str]:
         out = [
-            f"• {_format_unmatched_entry_link(x)}"
+            f"• {_format_unmatched_entry_link(x, history)}"
             for x in items[:limit]
         ]
         extra = len(items) - limit
@@ -5716,6 +5800,7 @@ def _format_unmatched_push(movies: list, shows: list, *, kind: str) -> str:
     Shows up to 5 of each kind; longer lists fall back to a 'и ещё K' suffix
     and a hint to open ``/admin → 📋 Несматчено`` for the full picture.
     """
+    history = _load_unmatched_source_history()
     total = len(movies) + len(shows)
     if kind == "initial":
         head = (
@@ -5729,7 +5814,7 @@ def _format_unmatched_push(movies: list, shows: list, *, kind: str) -> str:
 
     def _bullets(items: list, limit: int = 5) -> str:
         head_part = "\n".join(
-            f"• {_format_unmatched_entry_link(x)}"
+            f"• {_format_unmatched_entry_link(x, history)}"
             for x in items[:limit]
         )
         extra = len(items) - limit

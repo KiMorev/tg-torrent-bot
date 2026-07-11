@@ -4209,6 +4209,39 @@ class PlexUnmatchedFormattingTests(unittest.TestCase):
 
         self.assertIn('<a href="https://app.plex.tv/desktop/#!/server/machine-1/details?key=%2Flibrary%2Fmetadata%2Fr">X.mkv</a>', text)
 
+    def test_push_links_exact_movie_download_to_source_topic(self):
+        from bot import _format_unmatched_push
+        history = [{
+            "event": "download_added",
+            "title": "Movie.Release.2026",
+            "kind": "movie",
+            "year": 2026,
+            "topic_url": "https://tracker.example/topic?id=42&view=1",
+        }]
+        movie = self._make_movie("Movie.Release.2026.mkv")
+
+        with patch.object(bot.state_store, "load_download_history", return_value=history):
+            text = _format_unmatched_push([movie], [], kind="new")
+
+        self.assertIn(
+            '<a href="https://tracker.example/topic?id=42&amp;view=1">раздача</a>',
+            text,
+        )
+
+    def test_push_does_not_link_failed_or_unrelated_download(self):
+        from bot import _format_unmatched_push
+        history = [{
+            "event": "download_failed",
+            "title": "X",
+            "kind": "movie",
+            "topic_url": "https://tracker.example/topic/failed",
+        }]
+
+        with patch.object(bot.state_store, "load_download_history", return_value=history):
+            text = _format_unmatched_push([self._make_movie("X.mkv")], [], kind="new")
+
+        self.assertNotIn(">раздача</a>", text)
+
 
 class FormatUnmatchedListTests(unittest.TestCase):
     """Tests for _format_unmatched_list (admin /admin → 📋 Несматчено screen)."""
@@ -4239,6 +4272,53 @@ class FormatUnmatchedListTests(unittest.TestCase):
             text = _format_unmatched_list([self._make_movie("unmatched.mkv")], [])
 
         self.assertIn('<a href="https://app.plex.tv/desktop/#!/server/machine-1/details?key=%2Flibrary%2Fmetadata%2Fr">unmatched.mkv</a>', text)
+
+    def test_list_links_series_by_title_when_release_year_differs(self):
+        from bot import _format_unmatched_list
+        from plex import PlexShow
+        show = PlexShow(
+            title="Clarkson's Farm",
+            original_title="",
+            year=2024,
+            rating_key="show-1",
+            guid="local://show-1",
+        )
+        history = [{
+            "event": "download_added",
+            "kind": "series",
+            "series_query": "Clarksons Farm",
+            "year": 2026,
+            "topic_url": "https://tracker.example/topic/series",
+        }]
+
+        with patch.object(bot.state_store, "load_download_history", return_value=history):
+            text = _format_unmatched_list([], [show])
+
+        self.assertIn(
+            '<a href="https://tracker.example/topic/series">раздача</a>',
+            text,
+        )
+
+    def test_list_hides_ambiguous_source_topics(self):
+        from bot import _format_unmatched_list
+        history = [
+            {
+                "event": "download_added",
+                "title": "Movie.Release",
+                "topic_url": "https://tracker.example/topic/1",
+            },
+            {
+                "event": "download_added",
+                "title": "Movie.Release",
+                "topic_url": "https://tracker.example/topic/2",
+            },
+        ]
+        movie = self._make_movie("Movie.Release.mkv")
+
+        with patch.object(bot.state_store, "load_download_history", return_value=history):
+            text = _format_unmatched_list([movie], [])
+
+        self.assertNotIn(">раздача</a>", text)
 
 
 class AdminPlexUnmatchedCallbackTests(unittest.IsolatedAsyncioTestCase):
