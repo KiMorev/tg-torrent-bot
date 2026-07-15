@@ -5429,12 +5429,70 @@ def _load_unmatched_source_history() -> list[dict]:
     history = load()
     if not isinstance(history, list):
         return []
-    return [
-        item for item in history
-        if isinstance(item, dict)
-        and item.get("event") == "download_added"
-        and _history_safe_topic_url(item.get("topic_url"))
-    ]
+    return [item for item in history if isinstance(item, dict)]
+
+
+_UNMATCHED_PACK_FILE_MARKER_RE = re.compile(
+    r"(?:^|[\s._-])(?:фильм|серия|эпизод|часть)\s*0*\d+\b|"
+    r"\bS\d{1,2}[\s._-]?E\d{1,3}\b",
+    re.IGNORECASE,
+)
+
+
+def _unmatched_path_parts(value: object) -> tuple[str, ...]:
+    return tuple(
+        key
+        for part in re.split(r"[\\/]", str(value or ""))
+        if (key := title_match_key(part))
+    )
+
+
+def _unmatched_task_file_matches_plex_path(
+    plex_path: str,
+    task_file: str,
+    destination: str = "",
+) -> bool:
+    plex_parts = _unmatched_path_parts(plex_path)
+    task_parts = _unmatched_path_parts(task_file)
+    destination_parts = _unmatched_path_parts(destination)
+    if destination_parts and task_parts[:len(destination_parts)] == destination_parts:
+        task_parts = task_parts[len(destination_parts):]
+    return bool(
+        plex_parts
+        and task_parts
+        and len(task_parts) <= len(plex_parts)
+        and plex_parts[-len(task_parts):] == task_parts
+    )
+
+
+def _unmatched_pack_prefix_keys(entry) -> set[str]:
+    keys: set[str] = set()
+    for file_path in getattr(entry, "file_paths", None) or []:
+        filename = re.split(r"[\\/]", str(file_path or ""))[-1]
+        stem = re.sub(r"\.[^.]+$", "", filename)
+        marker = _UNMATCHED_PACK_FILE_MARKER_RE.search(stem)
+        if not marker:
+            continue
+        key = title_match_key(stem[:marker.start()])
+        if len(key) >= 8 and len(key.split()) >= 2:
+            keys.add(key)
+    return keys
+
+
+def _resolve_unmatched_topic_url(
+    candidates: list[tuple[str, int]],
+    entry_year: int,
+) -> str:
+    topic_urls = {url for url, _year in candidates if url}
+    if len(topic_urls) == 1:
+        return next(iter(topic_urls))
+    same_year_urls = {
+        url for url, year in candidates
+        if url and entry_year and year and entry_year == year
+    }
+    if len(same_year_urls) == 1:
+        return next(iter(same_year_urls))
+    return ""
 
 
 def _unmatched_entry_topic_url(entry, history: list[dict]) -> str:
@@ -5453,10 +5511,50 @@ def _unmatched_entry_topic_url(entry, history: list[dict]) -> str:
         if title_match_key(value)
     }
     file_paths = getattr(entry, "file_paths", None) or []
-    topic_urls: set[str] = set()
-    same_year_topic_urls: set[str] = set()
+    pack_prefix_keys = _unmatched_pack_prefix_keys(entry)
 
-    for item in history:
+    source_items = [
+        item for item in history
+        if item.get("event") == "download_added"
+        and _history_safe_topic_url(item.get("topic_url"))
+    ]
+    source_by_task_id: dict[str, list[dict]] = {}
+    for item in source_items:
+        task_id = str(item.get("task_id") or "")
+        if task_id:
+            source_by_task_id.setdefault(task_id, []).append(item)
+
+    path_candidates: list[tuple[str, int]] = []
+    path_matched = False
+    for snapshot in history:
+        if snapshot.get("event") not in {"download_completed", "download_soft_completed"}:
+            continue
+        task_id = str(snapshot.get("task_id") or "")
+        download_files = snapshot.get("download_files")
+        if not task_id or not isinstance(download_files, list):
+            continue
+        destination = str(snapshot.get("download_destination") or "")
+        if not any(
+            _unmatched_task_file_matches_plex_path(plex_path, str(task_file), destination)
+            for plex_path in file_paths
+            for task_file in download_files
+        ):
+            continue
+        path_matched = True
+        for item in source_by_task_id.get(task_id, []):
+            topic_url = _history_safe_topic_url(item.get("topic_url"))
+            try:
+                item_year = int(item.get("year") or 0)
+            except (TypeError, ValueError):
+                item_year = 0
+            path_candidates.append((topic_url, item_year))
+
+    if path_matched:
+        return _resolve_unmatched_topic_url(path_candidates, entry_year)
+
+    legacy_candidates: list[tuple[str, int]] = []
+
+    for item in source_items:
         topic_url = _history_safe_topic_url(item.get("topic_url"))
         if not topic_url:
             continue
@@ -5484,17 +5582,18 @@ def _unmatched_entry_topic_url(entry, history: list[dict]) -> str:
                     and canonical_key in entry_title_keys
                     and (not entry_year or not item_year or entry_year == item_year)
                 )
+            if not matched and pack_prefix_keys:
+                history_title_key = title_match_key(item.get("title"))
+                matched = any(
+                    history_title_key == prefix
+                    or history_title_key.startswith(f"{prefix} ")
+                    for prefix in pack_prefix_keys
+                )
 
         if matched:
-            topic_urls.add(topic_url)
-            if entry_year and item_year and entry_year == item_year:
-                same_year_topic_urls.add(topic_url)
+            legacy_candidates.append((topic_url, item_year))
 
-    if len(topic_urls) == 1:
-        return next(iter(topic_urls))
-    if len(same_year_topic_urls) == 1:
-        return next(iter(same_year_topic_urls))
-    return ""
+    return _resolve_unmatched_topic_url(legacy_candidates, entry_year)
 
 
 def _format_unmatched_entry_link(entry, history: list[dict] | None = None) -> str:
@@ -7437,9 +7536,17 @@ def _build_task_meta_from_result(result: dict, source: str = "search") -> dict:
     if not year:
         year = _movie_extract_year(raw_title) or 0
 
-    if _plex_is_series(raw_title):
+    explicit_kind = str(result.get("kind") or "").strip().lower()
+    kind = explicit_kind if explicit_kind in {"movie", "series"} else _search_cluster_kind(result)
+
+    if kind == "series":
         season_num = _extract_season_from_query(raw_title) or -1
-        series_query = _extract_series_base_query(raw_title) or ""
+        series_query = (
+            str(result.get("series_query") or "").strip()
+            or _extract_series_base_query(raw_title)
+            or str(result.get("movie_title") or "").strip()
+            or _search_cluster_display_title(raw_title, "series")
+        )
         return {
             "kind": "series",
             "title": raw_title,
@@ -7681,6 +7788,16 @@ def _history_fields_from_task(task: dict | None) -> dict:
     transfer = additional.get("transfer") if isinstance(additional.get("transfer"), dict) else {}
     downloaded = transfer.get("size_downloaded")
     size = task.get("size")
+    detail = additional.get("detail") if isinstance(additional.get("detail"), dict) else {}
+    download_files: list[str] = []
+    raw_files = additional.get("file")
+    if isinstance(raw_files, list):
+        for item in raw_files:
+            if not isinstance(item, dict):
+                continue
+            filename = str(item.get("filename") or "").strip()
+            if filename and is_video_file(Path(filename)):
+                download_files.append(filename)
     fields = {
         "title": task.get("title") or "",
         "ds_status": task.get("status") or "",
@@ -7688,11 +7805,12 @@ def _history_fields_from_task(task: dict | None) -> dict:
         "size": size,
         "downloaded": downloaded,
         "progress_percent": _progress_percent(downloaded, size),
+        "download_destination": detail.get("destination") or "",
+        "download_files": list(dict.fromkeys(download_files)),
     }
     status_extra = task.get("status_extra") if isinstance(task.get("status_extra"), dict) else {}
     error_detail = status_extra.get("error_detail")
     if not error_detail:
-        detail = additional.get("detail") if isinstance(additional.get("detail"), dict) else {}
         error_detail = detail.get("error_detail")
     if error_detail:
         fields["error_detail"] = error_detail
@@ -9750,6 +9868,37 @@ def _download_history_event_for_status(
     return ""
 
 
+def _merge_task_history_snapshot(task: dict, snapshot: dict) -> dict:
+    merged = dict(task)
+    merged.update({key: value for key, value in snapshot.items() if key != "additional"})
+    additional = dict(task.get("additional") or {})
+    snapshot_additional = snapshot.get("additional")
+    if isinstance(snapshot_additional, dict):
+        additional.update(snapshot_additional)
+    if additional:
+        merged["additional"] = additional
+    return merged
+
+
+async def _task_with_history_file_snapshot(task: dict) -> dict:
+    task_id = str(task.get("id") or "")
+    get_task_info = getattr(ds_client, "get_task_info", None)
+    if not task_id or not callable(get_task_info):
+        return task
+    try:
+        snapshot = await asyncio.to_thread(get_task_info, task_id)
+    except Exception:
+        logger.warning(
+            "Download history file snapshot failed task_id=%s",
+            task_id,
+            exc_info=True,
+        )
+        return task
+    if not isinstance(snapshot, dict):
+        return task
+    return _merge_task_history_snapshot(task, snapshot)
+
+
 def _record_task_notification_history(
     task: dict,
     *,
@@ -10284,8 +10433,11 @@ async def _run_task_notifications_once_locked(app: Application) -> None:
                 notified.get(task_id),
             )
             if not history_already_recorded:
+                history_task = task
+                if complete_despite_error or notification_status in {"finished", "seeding"}:
+                    history_task = await _task_with_history_file_snapshot(task)
                 _record_task_notification_history(
-                    task,
+                    history_task,
                     notification_status=notification_status,
                     complete_despite_error=complete_despite_error,
                     recipients=recipients,

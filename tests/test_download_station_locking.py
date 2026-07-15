@@ -3,7 +3,7 @@ import time
 import urllib.error
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from download_station import DownloadStationClient, DownloadStationError
 
@@ -65,6 +65,32 @@ class DownloadStationLockingTests(unittest.TestCase):
                 future.result()
 
         self.assertEqual(client.max_active_requests, 1)
+
+    def test_get_task_info_requests_destination_and_file_list(self) -> None:
+        client = DownloadStationClient(
+            "https://nas.example:5001",
+            "account",
+            "password",
+            destination="video",
+        )
+        task = {
+            "id": "dbid_1",
+            "additional": {
+                "detail": {"destination": "video"},
+                "file": [{"filename": "Show/episode.avi"}],
+            },
+        }
+        client._login = MagicMock(return_value="sid")
+        client._logout = MagicMock()
+        client._request = MagicMock(return_value={"data": {"tasks": [task]}})
+
+        self.assertEqual(client.get_task_info("dbid_1"), task)
+
+        params = client._request.call_args.args[1]
+        self.assertEqual(params["method"], "getinfo")
+        self.assertEqual(params["id"], "dbid_1")
+        self.assertEqual(params["additional"], "detail,file")
+        client._logout.assert_called_once_with("sid")
 
 
 class DownloadStationSecurityTests(unittest.TestCase):

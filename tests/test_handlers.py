@@ -4242,6 +4242,63 @@ class PlexUnmatchedFormattingTests(unittest.TestCase):
 
         self.assertNotIn(">раздача</a>", text)
 
+    def test_push_links_movie_via_completed_task_file_snapshot(self):
+        from bot import _format_unmatched_push
+        from plex import PlexMovie
+        filename = "Тайны следствия-6.Фильм 1.Личный состав_часть 1.avi"
+        movie = PlexMovie(
+            title="",
+            year=0,
+            rating_key="file-1",
+            resolution="",
+            added_at=0,
+            file_paths=[f"/storage/Тайны следствия-6/{filename}"],
+            guid="local://file-1",
+        )
+        history = [
+            {
+                "event": "download_added",
+                "task_id": "dbid_1",
+                "title": "Название раздачи не совпадает с файлом",
+                "topic_url": "https://tracker.example/topic/42",
+            },
+            {
+                "event": "download_completed",
+                "task_id": "dbid_1",
+                "download_destination": "video",
+                "download_files": [f"Тайны следствия-6/{filename}"],
+            },
+        ]
+
+        with patch.object(bot.state_store, "load_download_history", return_value=history):
+            text = _format_unmatched_push([movie], [], kind="new")
+
+        self.assertIn(
+            '<a href="https://tracker.example/topic/42">раздача</a>',
+            text,
+        )
+
+    def test_push_legacy_pack_filename_matches_source_title_prefix(self):
+        from bot import _format_unmatched_push
+        history = [{
+            "event": "download_added",
+            "task_id": "dbid_legacy",
+            "title": "Тайны следствия-6 2006 DVDRip",
+            "topic_url": "https://tracker.example/topic/legacy",
+        }]
+
+        with patch.object(bot.state_store, "load_download_history", return_value=history):
+            text = _format_unmatched_push(
+                [self._make_movie("Тайны следствия-6.Фильм 1.Личный состав_часть 1.avi")],
+                [],
+                kind="new",
+            )
+
+        self.assertIn(
+            '<a href="https://tracker.example/topic/legacy">раздача</a>',
+            text,
+        )
+
 
 class FormatUnmatchedListTests(unittest.TestCase):
     """Tests for _format_unmatched_list (admin /admin → 📋 Несматчено screen)."""
@@ -4299,18 +4356,30 @@ class FormatUnmatchedListTests(unittest.TestCase):
             text,
         )
 
-    def test_list_hides_ambiguous_source_topics(self):
+    def test_list_hides_ambiguous_task_file_sources(self):
         from bot import _format_unmatched_list
         history = [
             {
                 "event": "download_added",
-                "title": "Movie.Release",
+                "task_id": "dbid_1",
+                "title": "First release",
                 "topic_url": "https://tracker.example/topic/1",
             },
             {
                 "event": "download_added",
-                "title": "Movie.Release",
+                "task_id": "dbid_2",
+                "title": "Second release",
                 "topic_url": "https://tracker.example/topic/2",
+            },
+            {
+                "event": "download_completed",
+                "task_id": "dbid_1",
+                "download_files": ["Movie.Release.mkv"],
+            },
+            {
+                "event": "download_completed",
+                "task_id": "dbid_2",
+                "download_files": ["Movie.Release.mkv"],
             },
         ]
         movie = self._make_movie("Movie.Release.mkv")
@@ -6693,6 +6762,69 @@ class DownloadHistoryTests(unittest.TestCase):
 
         entry = store.append_download_history.call_args.args[0]
         self.assertEqual(entry["release"], {"hdr": "HDR10", "audio": "EAC3 5.1"})
+
+    def test_result_category_marks_series_without_season_marker(self):
+        meta = bot._build_task_meta_from_result(
+            {
+                "title": "Тайны следствия-6. DVDRip",
+                "movie_title": "Тайны следствия",
+                "category": "TV Series",
+            },
+            source="search",
+        )
+
+        self.assertEqual(meta["kind"], "series")
+        self.assertEqual(meta["series_query"], "Тайны следствия")
+
+    def test_task_history_keeps_destination_and_video_file_names(self):
+        fields = bot._history_fields_from_task({
+            "id": "dbid_1",
+            "title": "Тайны следствия-6",
+            "status": "finished",
+            "type": "bt",
+            "additional": {
+                "detail": {"destination": "video"},
+                "file": [
+                    {"filename": "Тайны следствия-6/Фильм 1.avi"},
+                    {"filename": "Тайны следствия-6/readme.txt"},
+                ],
+            },
+        })
+
+        self.assertEqual(fields["download_destination"], "video")
+        self.assertEqual(
+            fields["download_files"],
+            ["Тайны следствия-6/Фильм 1.avi"],
+        )
+
+    def test_completion_snapshot_merges_file_list_into_existing_task(self):
+        class FakeClient:
+            def get_task_info(self, task_id):
+                self.task_id = task_id
+                return {
+                    "id": task_id,
+                    "additional": {
+                        "detail": {"destination": "video"},
+                        "file": [{"filename": "Show/episode.avi"}],
+                    },
+                }
+
+        client = FakeClient()
+        task = {
+            "id": "dbid_1",
+            "status": "finished",
+            "additional": {"transfer": {"size_downloaded": 100}},
+        }
+
+        with patch.object(bot, "ds_client", client):
+            merged = asyncio.run(bot._task_with_history_file_snapshot(task))
+
+        self.assertEqual(client.task_id, "dbid_1")
+        self.assertEqual(merged["additional"]["transfer"]["size_downloaded"], 100)
+        self.assertEqual(
+            merged["additional"]["file"],
+            [{"filename": "Show/episode.avi"}],
+        )
 
 
 class TaskMetaWrapperTests(unittest.TestCase):

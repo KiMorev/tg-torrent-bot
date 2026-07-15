@@ -45,6 +45,7 @@
 - название раздачи и нормализованное название;
 - `kind`, `year`, `quality`, `series_query`, `season`;
 - `tracker`, `indexer`, `source`, `topic_id`, безопасная `topic_url`;
+- для завершённой BT-задачи: `download_destination` и относительные имена видеофайлов в `download_files`; они связывают фактический Plex-файл с `task_id` и исходной раздачей;
 - для YouTube: `youtube_job_id`, `youtube_video_id`, `canonical_url`, `channel`, `duration_seconds`, `format_id`, `file_path`, `file_size`;
 - профиль релиза из parsed meta: качество, source, HDR, аудио, языки, группа, edition;
 - статус DS, прогресс, размер, `error_detail`;
@@ -72,7 +73,7 @@
 - `search_series_bulk_run()` и `_series_bulk_add_download()` - bulk-сезоны;
 - `_do_process_magnet()` и `_do_process_torrent()` - ручные magnet/`.torrent`;
 - `_check_subscriptions()` и Jackett subscription paths - автоскачивание по подпискам;
-- `_run_task_notifications_once()` - финальные статусы DS;
+- `_run_task_notifications_once()` - финальные статусы DS и точечный снимок `detail,file` завершённой задачи;
 - `_handle_normalization_callback()` - подтверждённое переименование файлов сериала;
 - `_plex_poll_after_finish()` - итог поиска в Plex;
 - `youtube_callback()` и `_youtube_worker_once()` - очередь, старт, успех и ошибка YouTube-download;

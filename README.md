@@ -670,7 +670,7 @@ python -m pytest tests/ -v
 - HTML parsing: `beautifulsoup4`;
 - YouTube-download: `yt-dlp` и `ffmpeg` внутри Docker image.
 
-PlexLoader ведёт внутреннюю безопасную историю загрузок в `STATE_DIR/download_history.jsonl`: добавление задач, завершение, мягкое завершение Download Station после 100%, переименование файлов, ошибки и результат Plex polling. Она привязана к `chat_id`, не сохраняет magnet-ссылки, Jackett `/dl` URL, API keys и содержимое `.torrent`. Подробности формата: [`docs/download-history.md`](docs/download-history.md).
+PlexLoader ведёт внутреннюю безопасную историю загрузок в `STATE_DIR/download_history.jsonl`: добавление задач, завершение, мягкое завершение Download Station после 100%, относительные имена видеофайлов завершённой BT-задачи, переименование файлов, ошибки и результат Plex polling. Она привязана к `chat_id`, не сохраняет magnet-ссылки, Jackett `/dl` URL, API keys и содержимое `.torrent`. Подробности формата: [`docs/download-history.md`](docs/download-history.md).
 
 Основные файлы проекта:
 

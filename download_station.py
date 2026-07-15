@@ -483,3 +483,34 @@ class DownloadStationClient:
             return result.get("data", {}).get("tasks", [])
         finally:
             self._logout(sid)
+
+    @_synchronized
+    def get_task_info(self, task_id: str) -> dict | None:
+        """Return one task with its destination and BT file list."""
+        if not task_id:
+            return None
+        sid = self._login()
+        try:
+            result = self._request(
+                "/webapi/DownloadStation/task.cgi",
+                {
+                    "api": "SYNO.DownloadStation.Task",
+                    "version": "2",
+                    "method": "getinfo",
+                    "id": task_id,
+                    "additional": "detail,file",
+                    "_sid": sid,
+                },
+            )
+            tasks = result.get("data", {}).get("tasks", [])
+            if not isinstance(tasks, list):
+                return None
+            return next(
+                (
+                    task for task in tasks
+                    if isinstance(task, dict) and str(task.get("id") or "") == task_id
+                ),
+                None,
+            )
+        finally:
+            self._logout(sid)
