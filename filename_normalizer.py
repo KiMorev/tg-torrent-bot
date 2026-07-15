@@ -35,6 +35,12 @@ ARC_EPISODE_RE = re.compile(
     r"\s*(?:[-–—]\s*.*)?$",
     re.IGNORECASE,
 )
+SERIES_FILM_PART_RE = re.compile(
+    r"^\s*(?P<prefix>.+?)[\s._-]+(?P<season>\d{1,2})[\s._-]+"
+    r"(?:фильм|film)\s*0*(?P<arc>\d{1,3})[\s._-]+"
+    r"(?P<title>.+?)[\s._-]*(?:часть|part)\s*0*(?P<part>\d{1,3})\s*$",
+    re.IGNORECASE,
+)
 NON_PLEX_EPISODE_LIKE_RE = re.compile(
     r"(?:"
     r"\b(?:episode|ep|e)\s*0*\d{1,3}\b|"
@@ -95,25 +101,45 @@ def is_plex_episode_filename(path: Path) -> bool:
     return bool(PLEX_EPISODE_RE.search(path.stem))
 
 
-def is_non_plex_episode_like_filename(path: Path) -> bool:
+def is_non_plex_episode_like_filename(
+    path: Path,
+    *,
+    series_context: bool = False,
+    show_title: str = "",
+) -> bool:
     if is_plex_episode_filename(path):
         return False
-    return _parse_arc_episode(path) is not None or bool(NON_PLEX_EPISODE_LIKE_RE.search(path.stem))
+    return (
+        _parse_arc_episode(path, series_context=series_context, show_title=show_title) is not None
+        or bool(NON_PLEX_EPISODE_LIKE_RE.search(path.stem))
+    )
 
 
-def has_arc_episode_filenames(files: list[Path]) -> bool:
+def has_arc_episode_filenames(
+    files: list[Path],
+    *,
+    series_context: bool = False,
+    show_title: str = "",
+) -> bool:
     video_files = _video_files(files)
     if len(video_files) < 2:
         return False
     if all(is_plex_episode_filename(path) for path in video_files):
         return False
-    return all(_parse_arc_episode(path) is not None for path in video_files)
+    return all(
+        _parse_arc_episode(path, series_context=series_context, show_title=show_title) is not None
+        for path in video_files
+    )
 
 
 def sanitize_filename_part(value: str) -> str:
     cleaned = UNSAFE_FILENAME_CHARS_RE.sub(" ", value or "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     return cleaned or "Episode"
+
+
+def _title_key(value: str) -> str:
+    return re.sub(r"[^\w]+", " ", value or "", flags=re.UNICODE).casefold().strip()
 
 
 def _parse_arc_parts(value: str) -> tuple[int, ...] | None:
@@ -131,21 +157,70 @@ def _parse_arc_parts(value: str) -> tuple[int, ...] | None:
     return tuple(parts) if parts else None
 
 
-def _parse_arc_episode(path: Path) -> tuple[int, str, tuple[int, ...]] | None:
-    match = ARC_EPISODE_RE.match(path.stem)
+def _parse_series_film_part(
+    path: Path,
+    *,
+    show_title: str = "",
+) -> tuple[int, int, str, tuple[int, ...]] | None:
+    match = SERIES_FILM_PART_RE.match(path.stem)
     if not match:
         return None
+    if show_title and _title_key(match.group("prefix") or "") != _title_key(show_title):
+        return None
     try:
+        season = int(match.group("season"))
         arc = int(match.group("arc"))
+        part = int(match.group("part"))
     except (TypeError, ValueError):
         return None
-    parts = _parse_arc_parts(match.group("parts") or "")
-    if parts is None:
+    title = sanitize_filename_part(re.sub(r"[_]+", " ", match.group("title") or ""))
+    if season <= 0 or arc <= 0 or part <= 0 or not title:
         return None
-    title = sanitize_filename_part(match.group("title"))
-    if arc <= 0 or not title:
+    return season, arc, title, (part,)
+
+
+def infer_series_season_from_filenames(files: list[Path], show_title: str = "") -> int | None:
+    video_files = _video_files(files)
+    if len(video_files) < 2:
         return None
-    return arc, title, parts
+    parsed = [
+        _parse_series_film_part(path, show_title=show_title)
+        for path in video_files
+    ]
+    if any(item is None for item in parsed):
+        return None
+    seasons = {item[0] for item in parsed if item is not None}
+    if len(seasons) != 1:
+        return None
+    return next(iter(seasons))
+
+
+def _parse_arc_episode(
+    path: Path,
+    *,
+    series_context: bool = False,
+    show_title: str = "",
+) -> tuple[int, str, tuple[int, ...]] | None:
+    match = ARC_EPISODE_RE.match(path.stem)
+    if match:
+        try:
+            arc = int(match.group("arc"))
+        except (TypeError, ValueError):
+            return None
+        parts = _parse_arc_parts(match.group("parts") or "")
+        if parts is None:
+            return None
+        title = sanitize_filename_part(match.group("title"))
+        if arc <= 0 or not title:
+            return None
+        return arc, title, parts
+
+    if series_context:
+        item = _parse_series_film_part(path, show_title=show_title)
+        if item is not None:
+            _season, arc, title, parts = item
+            return arc, title, parts
+    return None
 
 
 def _single_parent(paths: list[Path]) -> Path | None:
@@ -170,7 +245,12 @@ def _arc_parts_are_contiguous(parsed: list[tuple[int, str, tuple[int, ...], Path
     return True
 
 
-def inspect_series_filenames(files: list[Path]) -> FilenameInspection:
+def inspect_series_filenames(
+    files: list[Path],
+    *,
+    series_context: bool = False,
+    show_title: str = "",
+) -> FilenameInspection:
     video_files = _video_files(files)
     if not video_files:
         return FilenameInspection(NAMING_NO_ACTION)
@@ -180,7 +260,7 @@ def inspect_series_filenames(files: list[Path]) -> FilenameInspection:
 
     suspicious = tuple(
         path for path in video_files
-        if is_non_plex_episode_like_filename(path)
+        if is_non_plex_episode_like_filename(path, series_context=series_context, show_title=show_title)
     )
     if not suspicious:
         return FilenameInspection(NAMING_NO_ACTION, files=tuple(video_files))
@@ -196,9 +276,12 @@ def inspect_series_filenames(files: list[Path]) -> FilenameInspection:
 
     parsed: list[tuple[int, str, tuple[int, ...], Path]] = []
     for path in video_files:
-        item = _parse_arc_episode(path)
+        item = _parse_arc_episode(path, series_context=series_context, show_title=show_title)
         if item is None:
-            if any(_parse_arc_episode(candidate) is not None for candidate in video_files):
+            if any(
+                _parse_arc_episode(candidate, series_context=series_context, show_title=show_title) is not None
+                for candidate in video_files
+            ):
                 return FilenameInspection(
                     NAMING_MIXED,
                     "часть файлов похожа на arc-эпизоды, но набор неоднородный",
@@ -241,6 +324,7 @@ def build_arc_episode_rename_plan(
     season: int,
     files: list[Path],
     source_root: Path | None = None,
+    series_context: bool = False,
 ) -> RenamePlan | None:
     """Build a Plex rename plan for Russian arc/part episode names.
 
@@ -259,7 +343,7 @@ def build_arc_episode_rename_plan(
 
     parsed: list[tuple[int, str, tuple[int, ...], Path]] = []
     for path in video_files:
-        item = _parse_arc_episode(path)
+        item = _parse_arc_episode(path, series_context=series_context, show_title=title)
         if item is None:
             return None
         arc, episode_title, parts = item

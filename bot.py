@@ -230,6 +230,7 @@ from filename_normalizer import (
     RenamePlanError,
     apply_rename_plan,
     build_arc_episode_rename_plan,
+    infer_series_season_from_filenames,
     inspect_series_filenames,
     is_video_file,
 )
@@ -7009,19 +7010,32 @@ def _inspect_completed_task_normalization(
     *,
     season_override: int | None = None,
 ) -> dict:
+    meta_kind = str(meta.get("kind") or "").strip().lower() if isinstance(meta, dict) else ""
+    if meta_kind == "movie":
+        return {"status": "no_action"}
+    series_context = meta_kind == "series"
+
     source_root, files = _completed_task_video_files(task)
     if not files:
         return {"status": "files_unavailable"}
 
-    naming = inspect_series_filenames(files)
+    show_title = _normalization_show_title(task, meta)
+    naming = inspect_series_filenames(
+        files,
+        series_context=series_context,
+        show_title=show_title,
+    )
     if naming.status in {"no_action", "plex_ready"}:
         return {"status": "no_action"}
 
-    show_title = _normalization_show_title(task, meta)
     if season_override is not None and season_override > 0:
         season, season_source = season_override, "выбран вручную"
     else:
         season, season_source = _normalization_season(task, meta)
+        if season <= 0 and series_context:
+            inferred_season = infer_series_season_from_filenames(files, show_title)
+            if inferred_season:
+                season, season_source = inferred_season, "из имён файлов"
 
     if season > 0 and source_root is not None:
         plan = build_arc_episode_rename_plan(
@@ -7029,6 +7043,7 @@ def _inspect_completed_task_normalization(
             season=season,
             files=files,
             source_root=source_root,
+            series_context=series_context,
         )
         if plan is not None:
             return {
@@ -7051,6 +7066,7 @@ def _inspect_completed_task_normalization(
             season=1,
             files=files,
             source_root=source_root,
+            series_context=series_context,
         )
         if probe_plan is None:
             return {

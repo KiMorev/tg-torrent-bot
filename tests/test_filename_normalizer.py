@@ -11,6 +11,7 @@ from filename_normalizer import (
     apply_rename_plan,
     build_arc_episode_rename_plan,
     has_arc_episode_filenames,
+    infer_series_season_from_filenames,
     inspect_series_filenames,
 )
 
@@ -119,6 +120,43 @@ class FilenameNormalizerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(plan.items[0].episode_numbers, (1, 2))
+
+    def test_series_context_plan_supports_film_part_files(self):
+        files = [
+            Path("Тайны следствия-6.Фильм 1.Личный состав_часть 1.avi"),
+            Path("Тайны следствия-6.Фильм 1.Личный состав_часть 2.avi"),
+            Path("Тайны следствия-6.Фильм 2.Веселый слоник_часть 1.avi"),
+            Path("Тайны следствия-6.Фильм 2.Веселый слоник_часть 2.avi"),
+        ]
+
+        inspection = inspect_series_filenames(
+            files,
+            series_context=True,
+            show_title="Тайны следствия",
+        )
+        plan = build_arc_episode_rename_plan(
+            show_title="Тайны следствия",
+            season=6,
+            files=files,
+            source_root=Path("."),
+            series_context=True,
+        )
+
+        self.assertFalse(has_arc_episode_filenames(files))
+        self.assertTrue(has_arc_episode_filenames(files, series_context=True, show_title="Тайны следствия"))
+        self.assertEqual(infer_series_season_from_filenames(files, "Тайны следствия"), 6)
+        self.assertEqual(inspection.status, NAMING_RENAMABLE_ARC)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            [item.target_path.name for item in plan.items],
+            [
+                "Тайны следствия - S06E01 - Личный состав.avi",
+                "Тайны следствия - S06E02 - Личный состав.avi",
+                "Тайны следствия - S06E03 - Веселый слоник.avi",
+                "Тайны следствия - S06E04 - Веселый слоник.avi",
+            ],
+        )
 
     def test_inspection_marks_missing_arc_parts_unsafe(self):
         files = [

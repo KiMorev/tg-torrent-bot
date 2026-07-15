@@ -424,6 +424,64 @@ class NotificationDeduplicationTests(unittest.TestCase):
         labels = [button.text for row in keyboard.inline_keyboard for button in row]
         self.assertIn("🛠 Переименовать для Plex", labels)
 
+    def test_series_meta_enables_film_part_normalization(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Тайны следствия-6", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Тайны следствия-6"
+        show_dir.mkdir(parents=True)
+        for name in [
+            "Тайны следствия-6.Фильм 1.Личный состав_часть 1.avi",
+            "Тайны следствия-6.Фильм 1.Личный состав_часть 2.avi",
+            "Тайны следствия-6.Фильм 2.Веселый слоник_часть 1.avi",
+            "Тайны следствия-6.Фильм 2.Веселый слоник_часть 2.avi",
+        ]:
+            (show_dir / name).write_bytes(b"")
+
+        with patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)):
+            decision = bot._inspect_completed_task_normalization(
+                task,
+                {
+                    "kind": "series",
+                    "title": "Тайны следствия-6. DVDRip",
+                    "series_query": "Тайны следствия",
+                    "season_num": -1,
+                },
+            )
+
+        plan = decision.get("plan")
+        self.assertEqual(decision["status"], "plan")
+        self.assertEqual(decision["season_source"], "из имён файлов")
+        self.assertEqual(plan.season, 6)
+        self.assertEqual(
+            [item.target_path.name for item in plan.items[:2]],
+            [
+                "Тайны следствия - S06E01 - Личный состав.avi",
+                "Тайны следствия - S06E02 - Личный состав.avi",
+            ],
+        )
+
+    def test_movie_meta_hides_normalization_button_for_film_part_files(self) -> None:
+        task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Тайны следствия-6", "size": 0}
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Тайны следствия-6"
+        show_dir.mkdir(parents=True)
+        for name in [
+            "Тайны следствия-6.Фильм 1.Личный состав_часть 1.avi",
+            "Тайны следствия-6.Фильм 1.Личный состав_часть 2.avi",
+        ]:
+            (show_dir / name).write_bytes(b"")
+
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)),
+            patch.object(bot, "_tracker_button_visible", return_value=False),
+            patch.object(bot, "_get_task_meta", return_value={"kind": "movie", "title": "Тайны следствия-6"}),
+        ):
+            keyboard = bot._make_task_keyboard("tid1", "seeding", "bt", task=task)
+
+        labels = [button.text for row in keyboard.inline_keyboard for button in row]
+        self.assertFalse(any("Переименовать" in label for label in labels))
+
     def test_already_plex_episode_names_keep_polling(self) -> None:
         task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Show", "size": 0}
         storage_root = Path(self._tmp.name) / "storage"
