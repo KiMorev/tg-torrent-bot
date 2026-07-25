@@ -88,8 +88,16 @@ def _access_approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Разрешить", callback_data=_access_callback("approve", chat_id)),
-                InlineKeyboardButton("🚫 Отклонить", callback_data=_access_callback("deny", chat_id)),
+                InlineKeyboardButton(
+                    "✅ Разрешить",
+                    callback_data=_access_callback("approve", chat_id),
+                    style="success",
+                ),
+                InlineKeyboardButton(
+                    "🚫 Отклонить",
+                    callback_data=_access_callback("deny", chat_id),
+                    style="danger",
+                ),
             ]
         ]
     )
@@ -112,7 +120,9 @@ def _task_error_keyboard(
     """Keyboard for task-flow error screens so they never become dead ends."""
     rows: list[list[InlineKeyboardButton]] = []
     if retry_callback:
-        rows.append([InlineKeyboardButton(BUTTON_RETRY, callback_data=retry_callback)])
+        rows.append([
+            InlineKeyboardButton(BUTTON_RETRY, callback_data=retry_callback, style="primary")
+        ])
     if list_scope:
         rows.append([
             InlineKeyboardButton(
@@ -140,7 +150,11 @@ def _youtube_preview_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     quality_buttons = [
-        InlineKeyboardButton(label, callback_data=f"{YOUTUBE_CALLBACK_PREFIX}:dl:{token}:{height}")
+        InlineKeyboardButton(
+            label,
+            callback_data=f"{YOUTUBE_CALLBACK_PREFIX}:dl:{token}:{height}",
+            style="success",
+        )
         for height, label in qualities
     ]
     for index in range(0, len(quality_buttons), 2):
@@ -160,7 +174,7 @@ def _youtube_close_keyboard() -> InlineKeyboardMarkup:
 
 def _youtube_plex_keyboard(plex_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)],
+        [InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url, style="success")],
         [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
@@ -168,7 +182,11 @@ def _youtube_plex_keyboard(plex_url: str) -> InlineKeyboardMarkup:
 
 def _youtube_failed_keyboard(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Повторить", callback_data=_task_callback("retry_youtube", task_id))],
+        [InlineKeyboardButton(
+            "🔄 Повторить",
+            callback_data=_task_callback("retry_youtube", task_id),
+            style="primary",
+        )],
         [InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
@@ -181,9 +199,13 @@ def _youtube_duplicate_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if plex_url:
-        rows.append([InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)])
+        rows.append([InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url, style="success")])
     if retry_task_id:
-        rows.append([InlineKeyboardButton("🔄 Повторить", callback_data=_task_callback("retry_youtube", retry_task_id))])
+        rows.append([InlineKeyboardButton(
+            "🔄 Повторить",
+            callback_data=_task_callback("retry_youtube", retry_task_id),
+            style="primary",
+        )])
     rows.append([InlineKeyboardButton(BUTTON_DOWNLOAD_LIST, callback_data=_task_callback("list", TASK_LIST_SCOPE_DEFAULT))])
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
@@ -208,7 +230,11 @@ def _admin_panel_keyboard(
     """
     rows = [
         [
-            InlineKeyboardButton(BUTTON_REFRESH, callback_data=_admin_callback("home")),
+            InlineKeyboardButton(
+                BUTTON_REFRESH,
+                callback_data=_admin_callback("home"),
+                style="primary",
+            ),
             InlineKeyboardButton("🧭 Диагностика", callback_data=_admin_callback("diagnostics")),
         ],
         [
@@ -247,6 +273,7 @@ def _admin_panel_keyboard(
         rows.append([InlineKeyboardButton(
             f"🔄 Сбросить счётчики ({stuck_notifications_count})",
             callback_data=_admin_callback("reset_notify_failures"),
+            style="primary",
         )])
 
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))])
@@ -277,7 +304,11 @@ def _admin_broadcast_input_keyboard() -> InlineKeyboardMarkup:
 
 def _admin_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Отправить", callback_data=_admin_callback("broadcast_send"))],
+        [InlineKeyboardButton(
+            "✅ Отправить",
+            callback_data=_admin_callback("broadcast_send"),
+            style="success",
+        )],
         [
             InlineKeyboardButton("✏️ Изменить текст", callback_data=_admin_callback("broadcast_edit")),
             InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("broadcast")),
@@ -297,7 +328,11 @@ def _admin_movie_status_keyboard(*, show_kp_buttons: bool) -> InlineKeyboardMark
     rows: list[list[InlineKeyboardButton]] = []
     if show_kp_buttons:
         rows.append([
-            InlineKeyboardButton("🔄 Обновить KP кэш", callback_data=_admin_callback("force_kp_refresh")),
+            InlineKeyboardButton(
+                "🔄 Обновить KP кэш",
+                callback_data=_admin_callback("force_kp_refresh"),
+                style="primary",
+            ),
             InlineKeyboardButton("🗑 Очистить KP кеш", callback_data=_admin_callback("clear_kp_cache")),
         ])
     rows.append([
@@ -312,7 +347,11 @@ def _admin_kp_cache_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Да, очистить", callback_data=_admin_callback("confirm_clear_kp_cache")),
+                InlineKeyboardButton(
+                    "✅ Да, очистить",
+                    callback_data=_admin_callback("confirm_clear_kp_cache"),
+                    style="danger",
+                ),
                 InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("home")),
             ],
             [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))],
@@ -338,12 +377,14 @@ def _admin_kp_force_refresh_keyboard(can_full: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 "✅ Обновить за один прогон",
                 callback_data=_admin_callback("confirm_force_kp_refresh_full"),
+                style="primary",
             )
         ])
     rows.append([
         InlineKeyboardButton(
             "🔄 Обновлять постепенно",
             callback_data=_admin_callback("confirm_force_kp_refresh_gradual"),
+            style="primary",
         )
     ])
     rows.append([
@@ -369,7 +410,11 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🤖 GPT / Voice", callback_data=_admin_callback("diag_ai")),
             ],
             [
-                InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback("diagnostics")),
+                InlineKeyboardButton(
+                    "🔄 Проверить снова",
+                    callback_data=_admin_callback("diagnostics"),
+                    style="primary",
+                ),
                 InlineKeyboardButton("⬅️ Админ-панель", callback_data=_admin_callback("home")),
             ],
             [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close"))],
@@ -380,7 +425,11 @@ def _admin_diagnostics_keyboard() -> InlineKeyboardMarkup:
 def _admin_diagnostics_detail_keyboard(section: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔄 Проверить снова", callback_data=_admin_callback(f"diag_refresh:{section}"))],
+            [InlineKeyboardButton(
+                "🔄 Проверить снова",
+                callback_data=_admin_callback(f"diag_refresh:{section}"),
+                style="primary",
+            )],
             [
                 InlineKeyboardButton(BUTTON_BACK, callback_data=_admin_callback("diagnostics_back")),
                 InlineKeyboardButton(BUTTON_CLOSE, callback_data=_admin_callback("close")),
@@ -395,7 +444,11 @@ def _tasks_keyboard(
     is_admin: bool = False,
     page: int = 0,
 ) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(BUTTON_REFRESH, callback_data=_task_callback("list", scope))]]
+    rows = [[InlineKeyboardButton(
+        BUTTON_REFRESH,
+        callback_data=_task_callback("list", scope),
+        style="primary",
+    )]]
     if is_admin:
         if scope == TASK_LIST_SCOPE_ALL:
             rows[0].append(
@@ -489,12 +542,20 @@ def _task_keyboard(
     show_normalization: bool = False,
 ) -> InlineKeyboardMarkup:
     status = status.lower()
-    rows = [[InlineKeyboardButton("🔄 Обновить статус", callback_data=_task_callback("info", task_id))]]
+    rows = [[InlineKeyboardButton(
+        "🔄 Обновить статус",
+        callback_data=_task_callback("info", task_id),
+        style="primary",
+    )]]
 
     if (task_type or "").lower() == "youtube":
         if status == "error":
             rows.append(
-                [InlineKeyboardButton("🔄 Повторить", callback_data=_task_callback("retry_youtube", task_id))]
+                [InlineKeyboardButton(
+                    "🔄 Повторить",
+                    callback_data=_task_callback("retry_youtube", task_id),
+                    style="primary",
+                )]
             )
         if status in {"finished", "error"}:
             rows.append(
@@ -512,7 +573,11 @@ def _task_keyboard(
         )
     elif status not in {"finished"}:
         rows[0].append(
-            InlineKeyboardButton("▶️ Запустить", callback_data=_task_callback("resume", task_id))
+            InlineKeyboardButton(
+                "▶️ Запустить",
+                callback_data=_task_callback("resume", task_id),
+                style="success",
+            )
         )
 
     if show_trackers:
@@ -553,15 +618,24 @@ def _plex_confirm_keyboard(*, show_upgrade: bool = False) -> InlineKeyboardMarku
     if show_upgrade:
         rows.append([
             InlineKeyboardButton("🔼 Заменить версией получше",
-                                 callback_data="plex:upgrade"),
+                                 callback_data="plex:upgrade",
+                                 style="success"),
         ])
         rows.append([
-            InlineKeyboardButton("⬇️ Скачать дубликатом", callback_data="plex:confirm"),
+            InlineKeyboardButton(
+                "⬇️ Скачать дубликатом",
+                callback_data="plex:confirm",
+                style="success",
+            ),
             InlineKeyboardButton("❌ Отмена", callback_data="plex:cancel"),
         ])
     else:
         rows.append([
-            InlineKeyboardButton("⬇️ Скачать всё равно", callback_data="plex:confirm"),
+            InlineKeyboardButton(
+                "⬇️ Скачать всё равно",
+                callback_data="plex:confirm",
+                style="success",
+            ),
             InlineKeyboardButton("❌ Отмена", callback_data="plex:cancel"),
         ])
     return InlineKeyboardMarkup(rows)
@@ -583,7 +657,7 @@ def _final_notification_keyboard(
     """
     rows = []
     if show_plex:
-        rows.append([InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url)])
+        rows.append([InlineKeyboardButton("▶️ Смотреть в Plex", url=plex_url, style="success")])
     else:
         rows.append([InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", task_id))])
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
@@ -625,7 +699,11 @@ def _task_reply_markup(task_id: str | None) -> InlineKeyboardMarkup:
 def _delete_confirm_keyboard(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🗑️ Да, удалить", callback_data=_task_callback("delete", task_id))],
+            [InlineKeyboardButton(
+                "🗑️ Да, удалить",
+                callback_data=_task_callback("delete", task_id),
+                style="danger",
+            )],
             [InlineKeyboardButton("↩️ Назад", callback_data=_task_callback("info", task_id))],
         ]
     )
@@ -638,6 +716,7 @@ def _delete_finished_confirm_keyboard(scope: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "🧹 Да, удалить завершенные",
                     callback_data=_task_callback("delete_finished", scope),
+                    style="danger",
                 )
             ],
             [
@@ -652,7 +731,11 @@ def _delete_finished_confirm_keyboard(scope: str) -> InlineKeyboardMarkup:
 def _delete_youtube_confirm_keyboard(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🗑️ Да, удалить ролик", callback_data=_task_callback("delete_youtube", task_id))],
+            [InlineKeyboardButton(
+                "🗑️ Да, удалить ролик",
+                callback_data=_task_callback("delete_youtube", task_id),
+                style="danger",
+            )],
             [InlineKeyboardButton("↩️ Назад", callback_data=_task_callback("info", task_id))],
         ]
     )
@@ -665,6 +748,7 @@ def _delete_youtube_all_confirm_keyboard(scope: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "🧹 Да, удалить YouTube-ролики",
                     callback_data=_task_callback("delete_youtube_all", scope),
+                    style="danger",
                 )
             ],
             [
@@ -708,6 +792,7 @@ def _no_results_keyboard(
     rows.append([InlineKeyboardButton(
         "🔄 Повторить поиск",
         callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry",
+        style="primary",
     )])
     if has_quality:
         rows.append([InlineKeyboardButton(
@@ -784,7 +869,11 @@ def _search_error_keyboard() -> InlineKeyboardMarkup:
     Gives the user a way to retry the same query or close the message.
     """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(BUTTON_RETRY, callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry")],
+        [InlineKeyboardButton(
+            BUTTON_RETRY,
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry",
+            style="primary",
+        )],
         [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
     ])
 
@@ -811,11 +900,13 @@ def _download_error_keyboard(
         rows.append([InlineKeyboardButton(
             "🔄 Повторить сейчас",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry_dl:{index}",
+            style="primary",
         )])
     if can_queue:
         rows.append([InlineKeyboardButton(
             "⏳ Поставить в очередь",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:queue_dl:{index}",
+            style="success",
         )])
     rows.append([InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))])
     return InlineKeyboardMarkup(rows)
@@ -930,6 +1021,7 @@ def _search_results_keyboard(
             InlineKeyboardButton(
                 f"🎯 {start + i + 1}",
                 callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_plan:{start + i}",
+                style="success",
             )
             for i, _result in enumerate(visible)
         ]
@@ -942,6 +1034,7 @@ def _search_results_keyboard(
                     if _search_result_has_download_picker(result)
                     else f"{SEARCH_CALLBACK_PREFIX}:dl:{start + i}"
                 ),
+                style="success",
             )
             for i, result in enumerate(visible)
         ]
@@ -1133,6 +1226,7 @@ def _jackett_select_keyboard(
         InlineKeyboardButton(
             confirm_label,
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:{JACKETT_SELECT_PREFIX}_search",
+            style="success",
         ),
     ]
     if show_back:
@@ -1168,13 +1262,19 @@ def users_keyboard(
             InlineKeyboardButton(
                 f"✅ {label or uid}",
                 callback_data=f"{ACCESS_CALLBACK_PREFIX}:approve:{uid}",
+                style="success",
             ),
             InlineKeyboardButton(
                 "🚫 Отклонить",
                 callback_data=f"{ACCESS_CALLBACK_PREFIX}:deny:{uid}",
+                style="danger",
             ),
         ])
-    rows.append([InlineKeyboardButton(BUTTON_REFRESH, callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")])
+    rows.append([InlineKeyboardButton(
+        BUTTON_REFRESH,
+        callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh",
+        style="primary",
+    )])
     if back_to_admin:
         rows.append([InlineKeyboardButton("⬅️ Админ-панель", callback_data=f"{ADMIN_CALLBACK_PREFIX}:home")])
     else:

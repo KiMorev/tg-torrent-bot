@@ -53,6 +53,7 @@ class KeyboardTests(unittest.TestCase):
         plex_button = keyboard.inline_keyboard[0][0]
         self.assertEqual(plex_button.text, "▶️ Смотреть в Plex")
         self.assertEqual(plex_button.url, "https://example.com/plex")
+        self.assertEqual(plex_button.style, "success")
 
     def test_final_notification_keyboard_hides_plex_button_when_disabled(self) -> None:
         keyboard = _final_notification_keyboard("tid1", show_plex=False)
@@ -430,6 +431,17 @@ class AdminKpCacheKeyboardTests(unittest.TestCase):
         labels = [b.text for row in _admin_kp_cache_confirm_keyboard().inline_keyboard for b in row]
         self.assertNotIn("🗑 Очистить KP кеш", labels)
 
+    def test_confirm_button_has_danger_style(self) -> None:
+        buttons = {
+            button.text: button
+            for row in _admin_kp_cache_confirm_keyboard().inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["✅ Да, очистить"].style, "danger")
+        self.assertIsNone(buttons["⬅️ Назад"].style)
+        self.assertIsNone(buttons["✖️ Закрыть"].style)
+
     def test_cleared_keyboard_returns_to_admin_panel(self) -> None:
         buttons = self._buttons(_admin_kp_cache_cleared_keyboard())
         self.assertEqual(buttons["⬅️ Админ-панель"], "admin:home")
@@ -745,6 +757,16 @@ class SearchErrorKeyboardTests(unittest.TestCase):
 
     def _buttons(self, keyboard) -> dict[str, str]:
         return {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+
+    def test_retry_button_has_primary_style(self) -> None:
+        buttons = {
+            button.text: button
+            for row in _search_error_keyboard().inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["🔄 Попробовать снова"].style, "primary")
+        self.assertIsNone(buttons["✖️ Закрыть"].style)
 
     def test_has_retry_button(self) -> None:
         buttons = self._buttons(_search_error_keyboard())

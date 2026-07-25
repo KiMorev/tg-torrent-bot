@@ -1434,6 +1434,48 @@ def _format_updated_at() -> str:
     return datetime.now(DISPLAY_TIMEZONE).strftime("%H:%M:%S")
 
 
+def _telegram_time_html(
+    dt: datetime,
+    fallback: str,
+    *,
+    date_time_format: str = "wDT",
+) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=DISPLAY_TIMEZONE)
+    return (
+        f'<tg-time unix="{int(dt.timestamp())}" format="{date_time_format}">'
+        f"{html_module.escape(fallback)}</tg-time>"
+    )
+
+
+def _parse_saved_datetime(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=DISPLAY_TIMEZONE)
+    return dt
+
+
+def _format_saved_datetime_html(
+    value: object,
+    *,
+    empty: str = "—",
+    date_time_format: str = "wDT",
+) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return html_module.escape(empty)
+    dt = _parse_saved_datetime(raw)
+    if dt is None:
+        return html_module.escape(raw)
+    return _telegram_time_html(dt, raw, date_time_format=date_time_format)
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     """Return the correct Russian plural form for *n*.
 
@@ -1487,7 +1529,7 @@ def _format_admin_subscriptions_line() -> str:
     next_check = ""
     if _next_subscription_check_at is not None:
         next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
-        next_check = f"\n  Следующая проверка: {next_dt.strftime('%d.%m %H:%M')}"
+        next_check = f"\n  Следующая проверка: {_format_subscription_dt(next_dt)}"
 
     return (
         f"• Подписки: {total} всего · Rutracker {rutracker_count} · "
@@ -1582,7 +1624,7 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
         mode_label = html_module.escape(policies_summary_ru(sub))
         if sub.get("type") == "jackett":
             query_text = html_module.escape(str(sub.get("query") or key))
-            last_check = html_module.escape(str(sub.get("last_check") or "—"))
+            last_check = _format_subscription_datetime(sub.get("last_check"))
             tracker = html_module.escape(str(sub.get("tracker") or "—"))
             title = html_module.escape(_format_sub_title(str(sub.get("title") or "")))
             ep_end = html_module.escape(str(sub.get("last_episode_end", "?")))
@@ -1603,7 +1645,7 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
             quality = html_module.escape(str(sub.get("quality") or "—"))
             ep_end = html_module.escape(str(sub.get("last_episode_end", "?")))
             total = html_module.escape(str(sub.get("total_episodes", "?")))
-            last_check = html_module.escape(str(sub.get("last_check") or "—"))
+            last_check = _format_subscription_datetime(sub.get("last_check"))
             lines.append(
                 f"\n{index}. 📺 <b>Plex-сезон</b>\n"
                 f"   Владелец: {owner}\n"
@@ -1631,7 +1673,7 @@ def _build_admin_subscriptions_view() -> tuple[str, InlineKeyboardMarkup]:
 
     if _next_subscription_check_at is not None:
         next_dt = datetime.fromtimestamp(_next_subscription_check_at, DISPLAY_TIMEZONE)
-        lines.append(f"\n🕐 Следующая проверка: {next_dt.strftime('%d.%m %H:%M')}")
+        lines.append(f"\n🕐 Следующая проверка: {_format_subscription_dt(next_dt)}")
 
     return "\n".join(lines), _admin_subscriptions_keyboard(subs)
 
@@ -1925,13 +1967,17 @@ def _format_admin_movie_discovery_summary() -> str:
 
     cache = state_store.load_movie_discovery_cache()
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
-    updated_at = str(cache.get("updated_at") or "ещё не обновлялись")
+    updated_at = _format_saved_datetime_html(
+        cache.get("updated_at"),
+        empty="ещё не обновлялись",
+        date_time_format="r",
+    )
     sources_present = rutracker_client is not None or jackett_client is not None
     status = "включены" if sources_present else "включены, но нет источников"
 
     lines = [
         f"• Статус: {status}",
-        f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}",
+        f"• Кэш: {updated_at} · карточек: {len(cards)}",
     ]
 
     kp_stats_line = _format_kp_api_stats_line(cache)
@@ -1958,7 +2004,11 @@ def _format_admin_movie_discovery_details() -> str:
 
     cache = state_store.load_movie_discovery_cache()
     cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
-    updated_at = str(cache.get("updated_at") or "ещё не обновлялись")
+    updated_at = _format_saved_datetime_html(
+        cache.get("updated_at"),
+        empty="ещё не обновлялись",
+        date_time_format="r",
+    )
     qualities = ", ".join(_movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES))
     sources = []
     if rutracker_client is not None:
@@ -1976,7 +2026,7 @@ def _format_admin_movie_discovery_details() -> str:
         f"• Jackett: {'только с датой' if MOVIE_DISCOVERY_JACKETT_REQUIRE_DATE else 'без строгой даты'} · "
         f"до {MOVIE_DISCOVERY_JACKETT_MAX_AGE_DAYS} дн.",
         f"• Автообновление: раз в {MOVIE_DISCOVERY_INTERVAL_HOURS} ч",
-        f"• Кэш: {html_module.escape(updated_at)} · карточек: {len(cards)}",
+        f"• Кэш: {updated_at} · карточек: {len(cards)}",
     ]
 
     # Tracker rating breakdown
@@ -3012,7 +3062,7 @@ def _movie_discovery_keyboard(cards: list[dict], chat_id: int | None = None) -> 
     sub_cb = "new:unsubscribe" if is_subscribed else "new:subscribe"
     rows.append([InlineKeyboardButton(sub_label, callback_data=sub_cb)])
     rows.append([
-        InlineKeyboardButton(BUTTON_REFRESH, callback_data="new:refresh"),
+        InlineKeyboardButton(BUTTON_REFRESH, callback_data="new:refresh", style="primary"),
         InlineKeyboardButton(BUTTON_CLOSE, callback_data="new:close"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -3079,12 +3129,15 @@ def _format_movie_discovery_cache(cache: dict, chat_id: int | None = None) -> st
     badge is omitted.
     """
     cards = _movie_discovery_confirmed_cards(cache)
-    updated_at = cache.get("updated_at") or "—"
+    updated_at = _format_saved_datetime_html(
+        cache.get("updated_at"),
+        date_time_format="r",
+    )
     qualities = ", ".join(_movie_parse_qualities(MOVIE_DISCOVERY_QUALITIES))
     years = ", ".join(str(year) for year in sorted(_movie_discovery_years(datetime.now(DISPLAY_TIMEZONE)), reverse=True))
     lines = [
         "🎬 <b>Новинки</b>",
-        f"Обновлено: {html_module.escape(str(updated_at))}",
+        f"Обновлено: {updated_at}",
         f"Фильтр: годы {years}; качество {html_module.escape(qualities)}; КП от {MOVIE_DISCOVERY_MIN_KP_RATING:g}",
     ]
     if not cards:
@@ -4330,12 +4383,20 @@ def _movie_notification_keyboard(
         downloadable_indices = list(range(max(0, count)))
     if push_id and downloadable_indices:
         rows.append([
-            InlineKeyboardButton(f"⬇️ {index + 1}", callback_data=f"new:dl:{push_id}:{index}")
+            InlineKeyboardButton(
+                f"⬇️ {index + 1}",
+                callback_data=f"new:dl:{push_id}:{index}",
+                style="success",
+            )
             for index in downloadable_indices
         ])
         if len(downloadable_indices) > 1:
             rows.append([
-                InlineKeyboardButton(f"⬇️ Скачать все {len(downloadable_indices)}", callback_data=f"new:bulk:{push_id}")
+                InlineKeyboardButton(
+                    f"⬇️ Скачать все {len(downloadable_indices)}",
+                    callback_data=f"new:bulk:{push_id}",
+                    style="success",
+                )
             ])
     rows.extend([
         [
@@ -6559,7 +6620,11 @@ async def _plex_poll_after_finish(
                 )
                 if deep_link:
                     keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("▶️ Смотреть в Plex", url=deep_link)],
+                        [InlineKeyboardButton(
+                            "▶️ Смотреть в Plex",
+                            url=deep_link,
+                            style="success",
+                        )],
                         [close_btn],
                     ])
                 else:
@@ -10147,7 +10212,11 @@ async def _handle_duplicate_task(
             kb = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(BUTTON_SHOW_TASK, callback_data=_task_callback("info", orig_id)),
-                    InlineKeyboardButton("▶️ Запустить", callback_data=_task_callback("resume", orig_id)),
+                    InlineKeyboardButton(
+                        "▶️ Запустить",
+                        callback_data=_task_callback("resume", orig_id),
+                        style="success",
+                    ),
                 ],
                 [InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", ""))],
             ])
@@ -19311,6 +19380,7 @@ def _series_bulk_plan_keyboard(
         rows.append([InlineKeyboardButton(
             f"⬇️ Скачать выбранные ({ready_count})",
             callback_data=f"{SEARCH_CALLBACK_PREFIX}:bulk_confirm",
+            style="success",
         )])
     if decision_count:
         rows.append([InlineKeyboardButton(
@@ -23513,20 +23583,21 @@ def _subscription_progress_text(sub: dict) -> str:
 def _format_subscription_dt(dt: datetime) -> str:
     today = datetime.now(DISPLAY_TIMEZONE).date()
     if dt.date() == today:
-        return f"сегодня {dt.strftime('%H:%M')}"
-    if dt.date() == today + timedelta(days=1):
-        return f"завтра {dt.strftime('%H:%M')}"
-    return dt.strftime("%d.%m %H:%M")
+        fallback = f"сегодня {dt.strftime('%H:%M')}"
+    elif dt.date() == today + timedelta(days=1):
+        fallback = f"завтра {dt.strftime('%H:%M')}"
+    else:
+        fallback = dt.strftime("%d.%m %H:%M")
+    return _telegram_time_html(dt, fallback)
 
 
 def _format_subscription_datetime(value: object) -> str:
     if not value:
         return "—"
     raw = str(value)
-    try:
-        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M").replace(tzinfo=DISPLAY_TIMEZONE)
-    except ValueError:
-        return raw
+    dt = _parse_saved_datetime(raw)
+    if dt is None:
+        return html_module.escape(raw)
 
     return _format_subscription_dt(dt)
 
@@ -26455,7 +26526,11 @@ async def _movie_notification_download_query(query, context: ContextTypes.DEFAUL
 def _movie_notification_bulk_keyboard(push_id: str, count: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if count > 0:
-        rows.append([InlineKeyboardButton(f"✅ Скачать {count}", callback_data=f"new:bulk_ok:{push_id}")])
+        rows.append([InlineKeyboardButton(
+            f"✅ Скачать {count}",
+            callback_data=f"new:bulk_ok:{push_id}",
+            style="success",
+        )])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"new:push_back:{push_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -26917,7 +26992,11 @@ def _access_result_keyboard() -> InlineKeyboardMarkup:
 
 def _access_remove_confirm_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Удалить доступ", callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove:{chat_id}")],
+        [InlineKeyboardButton(
+            "✅ Удалить доступ",
+            callback_data=f"{ACCESS_CALLBACK_PREFIX}:remove:{chat_id}",
+            style="danger",
+        )],
         [InlineKeyboardButton(BUTTON_BACK, callback_data=f"{ACCESS_CALLBACK_PREFIX}:users_refresh")],
     ])
 

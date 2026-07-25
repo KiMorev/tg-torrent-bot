@@ -1564,7 +1564,8 @@ class AdminPanelTests(unittest.TestCase):
 
         text = update.message.reply_text.call_args.args[0]
         self.assertIn("<b>Подписки</b> (3)", text)
-        self.assertIn("Следующая проверка: сегодня 18:00", text)
+        self.assertIn("Следующая проверка: <tg-time", text)
+        self.assertIn(">сегодня 18:00</tg-time>", text)
         self.assertIn("Как следим: по теме Rutracker", text)
         self.assertIn("Прогресс: 5 из 8 эп.", text)
         self.assertIn("Уведомления: только когда сезон завершится", text)
@@ -1574,7 +1575,8 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("The Rookie S08", text)
         self.assertIn("Прогресс: 4 из 8 эп.", text)
         self.assertIn("Как следим: через Jackett · rutracker", text)
-        self.assertIn("Проверено: 01.01 10:00", text)
+        self.assertIn("Проверено: <tg-time", text)
+        self.assertIn(">01.01 10:00</tg-time>", text)
         self.assertIn("Скачивание: не скачивать автоматически", text)
 
         keyboard = update.message.reply_text.call_args.kwargs["reply_markup"]
@@ -2362,6 +2364,26 @@ class MovieDiscoveryHandlerTests(unittest.TestCase):
         self.assertIn("фильтрам выше", text)
         self.assertIn("Почему может быть пусто", text)
         self.assertIn("нажать «Обновить»", text)
+
+    def test_movie_discovery_uses_native_telegram_time_with_fallback(self):
+        text = _format_movie_discovery_cache({
+            "updated_at": "2026-05-12 13:00",
+            "cards": [],
+        })
+
+        self.assertIn('<tg-time unix="', text)
+        self.assertIn('format="r">2026-05-12 13:00</tg-time>', text)
+
+    def test_movie_discovery_refresh_button_has_primary_style(self):
+        keyboard = _movie_discovery_keyboard([])
+        buttons = {
+            button.text: button
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        self.assertEqual(buttons["🔄 Обновить"].style, "primary")
+        self.assertIsNone(buttons["✖️ Закрыть"].style)
 
     def test_movie_discovery_refresh_start_text_explains_wait(self):
         text = bot._movie_discovery_refresh_start_text()
