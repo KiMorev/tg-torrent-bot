@@ -460,6 +460,38 @@ class NotificationDeduplicationTests(unittest.TestCase):
             ],
         )
 
+    def test_series_meta_enables_numbered_episode_normalization(self) -> None:
+        task = {
+            "id": "tid1",
+            "status": "seeding",
+            "type": "bt",
+            "title": "Тайны следствия 8 [rutracker.org]",
+            "size": 0,
+        }
+        storage_root = Path(self._tmp.name) / "storage"
+        show_dir = storage_root / "Тайны следствия 8 [rutracker.org]"
+        show_dir.mkdir(parents=True)
+        for episode in range(1, 13):
+            (show_dir / f"{episode:02d}.avi").write_bytes(b"")
+
+        with patch.object(bot, "STORAGE_MOUNT_PATH", str(storage_root)):
+            decision = bot._inspect_completed_task_normalization(
+                task,
+                {
+                    "kind": "series",
+                    "title": "Тайны следствия",
+                    "series_query": "Тайны следствия",
+                    "season_num": 8,
+                },
+            )
+
+        plan = decision.get("plan")
+        self.assertEqual(decision["status"], "plan")
+        self.assertEqual(decision["season_source"], "из названия раздачи")
+        self.assertEqual(plan.season, 8)
+        self.assertEqual(plan.items[0].target_path.name, "Тайны следствия - S08E01.avi")
+        self.assertEqual(plan.items[-1].target_path.name, "Тайны следствия - S08E12.avi")
+
     def test_movie_meta_hides_normalization_button_for_film_part_files(self) -> None:
         task = {"id": "tid1", "status": "seeding", "type": "bt", "title": "Тайны следствия-6", "size": 0}
         storage_root = Path(self._tmp.name) / "storage"

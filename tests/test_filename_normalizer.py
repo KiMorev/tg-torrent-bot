@@ -158,6 +158,55 @@ class FilenameNormalizerTests(unittest.TestCase):
             ],
         )
 
+    def test_series_context_plan_supports_numbered_episode_files(self):
+        files = [Path("01.avi"), Path("02.avi"), Path("03.avi")]
+
+        inspection = inspect_series_filenames(
+            files,
+            series_context=True,
+            show_title="Тайны следствия",
+        )
+        plan = build_arc_episode_rename_plan(
+            show_title="Тайны следствия",
+            season=8,
+            files=files,
+            source_root=Path("."),
+            series_context=True,
+        )
+
+        self.assertFalse(has_arc_episode_filenames(files))
+        self.assertTrue(has_arc_episode_filenames(files, series_context=True, show_title="Тайны следствия"))
+        self.assertEqual(inspection.status, NAMING_RENAMABLE_ARC)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            [item.target_path.name for item in plan.items],
+            [
+                "Тайны следствия - S08E01.avi",
+                "Тайны следствия - S08E02.avi",
+                "Тайны следствия - S08E03.avi",
+            ],
+        )
+
+    def test_numbered_episode_files_reject_gaps(self):
+        files = [Path("01.avi"), Path("03.avi")]
+
+        inspection = inspect_series_filenames(
+            files,
+            series_context=True,
+            show_title="Тайны следствия",
+        )
+        plan = build_arc_episode_rename_plan(
+            show_title="Тайны следствия",
+            season=8,
+            files=files,
+            source_root=Path("."),
+            series_context=True,
+        )
+
+        self.assertEqual(inspection.status, NAMING_UNSAFE_ARC)
+        self.assertIsNone(plan)
+
     def test_inspection_marks_missing_arc_parts_unsafe(self):
         files = [
             Path("1. Дело (1 сер.) - hdtv1080p.mkv"),

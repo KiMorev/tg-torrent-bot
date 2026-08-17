@@ -114,7 +114,7 @@
 | `state_store.py` | Atomic JSON load/save через `JsonStateStore`, append-only JSONL для истории загрузок. |
 | `task_views.py` | Форматирование списка задач и карточки задачи. |
 | `task_policies.py` | Получатели уведомлений, дедуп статусов, текст финального push, автоудаление. |
-| `filename_normalizer.py` | Чистый планировщик и классификатор имён сериалов для Plex: детект русских арок `N. Название (M сер.)` и сериальных файлов `Название-6.Фильм N...часть M`, dry-run план, безопасное применение и блокировка подозрительных non-Plex имён перед polling. |
+| `filename_normalizer.py` | Чистый планировщик и классификатор имён сериалов для Plex: детект русских арок `N. Название (M сер.)`, сериальных файлов `Название-6.Фильм N...часть M` и простой нумерации `01.avi` в series-context, dry-run план, безопасное применение и блокировка подозрительных non-Plex имён перед polling. |
 | `formatters.py` | Общие форматтеры, progress, качество, сериал/сезон, короткие названия. |
 | `torrent_utils.py` | Magnet, bencode, `.torrent`, private torrent detection, matching DS task id. |
 | `tracker_service.py` | Публичные BT-трекеры: загрузка списка, cache, применение к задачам. |

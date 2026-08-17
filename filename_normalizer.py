@@ -41,6 +41,7 @@ SERIES_FILM_PART_RE = re.compile(
     r"(?P<title>.+?)[\s._-]*(?:часть|part)\s*0*(?P<part>\d{1,3})\s*$",
     re.IGNORECASE,
 )
+NUMBERED_EPISODE_RE = re.compile(r"^\s*0*(?P<episode>\d{1,3})\s*$")
 NON_PLEX_EPISODE_LIKE_RE = re.compile(
     r"(?:"
     r"\b(?:episode|ep|e)\s*0*\d{1,3}\b|"
@@ -179,6 +180,19 @@ def _parse_series_film_part(
     return season, arc, title, (part,)
 
 
+def _parse_numbered_episode(path: Path) -> tuple[int, str, tuple[int, ...]] | None:
+    match = NUMBERED_EPISODE_RE.match(path.stem)
+    if not match:
+        return None
+    try:
+        episode = int(match.group("episode"))
+    except (TypeError, ValueError):
+        return None
+    if episode <= 0:
+        return None
+    return 1, "", (episode,)
+
+
 def infer_series_season_from_filenames(files: list[Path], show_title: str = "") -> int | None:
     video_files = _video_files(files)
     if len(video_files) < 2:
@@ -220,6 +234,9 @@ def _parse_arc_episode(
         if item is not None:
             _season, arc, title, parts = item
             return arc, title, parts
+        numbered = _parse_numbered_episode(path)
+        if numbered is not None:
+            return numbered
     return None
 
 
@@ -269,7 +286,7 @@ def inspect_series_filenames(
     if plex_ready:
         return FilenameInspection(
             NAMING_MIXED,
-            "часть файлов уже в формате Plex, часть похожа на эпизоды без SxxEyy",
+            "часть файлов уже в формате Plex, часть требует переименования; смешанный набор не переименовываю автоматически",
             files=tuple(video_files),
             suspicious_files=suspicious,
         )
@@ -284,13 +301,13 @@ def inspect_series_filenames(
             ):
                 return FilenameInspection(
                     NAMING_MIXED,
-                    "часть файлов похожа на arc-эпизоды, но набор неоднородный",
+                    "часть файлов распознана как серии, часть нет; набор неоднородный",
                     files=tuple(video_files),
                     suspicious_files=suspicious,
                 )
             return FilenameInspection(
                 NAMING_UNKNOWN_NON_PLEX,
-                "файлы похожи на эпизоды, но в именах нет SxxEyy",
+                "не удалось однозначно определить номера серий для автопереименования",
                 files=tuple(video_files),
                 suspicious_files=suspicious,
             )
@@ -300,14 +317,14 @@ def inspect_series_filenames(
     if len(video_files) < 2:
         return FilenameInspection(
             NAMING_UNSAFE_ARC,
-            "один arc-эпизод нельзя безопасно сопоставить с номером серии сезона",
+            "одного файла недостаточно, чтобы безопасно сопоставить его с номером серии сезона",
             files=tuple(video_files),
             suspicious_files=suspicious,
         )
     if not _arc_parts_are_contiguous(parsed):
         return FilenameInspection(
             NAMING_UNSAFE_ARC,
-            "в arc-эпизодах пропущены или повторяются части",
+            "в найденной нумерации серий есть пропуски или повторы",
             files=tuple(video_files),
             suspicious_files=suspicious,
         )
@@ -373,10 +390,12 @@ def build_arc_episode_rename_plan(
             if first_episode == last_episode
             else f"S{season:02d}E{first_episode:02d}-E{last_episode:02d}"
         )
-        target_name = (
-            f"{title} - {episode_marker} - "
-            f"{sanitize_filename_part(episode_title)}{source_path.suffix}"
+        episode_title_suffix = (
+            f" - {sanitize_filename_part(episode_title)}"
+            if episode_title
+            else ""
         )
+        target_name = f"{title} - {episode_marker}{episode_title_suffix}{source_path.suffix}"
         items.append(
             RenameItem(
                 source_path=source_path,

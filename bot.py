@@ -7120,7 +7120,7 @@ def _inspect_completed_task_normalization(
         if naming.status == NAMING_RENAMABLE_ARC:
             return {
                 "status": "unsafe",
-                "reason": "не удалось построить безопасный план переименования",
+                "reason": "не удалось однозначно сопоставить файлы с сериями для автопереименования",
                 "file_count": len(files),
                 "files": [str(path) for path in naming.files],
             }
@@ -7136,7 +7136,7 @@ def _inspect_completed_task_normalization(
         if probe_plan is None:
             return {
                 "status": "unsafe",
-                "reason": "не удалось построить безопасный план переименования",
+                "reason": "не удалось однозначно сопоставить файлы с сериями для автопереименования",
                 "file_count": len(files),
                 "files": [str(path) for path in naming.files],
             }
@@ -7148,7 +7148,10 @@ def _inspect_completed_task_normalization(
     if naming.status in {NAMING_UNSAFE_ARC, NAMING_MIXED, NAMING_UNKNOWN_NON_PLEX, NAMING_RENAMABLE_ARC}:
         return {
             "status": "unsafe",
-            "reason": naming.reason or "в именах эпизодов нет надёжного Plex-маркера SxxEyy",
+            "reason": (
+                naming.reason
+                or "не удалось однозначно сопоставить файлы с сериями для автопереименования"
+            ),
             "file_count": len(files),
             "files": [str(path) for path in naming.suspicious_files or naming.files],
         }
@@ -7171,7 +7174,10 @@ def _format_normalization_notification(task: dict, decision: dict) -> str:
         return "\n".join(lines)
 
     if decision.get("status") == "unsafe":
-        reason = str(decision.get("reason") or "в именах эпизодов нет надёжного Plex-маркера SxxEyy")
+        reason = str(
+            decision.get("reason")
+            or "не удалось однозначно сопоставить файлы с сериями для автопереименования"
+        )
         lines.extend([
             "Похоже, часть файлов сериала названа не в формате Plex.",
             f"Автопереименование небезопасно: {reason}.",
@@ -7195,7 +7201,10 @@ def _format_normalization_notification(task: dict, decision: dict) -> str:
 
 
 def _format_normalization_issue_text(task: dict, decision: dict, *, limit: int = 12) -> str:
-    reason = str(decision.get("reason") or "в именах эпизодов нет SxxEyy")
+    reason = str(
+        decision.get("reason")
+        or "не удалось однозначно сопоставить файлы с сериями для автопереименования"
+    )
     files = [str(path) for path in decision.get("files") or []]
     lines = [
         _format_task_notification(task, plex_polling_started=False),
@@ -7609,6 +7618,7 @@ def _build_task_meta_from_result(result: dict, source: str = "search") -> dict:
     when applicable. Quality is normalised via :func:`_plex_quality_from_result`.
     """
     raw_title = result.get("movie_title") or result.get("title") or ""
+    release_title = result.get("title") or raw_title
     quality = _plex_quality_from_result(result)
     try:
         year = int(result.get("year") or 0)
@@ -7621,10 +7631,15 @@ def _build_task_meta_from_result(result: dict, source: str = "search") -> dict:
     kind = explicit_kind if explicit_kind in {"movie", "series"} else _search_cluster_kind(result)
 
     if kind == "series":
-        season_num = _extract_season_from_query(raw_title) or -1
+        season_num = (
+            _extract_season_from_query(raw_title)
+            or _extract_season_from_query(release_title)
+            or -1
+        )
         series_query = (
             str(result.get("series_query") or "").strip()
             or _extract_series_base_query(raw_title)
+            or _extract_series_base_query(release_title)
             or str(result.get("movie_title") or "").strip()
             or _search_cluster_display_title(raw_title, "series")
         )

@@ -6663,6 +6663,24 @@ class BuildTaskMetaTests(unittest.TestCase):
         self.assertEqual(meta["season_num"], 1)
         self.assertEqual(meta["quality"], "1080")
 
+    def test_series_result_uses_release_title_for_season_when_movie_title_is_clean(self):
+        meta = bot._build_task_meta_from_result(
+            {
+                "title": (
+                    "Тайны следствия / Сезон: 8 / Серии: 1-12 из 12 "
+                    "(Михаил Вассербаум) [2009, WEBRip]"
+                ),
+                "movie_title": "Тайны следствия",
+                "category": "TV Series",
+            },
+            source="search",
+        )
+
+        self.assertEqual(meta["kind"], "series")
+        self.assertEqual(meta["title"], "Тайны следствия")
+        self.assertEqual(meta["series_query"], "Тайны следствия")
+        self.assertEqual(meta["season_num"], 8)
+
     def test_from_title_detects_movie_when_no_season_marker(self):
         from bot import _build_task_meta_from_title
         meta = _build_task_meta_from_title("Dune.Part.Two.2024.1080p", source="torrent_file")
