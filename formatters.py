@@ -230,10 +230,10 @@ def _score_result(result: dict) -> float:
 # Series episode parsing
 # ---------------------------------------------------------------------------
 
-# Matches "Серии: 1-8 из 10" or "Серия: 1-8 из 10" (case-insensitive: also
+# Matches "Серии: 1-8 из 10" or "Серия: 1 из 10" (case-insensitive: also
 # СЕРИИ, серии). Note: [яи] is a morphology variant (Серия/Серии), not a case
 # class — it must stay alongside re.IGNORECASE.
-_EPISODE_RE = re.compile(r"сери[яи][:\s]+(\d+)-(\d+)\s+из\s+(\d+)", re.IGNORECASE)
+_EPISODE_RE = re.compile(r"сери[яи][:\s]+(\d+)(?:-(\d+))?\s+из\s+(\d+)", re.IGNORECASE)
 # English form: 'S2E1-9 of 9' → (last_end=9, total=9)
 _EPISODE_EN_OF_RE = re.compile(
     r"\bS\d{1,2}E(\d{1,2})-(\d{1,2})\s+of\s+(\d{1,2})\b", re.IGNORECASE
@@ -245,14 +245,14 @@ _EPISODE_EN_RE = re.compile(r"\bS\d{1,2}E(\d{1,2})-(\d{1,2})\b", re.IGNORECASE)
 def _parse_episode_info(title: str) -> tuple[int, int] | None:
     """Return (current_end, total) from a series title, or None.
 
-    Recognises both Russian Rutracker form ('Серии: 1-9 из 10') and the English
+    Recognises Russian Rutracker forms ('Серии: 1-9 из 10', 'Серии: 1 из 10') and the English
     form common on Jackett/foreign trackers ('S2E1-9 of 9' or 'S2E1-9').
     Returns None when no episode pattern is found.
     Caller should check current_end < total to decide if the series is partial.
     """
     m = _EPISODE_RE.search(title)
     if m:
-        return int(m.group(2)), int(m.group(3))
+        return int(m.group(2) or m.group(1)), int(m.group(3))
     m = _EPISODE_EN_OF_RE.search(title)
     if m:
         return int(m.group(2)), int(m.group(3))

@@ -6499,6 +6499,20 @@ class SeasonRegexCaseInsensitiveTests(unittest.TestCase):
         self.assertEqual(_parse_episode_info("Show серия: 5-9 из 10"), (9, 10))
         self.assertEqual(_parse_episode_info("Show СЕРИЯ: 2-4 из 8"), (4, 8))
 
+    def test_parse_episode_info_handles_single_russian_episode(self):
+        from formatters import _parse_episode_info
+
+        for marker, expected in [
+            ("Серии: 1 из 10", (1, 10)),
+            ("Серия: 01 из 10", (1, 10)),
+            ("СЕРИИ: 10 из 10", (10, 10)),
+            ("Серия: 1 из 1", (1, 1)),
+            ("Серии: 1", None),
+        ]:
+            with self.subTest(marker=marker):
+                title = f"Гангстерленд / MobLand / Сезон: 2 / {marker} / WEB-DL 1080p"
+                self.assertEqual(_parse_episode_info(title), expected)
+
     def test_extract_series_base_query_handles_uppercase_sezon(self):
         """Series detection must work for СЕЗОН as well as Сезон/сезон."""
         from formatters import _extract_series_base_query

@@ -168,6 +168,79 @@ def _fake_series_bulk_and_pending_store(initial: dict | None = None):
 class SearchDownloadPickTests(unittest.TestCase):
     """search_download_pick — first tap «⬇️ N» on a partial result opens download choices."""
 
+    def test_first_episode_search_offers_and_saves_subscription(self):
+        title = (
+            "Гангстерленд / MobLand / Сезон: 2 / Серии: 1 из 10 "
+            "(Даниэль Сыркин, Гай Ричи, Энтони Бирн) "
+            "[2026, Великобритания, США, криминал, драма, WEB-DL 1080p] "
+            "MVO + DVO (ViruseProject) + Original + Sub (Rus, Eng)"
+        )
+        for source in ("jackett", "rutracker"):
+            with self.subTest(source=source):
+                release = SimpleNamespace(
+                    title=title, topic_id="123", category="Сериалы",
+                    topic_url="https://rutracker.org/forum/viewtopic.php?t=123",
+                    tracker="rutracker", size="3.71 GB", seeders=390,
+                    magnet_url=None, torrent_url="https://jackett.local/dl/123",
+                )
+                client = MagicMock()
+                client.search.return_value = [release]
+                message = MagicMock(message_id=1, chat_id=100)
+                message.edit_text = AsyncMock()
+                ctx = _make_context(results=[])
+                ctx.user_data.update({
+                    "srch_query": "Гангстерленд сезон 2",
+                    "srch_jackett_indexers": [{"id": "rutracker"}],
+                    "srch_jackett_selected": {"rutracker"},
+                })
+                with (
+                    patch.object(bot, "jackett_client", client if source == "jackett" else None),
+                    patch.object(bot, "rutracker_client", client if source == "rutracker" else None),
+                    patch.object(bot, "_enrich_top_results_with_metadata", AsyncMock()),
+                ):
+                    asyncio.run(bot._run_search(
+                        AsyncMock(return_value=message), ctx, "Гангстерленд сезон 2",
+                    ))
+
+                buttons = {
+                    b.text: b.callback_data
+                    for row in message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+                    for b in row
+                }
+                self.assertEqual(buttons.get("🔔 1"), "srch:sub_pick:0")
+                update = MagicMock(callback_query=_make_query(buttons["⬇️ 1"]))
+                update.callback_query.message.chat.id = 100
+                asyncio.run(bot.search_download_pick(update, ctx))
+                call = update.callback_query.edit_message_text.await_args
+                self.assertIn("1/10 эп.", call.args[0])
+                choices = {b.text: b.callback_data for row in call.kwargs["reply_markup"].inline_keyboard for b in row}
+                self.assertEqual(
+                    choices.get("⬇️ Скачать сейчас + новые серии по мере выхода"),
+                    "srch:sub_preset:0:each",
+                )
+
+                update.callback_query.data = buttons["🔔 1"]
+                asyncio.run(bot.search_subscribe_pick(update, ctx))
+                call = update.callback_query.edit_message_text.await_args
+                choices = {b.text: b.callback_data for row in call.kwargs["reply_markup"].inline_keyboard for b in row}
+                update.callback_query.data = choices["🔔 Уведомлять о новых сериях"]
+                store = MagicMock()
+                store.load_topic_subscriptions.return_value = {}
+                with (
+                    patch.object(bot, "state_store", store),
+                    patch.object(bot, "_download_and_add", AsyncMock()) as download,
+                ):
+                    asyncio.run(bot.search_subscribe_preset(update, ctx))
+
+                download.assert_not_awaited()
+                saved = store.save_topic_subscriptions.call_args.args[0]
+                self.assertEqual(len(saved), 1)
+                sub = next(iter(saved.values()))
+                self.assertEqual(sub["last_episode_end"], 1)
+                self.assertEqual(sub["total_episodes"], 10)
+                self.assertEqual(sub["notify_policy"], NOTIFY_EACH_UPDATE)
+                self.assertEqual(sub["download_policy"], DOWNLOAD_NOTIFY_ONLY)
+
     def test_renders_download_choices(self):
         update = MagicMock(callback_query=_make_query("srch:dl_pick:0"))
         ctx = _make_context()
