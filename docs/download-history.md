@@ -16,7 +16,7 @@
 - `download_completed` - Download Station сообщил обычное завершение;
 - `download_soft_completed` - DS показал `error`, но BT-задача скачана >=99.9% и без конкретного `error_detail`;
 - `download_failed` - добавление или финальный статус завершились ошибкой;
-- `files_normalized` - исходные файлы сериала переименованы в Plex-формат после подтверждения пользователя;
+- `files_normalized` - исходные файлы сериала переименованы в Plex-формат после подтверждения пользователя или автоматически исправлены маркеры `Sxx.Eyy → SxxEyy` перед Plex-проверкой;
 - `plex_found` - Plex нашёл фильм или сезон после скачивания;
 - `plex_not_found` - Plex не подтвердил появление за окно ожидания;
 - `youtube_download_queued` - пользователь подтвердил скачивание YouTube-ролика;
@@ -75,7 +75,7 @@
 - `_check_subscriptions()` и Jackett subscription paths - автоскачивание по подпискам;
 - `_run_task_notifications_once()` - финальные статусы DS и точечный снимок `detail,file` завершённой задачи;
 - `_handle_normalization_callback()` - подтверждённое переименование файлов сериала;
-- `_plex_poll_after_finish()` - итог поиска в Plex;
+- `_plex_poll_after_finish()` - автоматическое исправление `Sxx.Eyy → SxxEyy` и итог поиска в Plex;
 - `youtube_callback()` и `_youtube_worker_once()` - очередь, старт, успех и ошибка YouTube-download;
 - `_youtube_plex_poll_after_finish()` - итог поиска YouTube-ролика в отдельной Plex-библиотеке.
 

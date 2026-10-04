@@ -159,6 +159,10 @@ Tl;dr: **обязательно** локально для серьёзных и�
 ### Plex polling (`_plex_poll_after_finish` / `_plex_poll_lookup_target`)
 
 - `Plex polling started task_id=... title=... kind=... chat_ids=[...]` — запуск (после finished).
+- `Plex filename normalization task_id=... renamed=N` — перед Plex lookup убраны точки между `Sxx` и `Eyy`; затем запрашивается сканирование TV-библиотеки. Проверено на `Oldschool.S02.E01`: Plex ошибочно объединял второй сезон с первым, а `S02E01` исправил распознавание.
+- `Plex filename normalization failed task_id=...` — исправление имён не удалось (конфликт целевого имени или права записи); lookup не выполняется, задача остаётся доступной для повтора после исправления файлов.
+- `Plex scan deferred task_id=...` — сканирование TV-библиотеки не стартовало; перед lookup запрос повторяется в следующей попытке.
+- `Plex lookup: ignoring stale season ... expected_season=...` — путь найден в другом сезоне; такой матч не отправляет успешное уведомление.
 - `Plex polling: found 'TITLE' after N attempt(s)` — нашли в библиотеке, шлём push.
 - `Plex lookup: series show not found query=... year=... shows_cached=N` — show не нашёлся в кэше TV-секции. Проверить: 1) подключена ли секция в Plex, 2) совпадает ли normalised title (`_normalize_movie_title`), 3) если ничего не помогает — посмотреть `_plex_shows_library.keys()` через debug.
 - `Plex lookup: show 'X' found but season N missing (have: [...])` — show нашёлся, но нужного сезона ещё нет в Plex (новый сезон ещё не вышел, либо файл не индексирован).

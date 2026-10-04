@@ -435,6 +435,9 @@ class PlexClient:
             self._show_section_id = self.find_show_section()
         return self._show_section_id or ""
 
+    def refresh_show_section(self) -> bool:
+        return self.refresh_section(self._ensure_show_section())
+
     def get_all_shows(self) -> list[PlexShow]:
         """Fetch all TV shows from the show library section.
 

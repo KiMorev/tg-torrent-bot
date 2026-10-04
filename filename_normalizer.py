@@ -27,6 +27,7 @@ NAMING_MIXED = "mixed"
 NAMING_UNKNOWN_NON_PLEX = "unknown_non_plex"
 
 PLEX_EPISODE_RE = re.compile(r"(?i)\bS\d{1,2}[\s._-]?E\d{1,3}\b")
+DOTTED_EPISODE_RE = re.compile(r"(?i)\b(S\d{1,2})\.(E\d{1,3})\b")
 ARC_EPISODE_RE = re.compile(
     r"^\s*(?P<arc>\d{1,3})\.\s+"
     r"(?P<title>.+?)\s*"
@@ -89,6 +90,30 @@ class RenamePlanError(RuntimeError):
 
 def is_video_file(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def normalize_dotted_episode_name(name: str) -> str:
+    return DOTTED_EPISODE_RE.sub(r"\1\2", name)
+
+
+def normalize_dotted_episode_files(files: list[Path]) -> dict[Path, Path]:
+    """Join Sxx.Eyy tokens in place, checking every target before renaming."""
+    renames = {
+        path: path.with_name(normalize_dotted_episode_name(path.name))
+        for path in files
+        if is_video_file(path) and normalize_dotted_episode_name(path.name) != path.name
+    }
+    seen_targets: set[str] = set()
+    for source, target in renames.items():
+        if not source.is_file():
+            raise RenamePlanError(f"source file missing: {source}")
+        key = os.path.normcase(str(target))
+        if key in seen_targets or target.exists():
+            raise RenamePlanError(f"target already exists: {target}")
+        seen_targets.add(key)
+    for source, target in renames.items():
+        source.rename(target)
+    return renames
 
 
 def _video_files(files: list[Path]) -> list[Path]:

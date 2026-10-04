@@ -232,7 +232,10 @@ from filename_normalizer import (
     build_arc_episode_rename_plan,
     infer_series_season_from_filenames,
     inspect_series_filenames,
+    is_plex_episode_filename,
     is_video_file,
+    normalize_dotted_episode_files,
+    normalize_dotted_episode_name,
 )
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
@@ -6384,7 +6387,9 @@ def _plex_find_by_ds_title(ds_title: str) -> "PlexMovie | None":
     return None
 
 
-async def _plex_find_series_by_ds_title(ds_title: str) -> tuple["PlexSeason", "PlexShow"] | None:
+async def _plex_find_series_by_ds_title(
+    ds_title: str, *, season_num: int = 0, expected_files: tuple[str, ...] = (),
+) -> tuple["PlexSeason", "PlexShow"] | None:
     """Find a TV season whose episode file path matches a DS task title."""
     name = ds_title.strip()
     if not name:
@@ -6394,23 +6399,39 @@ async def _plex_find_series_by_ds_title(ds_title: str) -> tuple["PlexSeason", "P
     for show in shows_snapshot:
         seasons = show.seasons or await _plex_ensure_show_seasons(show)
         for season in seasons.values():
-            for fp in season.file_paths:
-                if _plex_file_path_matches_ds_title(fp, name):
-                    return season, show
+            if season_num > 0 and season.season_number != season_num:
+                if _plex_season_matches_ds_title(season, name):
+                    logger.info(
+                        "Plex lookup: ignoring stale season %d for task_title=%r expected_season=%d",
+                        season.season_number, name, season_num,
+                    )
+                continue
+            if _plex_season_matches_ds_title(season, name, expected_files=expected_files):
+                return season, show
     return None
 
 
-def _plex_season_matches_ds_title(season: object, ds_title: str) -> bool:
+def _plex_season_matches_ds_title(
+    season: object, ds_title: str, *, expected_files: tuple[str, ...] = (),
+) -> bool:
     name = ds_title.strip()
     if not name:
         return False
+    if expected_files:
+        paths = [str(fp).replace("\\", "/").casefold() for fp in getattr(season, "file_paths", None) or []]
+        return all(
+            any(fp.endswith("/" + expected.casefold()) for fp in paths)
+            for expected in expected_files
+        )
     for fp in getattr(season, "file_paths", None) or []:
         if _plex_file_path_matches_ds_title(fp, name):
             return True
     return False
 
 
-async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[object, str, str]:
+async def _plex_poll_lookup_target(
+    task_title: str, meta: dict | None, *, expected_files: tuple[str, ...] = (),
+) -> tuple[object, str, str]:
     """Attempt to locate the just-finished task in the Plex library.
 
     Returns a tuple ``(target, metadata_type, found_title)``:
@@ -6442,7 +6463,7 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
                 seasons = await _plex_ensure_show_seasons(show)
                 season = seasons.get(season_num)
                 if season is not None:
-                    if _plex_season_matches_ds_title(season, task_title):
+                    if _plex_season_matches_ds_title(season, task_title, expected_files=expected_files):
                         found_title = f"Сезон {season_num} «{show.title or series_query}»"
                         return season, "3", found_title
                     logger.info(
@@ -6464,7 +6485,9 @@ async def _plex_poll_lookup_target(task_title: str, meta: dict | None) -> tuple[
                 "Plex lookup: series meta incomplete query=%r season_num=%s",
                 series_query, season_num,
             )
-        fallback = await _plex_find_series_by_ds_title(task_title)
+        fallback = await _plex_find_series_by_ds_title(
+            task_title, season_num=season_num, expected_files=expected_files,
+        )
         if fallback is not None:
             season, show = fallback
             found_title = f"Сезон {season.season_number} «{show.title or series_query or task_title}»"
@@ -6592,9 +6615,49 @@ async def _plex_poll_after_finish(
     cancelled = False
     delivery_retry_needed = False
     try:
+        try:
+            task_title, meta, expected_files, renamed_count = await asyncio.to_thread(
+                _prepare_completed_task_plex_files, {"id": task_id, "title": task_title}, meta,
+            )
+        except (RenamePlanError, OSError) as exc:
+            logger.warning("Plex filename normalization failed task_id=%s: %s", task_id, exc)
+            await _delete_hint_messages()
+            delivery_retry_needed = True
+            for cid in _plex_poll_target_chat_ids(task_id, "normalization_failed", chat_ids):
+                sent, _retry_later, _label = await _send_plex_poll_message(
+                    app, chat_id=cid,
+                    text=(
+                        "⚠️ Не удалось исправить имена серий для Plex. "
+                        "Проверьте права записи в /storage и отсутствие файлов с совпадающими именами. "
+                        "Plex-проверка отложена."
+                    ),
+                    reply_markup=_task_error_keyboard(
+                        retry_callback=_normalization_callback("norm_skip", task_id),
+                    ),
+                )
+                if sent:
+                    _mark_plex_poll_sent(task_id, "normalization_failed", cid)
+            return
+        if renamed_count:
+            logger.info("Plex filename normalization task_id=%s renamed=%d", task_id, renamed_count)
+            _record_download_history(
+                "files_normalized", task_id=task_id, chat_ids=chat_ids, meta=meta,
+                renamed_count=renamed_count,
+            )
+        scan_required = bool(expected_files)
         for attempt in range(max_attempts):
             if attempt > 0:
                 await _plex_wait_for_poll_interval(interval_seconds)
+
+            if scan_required:
+                try:
+                    if plex_client is None or not await asyncio.to_thread(plex_client.refresh_show_section):
+                        logger.info("Plex scan deferred task_id=%s: show library refresh not started", task_id)
+                        continue
+                except PlexAPIError as exc:
+                    logger.info("Plex scan deferred task_id=%s: %s", task_id, exc)
+                    continue
+                scan_required = False
 
             # Refresh Plex library, then look for the file. Unmatched admin radar
             # stays on the regular cache loop so Plex has time to finish matching.
@@ -6603,7 +6666,9 @@ async def _plex_poll_after_finish(
             # this refresh succeeded.
             if _plex_consecutive_failures == 0:
                 refresh_succeeded_at_least_once = True
-            target, metadata_type, found_title = await _plex_poll_lookup_target(task_title, meta)
+            target, metadata_type, found_title = await _plex_poll_lookup_target(
+                task_title, meta, expected_files=expected_files,
+            )
 
             if target is not None:
                 # Build deep link
@@ -7038,6 +7103,11 @@ def _find_completed_task_storage_root(task: dict) -> Path | None:
     if not storage_root.exists():
         return None
     names = _safe_storage_child_names(str(task.get("title") or ""))
+    # A single-episode task keeps its original DS title after the file is renamed.
+    names += [
+        normalize_dotted_episode_name(name) for name in names
+        if is_video_file(Path(name)) and normalize_dotted_episode_name(name) != name
+    ]
     for name in names:
         candidate = storage_root / name
         if candidate.exists():
@@ -7067,6 +7137,38 @@ def _completed_task_video_files(task: dict) -> tuple[Path | None, list[Path]]:
     except OSError:
         return root, []
     return root, files
+
+
+def _prepare_completed_task_plex_files(
+    task: dict, meta: dict | None,
+) -> tuple[str, dict | None, tuple[str, ...], int]:
+    """Normalize episode tokens before lookup, including /seasons catch-up tasks."""
+    task_title = str(task.get("title") or "")
+    _root, files = _completed_task_video_files(task)
+    renames = normalize_dotted_episode_files(files)
+    files = [renames.get(path, path) for path in files]
+    episodes = [path for path in files if is_plex_episode_filename(path)]
+    if not episodes:
+        return task_title, meta, (), len(renames)
+    updated = dict(meta or {})
+    updated["kind"] = "series"
+    updated["series_query"] = updated.get("series_query") or _extract_series_base_query(task_title)
+    seasons = {_extract_season_from_query(path.name) for path in episodes}
+    if len(seasons) == 1:
+        file_season = next(iter(seasons))
+        if file_season:
+            updated["season_num"] = file_season
+    season_num, _source = _normalization_season(task, updated)
+    expected_files = tuple(
+        path.relative_to(Path(STORAGE_MOUNT_PATH)).as_posix()
+        for path in episodes
+        if not season_num or _extract_season_from_query(path.name) == season_num
+    )
+    if len(files) == 1 and files[0].name == normalize_dotted_episode_name(task_title):
+        task_title = files[0].name
+    if updated != meta:
+        _remember_task_meta(str(task.get("id") or ""), updated)
+    return task_title, updated, expected_files, len(renames)
 
 
 def _inspect_completed_task_normalization(

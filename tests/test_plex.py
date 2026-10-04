@@ -580,6 +580,26 @@ class ParseShowTests(unittest.TestCase):
 
 
 class PlexClientFindShowSectionTests(unittest.TestCase):
+    def test_refresh_show_section_uses_configured_section(self):
+        client = _make_client(show_section_id="7")
+        with patch.object(client, "refresh_section", return_value=True) as refresh:
+            self.assertTrue(client.refresh_show_section())
+        refresh.assert_called_once_with("7")
+
+    def test_refresh_show_section_detects_section_and_handles_absence(self):
+        for section_id in ["2", ""]:
+            with self.subTest(section_id=section_id):
+                client = _make_client()
+                with (
+                    patch.object(client, "find_show_section", return_value=section_id),
+                    patch.object(client, "_get_ok", return_value=True) as request,
+                ):
+                    self.assertEqual(client.refresh_show_section(), bool(section_id))
+                if section_id:
+                    request.assert_called_once_with("/library/sections/2/refresh")
+                else:
+                    request.assert_not_called()
+
     def test_returns_first_show_section(self):
         client = _make_client()
         xml = (

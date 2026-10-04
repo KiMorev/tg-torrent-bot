@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from filename_normalizer import (
     NAMING_MIXED,
@@ -8,15 +9,73 @@ from filename_normalizer import (
     NAMING_RENAMABLE_ARC,
     NAMING_UNSAFE_ARC,
     NAMING_UNKNOWN_NON_PLEX,
+    RenamePlanError,
     apply_rename_plan,
     build_arc_episode_rename_plan,
     has_arc_episode_filenames,
     infer_series_season_from_filenames,
     inspect_series_filenames,
+    normalize_dotted_episode_files,
+    normalize_dotted_episode_name,
 )
 
 
 class FilenameNormalizerTests(unittest.TestCase):
+    def test_dotted_episode_name_changes_only_marker_separator(self):
+        for source, target in [
+            ("Oldschool.S02.E01.2026.WEB-DL.1080p.ExKinoRay.mkv", "Oldschool.S02E01.2026.WEB-DL.1080p.ExKinoRay.mkv"),
+            ("Шоу.s2.e103.1080p.MKV", "Шоу.s2e103.1080p.MKV"),
+            ("Show.S02E01.mkv", "Show.S02E01.mkv"),
+            ("Show.S02.2026.mkv", "Show.S02.2026.mkv"),
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(normalize_dotted_episode_name(source), target)
+
+    def test_dotted_episode_files_are_renamed_in_place_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Oldschool.S02.E13.2026.mkv"
+            source.write_bytes(b"episode 13")
+            ready = root / "Oldschool.S02E01.2026.mkv"
+            ready.write_bytes(b"episode 1")
+            subtitle = root / "Oldschool.S02.E13.2026.srt"
+            subtitle.write_text("subtitle")
+            target = root / "Oldschool.S02E13.2026.mkv"
+
+            renamed = normalize_dotted_episode_files([source, ready, subtitle])
+
+            self.assertEqual(renamed, {source: target})
+            self.assertFalse(source.exists())
+            self.assertEqual(target.read_bytes(), b"episode 13")
+            self.assertTrue(subtitle.exists())
+            self.assertEqual(normalize_dotted_episode_files([target, ready, subtitle]), {})
+
+    def test_dotted_episode_collision_checks_entire_batch_before_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "Show.S02.E01.mkv"
+            second = root / "Show.S02.E02.mkv"
+            existing = root / "Show.S02E02.mkv"
+            for path, content in [(first, b"first"), (second, b"second"), (existing, b"existing")]:
+                path.write_bytes(content)
+
+            with self.assertRaises(RenamePlanError):
+                normalize_dotted_episode_files([first, second])
+
+            self.assertEqual(first.read_bytes(), b"first")
+            self.assertEqual(second.read_bytes(), b"second")
+            self.assertEqual(existing.read_bytes(), b"existing")
+            self.assertFalse((root / "Show.S02E01.mkv").exists())
+
+    def test_dotted_episode_files_report_write_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "Show.S02.E01.mkv"
+            source.write_bytes(b"episode")
+            with patch.object(Path, "rename", side_effect=PermissionError("read only")):
+                with self.assertRaises(PermissionError):
+                    normalize_dotted_episode_files([source])
+            self.assertEqual(source.read_bytes(), b"episode")
+
     def test_arc_episode_plan_uses_sequential_plex_episode_numbers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "Тайны следствия"
