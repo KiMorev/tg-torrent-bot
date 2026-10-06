@@ -107,6 +107,7 @@ from keyboards import (
     _cluster_picker_keyboard,
     _no_results_keyboard,
     _search_error_keyboard,
+    _search_mode_label,
     _search_options_keyboard,
     _search_results_keyboard,
     tracker_selection_label,

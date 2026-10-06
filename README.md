@@ -665,6 +665,8 @@ python -m pytest tests/ -v
 
 Админские сценарии `/admin`, включая рассылку и callback-data кнопок, покрыты в `tests/test_handlers.py` и `tests/test_keyboards.py`.
 
+Поиск по ссылке Кинопоиска, включая ссылки на сериалы с параметром `socialAlias` и переход к кнопкам поиска, покрыт в `tests/test_handlers.py`.
+
 Распознавание одиночной серии и создание подписки после поиска через Jackett/Rutracker покрыты в `tests/test_handlers.py` и `tests/test_subscription_picker_ui.py`.
 
 Автоматическое исправление `Sxx.Eyy → SxxEyy`, порядок переименование → сканирование → Plex-проверка, защита от старого сезона, докачка отдельных серий и конфликты имён покрыты в `tests/test_filename_normalizer.py` и `tests/test_plex_normalization.py`.

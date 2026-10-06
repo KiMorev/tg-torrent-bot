@@ -7365,6 +7365,52 @@ class SearchSeasonManualInputTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SearchDownloadModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_kinopoisk_series_link_shows_search_options(self):
+        update = _make_message_update(chat_id=100)
+        update.message.text = "https://www.kinopoisk.ru/series/7865896/?socialAlias=NjU5Mzk4NjU%3D"
+        status = MagicMock()
+        status.edit_text = AsyncMock()
+        update.message.reply_text.return_value = status
+        context = _make_context()
+        kp_client = MagicMock()
+        kp_client.get_film_info.return_value = bot.KinopoiskInfo(
+            kp_id=7865896,
+            title_ru="К востоку от Эдема",
+            title_en="East of Eden",
+            year=2026,
+            media_type="MINI_SERIES",
+            director="",
+        )
+        store = MagicMock()
+        store.load_approved_chat_ids.return_value = set()
+        store.load_user_search_defaults.return_value = {}
+
+        with (
+            patch.object(bot, "ALLOWED_CHAT_IDS", {100}),
+            patch.object(bot, "ADMIN_CHAT_IDS", set()),
+            patch.object(bot, "state_store", store),
+            patch.object(bot, "kinopoisk_client", kp_client),
+            patch.object(bot, "jackett_client", None),
+            patch.object(bot, "GPT_ENABLED", False),
+        ):
+            result = await bot.text_message_entry(update, context)
+
+        self.assertEqual(result, bot.SEARCH_OPTIONS)
+        kp_client.get_film_info.assert_called_once_with(7865896)
+        self.assertEqual(context.user_data["srch_query"], "К востоку от Эдема")
+        self.assertTrue(context.user_data["srch_from_kp_link"])
+        status.edit_text.assert_awaited_once()
+        text = status.edit_text.await_args.args[0]
+        self.assertIn("К востоку от Эдема", text)
+        self.assertIn("Что скачать: одна раздача", text)
+        buttons = {
+            button.text: button.callback_data
+            for row in status.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+        self.assertEqual(buttons["🔍 Искать"], "srch:quick")
+        self.assertEqual(buttons["❌ Отмена"], "srch:cancel")
+
     async def test_mode_click_toggles_to_series_and_rerenders_options(self):
         update = _make_callback_update(callback_data="srch:mode:options")
         context = _make_context(user_data={"srch_query": "Клиника"})
