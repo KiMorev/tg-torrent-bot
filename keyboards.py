@@ -764,6 +764,7 @@ def _no_results_keyboard(
     *,
     has_quality: bool,
     jackett_can_expand: bool,
+    show_switch_trackers: bool = False,
     suggestions: list[str] | None = None,
 ) -> InlineKeyboardMarkup:
     """Shown on a 'no results' dead-end. Offers to relax filters and retry.
@@ -775,6 +776,7 @@ def _no_results_keyboard(
     - ``jackett_can_expand``: Jackett is configured AND ``srch_jackett_selected``
       is a strict subset of available indexers — offer to broaden.
     - Both flags True → also offer the combined retry.
+    - ``show_switch_trackers``: offer the configured Jackett tracker picker.
     - ``suggestions``: optional GPT-generated «did you mean …» variations.
       Each becomes a button that re-runs the search with that text.
 
@@ -794,6 +796,11 @@ def _no_results_keyboard(
         callback_data=f"{SEARCH_CALLBACK_PREFIX}:retry",
         style="primary",
     )])
+    if show_switch_trackers:
+        rows.append([InlineKeyboardButton(
+            "🔄 Сменить трекеры",
+            callback_data=f"{SEARCH_CALLBACK_PREFIX}:switch_trackers",
+        )])
     if has_quality:
         rows.append([InlineKeyboardButton(
             "🎞 Искать без качества",

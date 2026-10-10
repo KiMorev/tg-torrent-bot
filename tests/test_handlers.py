@@ -5428,6 +5428,59 @@ class SearchRetryHandlerTests(unittest.IsolatedAsyncioTestCase):
 class SearchJackettDoHandlerTests(unittest.IsolatedAsyncioTestCase):
     """Tracker confirmation should not bypass the shared search pipeline."""
 
+    async def test_switch_trackers_uses_configured_choices_and_preserves_search(self):
+        update = _make_callback_update(chat_id=100, callback_data="srch:switch_trackers")
+        search_query = "Аркейн 1080p Original Sub"
+        settings = {"quality": "1080p", "audio": True, "subs": True}
+        context = _make_context(user_data={
+            "srch_query": "Аркейн",
+            "srch_search_query": search_query,
+            "srch_jackett_selected": {"rutracker"},
+            "srch_settings": dict(settings),
+            "srch_intent": bot.SEARCH_INTENT_SERIES_MASTER,
+        })
+        indexers = [
+            {"id": "rutracker", "name": "RuTracker.org"},
+            {"id": "kinozal", "name": "Kinozal"},
+        ]
+        mock_jackett = MagicMock()
+        mock_jackett.get_indexers.return_value = indexers
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "_execute_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as exec_mock,
+        ):
+            result = await bot.search_switch_trackers(update, context)
+            self.assertEqual(result, bot.SEARCH_JACKETT_SELECT)
+            mock_jackett.get_indexers.assert_called_once_with()
+            keyboard = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+            tracker_callbacks = {
+                button.callback_data
+                for row in keyboard.inline_keyboard
+                for button in row
+                if button.callback_data.startswith("srch:jk_toggle:")
+            }
+            self.assertEqual(tracker_callbacks, {
+                "srch:jk_toggle:rutracker", "srch:jk_toggle:kinozal",
+            })
+
+            for indexer_id in ("rutracker", "kinozal"):
+                update.callback_query.data = f"srch:jk_toggle:{indexer_id}"
+                result = await bot.search_jackett_toggle(update, context)
+                self.assertEqual(result, bot.SEARCH_JACKETT_SELECT)
+            self.assertEqual(context.user_data["srch_jackett_selected"], {"kinozal"})
+            exec_mock.assert_not_awaited()
+
+            update.callback_query.data = "srch:jk_search"
+            result = await bot.search_jackett_do(update, context)
+
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        exec_mock.assert_awaited_once_with(update.callback_query, context, search_query)
+        self.assertEqual(context.user_data["srch_picker_return_to"], "results")
+        self.assertEqual(context.user_data["srch_search_query"], search_query)
+        self.assertEqual(context.user_data["srch_settings"], settings)
+        self.assertEqual(context.user_data["srch_intent"], bot.SEARCH_INTENT_SERIES_MASTER)
+
     async def test_results_mode_uses_unified_search_pipeline(self):
         update = _make_callback_update(chat_id=100, callback_data="srch:jk_search")
         context = _make_context(user_data={

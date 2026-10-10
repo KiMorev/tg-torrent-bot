@@ -276,6 +276,7 @@ class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
         mock_rutracker.search.side_effect = RutrackerError("521 Server Error: <none> for url")
         send_fn, message = _make_send_fn()
         context = _make_context()
+        search_query = "Some Query 1080p Original Sub"
 
         with (
             patch.object(bot, "jackett_client", mock_jackett),
@@ -285,8 +286,10 @@ class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
                 new=AsyncMock(return_value=["альтернатива"]),
             ),
         ):
-            asyncio.run(bot._run_search(send_fn, context, "Some Query"))
+            result = asyncio.run(bot._run_search(send_fn, context, search_query))
 
+        self.assertEqual(result, bot.SEARCH_RESULTS)
+        self.assertEqual(context.user_data["srch_search_query"], search_query)
         args, kwargs = message.edit_text.call_args
         text = args[0] if args else kwargs.get("text", "")
         self.assertIn("Поиск временно не получился", text)
@@ -300,6 +303,8 @@ class DoubleFailureLandsInNoResultsTests(unittest.TestCase):
         labels = [b.text for row in keyboard for b in row]
         self.assertFalse(any("альтернатива" in lbl for lbl in labels))
         self.assertTrue(any("Повторить поиск" in lbl for lbl in labels))
+        buttons = {b.text: b.callback_data for row in keyboard for b in row}
+        self.assertEqual(buttons["🔄 Сменить трекеры"], "srch:switch_trackers")
 
 
 class SplitQuerySettingsTests(unittest.TestCase):

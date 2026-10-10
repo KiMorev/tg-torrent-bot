@@ -13972,7 +13972,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 "⚠️ Поиск временно не получился\n\n"
                 f"Запрос {_format_search_query_label(search_query)} не удалось проверить: "
                 "источники поиска сейчас не ответили.\n\n"
-                "Это не значит, что раздач нет. Повторите поиск через минуту. "
+                "Это не значит, что раздач нет. Повторите поиск через минуту "
+                "или выберите другие трекеры. "
                 "Если проблема повторяется, проверьте диагностику в /admin."
             )
             await edit_fn(
@@ -13980,6 +13981,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
                 reply_markup=_no_results_keyboard(
                     has_quality=False,
                     jackett_can_expand=False,
+                    show_switch_trackers=bool(jackett_client),
                     suggestions=[],
                 ),
             )

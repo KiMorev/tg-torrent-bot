@@ -838,6 +838,19 @@ class NoResultsKeyboardTests(unittest.TestCase):
         self.assertNotIn("🎞🌐 Без качества + все трекеры", buttons)
         self.assertIn("❌ Отмена", buttons)
 
+    def test_temporary_failure_offers_configured_tracker_picker(self) -> None:
+        keyboard = _no_results_keyboard(
+            has_quality=False,
+            jackett_can_expand=False,
+            show_switch_trackers=True,
+        )
+        buttons = self._buttons(keyboard)
+        self.assertEqual(list(buttons), [
+            "🔄 Повторить поиск", "🔄 Сменить трекеры", "❌ Отмена",
+        ])
+        self.assertEqual(buttons["🔄 Сменить трекеры"], "srch:switch_trackers")
+        self.assertEqual(keyboard.inline_keyboard[-1][0].callback_data, "srch:cancel")
+
     def test_jackett_can_expand_only_shows_expand_button(self) -> None:
         buttons = self._buttons(_no_results_keyboard(
             has_quality=False, jackett_can_expand=True,
