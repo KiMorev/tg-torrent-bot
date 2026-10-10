@@ -1,5 +1,6 @@
 import unittest
-from dataclasses import dataclass
+
+from jackett import JackettIndexerStatus
 
 from jackett_guard import (
     STATE_DEGRADED,
@@ -16,19 +17,6 @@ from jackett_guard import (
     unready_indexer_ids,
     unready_summary,
 )
-
-
-@dataclass
-class _Status:
-    indexer_id: str
-    name: str
-    status: int
-    results: int
-    error: str = ""
-
-    @property
-    def is_ok(self) -> bool:
-        return self.status == 0 or self.results > 0
 
 
 class JackettGuardTests(unittest.TestCase):
@@ -120,8 +108,8 @@ class JackettGuardTests(unittest.TestCase):
         state, events = record_statuses(
             state,
             [
-                _Status("kinozal", "Kinozal", status=0, results=5),
-                _Status("rutracker", "RuTracker", status=1, results=0, error="timeout"),
+                JackettIndexerStatus("kinozal", "Kinozal", status=2, results=5, error=""),
+                JackettIndexerStatus("rutracker", "RuTracker", status=1, results=0, error="timeout"),
             ],
             source="warmup",
             query="1080p",
@@ -131,6 +119,35 @@ class JackettGuardTests(unittest.TestCase):
         self.assertEqual(state["indexers"]["kinozal"]["state"], STATE_OK)
         self.assertEqual(state["indexers"]["rutracker"]["state"], STATE_DEGRADED)
         self.assertEqual([event["indexer_id"] for event in events], ["kinozal", "rutracker"])
+
+    def test_successful_empty_search_recovers_indexer(self) -> None:
+        state, _ = record_failure({}, "rutracker", error_kind="timeout", error="timeout", now=1000)
+        state, events = record_statuses(
+            state,
+            [JackettIndexerStatus("rutracker", "RuTracker", 2, 0, "")],
+            source="warmup",
+            query="1080p",
+            now=1100,
+        )
+
+        self.assertEqual(state["indexers"]["rutracker"]["state"], STATE_OK)
+        self.assertEqual(state["indexers"]["rutracker"]["fail_streak"], 0)
+        self.assertEqual(state["indexers"]["rutracker"]["last_results"], 0)
+        self.assertEqual(events[0]["kind"], "recovered")
+
+    def test_unknown_empty_status_does_not_recover_indexer(self) -> None:
+        state, _ = record_failure({}, "rutracker", error_kind="timeout", error="timeout", now=1000)
+        state, events = record_statuses(
+            state,
+            [JackettIndexerStatus("rutracker", "RuTracker", 0, 0, "")],
+            source="warmup",
+            query="1080p",
+            now=1100,
+        )
+
+        self.assertEqual(state["indexers"]["rutracker"]["state"], STATE_DEGRADED)
+        self.assertEqual(state["indexers"]["rutracker"]["fail_streak"], 2)
+        self.assertEqual(events[0]["kind"], "degraded")
 
     def test_due_indexers_and_delay_follow_next_retry(self) -> None:
         state, _ = record_failure({}, "kinozal", error_kind="timeout", error="timeout", now=1000)

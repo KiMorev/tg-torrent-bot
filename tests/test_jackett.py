@@ -156,7 +156,7 @@ class WarmupTests(unittest.TestCase):
         payload = {
             "Results": [{"Title": "Movie 1080p"}],
             "Indexers": [
-                {"ID": "rutracker", "Name": "Rutracker", "Status": 0, "Results": 1, "Error": ""},
+                {"ID": "rutracker", "Name": "Rutracker", "Status": 2, "Results": 1, "Error": ""},
             ],
         }
         session = SequenceSession([FakeResponse(text=json.dumps(payload))])
@@ -265,9 +265,9 @@ class ParseIndexerStatusesTests(unittest.TestCase):
         payload = {
             "Results": [],
             "Indexers": [
-                {"ID": "rutracker", "Name": "RuTracker", "Status": 0, "Results": 100, "Error": ""},
+                {"ID": "rutracker", "Name": "RuTracker", "Status": 2, "Results": 100, "Error": ""},
                 {"ID": "nnmclub", "Name": "NNM-Club", "Status": 1, "Results": 0, "Error": "Read timeout"},
-                {"ID": "kinozal", "Name": "Kinozal", "Status": 0, "Results": 50, "Error": ""},
+                {"ID": "kinozal", "Name": "Kinozal", "Status": 2, "Results": 50, "Error": ""},
             ],
         }
         statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
@@ -286,38 +286,32 @@ class ParseIndexerStatusesTests(unittest.TestCase):
         payload = {
             "Results": [],
             "Indexers": [
-                {"ID": "RUTracker", "Name": "RT", "Status": 0, "Results": 5, "Error": ""},
+                {"ID": "RUTracker", "Name": "RT", "Status": 2, "Results": 5, "Error": ""},
             ],
         }
         statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
         self.assertEqual(statuses[0].indexer_id, "rutracker")
 
     def test_status_2_with_results_is_treated_as_ok(self):
-        """Torznab Status=2 is a WARNING, not a failure. Indexers reporting
-        Status=2 alongside Results>0 actually did their job — the warning
-        is for non-fatal issues like «captcha solved with delay» or «one
-        sub-request timed out but I still got data». Don't mark as failed."""
+        """Jackett's JSON API uses Status=2 for a successful search."""
         from jackett import JackettIndexerStatus
-        status_warn_with_data = JackettIndexerStatus(
+        status_ok_with_data = JackettIndexerStatus(
             indexer_id="rutracker", name="RT",
             status=2, results=50, error="",
         )
-        self.assertTrue(status_warn_with_data.is_ok)
+        self.assertTrue(status_ok_with_data.is_ok)
 
-    def test_status_2_with_zero_results_is_failed(self):
-        """Status=2 + Results=0 = actually got nothing back. Treat as failed
-        so the supplement step pulls prev cache for this indexer."""
+    def test_status_2_with_zero_results_is_ok(self):
+        """A successful search with no matches must not trigger a fallback."""
         from jackett import JackettIndexerStatus
-        warn_no_data = JackettIndexerStatus(
+        ok_no_data = JackettIndexerStatus(
             indexer_id="eztv", name="EZTV",
             status=2, results=0, error="",
         )
-        self.assertFalse(warn_no_data.is_ok)
+        self.assertTrue(ok_no_data.is_ok)
 
-    def test_status_1_always_failed(self):
-        """Status=1 is a definitive error. Even if Results were somehow >0
-        the indexer reported a problem we should respect — but in practice
-        Status=1 comes with Results=0."""
+    def test_status_1_with_zero_results_is_failed(self):
+        """Status=1 reports an indexer error, not an empty successful search."""
         from jackett import JackettIndexerStatus
         err = JackettIndexerStatus(
             indexer_id="noname-club", name="NN",
@@ -325,23 +319,31 @@ class ParseIndexerStatusesTests(unittest.TestCase):
         )
         self.assertFalse(err.is_ok)
 
-    def test_status_0_always_ok(self):
+    def test_status_0_with_zero_results_is_not_ok(self):
         from jackett import JackettIndexerStatus
-        ok = JackettIndexerStatus(
+        unknown = JackettIndexerStatus(
+            indexer_id="kinozal", name="KZ",
+            status=0, results=0, error="",
+        )
+        self.assertFalse(unknown.is_ok)
+
+    def test_results_remain_usable_with_unknown_status(self):
+        from jackett import JackettIndexerStatus
+        unknown = JackettIndexerStatus(
             indexer_id="kinozal", name="KZ",
             status=0, results=18, error="",
         )
-        self.assertTrue(ok.is_ok)
+        self.assertTrue(unknown.is_ok)
 
     def test_skips_malformed_entries(self):
         import json as _json
         payload = {
             "Results": [],
             "Indexers": [
-                {"ID": "ok", "Status": 0, "Results": 5, "Error": ""},
+                {"ID": "ok", "Status": 2, "Results": 5, "Error": ""},
                 "garbage string",
                 {"ID": "broken", "Status": "not-an-int"},  # ValueError on int()
-                {"ID": "also-ok", "Status": 0, "Results": 1, "Error": ""},
+                {"ID": "also-ok", "Status": 2, "Results": 1, "Error": ""},
             ],
         }
         statuses = JackettClient.parse_indexer_statuses(_json.dumps(payload))
@@ -365,7 +367,7 @@ class SearchWithStatusesTests(unittest.TestCase):
                 "PublishDate": "",
             }],
             "Indexers": [
-                {"ID": "rutracker", "Name": "Rutracker", "Status": 0, "Results": 1, "Error": ""},
+                {"ID": "rutracker", "Name": "Rutracker", "Status": 2, "Results": 1, "Error": ""},
                 {"ID": "kinozal", "Name": "Kinozal", "Status": 1, "Results": 0, "Error": "timeout"},
             ],
         }
@@ -377,6 +379,7 @@ class SearchWithStatusesTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].tracker, "rutracker")
         self.assertEqual([st.indexer_id for st in statuses], ["rutracker", "kinozal"])
+        self.assertTrue(statuses[0].is_ok)
         self.assertFalse(statuses[1].is_ok)
 
 

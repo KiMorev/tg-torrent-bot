@@ -97,7 +97,7 @@
 | `app_context.py` | Общий runtime context и клиенты внешних сервисов. |
 | `download_station.py` | Synology Download Station API, ошибки, lock вокруг HTTP-сессии. |
 | `rutracker.py` | Прямой клиент Rutracker: login, search, download, unavailable topic. |
-| `jackett.py` | Jackett API: search, indexers, warmup probe, download proxy, magnet redirect. |
+| `jackett.py` | Jackett API: search, indexers, warmup probe, download proxy, magnet redirect; статусы JSON-поиска `2=OK` (включая 0 раздач), `1=Error`, `0=Unknown` разделяют пустую выдачу и сбой для поиска, `/new` и Guardian. |
 | `jackett_guard.py` | Чистая state-machine готовности Jackett-индексеров: `ok`/`warming`/`degraded`/`quarantined`/`manual_required`, backoff, due retry и unready summary для `/new`. |
 | `jackett_subscriptions.py` | Якорь подписки и выбор новой серии/раздачи из Jackett results. |
 | `subscription_policy.py` | Решение, уведомлять ли и скачивать ли по подписке. |

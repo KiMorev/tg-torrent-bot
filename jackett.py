@@ -71,9 +71,9 @@ class JackettIndexerStatus:
     """Per-indexer status reported by Jackett in the `Indexers` field of the
     /api/v2.0/indexers/all/results response.
 
-    Status: 0 = OK, 1 = Error (per Torznab spec).
+    Status: 0 = Unknown, 1 = Error, 2 = OK (Jackett JSON API).
     Results: number of items this indexer contributed.
-    Error: human-readable error string when Status=1, empty otherwise.
+    Error: human-readable error string for a failed search, empty on success.
 
     We surface this to the caller so it can distinguish a clean Jackett
     response from a partial-failure response (some indexers timed out /
@@ -91,19 +91,12 @@ class JackettIndexerStatus:
     def is_ok(self) -> bool:
         """Indexer contributed usefully to the search response.
 
-        Torznab status semantics observed in real Jackett responses:
-          0 → OK, no issues
-          1 → Error (definitive failure, usually with Error message)
-          2 → Warning (potentially benign — indexer often returns Results>0
-              alongside it; the warning is about non-fatal issues like
-              «captcha solved with delay», «one sub-request timed out but
-              I still got data», etc.)
-
-        We treat «contributed Results > 0» as success regardless of status:
-        if the indexer gave us real data, it did its job. Only Results=0
-        with non-zero Status is a real miss (no data + something went wrong).
+        Jackett's ManualSearchResultIndexerStatus uses 2 for OK, including
+        successful searches with zero matches. A zero-result response with
+        status 0 (Unknown) or 1 (Error) does not confirm an empty search.
+        Actual results remain usable regardless of the reported status.
         """
-        if self.status == 0:
+        if self.status == 2:
             return True
         return self.results > 0
 

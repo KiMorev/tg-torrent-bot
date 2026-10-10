@@ -4,8 +4,7 @@ Pinned behaviour:
   - Jackett returned [] → SKIP Rutracker fallback (it's currently broken at
     search/login pages anyway), go straight to no-results with did-you-mean.
   - Jackett ERRORED → Rutracker direct fallback (existing alternative source).
-  - Both sources fail → no-results screen with explanatory banner, NOT a
-    fatal error screen — user still sees did-you-mean.
+  - Both sources fail → temporary-failure screen without did-you-mean.
   - Pure-Rutracker install (no Jackett) → RutrackerError stays fatal
     (no fallback to soften the blow).
 """
@@ -74,6 +73,40 @@ class JackettEmptyDoesNotFallbackToRutrackerTests(unittest.TestCase):
 
         mock_jackett.search.assert_called_once()
         mock_rutracker.search.assert_not_called()
+
+    def test_successful_selected_indexer_with_zero_results_shows_no_results(self):
+        mock_jackett = MagicMock()
+        mock_jackett.search_with_statuses.return_value = (
+            [],
+            [JackettIndexerStatus("rutracker", "RuTracker", 2, 0, "")],
+        )
+        mock_rutracker = MagicMock()
+        mock_rutracker.search.side_effect = RutrackerError("521 Server Error")
+        send_fn, message = _make_send_fn()
+        context = _make_context()
+        context.user_data["srch_from_kp_link"] = True
+        context.user_data["srch_kp_info"] = {"kp_id": "6426123"}
+
+        with (
+            patch.object(bot, "jackett_client", mock_jackett),
+            patch.object(bot, "rutracker_client", mock_rutracker),
+            patch.object(bot, "_gpt_get_did_you_mean", new=AsyncMock(return_value=[])),
+        ):
+            asyncio.run(bot._run_search(send_fn, context, "Практическая магия 2 2026 1080p"))
+
+        mock_jackett.search_with_statuses.assert_called_once_with(
+            "Практическая магия 2 2026",
+            indexers=["rutracker"],
+            fetch_limit=bot.JACKETT_FETCH_LIMIT,
+        )
+        mock_jackett.search.assert_not_called()
+        mock_rutracker.search.assert_not_called()
+        args, kwargs = message.edit_text.call_args
+        text = args[0] if args else kwargs.get("text", "")
+        self.assertIn("Практическая магия 2 2026", text)
+        self.assertIn("ничего не найдено", text)
+        self.assertNotIn("Поиск временно не получился", text)
+        self.assertNotIn("источники поиска сейчас не ответили", text)
 
     def test_jackett_empty_shows_no_results_screen_with_did_you_mean(self):
         """No-results screen text must include the query and the GPT suggestions

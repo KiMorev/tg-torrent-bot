@@ -3558,8 +3558,8 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
     # all-2025» bug). One key per query string so we can also handle the
     # multi-quality case (1080p+2160p).
     failed_query_specs: list[tuple[int | None, str]] = []
-    # Per-indexer failure tracking via Jackett's `Indexers` field (Status=1 or
-    # Results=0+Error). Union across all queries — if any query saw an indexer
+    # Per-indexer failure tracking via Jackett's `Indexers` field (Error or
+    # Unknown with no results). Union across all queries — if any query saw an indexer
     # fail, we'll supplement its prev releases. This catches the case where
     # Jackett OVERALL responded fine but a specific indexer was silently
     # broken or returned a degraded snapshot — exactly the «cards=23,
@@ -3590,8 +3590,8 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
                 _record_jackett_guard_statuses(statuses, source="movie_discovery", query=search_query)
                 for st in statuses:
                     if st.is_ok:
-                        # Healthy or status>0 with Results>0 (Torznab warning,
-                        # data still came back). Log at debug level — no action.
+                        # Successful search (including zero matches), or
+                        # usable results despite the reported status.
                         continue
                     failed_indexer_ids.add(_jackett_guard.normalize_indexer_id(st.indexer_id))
                     logger.warning(
