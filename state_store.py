@@ -717,6 +717,33 @@ class JsonStateStore:
             return
         self.save_json_file(self.voice_usage_file, payload, "voice usage")
 
+    def migrate_user_search_quality_to_2160(self) -> int:
+        """Move existing users to 4K once, preserving subsequent preferences."""
+        if not self.user_search_defaults_file:
+            return 0
+        marker = "__quality_2160_migrated__"
+        with self.lock:
+            payload = self.load_json_file(self.user_search_defaults_file, None)
+            if payload is None:
+                if self.user_search_defaults_file.exists():
+                    return 0  # Never overwrite unreadable or malformed preferences.
+                payload = {}
+            if not isinstance(payload, dict) or payload.get(marker) is True:
+                return 0
+            changed = 0
+            for chat_id, defaults in payload.items():
+                if str(chat_id).lstrip("-").isdigit() and isinstance(defaults, dict):
+                    if defaults.get("quality") != "4K":
+                        defaults["quality"] = "4K"
+                        changed += 1
+            payload[marker] = True
+            self.save_json_file(self.user_search_defaults_file, payload, "user quality migration")
+            saved = self.load_json_file(self.user_search_defaults_file, {})
+            if not isinstance(saved, dict) or saved.get(marker) is not True:
+                return 0
+            logger.info("User search quality migrated to 2160p: users=%s", changed)
+            return changed
+
     def load_user_search_defaults(self, chat_id: int) -> dict | None:
         if not self.user_search_defaults_file:
             return None
@@ -726,9 +753,9 @@ class JsonStateStore:
         raw = payload.get(str(chat_id))
         if not isinstance(raw, dict):
             return None
-        quality = str(raw.get("quality") or "1080p")
+        quality = str(raw.get("quality") or "4K")
         if quality not in {"4K", "1080p", "720p", "any"}:
-            quality = "1080p"
+            quality = "4K"
         voices_raw = raw.get("preferred_voices") or []
         if isinstance(voices_raw, str):
             voices = [voices_raw]
@@ -750,9 +777,9 @@ class JsonStateStore:
         payload = self.load_json_file(self.user_search_defaults_file, {})
         if not isinstance(payload, dict):
             payload = {}
-        quality = str(defaults.get("quality") or "1080p")
+        quality = str(defaults.get("quality") or "4K")
         if quality not in {"4K", "1080p", "720p", "any"}:
-            quality = "1080p"
+            quality = "4K"
         voices_raw = defaults.get("preferred_voices") or []
         voices = [str(v) for v in voices_raw if v] if isinstance(voices_raw, list) else []
         payload[str(chat_id)] = {

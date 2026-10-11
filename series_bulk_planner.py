@@ -6,12 +6,13 @@ an explicit user choice.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import re
 from typing import Iterable
 
-from formatters import _extract_season_from_query, _parse_episode_info
+from formatters import _extract_season_from_query, _parse_episode_info, _score_result
 from movie_discovery import detect_quality, parse_size_gb
+from release_quality import is_screen_release, normalize_quality, quality_sort_key, result_quality
 from series_continue import title_match_key
 
 
@@ -172,7 +173,10 @@ def build_series_bulk_plan(
     plex_set = {int(s) for s in plex_seasons if int(s) > 0}
     downloading_set = {int(s) for s in downloading_seasons if int(s) > 0}
 
-    result_list = [r for r in results if isinstance(r, dict)]
+    result_list = [
+        r for r in results
+        if isinstance(r, dict) and not is_screen_release(_result_title(r))
+    ]
     profile = _profile_for_single_reference_voice(
         series_title=series_title,
         seasons=wanted_seasons,
@@ -180,12 +184,18 @@ def build_series_bulk_plan(
         profile=profile,
         skipped_seasons=plex_set | downloading_set,
     )
-    pack_candidates = tuple(
-        r for r in result_list
-        if not _result_is_non_downloadable_seed(r)
-        and _title_matches_series(series_title, _result_title(r))
-        and _detect_season_pack(_result_title(r)) is not None
-    )
+    pack_candidates = tuple(sorted(
+        (
+            r for r in result_list
+            if not _result_is_non_downloadable_seed(r)
+            and _title_matches_series(series_title, _result_title(r))
+            and _detect_season_pack(_result_title(r)) is not None
+        ),
+        key=lambda result: quality_sort_key(
+            result, _score_result(result), preferred_quality=profile.quality,
+        ),
+        reverse=True,
+    ))
 
     plans: list[SeasonPlan] = []
     for season in wanted_seasons:
@@ -241,13 +251,23 @@ def _evaluate_season_candidates(
             continue
 
         release = release_profile_from_title(title, size=str(result.get("size") or ""))
+        release = replace(release, quality=result_quality(result))
         episode_progress = _parse_episode_info(title)
         season_candidates.append((result, title, release, episode_progress))
 
     preferred_quality_available = (
         bool(profile.quality)
         and profile.quality != "any"
-        and any(release.quality == profile.quality for _result, _title, release, _progress in season_candidates)
+        and any(
+            release.quality == normalize_quality(profile.quality)
+            and not _score_candidate(
+                result=result,
+                release=release,
+                profile=profile,
+                preferred_quality_available=False,
+            )[3]
+            for result, _title, release, _progress in season_candidates
+        )
     )
 
     evaluations: list[CandidateEvaluation] = []
@@ -280,7 +300,13 @@ def _evaluate_season_candidates(
             episode_progress=episode_progress,
         ))
 
-    return tuple(sorted(evaluations, key=lambda item: item.score, reverse=True))
+    return tuple(sorted(
+        evaluations,
+        key=lambda item: quality_sort_key(
+            item.result, item.score, preferred_quality=profile.quality,
+        ),
+        reverse=True,
+    ))
 
 
 def _profile_for_single_reference_voice(
@@ -295,8 +321,7 @@ def _profile_for_single_reference_voice(
         return profile
 
     best_voice = ""
-    best_ready_count = -1
-    best_score = -1.0
+    best_key = (-1, (), -1.0)
     for voice in profile.voices:
         trial = _profile_copy(
             profile,
@@ -305,6 +330,7 @@ def _profile_for_single_reference_voice(
         )
         ready_count = 0
         score = 0.0
+        qualities = []
         for season in seasons:
             if season in skipped_seasons:
                 continue
@@ -320,10 +346,13 @@ def _profile_for_single_reference_voice(
             if plan.status in {STATUS_EXACT, STATUS_GOOD} and plan.selected is not None:
                 ready_count += 1
                 score += plan.selected.score
-        if (ready_count, score) > (best_ready_count, best_score):
+                qualities.append(quality_sort_key(
+                    plan.selected.result, preferred_quality=profile.quality,
+                )[:2])
+        key = (ready_count, tuple(sorted(qualities, reverse=True)), score)
+        if key > best_key:
             best_voice = voice
-            best_ready_count = ready_count
-            best_score = score
+            best_key = key
 
     if not best_voice:
         return profile
@@ -378,7 +407,8 @@ def _choose_season_plan(season: int, evaluations: tuple[CandidateEvaluation, ...
         )
 
     top = passing[0]
-    if len(passing) > 1 and top.score - passing[1].score < 40:
+    same_quality = tuple(e for e in passing if e.release.quality == top.release.quality)
+    if len(same_quality) > 1 and top.score - same_quality[1].score < 40:
         return SeasonPlan(
             season=season,
             status=STATUS_NEEDS_DECISION,
@@ -407,7 +437,7 @@ def _score_candidate(
     hard_failures: list[str] = []
 
     if profile.quality and profile.quality != "any":
-        if release.quality == profile.quality:
+        if release.quality == normalize_quality(profile.quality):
             score += 260
             reasons.append(f"quality matches {profile.quality}")
         elif preferred_quality_available:

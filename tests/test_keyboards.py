@@ -671,6 +671,11 @@ class SearchOptionsKeyboardTests(unittest.TestCase):
 class SearchAdvancedKeyboardTests(unittest.TestCase):
     _settings = {"quality": "1080p", "audio": False, "subs": False}
 
+    def test_empty_settings_select_4k(self) -> None:
+        keyboard = _search_advanced_keyboard({})
+        selected = [b for row in keyboard.inline_keyboard for b in row if b.text.startswith("✅ ")]
+        self.assertEqual([b.callback_data for b in selected], ["srch:quality:4K"])
+
     def test_no_tracker_button_without_label(self) -> None:
         keyboard = _search_advanced_keyboard(self._settings)
         labels = [b.text for row in keyboard.inline_keyboard for b in row]

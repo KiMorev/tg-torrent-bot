@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from formatters import _extract_season_from_query, _parse_episode_info
+from release_quality import is_screen_release, normalize_quality, quality_sort_key, result_quality
 
 
 JACKETT_SUBSCRIPTION_SCHEMA = 2
@@ -68,6 +69,8 @@ def build_jackett_subscription(
         ``notify_only`` / ``ask``
     """
     title = str(result.get("title") or "")
+    if is_screen_release(title):
+        raise RuntimeError("Экранные копии исключены из подбора.")
     query = str(query or title)
     episode_info = _parse_episode_info(title)
     season = _extract_season_from_query(title) or _extract_season_from_query(query)
@@ -78,6 +81,7 @@ def build_jackett_subscription(
         "chat_id": chat_id,
         "query": query,
         "title": title,
+        "quality": result_quality(result) or result_quality({"title": query}),
         "tracker": str(result.get("tracker_name") or result.get("category") or "").strip(),
         "topic_url": str(result.get("url") or "").strip(),
         "season": season,
@@ -96,9 +100,27 @@ def build_jackett_subscription(
 
 
 def select_jackett_subscription_candidate(sub: dict, results: list[Any]) -> Any | None:
+    expected_quality = (
+        normalize_quality(sub.get("quality"))
+        or result_quality({"title": str(sub.get("title") or "")})
+        or result_quality({"title": str(sub.get("query") or "")})
+    )
+    results = [
+        result for result in results
+        if not is_screen_release(_result_title(result))
+        and (
+            not expected_quality
+            or not result_quality({"title": _result_title(result)})
+            or result_quality({"title": _result_title(result)}) == expected_quality
+        )
+    ]
     if sub.get("version") != JACKETT_SUBSCRIPTION_SCHEMA:
         seen_titles = set(sub.get("seen_titles", []))
-        return next((r for r in results if _result_title(r) not in seen_titles), None)
+        unseen = [r for r in results if _result_title(r) not in seen_titles]
+        unseen.sort(key=lambda result: quality_sort_key(
+            {"title": _result_title(result)}, preferred_quality=expected_quality,
+        ), reverse=True)
+        return unseen[0] if unseen else None
 
     expected_tracker = str(sub.get("tracker") or "").strip().lower()
     expected_topic_url = str(sub.get("topic_url") or "").strip().rstrip("/").lower()
@@ -106,7 +128,7 @@ def select_jackett_subscription_candidate(sub: dict, results: list[Any]) -> Any 
     expected_season = sub.get("season")
     last_episode_end = sub.get("last_episode_end")
 
-    candidates: list[tuple[float, Any, tuple[int, int] | None]] = []
+    candidates: list[tuple[tuple[int, int, float], Any, tuple[int, int] | None]] = []
     for result in results:
         title = _result_title(result)
         if not title:
@@ -135,7 +157,9 @@ def select_jackett_subscription_candidate(sub: dict, results: list[Any]) -> Any 
         if episode_info:
             score += episode_info[0]
         score += min(int(getattr(result, "seeders", 0) or 0), 100) / 100
-        candidates.append((score, result, episode_info))
+        candidates.append((quality_sort_key(
+            {"title": title}, score, preferred_quality=expected_quality,
+        ), result, episode_info))
 
     if not candidates:
         return None

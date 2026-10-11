@@ -8506,7 +8506,7 @@ class SearchVoicePreferenceTests(unittest.TestCase):
 
         self.assertEqual(len(filtered), 2)
         self.assertIn("LostFilm", filtered[0]["title"])
-        self.assertIn("Сначала варианты с LostFilm", banner)
+        self.assertIn("В одинаковом качестве сначала варианты с LostFilm", banner)
 
     def test_default_voice_only_boosts_and_keeps_alternatives(self):
         context = _make_context(user_data={
@@ -9936,10 +9936,10 @@ class SeriesContinueCommandTests(unittest.TestCase):
         asyncio.run(run())
 
         build_plan.assert_awaited_once()
-        self.assertEqual(context.user_data["srch_series_bulk_profile_draft"].quality, "1080p")
-        self.assertEqual(context.user_data["srch_series_bulk_base_quality"], "1080p")
-        self.assertEqual(context.user_data["srch_results"][0]["quality"], "1080p")
-        self.assertIn("1080", context.user_data["srch_results"][0]["title"])
+        self.assertEqual(context.user_data["srch_series_bulk_profile_draft"].quality, "2160p")
+        self.assertEqual(context.user_data["srch_series_bulk_base_quality"], "2160p")
+        self.assertEqual(context.user_data["srch_results"][0]["quality"], "2160p")
+        self.assertIn("2160", context.user_data["srch_results"][0]["title"])
 
     def test_continue_missing_bulk_respects_user_any_quality_default(self):
         state = {
@@ -9971,9 +9971,10 @@ class SeriesContinueCommandTests(unittest.TestCase):
 
         build_plan.assert_awaited_once()
         self.assertEqual(context.user_data["srch_series_bulk_profile_draft"].quality, "any")
-        self.assertEqual(context.user_data["srch_series_bulk_base_quality"], "1080p")
+        self.assertEqual(context.user_data["srch_series_bulk_base_quality"], "2160p")
         self.assertEqual(context.user_data["srch_results"][0]["quality"], "")
         self.assertNotIn("1080", context.user_data["srch_results"][0]["title"])
+        self.assertNotIn("2160", context.user_data["srch_results"][0]["title"])
 
     def test_continue_missing_bulk_single_uses_only_selected_season(self):
         state = {

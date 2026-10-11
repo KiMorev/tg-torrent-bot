@@ -39,6 +39,7 @@ from access_control import (
 )
 from app_context import build_app_context
 from config import load_settings, parse_chat_ids
+from release_quality import is_screen_release, normalize_quality, result_quality, quality_sort_key
 from diagnostics import friendly_error as _friendly_error, format_diagnostics, format_diagnostics_section, run_diagnostics
 from download_station import DownloadStationError
 from formatters import (
@@ -252,6 +253,7 @@ from movie_discovery import (
     parse_size_gb as _movie_parse_size_gb,
     parse_published_at as _movie_parse_published_at,
     parse_qualities as _movie_parse_qualities,
+    prepare_card_releases as _movie_prepare_card_releases,
     prune_kp_cache as _movie_prune_kp_cache,
     prune_seen_fingerprints as _movie_prune_seen_fingerprints,
     prune_tracker_data as _movie_prune_tracker_data,
@@ -1735,7 +1737,7 @@ def _format_admin_stuck_notifications_line() -> str:
 
 
 def _format_admin_search_defaults_line() -> str:
-    quality = _SRCH_DEFAULT_SETTINGS.get("quality", "1080p")
+    quality = _SRCH_DEFAULT_SETTINGS["quality"]
     audio = "да" if _SRCH_DEFAULT_SETTINGS.get("audio") else "нет"
     subs = "да" if _SRCH_DEFAULT_SETTINGS.get("subs") else "нет"
     return f"• Поиск: {quality} · оригинальная дорожка: {audio} · субтитры: {subs}"
@@ -2991,6 +2993,7 @@ def _movie_release_to_search_result(release: dict) -> dict:
         "url": release.get("url") or release.get("topic_url") or "",
         "category": release.get("tracker") or "",
         "size": release.get("size") or "",
+        "quality": release.get("quality") or "",
         "seeders": release.get("seeders") or 0,
         "partial": False,
         "ep_str": "",
@@ -3079,7 +3082,11 @@ def _movie_discovery_confirmed_cards(cache: dict, limit: int = 10) -> list[dict]
     before it becomes visible. Without previous data (fresh install / migration)
     keep the historical behavior.
     """
-    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    cards = [
+        prepared for card in (cache.get("cards") or [])
+        if isinstance(card, dict)
+        and (prepared := _movie_prepare_card_releases(card)) is not None
+    ]
     prev_top10_set = {kp for kp in (cache.get("prev_top10_kp_ids") or []) if kp}
     if not prev_top10_set:
         return cards[:limit]
@@ -3721,7 +3728,10 @@ async def _refresh_movie_discovery_cache_inner(max_stale_kp_refresh: int | None 
         key = "|".join(str(release.get(part, "") or "") for part in ("source", "tracker", "topic_id", "topic_url", "title", "size"))
         by_fingerprint[key] = release
 
-    all_releases = list(by_fingerprint.values())
+    all_releases = [
+        release for release in by_fingerprint.values()
+        if not is_screen_release(str(release.get("title") or ""))
+    ]
 
     previous = _load_movie_discovery_cache()
     # Migrate legacy list format → dict[fingerprint, timestamp]
@@ -3919,6 +3929,11 @@ async def _recompute_movie_discovery_from_cache() -> None:
     all_releases = cache.get("all_releases")
     if not isinstance(all_releases, list):
         return
+    all_releases = [
+        release for release in all_releases
+        if isinstance(release, dict)
+        and not is_screen_release(str(release.get("title") or ""))
+    ]
 
     settings = _load_movie_discovery_settings()
     enabled_ids_raw = settings.get("jackett_trackers_enabled")
@@ -4002,12 +4017,11 @@ _MOVIE_NOTIFICATION_MAX_FAILURES = MAX_TASK_NOTIFICATION_FAILURES
 
 
 def _movie_notification_target_quality(defaults: dict) -> str:
-    quality = str(defaults.get("quality") or "1080p")
-    return {"4K": "2160p", "1080p": "1080p", "720p": "720p"}.get(quality, "")
+    return normalize_quality(defaults.get("quality") or "4K")
 
 
 def _movie_release_quality_label(result: dict) -> str:
-    return str(result.get("quality") or _movie_detect_quality(str(result.get("title") or "")) or "")
+    return result_quality(result) or ""
 
 
 def _movie_notification_release_score(result: dict, defaults: dict) -> float:
@@ -4047,6 +4061,13 @@ async def _gpt_choose_movie_notification_release(
     scored_releases: list[tuple[float, dict]],
 ) -> tuple[dict | None, str]:
     if not GPT_ENABLED or len(scored_releases) < 2:
+        return None, ""
+    selected_quality = _movie_release_quality_label(scored_releases[0][1])
+    scored_releases = [
+        (score, result) for score, result in scored_releases
+        if _movie_release_quality_label(result) == selected_quality
+    ]
+    if len(scored_releases) < 2:
         return None, ""
     top_score = scored_releases[0][0]
     if top_score - scored_releases[1][0] > _MOVIE_NOTIFICATION_GPT_TIE_DELTA:
@@ -4121,12 +4142,16 @@ def _movie_notification_pick_release(card: dict, chat_id: int | None) -> tuple[d
         _movie_release_to_search_result(release)
         for release in (card.get("releases") or [])
         if isinstance(release, dict)
+        and not is_screen_release(str(release.get("title") or ""))
     ]
     if not releases:
         return None, []
     defaults = _search_defaults_for_chat(chat_id)
     releases.sort(
-        key=lambda r: _movie_notification_release_score(r, defaults),
+        key=lambda r: quality_sort_key(
+            r, _movie_notification_release_score(r, defaults),
+            preferred_quality=_movie_notification_target_quality(defaults),
+        ),
         reverse=True,
     )
     selected = releases[0]
@@ -4141,6 +4166,7 @@ async def _movie_notification_pick_release_for_snapshot(
         _movie_release_to_search_result(release)
         for release in (card.get("releases") or [])
         if isinstance(release, dict)
+        and not is_screen_release(str(release.get("title") or ""))
     ]
     if not releases:
         return None, []
@@ -4150,7 +4176,9 @@ async def _movie_notification_pick_release_for_snapshot(
             (_movie_notification_release_score(result, defaults), result)
             for result in releases
         ),
-        key=lambda item: item[0],
+        key=lambda item: quality_sort_key(
+            item[1], item[0], preferred_quality=_movie_notification_target_quality(defaults),
+        ),
         reverse=True,
     )
     selected = scored[0][1]
@@ -4166,6 +4194,9 @@ async def _movie_notification_pick_release_for_snapshot(
 
 
 def _movie_notification_snapshot_card(card: dict) -> dict:
+    card = _movie_prepare_card_releases(card)
+    if card is None:
+        return {}
     keep = (
         "key", "title", "alt_title", "year", "kp_id", "kp_url", "rating",
         "kp_votes", "genres", "countries", "poster_url", "poster_preview_url",
@@ -4186,6 +4217,9 @@ def _movie_notification_snapshot_items(cards: list[dict], chat_id: int | None) -
     for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]:
         if not isinstance(card, dict):
             continue
+        card = _movie_prepare_card_releases(card)
+        if card is None:
+            continue
         selected, notes = _movie_notification_pick_release(card, chat_id)
         items.append({
             "card": _movie_notification_snapshot_card(card),
@@ -4202,6 +4236,9 @@ async def _movie_notification_snapshot_items_with_gpt(
     items: list[dict] = []
     for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]:
         if not isinstance(card, dict):
+            continue
+        card = _movie_prepare_card_releases(card)
+        if card is None:
             continue
         selected, notes = await _movie_notification_pick_release_for_snapshot(card, chat_id)
         items.append({
@@ -4277,6 +4314,20 @@ def _load_movie_notification_snapshot(push_id: str, chat_id: int | None) -> dict
         return None
     if chat_id is not None and str(snapshot.get("chat_id") or "") != str(chat_id):
         return None
+    snapshot = dict(snapshot)
+    items = []
+    for item in snapshot.get("items") or []:
+        item = dict(item)
+        card = item.get("card")
+        item["card"] = _movie_prepare_card_releases(card) if isinstance(card, dict) else None
+        result = item.get("result")
+        if item["card"] is None or (
+            isinstance(result, dict) and is_screen_release(str(result.get("title") or ""))
+        ):
+            item["result"] = None
+            item["notes"] = ["Экранная версия исключена из результатов"]
+        items.append(item)
+    snapshot["items"] = items
     return snapshot
 
 
@@ -4334,10 +4385,14 @@ def _movie_notification_total_size_gb(items: list[dict]) -> float:
     return total
 
 
-def _format_movie_notification_text(cards: list) -> str:
+def _format_movie_notification_text(cards: list, items: list[dict] | None = None) -> str:
     """Build the HTML message body for a /new notification."""
     import html as _html
     lines = ["🎬 <b>Новые фильмы в /new:</b>", ""]
+    visible_items = [
+        item for item in (items or [])
+        if isinstance(item, dict) and isinstance(item.get("card"), dict)
+    ]
     for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]:
         title_str = _html.escape(str(card.get("title") or ""))
         alt = card.get("alt_title") or ""
@@ -4354,12 +4409,26 @@ def _format_movie_notification_text(cards: list) -> str:
         meta_text = f" ({_html.escape(', '.join(meta_parts))})" if meta_parts else ""
         rating = card.get("rating")
         rating_text = f" · КП {rating:.1f}" if isinstance(rating, (int, float)) else ""
-        best_parts = [
-            str(value) for value in (card.get("best_quality"), card.get("best_size"))
-            if value
-        ]
+        item = next((
+            item for item in visible_items
+            if _movie_discovery_card_token(item["card"]) == _movie_discovery_card_token(card)
+        ), None)
+        result = item.get("result") if item is not None else None
+        if items is not None:
+            best_parts = (
+                [_movie_release_quality_label(result), str(result.get("size") or "")]
+                if isinstance(result, dict) else ["раздача недоступна"]
+            )
+        else:
+            best_parts = [
+                str(value) for value in (card.get("best_quality"), card.get("best_size"))
+                if value
+            ]
         best_text = f" · {html_module.escape(', '.join(best_parts))}" if best_parts else ""
         lines.append(f"• {title_str}{meta_text}{rating_text}{best_text}")
+        if item is not None:
+            for note in item.get("notes") or []:
+                lines.append(f"   {html_module.escape(str(note))}")
     return "\n".join(lines)
 
 
@@ -4370,7 +4439,11 @@ def _movie_notification_downloadable_indices(items: list[dict]) -> list[int]:
             continue
         card = item.get("card")
         result = item.get("result")
-        if isinstance(card, dict) and isinstance(result, dict) and not card.get("in_plex"):
+        if (
+            isinstance(card, dict) and isinstance(result, dict)
+            and not card.get("in_plex")
+            and not is_screen_release(str(result.get("title") or ""))
+        ):
             indices.append(index)
     return indices
 
@@ -4432,7 +4505,11 @@ async def _send_movie_notification_push_to_user_result(
 
     Returns ``(sent, failure_label, is_permanent)``.
     """
-    cards = [c for c in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT] if c.get("kp_id")]
+    cards = [
+        prepared for card in cards[:_MOVIE_NOTIFICATION_ACTION_LIMIT]
+        if card.get("kp_id")
+        and (prepared := _movie_prepare_card_releases(card)) is not None
+    ]
     if not cards:
         return False, "no_eligible_cards", False
     _enrich_cards_with_plex(cards)
@@ -4441,7 +4518,7 @@ async def _send_movie_notification_push_to_user_result(
         return False, "already_in_plex", False
     items = await _movie_notification_snapshot_items_with_gpt(cards, chat_id)
     push_id, items = _save_movie_notification_snapshot(chat_id, cards, items=items)
-    text = _format_movie_notification_text(cards)
+    text = _format_movie_notification_text(cards, items=items)
     keyboard = _movie_notification_keyboard(
         push_id,
         len(items),
@@ -4500,7 +4577,11 @@ def _movie_notification_pending_cards(entry: object) -> list[dict]:
     cards = entry.get("cards")
     if not isinstance(cards, list):
         return []
-    return [card for card in cards if isinstance(card, dict)]
+    return [
+        prepared for card in cards
+        if isinstance(card, dict)
+        and (prepared := _movie_prepare_card_releases(card)) is not None
+    ]
 
 
 def _queue_movie_notification(settings: dict, chat_id: int, cards: list[dict]) -> bool:
@@ -6052,6 +6133,10 @@ def _recompute_and_resort_cards(cards: list[dict]) -> None:
     """
     if not cards:
         return
+    cards[:] = [
+        prepared for card in cards
+        if (prepared := _movie_prepare_card_releases(card)) is not None
+    ]
     current_year = datetime.now(DISPLAY_TIMEZONE).year
     for card in cards:
         card["score"] = _movie_compute_card_score(card, current_year)
@@ -10692,6 +10777,8 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
     last_error message.
     """
     title = str(entry.get("title") or "untitled")
+    if is_screen_release(title):
+        raise RuntimeError("Экранные копии исключены из подбора.")
     safe_name = _safe_filename(f"{title}.torrent")
     temp_path = _temp_path(safe_name)
     tracker = (entry.get("tracker") or "").lower()
@@ -10890,18 +10977,26 @@ async def _notify_pending_dropped(app: Application, entry: dict) -> bool:
     attempts = int(entry.get("attempts") or 0)
     last_error = _stored_error_user_text(entry.get("last_error"))
     ttl_h = PENDING_DOWNLOADS_TTL_HOURS
-    text = (
-        f"⌛ Не удалось скачать «{title}» за {ttl_h:g}ч ({attempts} попыток).\n"
-        f"Последняя ошибка: {last_error}.\n"
-        "Попробуйте найти раздачу заново."
-    )
+    if is_screen_release(str(title)):
+        text = (
+            f"Отложенная загрузка «{title}» не запущена: экранные копии исключены.\n"
+            "Найдите другую раздачу через поиск."
+        )
+        keyboard = _search_error_keyboard()
+    else:
+        text = (
+            f"⌛ Не удалось скачать «{title}» за {ttl_h:g}ч ({attempts} попыток).\n"
+            f"Последняя ошибка: {last_error}.\n"
+            "Попробуйте найти раздачу заново."
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
+        ]])
     try:
         await app.bot.send_message(
             chat_id=chat_id,
             text=text,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(BUTTON_CLOSE, callback_data=_task_callback("close", "")),
-            ]]),
+            reply_markup=keyboard,
         )
     except Exception:
         logger.warning("Failed to notify pending-dropped for chat_id=%s", chat_id, exc_info=True)
@@ -11034,6 +11129,10 @@ async def _run_pending_downloads_once(app: Application) -> None:
 
     for entry_id, entry in list(pending.items()):
         notification_pending = str(entry.get("notification_pending") or "")
+        if notification_pending != "success" and is_screen_release(str(entry.get("title") or "")):
+            notification_pending = "drop"
+            entry["notification_pending"] = "drop"
+            entry["last_error"] = "экранные копии исключены из подбора"
         if notification_pending == "success":
             task_id = str(entry.get("task_id") or "")
             method = str(entry.get("method") or "download")
@@ -11823,7 +11922,7 @@ async def _wait_for_magnet_task_id(
 
 def _build_search_query(base: str, settings: dict) -> str:
     parts = [base]
-    quality = settings.get("quality", "1080p")
+    quality = settings.get("quality", _SRCH_DEFAULT_SETTINGS["quality"])
     if quality != "any":
         parts.append(quality)
     if settings.get("audio"):
@@ -11890,7 +11989,7 @@ def _search_defaults_for_chat(chat_id: int | None) -> dict:
 def _search_settings_for_chat(chat_id: int | None) -> dict:
     defaults = _search_defaults_for_chat(chat_id)
     return {
-        "quality": defaults.get("quality", "1080p"),
+        "quality": defaults.get("quality", _SRCH_DEFAULT_SETTINGS["quality"]),
         "audio": bool(defaults.get("audio", False)),
         "subs": bool(defaults.get("subs", False)),
     }
@@ -11898,7 +11997,7 @@ def _search_settings_for_chat(chat_id: int | None) -> dict:
 
 def _save_search_defaults(chat_id: int, defaults: dict) -> None:
     state_store.save_user_search_defaults(chat_id, {
-        "quality": defaults.get("quality", "1080p"),
+        "quality": defaults.get("quality", _SRCH_DEFAULT_SETTINGS["quality"]),
         "audio": bool(defaults.get("audio", False)),
         "subs": bool(defaults.get("subs", False)),
         "preferred_voices": _normalise_preferred_voices(defaults.get("preferred_voices")),
@@ -11906,7 +12005,7 @@ def _save_search_defaults(chat_id: int, defaults: dict) -> None:
 
 
 def _quality_label(value: str) -> str:
-    return {"4K": "4K", "1080p": "1080p", "720p": "720p", "any": "любое"}.get(value, "1080p")
+    return {"4K": "4K", "1080p": "1080p", "720p": "720p", "any": "любое"}.get(value, _SRCH_DEFAULT_SETTINGS["quality"])
 
 
 def _settings_voice_label(voices: list[str]) -> str:
@@ -11920,7 +12019,7 @@ def _settings_text(defaults: dict) -> str:
         "",
         "Учитываю в новых поисках как пожелания. Если точного варианта нет, покажу альтернативы.",
         "",
-        f"• Качество: предпочитаю {_quality_label(str(defaults.get('quality') or '1080p'))}",
+        f"• Качество: предпочитаю {_quality_label(str(defaults.get('quality') or _SRCH_DEFAULT_SETTINGS['quality']))}",
         f"• Original: {'предпочитаю' if defaults.get('audio') else 'не важно'}",
         f"• Субтитры: {'предпочитаю' if defaults.get('subs') else 'не важно'}",
         f"• Переводы: {_settings_voice_label(voices)}",
@@ -11928,7 +12027,7 @@ def _settings_text(defaults: dict) -> str:
 
 
 def _settings_keyboard(defaults: dict, *, voices_expanded: bool = False) -> InlineKeyboardMarkup:
-    quality = str(defaults.get("quality") or "1080p")
+    quality = str(defaults.get("quality") or _SRCH_DEFAULT_SETTINGS["quality"])
     audio = bool(defaults.get("audio", False))
     subs = bool(defaults.get("subs", False))
     voice_list = _normalise_preferred_voices(defaults.get("preferred_voices"))
@@ -12001,8 +12100,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if action == "quality":
         order = ["4K", "1080p", "720p", "any"]
-        current = str(defaults.get("quality") or "1080p")
-        defaults["quality"] = order[(order.index(current) + 1) % len(order)] if current in order else "1080p"
+        current = str(defaults.get("quality") or _SRCH_DEFAULT_SETTINGS["quality"])
+        defaults["quality"] = order[(order.index(current) + 1) % len(order)] if current in order else _SRCH_DEFAULT_SETTINGS["quality"]
     elif action == "audio":
         defaults["audio"] = not bool(defaults.get("audio", False))
     elif action == "subs":
@@ -12335,7 +12434,7 @@ def _apply_intent_to_search_state(
 ) -> tuple[str, dict]:
     defaults = _search_defaults_for_chat(chat_id)
     settings = {
-        "quality": defaults.get("quality", "1080p"),
+        "quality": defaults.get("quality", _SRCH_DEFAULT_SETTINGS["quality"]),
         "audio": bool(defaults.get("audio", False)),
         "subs": bool(defaults.get("subs", False)),
     }
@@ -12713,8 +12812,12 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("Запрос потерян. Начните поиск заново.", show_alert=True)
         return ConversationHandler.END
     base_query, preferred_quality, audio_required, subs_required = _split_query_settings(search_query)
+    context.user_data["srch_preferred_quality"] = preferred_quality
     series_master = _search_is_series_master(context)
-    await query.edit_message_text(f"🔍 Ищу {_format_search_query_label(search_query)} напрямую в Rutracker…")
+    await query.edit_message_text(
+        f"🔍 Ищу {_format_search_query_label(search_query)} напрямую в Rutracker…",
+        reply_markup=_search_error_keyboard(),
+    )
     try:
         rt_results = await asyncio.to_thread(rutracker_client.search, base_query)
     except RutrackerError as rt_err:
@@ -12743,25 +12846,23 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             "torrent_url": None,
             "tracker_name": "rutracker",
         })
+    screen_count = sum(is_screen_release(str(result.get("title") or "")) for result in results_data)
+    results_data = [result for result in results_data if not is_screen_release(str(result.get("title") or ""))]
+    if screen_count and not results_data:
+        context.user_data["srch_results"] = []
+        await query.edit_message_text(
+            "Найдены только экранки. Они не показываются при любом качестве поиска.",
+            reply_markup=_no_results_keyboard(
+                has_quality=False, jackett_can_expand=False, show_switch_trackers=bool(jackett_client),
+            ),
+        )
+        return SEARCH_RESULTS
     results_data, filter_banner_parts = _apply_audio_subs_preferences(
         results_data,
         context,
         audio_required=audio_required,
         subs_required=subs_required,
     )
-    quality_banner = ""
-    if preferred_quality and results_data:
-        buckets = _classify_results_by_quality(results_data)
-        preferred_bucket = buckets.get(preferred_quality) or []
-        if preferred_bucket:
-            results_data = preferred_bucket
-            other_stats = _format_quality_stats(buckets, exclude=preferred_quality)
-            quality_banner = f"🎬 Показаны раздачи в {preferred_quality}."
-            if other_stats:
-                quality_banner += f" Также есть: {other_stats}."
-        else:
-            other_stats = _format_quality_stats(buckets)
-            quality_banner = f"⚠️ В {preferred_quality} ничего не найдено. Показаны все качества: {other_stats}."
     series_master_banner = ""
     if series_master:
         before = len(results_data)
@@ -12779,29 +12880,14 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
     results_data, voice_banner = _apply_voice_preferences(results_data, context)
     if voice_banner:
         filter_banner_parts.append(voice_banner)
+    season_num = _extract_season_from_query(search_query)
+    if season_num is not None:
+        results_data = _filter_by_season(results_data, season_num)
+    results_data, quality_banner = _apply_search_quality_preference(results_data, preferred_quality)
     if not results_data:
         has_quality, _ = _no_results_flags(context, search_query)
         suggestions = await _gpt_get_did_you_mean(base_query)
         suggestions = _remember_didmean_suggestions(context, suggestions)
-        advice = None
-        if not multi_tracker_coverage_lost and not original_kp_match:
-            advice = await _gpt_get_search_failure_advice(
-                search_query,
-                base_query=base_query,
-                preferred_quality=preferred_quality,
-                audio_required=audio_required,
-                subs_required=subs_required,
-                has_quality=has_quality,
-                jackett_can_expand=jackett_can_expand,
-                season_requested=bool(_extract_season_from_query(search_query)),
-                source_status="empty",
-                suggestions=suggestions,
-            )
-            extra_suggestions = (advice or {}).get("suggested_queries") or []
-            if extra_suggestions:
-                suggestions = _remember_didmean_suggestions(
-                    context, [*suggestions, *extra_suggestions],
-                )
         advice = await _gpt_get_search_failure_advice(
             search_query,
             base_query=base_query,
@@ -12841,10 +12927,10 @@ async def search_direct_rutracker(update: Update, context: ContextTypes.DEFAULT_
             ),
         )
         return SEARCH_RESULTS
-    results_data.sort(key=_search_result_sort_score, reverse=True)
-    results_data[0]["recommended"] = True
+    _sort_search_results(results_data)
     await _enrich_results_with_plex_hints(results_data, preferred_quality, max_n=15)
-    banner = "\n".join(b for b in (series_master_banner, "🔗 Прямой поиск Rutracker", *filter_banner_parts, quality_banner) if b)
+    screen_banner = f"🚫 Экранки исключены: {screen_count}." if screen_count else ""
+    banner = "\n".join(b for b in (series_master_banner, "🔗 Прямой поиск Rutracker", screen_banner, *filter_banner_parts, quality_banner) if b)
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
     # R.2 pre-warm: kick off background Plex season fetch for the first
@@ -13152,7 +13238,7 @@ def _classify_results_by_quality(results: list[dict]) -> dict[str, list[dict]]:
     """
     buckets: dict[str, list[dict]] = {}
     for r in results:
-        q = _movie_detect_quality(r.get("title", "")) or "other"
+        q = result_quality(r) or "other"
         buckets.setdefault(q, []).append(r)
     return buckets
 
@@ -13165,13 +13251,63 @@ def _format_quality_stats(buckets: dict[str, list[dict]], exclude: str | None = 
              → "720p × 12, 2160p × 7"
     Order is fixed (highest quality first) for stable display.
     """
-    order = ["2160p", "1080p", "720p", "480p", "other"]
+    order = ["2160p", "1080p", "720p", "576p", "480p", "other"]
     parts = [
         f"{q} × {len(buckets[q])}"
         for q in order
         if q in buckets and q != exclude and buckets[q]
     ]
     return ", ".join(parts)
+
+
+def _apply_search_quality_preference(
+    results: list[dict], preferred_quality: str | None,
+) -> tuple[list[dict], str]:
+    """Apply resolution preferences within each movie/year/season identity."""
+    preferred_quality = normalize_quality(preferred_quality)
+    if not preferred_quality or not results:
+        return results, ""
+    selected_indices: set[int] = set()
+    missing = 0
+    used_1080_fallback = False
+    clusters = _build_search_clusters(results)
+    for cluster in clusters:
+        indices = cluster["indices"]
+        matches = [i for i in indices if result_quality(results[i]) == preferred_quality]
+        if not matches:
+            missing += 1
+            if preferred_quality == "2160p":
+                matches = [i for i in indices if result_quality(results[i]) == "1080p"]
+                used_1080_fallback = used_1080_fallback or bool(matches)
+        selected_indices.update(matches or indices)
+    selected = [result for index, result in enumerate(results) if index in selected_indices]
+    if not missing:
+        other_stats = _format_quality_stats(_classify_results_by_quality(results), exclude=preferred_quality)
+        suffix = f". Также есть: {other_stats}" if other_stats else ""
+        banner = (
+            f"🎬 Найдено {len(results)} раздач, "
+            f"показаны {len(selected)} в {preferred_quality}{suffix}."
+        )
+    else:
+        shown = _format_quality_stats(_classify_results_by_quality(selected))
+        if len(clusters) == 1:
+            fallback_label = "Показаны 1080p" if used_1080_fallback else "Показаны все качества"
+            banner = f"⚠️ В {preferred_quality} ничего не найдено. {fallback_label}: {shown}."
+        else:
+            banner = (
+                f"🎬 Найдено {len(results)} раздач, показаны {len(selected)}: {shown}.\n"
+                f"⚠️ Для {missing} из {len(clusters)} фильмов/сезонов {preferred_quality} не найдено. "
+                "Показаны доступные варианты отдельно для каждого фильма/сезона."
+            )
+    return selected, banner
+
+
+def _sort_search_results(results: list[dict]) -> None:
+    for result in results:
+        result.pop("recommended", None)
+    results.sort(key=_search_result_sort_score, reverse=True)
+    if results:
+        results[0]["recommended"] = True
 
 
 def _result_has_preferred_voice(result: dict, voices: list[str]) -> bool:
@@ -13197,7 +13333,7 @@ def _apply_voice_preferences(results: list[dict], context: ContextTypes.DEFAULT_
     label = " / ".join(voices)
     source = context.user_data.get("srch_voice_source")
     if matched and source == "explicit":
-        return matched + other, f"🎙 Сначала варианты с {label}; другие озвучки оставил ниже."
+        return matched + other, f"🎙 В одинаковом качестве сначала варианты с {label}; другие озвучки оставил ниже."
     if matched:
         return matched + other, ""
     if source == "explicit":
@@ -13274,13 +13410,14 @@ def _apply_audio_subs_preferences(
     return results, banners
 
 
-def _search_result_sort_score(result: dict) -> float:
-    return (
+def _search_result_sort_score(result: dict) -> tuple[int, int, float]:
+    secondary_score = (
         _score_result(result)
         + (10000 if result.get("voice_preferred") else 0)
         + (5000 if result.get("audio_preferred") else 0)
         + (3000 if result.get("subs_preferred") else 0)
     )
+    return quality_sort_key(result, secondary_score)
 
 
 def _cancel_didmean_prefetch(context) -> None:
@@ -13616,6 +13753,7 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
     context.user_data.pop("srch_results_full", None)
     context.user_data.pop("srch_clusters", None)
     context.user_data.pop("srch_picker_clusters", None)
+    context.user_data.pop("srch_picker_banner", None)
     context.user_data.pop("srch_cluster_picker_return", None)
     _cancel_series_bulk_prefetch(context)
     # Check for in-flight didmean prefetch BEFORE Strategy-2 splitting — we
@@ -13950,6 +14088,27 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         if rt_results:
             source = "rutracker"
 
+    screen_count = sum(is_screen_release(str(result.get("title") or "")) for result in results_data)
+    results_data = [result for result in results_data if not is_screen_release(str(result.get("title") or ""))]
+    if screen_count:
+        banner = "\n".join(part for part in (banner, f"🚫 Экранки исключены: {screen_count}.") if part)
+    if screen_count and not results_data:
+        context.user_data["srch_results"] = []
+        _remember_didmean_suggestions(context, [])
+        _has_quality, jackett_can_expand = _no_results_flags(context, search_query)
+        await edit_fn(
+            _search_empty_text(
+                search_query,
+                preferred_quality=preferred_quality,
+                body="Найдены только экранки. Они не показываются при любом качестве поиска.",
+            ),
+            reply_markup=_no_results_keyboard(
+                has_quality=False, jackett_can_expand=jackett_can_expand,
+                show_switch_trackers=bool(jackett_client),
+            ),
+        )
+        return SEARCH_RESULTS
+
     # Diagnostic for the search-fallback investigation: log when we DIDN'T fall
     # back to Rutracker because Jackett successfully returned 0 results.
     if not results_data and not jackett_errored and jackett_client is not None:
@@ -14208,42 +14367,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             media_intent, len(results_data), before_media_intent, base_query,
         )
 
-    # Classify all results by detected quality (1080p / 2160p / 720p / other).
-    # If the user asked for a specific quality:
-    #   - filter to that bucket if non-empty (standard case)
-    #   - else show ALL with a banner «в <quality> ничего, есть в других»
-    #     (avoids the «0 results» dead-end when the film exists in other quality)
-    quality_banner = ""
-    if preferred_quality:
-        buckets = _classify_results_by_quality(results_data)
-        preferred_bucket = buckets.get(preferred_quality) or []
-        if preferred_bucket:
-            other_stats = _format_quality_stats(buckets, exclude=preferred_quality)
-            stats_suffix = f". Также есть: {other_stats}" if other_stats else ""
-            quality_banner = (
-                f"🎬 Найдено {len(results_data)} раздач, "
-                f"показаны {len(preferred_bucket)} в {preferred_quality}{stats_suffix}."
-            )
-            results_data = preferred_bucket
-            logger.info(
-                "Search: quality filter %s kept %d/%d for %r",
-                preferred_quality, len(preferred_bucket), len(results_data) + sum(
-                    len(v) for k, v in buckets.items() if k != preferred_quality
-                ), base_query,
-            )
-        else:
-            # Preferred bucket empty but other qualities have content → show
-            # everything with a banner. Better than hiding behind no-results.
-            other_stats = _format_quality_stats(buckets)
-            quality_banner = (
-                f"⚠️ В {preferred_quality} ничего не найдено. "
-                f"Показаны все качества: {other_stats}."
-            )
-            logger.info(
-                "Search: %s bucket empty, falling back to all qualities (%d total) for %r",
-                preferred_quality, len(results_data), base_query,
-            )
-
     series_master_banner = ""
     if series_master:
         before = len(results_data)
@@ -14300,13 +14423,12 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             context.user_data["srch_clusters"] = clusters
             context.user_data["srch_picker_clusters"] = picker_clusters
             context.user_data["srch_source"] = source
-            # Banner: combine source-fallback + filter banners (quality/audio/subs).
-            # combined_banner isn't computed until after season filter further
-            # down, so we build it inline here for the picker case.
+            # Resolution availability is evaluated after choosing the film.
             picker_banner = "\n".join(
-                b for b in (series_master_banner, banner, *filter_banner_parts, quality_banner) if b
+                b for b in (series_master_banner, banner, *filter_banner_parts) if b
             )
             context.user_data["srch_banner"] = picker_banner
+            context.user_data["srch_picker_banner"] = picker_banner
             await edit_fn(
                 _cluster_picker_text_with_hints(search_query, picker_clusters, picker_banner),
                 reply_markup=_cluster_picker_keyboard(
@@ -14329,23 +14451,6 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
         else:
             has_quality, jackett_can_expand = _no_results_flags(context, search_query)
             _remember_didmean_suggestions(context, [])
-            if has_quality:
-                await edit_fn(
-                    _search_empty_text(
-                        search_query,
-                        preferred_quality=preferred_quality,
-                        audio_required=audio_required,
-                        subs_required=subs_required,
-                        body="Раздачи есть, но с указанным качеством сезон не нашёл.",
-                        action_hint="Лучшее следующее действие: искать без ограничения качества.",
-                    ),
-                    reply_markup=_no_results_keyboard(
-                        has_quality=True,
-                        jackett_can_expand=jackett_can_expand,
-                    ),
-                )
-                return SEARCH_RESULTS
-
             # If we ran this search inside the season picker (srch_base_title set)
             # and the tracker has SOME seasons but not the one requested, list them
             # and offer a way back to the picker.
@@ -14402,9 +14507,8 @@ async def _run_search(send_fn, context: ContextTypes.DEFAULT_TYPE, search_query:
             )
             return SEARCH_RESULTS
 
-    # --- Step 2: sort by score, best first ---
-    results_data.sort(key=_search_result_sort_score, reverse=True)
-    results_data[0]["recommended"] = True
+    results_data, quality_banner = _apply_search_quality_preference(results_data, preferred_quality)
+    _sort_search_results(results_data)
 
     # PR3: enrich top-10 with GPT-parsed metadata (badges in card UI).
     # Runs after sort so the right results get the badges (top of list);
@@ -14460,8 +14564,21 @@ async def search_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE
     except (ValueError, IndexError):
         return SEARCH_RESULTS
 
-    context.user_data["srch_results_page"] = page
     results_data = context.user_data.get("srch_results", [])
+    visible_results = [result for result in results_data if not is_screen_release(str(result.get("title") or ""))]
+    if len(visible_results) != len(results_data):
+        results_data = visible_results
+        _sort_search_results(results_data)
+        context.user_data["srch_results"] = results_data
+    if not results_data:
+        context.user_data["srch_results_page"] = 0
+        await query.edit_message_text(
+            "В результатах нет подходящих раздач. Экранки исключены.",
+            reply_markup=_search_error_keyboard(),
+        )
+        return SEARCH_RESULTS
+    page = max(0, min(page, (len(results_data) - 1) // SEARCH_PAGE_SIZE))
+    context.user_data["srch_results_page"] = page
     search_query = context.user_data.get("srch_search_query", context.user_data.get("srch_query", ""))
     banner = context.user_data.get("srch_banner", "")
     source = context.user_data.get("srch_source", "")
@@ -14551,12 +14668,17 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
         indices = set(chosen.get("indices") or [])
         results_data = [r for i, r in enumerate(full) if i in indices]
 
-    # Standard post-cluster render: sort by score, mark top as recommended,
-    # delegate to the existing results keyboard. Picker state stays in user_data
-    # so «⬅️ К вариантам» can restore the original chooser.
-    if results_data:
-        results_data.sort(key=_search_result_sort_score, reverse=True)
-        results_data[0]["recommended"] = True
+    results_data = [result for result in results_data if not is_screen_release(str(result.get("title") or ""))]
+    preferred_quality = context.user_data.get("srch_preferred_quality")
+    results_data, quality_banner = _apply_search_quality_preference(results_data, preferred_quality)
+    if not results_data:
+        context.user_data["srch_results"] = []
+        await query.edit_message_text(
+            "В этом варианте нет подходящих раздач. Экранки исключены.",
+            reply_markup=_search_error_keyboard(),
+        )
+        return SEARCH_RESULTS
+    _sort_search_results(results_data)
 
     # PR3: enrich top-10 of the cluster slice. Cluster results are typically
     # a subset of what was fetched, so most are likely cache hits (we already
@@ -14570,10 +14692,12 @@ async def search_pick_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     search_query = context.user_data.get("srch_search_query", "")
     source = context.user_data.get("srch_source", "")
-    banner = context.user_data.get("srch_banner", "")
+    picker_banner = context.user_data.get("srch_picker_banner", context.user_data.get("srch_banner", ""))
+    banner = "\n".join(part for part in (picker_banner, quality_banner) if part)
 
     context.user_data["srch_results"] = results_data
     context.user_data["srch_results_page"] = 0
+    context.user_data["srch_banner"] = banner
     # R.2 pre-warm: kick off background Plex season fetch for the first
     # partial-season result so the eventual confirm dialog is instant.
     _maybe_prewarm_plex_for_results(
@@ -14607,7 +14731,7 @@ async def search_cluster_back(update: Update, context: ContextTypes.DEFAULT_TYPE
     full = context.user_data.get("srch_results_full") or []
     picker_clusters = context.user_data.get("srch_picker_clusters") or []
     search_query = context.user_data.get("srch_search_query", "")
-    banner = context.user_data.get("srch_banner", "")
+    banner = context.user_data.get("srch_picker_banner", context.user_data.get("srch_banner", ""))
 
     if not full or not picker_clusters or not search_query:
         await query.edit_message_text(
@@ -15879,6 +16003,7 @@ def _series_continue_season_subscription_payload(
     chat_id: int,
     notify_policy: str,
     download_policy: str,
+    quality_is_preference: bool = False,
 ) -> dict:
     notify_policy, download_policy = _coerce_subscription_policies(
         notify_policy,
@@ -15914,6 +16039,8 @@ def _series_continue_season_subscription_payload(
         "notify_policy": notify_policy,
         "download_policy": download_policy,
     }
+    if quality_is_preference:
+        payload["quality_is_preference"] = True
     payload.update(identity_payload)
     return payload
 
@@ -15924,6 +16051,7 @@ def _save_plex_season_subscription(
     chat_id: int | None,
     notify_policy: str | None = None,
     download_policy: str | None = None,
+    quality_is_preference: bool = False,
 ) -> tuple[str, dict]:
     if chat_id is None:
         raise RuntimeError("Не удалось определить чат для подписки на сезон.")
@@ -15937,8 +16065,15 @@ def _save_plex_season_subscription(
         chat_id=chat_id,
         notify_policy=notify_policy,
         download_policy=download_policy,
+        quality_is_preference=quality_is_preference,
     )
     if isinstance(previous, dict):
+        if quality_is_preference and previous.get("quality"):
+            payload["quality"] = previous["quality"]
+            if previous.get("quality_is_preference"):
+                payload["quality_is_preference"] = True
+            else:
+                payload.pop("quality_is_preference", None)
         for field in ("last_handled_signature", "last_options_signature", "last_handled_episode_end"):
             if previous.get(field):
                 payload[field] = previous[field]
@@ -16494,7 +16629,7 @@ def _series_continue_missing_bulk_quality(group: dict, chat_id: int | None) -> s
     if inferred_quality != "any":
         return inferred_quality
     settings = _search_settings_for_chat(chat_id)
-    return _series_continue_profile_quality(settings.get("quality") or "1080p")
+    return _series_continue_profile_quality(settings.get("quality") or "4K")
 
 
 async def _series_continue_start_missing_bulk(
@@ -16536,7 +16671,7 @@ async def _series_continue_start_missing_bulk(
     context.user_data["srch_series_bulk_origin_scope"] = scope
     context.user_data["srch_series_bulk_origin_page"] = page
     context.user_data["srch_series_bulk_base_quality"] = (
-        profile_quality if profile_quality != "any" else "1080p"
+        profile_quality if profile_quality != "any" else "2160p"
     )
     context.user_data["srch_series_bulk_profile_draft"] = SeriesBulkProfile(
         quality=profile_quality,
@@ -17028,6 +17163,12 @@ async def _series_continue_add_download_result(
     chat_id = _chat_id_from_query(query)
     notify_policy = NOTIFY_EACH_UPDATE
     download_policy = DOWNLOAD_AUTO_EACH_UPDATE
+    if is_screen_release(str(result.get("title") or "")):
+        await query.edit_message_text(
+            "Экранные копии исключены из подбора. Запустите поиск похожих ещё раз.",
+            reply_markup=_series_continue_action_keyboard(scope, index, page, search_alt=True),
+        )
+        return
     try:
         entry = _pending_download_entry_from_result(
             result,
@@ -17183,13 +17324,21 @@ async def _series_continue_subscribe_missing_season(
     page: int,
     group: dict,
 ) -> None:
+    quality_is_preference = not candidate.quality
     catch_up_candidate = _series_continue_candidate_from_missing_season(candidate)
+    if not catch_up_candidate.quality:
+        defaults = _search_settings_for_chat(_chat_id_from_query(query))
+        catch_up_candidate = replace(
+            catch_up_candidate,
+            quality=_plex_normalise_resolution(normalize_quality(defaults.get("quality"))),
+        )
     try:
         _saved_key, saved_sub = _save_plex_season_subscription(
             catch_up_candidate,
             chat_id=_chat_id_from_query(query),
             notify_policy=NOTIFY_EACH_UPDATE,
             download_policy=DOWNLOAD_AUTO_EACH_UPDATE,
+            quality_is_preference=quality_is_preference,
         )
     except RuntimeError as exc:
         logger.info("Series continue: missing season subscription failed: %s", exc)
@@ -17257,6 +17406,7 @@ async def _series_continue_search_alternatives(
         _series_continue_result_from_rutracker(result)
         for result in raw_results
         if result.topic_id != candidate.topic_id
+        and not is_screen_release(result.title)
         and _extract_season_from_query(result.title) == candidate.season_number
     ]
     if candidate.quality:
@@ -17267,7 +17417,9 @@ async def _series_continue_search_alternatives(
     else:
         quality_results = season_results
     results = quality_results or season_results
-    results.sort(key=_score_result, reverse=True)
+    results.sort(key=lambda result: quality_sort_key(
+        result, _score_result(result), preferred_quality=candidate.quality,
+    ), reverse=True)
     results = results[:5]
     if not results:
         await query.edit_message_text(
@@ -18385,6 +18537,12 @@ async def _download_and_add(
         notify_policy, download_policy
     )
     result = results[index]
+    if is_screen_release(str(result.get("title") or "")):
+        await _safe_edit_callback(
+            query, "Экранные копии исключены из подбора. Запустите поиск ещё раз.",
+            reply_markup=_search_error_keyboard(),
+        )
+        return SEARCH_RESULTS
     context.user_data["srch_picked"] = index
     # Stash subscribe/policy intent so retry/queue handlers
     # can restore them after a download failure. Without this, tapping retry
@@ -18851,6 +19009,8 @@ def _save_subscription_for_result(
     seen_results: list[dict] | None = None,
 ) -> tuple[str, dict]:
     title = str(result.get("title") or "")
+    if is_screen_release(title):
+        raise RuntimeError("Экранные копии исключены из подбора.")
     notify_policy, download_policy = _coerce_subscription_policies(
         notify_policy, download_policy
     )
@@ -18865,6 +19025,14 @@ def _save_subscription_for_result(
             or context.user_data.get("srch_query")
             or title
         )
+        selected_quality = result_quality(result)
+        if selected_quality:
+            base_query, _quality, audio_required, subs_required = _split_query_settings(search_query)
+            search_query = _build_search_query(base_query, {
+                "quality": selected_quality,
+                "audio": audio_required,
+                "subs": subs_required,
+            })
         subs[sub_key] = build_jackett_subscription(
             chat_id=chat_id,
             query=search_query,
@@ -19876,6 +20044,8 @@ def _series_bulk_merge_results(*groups: list[dict]) -> list[dict]:
         for result in group:
             if not isinstance(result, dict):
                 continue
+            if is_screen_release(str(result.get("title") or "")):
+                continue
             key = _series_bulk_result_key(result)
             if key in seen:
                 continue
@@ -19946,7 +20116,7 @@ def _series_bulk_candidate_from_snapshot(
 ) -> CandidateEvaluation | None:
     data = snapshot if isinstance(snapshot, dict) else {}
     result = data.get("result")
-    if not isinstance(result, dict) or not result:
+    if not isinstance(result, dict) or not result or is_screen_release(str(result.get("title") or "")):
         return None
     try:
         season = int(data.get("season") or default_season)
@@ -20008,6 +20178,8 @@ def _series_bulk_plan_from_job(job: dict) -> SeriesBulkPlan | None:
             if all(_series_bulk_result_key(candidate.result) != selected_key for candidate in candidates):
                 candidates.insert(0, selected)
         status = str(entry.get("plan_status") or entry.get("status") or STATUS_MISSING)
+        if selected is None and entry.get("selected"):
+            status = STATUS_NEEDS_DECISION if candidates else STATUS_MISSING
         seasons.append(SeasonPlan(
             season=season_num,
             status=status,
@@ -20024,7 +20196,7 @@ def _series_bulk_plan_from_job(job: dict) -> SeriesBulkPlan | None:
         seasons=tuple(sorted(seasons, key=lambda item: item.season)),
         pack_candidates=tuple(
             item for item in (job.get("pack_candidates") or ())
-            if isinstance(item, dict)
+            if isinstance(item, dict) and not is_screen_release(str(item.get("title") or ""))
         ),
         verified_season_range=bool(job.get("verified_season_range", True)),
     )
@@ -20094,6 +20266,9 @@ def _series_bulk_context_maps_from_job(job: dict) -> tuple[dict[str, str], dict[
         runtime_status = str(entry.get("runtime_status") or "")
         summary = str(entry.get("summary") or "")
         if runtime_status in _SERIES_BULK_FAILED_RUNTIME_STATUSES:
+            failed_result = entry.get("result") or (entry.get("selected") or {}).get("result") or {}
+            if isinstance(failed_result, dict) and is_screen_release(str(failed_result.get("title") or "")):
+                continue
             failed[season_key] = str(entry.get("error") or summary or "ошибка")
             failed_candidates[season_key] = 0
         elif runtime_status in _SERIES_BULK_RESOLVED_RUNTIME_STATUSES:
@@ -20429,6 +20604,7 @@ def _series_bulk_profile_from_result(
         or settings.get("quality")
         or "any"
     )
+    quality = normalize_quality(quality) or "any"
     if quality == "any":
         quality = "any"
     audio_required = bool((audio_required or settings.get("audio")) and audio_source == "explicit")
@@ -20734,7 +20910,7 @@ async def search_series_bulk_profile_callback(update: Update, context: ContextTy
     action = query.data.rsplit(":", 1)[-1]
     answer_text: str | None = None
     if action == "quality":
-        base_quality = str(context.user_data.get("srch_series_bulk_base_quality") or "1080p")
+        base_quality = str(context.user_data.get("srch_series_bulk_base_quality") or "2160p")
         profile = _series_bulk_profile_copy(
             profile,
             quality=base_quality if profile.quality == "any" else "any",
@@ -21522,6 +21698,8 @@ def _series_bulk_pack_from_query(context: ContextTypes.DEFAULT_TYPE, data: str |
     packs = _series_bulk_pack_candidates(plan)
     if not (0 <= index < len(packs)):
         return None
+    if is_screen_release(str(packs[index].get("title") or "")):
+        return None
     return index, packs[index]
 
 
@@ -21871,6 +22049,8 @@ async def _series_bulk_add_download(
     chat_id: int | None,
     meta_source: str,
 ) -> tuple[str, str]:
+    if is_screen_release(str(result.get("title") or "")):
+        raise RuntimeError("Экранные копии исключены из подбора.")
     entry = _pending_download_entry_from_result(
         result,
         chat_id=chat_id,
@@ -22058,6 +22238,11 @@ async def search_series_bulk_candidate_download(update: Update, context: Context
             notice="Не нашёл выбранный вариант. Откройте разбор ещё раз.",
         )
 
+    if is_screen_release(str(candidate.result.get("title") or "")):
+        return await _series_bulk_show_plan(
+            query, context,
+            notice="Экранные копии исключены из подбора. Пересоберите план.",
+        )
     updated = replace(
         season_plan,
         status=STATUS_GOOD,
@@ -22712,7 +22897,7 @@ async def search_series_bulk_plan(update: Update, context: ContextTypes.DEFAULT_
         return SEARCH_RESULTS
 
     profile = _series_bulk_profile_from_result(context, result)
-    base_quality = profile.quality if profile.quality and profile.quality != "any" else "1080p"
+    base_quality = profile.quality if profile.quality and profile.quality != "any" else "2160p"
     _clear_search_intent(context)
     context.user_data["srch_series_bulk_index"] = index
     context.user_data["srch_series_bulk_profile_draft"] = profile
@@ -23523,7 +23708,7 @@ async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "srch_series_bulk_origin_page",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
-        "srch_results_full", "srch_clusters", "srch_picker_clusters",
+        "srch_results_full", "srch_clusters", "srch_picker_clusters", "srch_picker_banner", "srch_preferred_quality",
         "srch_cluster_picker_return",
     ):
         context.user_data.pop(key, None)
@@ -23597,7 +23782,7 @@ async def search_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "srch_series_bulk_origin_page",
         # Cluster picker state (Proposal #1 — preserved between picker render
         # and the user's cluster choice; cleaned out at conversation exit).
-        "srch_results_full", "srch_clusters", "srch_picker_clusters",
+        "srch_results_full", "srch_clusters", "srch_picker_clusters", "srch_picker_banner", "srch_preferred_quality",
         "srch_cluster_picker_return",
     ):
         context.user_data.pop(key, None)
@@ -24429,6 +24614,9 @@ async def _deliver_jackett_subscription_pending_notification(
     sub: dict,
     pending: dict,
 ) -> bool:
+    if is_screen_release(str(pending.get("title") or "")):
+        sub.pop("pending_notification", None)
+        return True
     chat_id = _background_chat_id(sub.get("chat_id"))
     if chat_id is None:
         _apply_jackett_subscription_pending(subs, key, sub, pending)
@@ -24506,6 +24694,9 @@ async def _check_jackett_sub_via_rutracker_direct(
         return False
 
     # No new-episode info in title → nothing actionable
+    if is_screen_release(new_title):
+        sub["last_check"] = now_text
+        return True
     new_info = _parse_episode_info(new_title)
     sub["last_check"] = now_text
     if new_info is None:
@@ -25218,6 +25409,9 @@ async def _deliver_rutracker_subscription_notification(
     sub: dict,
     pending: dict,
 ) -> bool:
+    if is_screen_release(str(pending.get("title") or "")):
+        sub.pop("pending_notification", None)
+        return True
     text, keyboard = _rutracker_subscription_notification(pending, topic_id)
     chat_id = _background_chat_id(sub.get("chat_id"))
     if chat_id is not None:
@@ -25267,6 +25461,8 @@ def _plex_season_subscription_update_from_candidate(sub: dict, candidate: Series
         "quality": candidate.quality or sub.get("quality") or "",
         "season_key": _series_continue_season_subscription_season_key(candidate),
     }
+    if candidate.quality and sub.get("quality_is_preference"):
+        updates["quality_is_preference"] = False
     handled_end = max(
         _series_continue_int(sub.get("last_episode_end")),
         int(candidate.present_count or 0),
@@ -25338,6 +25534,15 @@ def _plex_season_subscription_select_result(
     uncertain: list[dict] = []
     last_handled_signature = str(sub.get("last_handled_signature") or "")
     last_handled_episode_end = _series_continue_int(sub.get("last_handled_episode_end"))
+    fixed_quality = "" if sub.get("quality_is_preference") else normalize_quality(sub.get("quality") or candidate.quality)
+    results = [
+        result for result in results
+        if not is_screen_release(str(result.get("title") or ""))
+        and (not fixed_quality or not result_quality(result) or result_quality(result) == fixed_quality)
+    ]
+    results.sort(key=lambda result: quality_sort_key(
+        result, _score_result(result), preferred_quality=sub.get("quality") or candidate.quality,
+    ), reverse=True)
     for result in results:
         covers_missing = _series_continue_result_covers_missing(candidate, result)
         if covers_missing is True:
@@ -25531,7 +25736,8 @@ async def _check_plex_season_subscriptions(app: Application) -> None:
                 changed = True
                 continue
 
-            results = await _plex_season_subscription_search_results(candidate)
+            search_candidate = replace(candidate, quality="") if sub.get("quality_is_preference") else candidate
+            results = await _plex_season_subscription_search_results(search_candidate)
             selected, uncertain = _plex_season_subscription_select_result(sub, candidate, results)
             if selected is None:
                 options_signature = _plex_season_subscription_options_signature(uncertain)
@@ -25655,6 +25861,8 @@ async def _check_subscriptions(app: Application) -> None:
                 continue
 
             new_info = _parse_episode_info(new_title)
+            if is_screen_release(new_title):
+                continue
             if new_info is None:
                 continue
 
@@ -26501,7 +26709,7 @@ async def movie_new_open_callback(update: Update, context: ContextTypes.DEFAULT_
         cards = _movie_notification_cards_from_items(items)
         if cards:
             snapshot_changed = _movie_notification_snapshot_changed(cards)
-            text = _format_movie_notification_text(cards)
+            text = _format_movie_notification_text(cards, items=items)
             if snapshot_changed:
                 text = (
                     "⚠️ <b>Свежий /new уже изменился.</b>\n"
@@ -26672,7 +26880,7 @@ def _movie_notification_confirm_text(items: list[dict]) -> tuple[str, int]:
         result = item.get("result") if isinstance(item, dict) else None
         if isinstance(card, dict) and card.get("in_plex"):
             skipped_plex.append(item)
-        elif isinstance(result, dict):
+        elif isinstance(result, dict) and not is_screen_release(str(result.get("title") or "")):
             download_items.append(item)
         else:
             unavailable.append(item)
@@ -26720,7 +26928,7 @@ async def movie_new_notification_push_back(update: Update, context: ContextTypes
     items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
     cards = _movie_notification_cards_from_items(items)
     await query.edit_message_text(
-        _format_movie_notification_text(cards),
+        _format_movie_notification_text(cards, items=items),
         reply_markup=_movie_notification_keyboard(
             push_id,
             len(items),
@@ -26795,6 +27003,8 @@ async def movie_new_notification_download(update: Update, context: ContextTypes.
     item = items[index]
     card = item.get("card") if isinstance(item.get("card"), dict) else {}
     result = item.get("result") if isinstance(item.get("result"), dict) else None
+    if result is not None and is_screen_release(str(result.get("title") or "")):
+        result = None
     if card.get("in_plex"):
         await work_query.edit_message_text(
             "Этот фильм уже есть в Plex. Откройте /new, если хотите выбрать другую новинку.",
@@ -26851,6 +27061,7 @@ async def movie_new_notification_bulk_run(update: Update, context: ContextTypes.
         and isinstance(item.get("card"), dict)
         and isinstance(item.get("result"), dict)
         and not item["card"].get("in_plex")
+        and not is_screen_release(str(item["result"].get("title") or ""))
     ]
     skipped_plex = [
         item for item in items
@@ -26993,7 +27204,15 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     releases = [_movie_release_to_search_result(release) for release in card.get("releases", [])]
-    releases = sorted(releases, key=_score_result, reverse=True)
+    defaults = _search_defaults_for_chat(chat_id)
+    target_quality = _movie_notification_target_quality(defaults)
+    releases = sorted(
+        (release for release in releases if not is_screen_release(str(release.get("title") or ""))),
+        key=lambda release: quality_sort_key(
+            release, _score_result(release), preferred_quality=target_quality,
+        ),
+        reverse=True,
+    )
     if not releases:
         await query.edit_message_text(
             "По этой новинке пока нет подходящих раздач. Можно вернуться к списку и выбрать другой фильм.",
@@ -27003,6 +27222,9 @@ async def movie_new_show_releases(update: Update, context: ContextTypes.DEFAULT_
 
     search_query = f"{card.get('title', '')} {card.get('year', '')}".strip()
     banner = "🎬 Раздачи по выбранной новинке"
+    if target_quality and not any(_movie_release_quality_label(release) == target_quality for release in releases):
+        banner += f"\n⚠️ {target_quality} не найдено, показаны другие качества."
+    releases[0]["recommended"] = True
     context.user_data["srch_results"] = releases
     context.user_data["srch_results_page"] = 0
     context.user_data["srch_search_query"] = search_query
@@ -27025,7 +27247,7 @@ async def movie_new_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = query.message.chat.id if query.message else None
     await query.answer()
     cache = _load_movie_discovery_cache()
-    cards = cache.get("cards") if isinstance(cache.get("cards"), list) else []
+    cards = _movie_discovery_confirmed_cards(cache)
     try:
         await query.edit_message_text(
             _format_movie_discovery_cache(cache),
@@ -29318,6 +29540,7 @@ async def setup_bot_commands(app: Application) -> None:
     global YOUTUBE_WORKER_TASK, YOUTUBE_STATUS_UPDATE_TASK
     global _PLEX_WEBHOOK_SERVER
 
+    state_store.migrate_user_search_quality_to_2160()
     _cleanup_tmp_dir()
     commands = list(BOT_COMMANDS)
     admin_commands = commands + [

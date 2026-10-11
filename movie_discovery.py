@@ -9,10 +9,11 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from release_quality import is_screen_release, quality_sort_key, result_quality
+
 logger = logging.getLogger("tg_torrent_drop")
 
 
-BAD_QUALITY_RE = re.compile(r"\b(camrip|cam|hdcam|ts|telesync|tc|hdts|screener|scr|workprint)\b", re.I)
 SERIES_RE = re.compile(r"([сc]езон|[сc]ерии|s\d{1,2}\s*e\d{1,2}|\bs\d{1,2}\b|\be\d{1,2}\b|tv[-\s]?series)", re.I)
 ADULT_RE = re.compile(
     r"\b(18\+|xxx|porn|porno|erotic|эротик|порно|для взрослых|adult|sex|hentai|хентай)\b",
@@ -119,7 +120,7 @@ def parse_qualities(raw: str) -> list[str]:
         quality = QUALITY_ALIASES.get(value.strip().lower())
         if quality and quality not in result:
             result.append(quality)
-    return result or ["1080p"]
+    return result or ["2160p", "1080p"]
 
 
 def parse_size_gb(size: str) -> float:
@@ -179,7 +180,7 @@ def extract_year(title: str) -> int | None:
 def is_noise_title(title: str, category: str = "") -> bool:
     text = f"{title} {category}"
     return bool(
-        BAD_QUALITY_RE.search(text)
+        is_screen_release(title)
         or SERIES_RE.search(text)
         or ADULT_RE.search(text)
         or COLLECTION_RE.search(text)
@@ -444,10 +445,58 @@ def _compute_card_score(card: dict, current_year: int) -> float:
     )
 
 
+def _sorted_releases(releases: list[dict]) -> list[dict]:
+    deduped = {
+        fingerprint(release): release for release in releases
+        if isinstance(release, dict) and not is_screen_release(str(release.get("title") or ""))
+    }
+    return sorted(
+        deduped.values(),
+        key=lambda item: quality_sort_key(item, float(item.get("score") or 0)),
+        reverse=True,
+    )
+
+
+def _retain_releases(releases: list[dict]) -> list[dict]:
+    leaders: dict[str, dict] = {}
+    for release in releases:
+        leaders.setdefault(result_quality(release) or "", release)
+    retained = list(leaders.values())[:8]
+    retained_ids = {id(release) for release in retained}
+    for release in releases:
+        if len(retained) >= 8:
+            break
+        if id(release) not in retained_ids:
+            retained.append(release)
+    return sorted(
+        retained,
+        key=lambda item: quality_sort_key(item, float(item.get("score") or 0)),
+        reverse=True,
+    )
+
+
+def prepare_card_releases(card: dict) -> dict | None:
+    """Recheck saved releases before showing a card or choosing a download."""
+    releases = card.get("releases")
+    if not isinstance(releases, list) or not releases:
+        return card
+    ordered = _sorted_releases(releases)
+    if not ordered:
+        return None
+    prepared = dict(card)
+    prepared["releases"] = _retain_releases(ordered)
+    best = ordered[0]
+    prepared["best_quality"] = result_quality(best)
+    prepared["best_size"] = best.get("size")
+    prepared["best_seeders"] = best.get("seeders", 0)
+    if len(ordered) != len(releases):
+        prepared["release_count"] = len(ordered)
+    return prepared
+
+
 def _finalize_card(card: dict, known_fingerprints: set[str]) -> dict:
-    deduped = {fingerprint(release): release for release in card["releases"]}
-    releases_sorted = sorted(deduped.values(), key=lambda item: item["score"], reverse=True)
-    card["releases"] = releases_sorted[:8]
+    releases_sorted = _sorted_releases(card["releases"])
+    card["releases"] = _retain_releases(releases_sorted)
     best = releases_sorted[0]
     card["best_quality"] = best["quality"]
     card["best_size"] = best["size"]
@@ -660,6 +709,10 @@ def build_cards(
     except (ValueError, IndexError):
         current_year = datetime.now(timezone.utc).year
 
+    releases = [
+        release for release in releases
+        if not is_screen_release(str(release.get("title") or ""))
+    ]
     grouped: dict[str, dict] = {}
     for release in releases:
         key = movie_key(release["movie_title"], release["year"])

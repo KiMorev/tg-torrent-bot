@@ -46,7 +46,7 @@ _SRCH_QUALITY_OPTIONS: list[tuple[str, str]] = [
     ("📺 720p", "720p"),
     ("🔍 Любое", "any"),
 ]
-_SRCH_DEFAULT_SETTINGS: dict = {"quality": "1080p", "audio": False, "subs": False}
+_SRCH_DEFAULT_SETTINGS: dict = {"quality": "4K", "audio": False, "subs": False}
 SEARCH_INTENT_SERIES_MASTER = "series_master"
 
 # ---------------------------------------------------------------------------
@@ -959,7 +959,7 @@ def _search_advanced_keyboard(
     tracker_label: str = "",
     intent: str | None = None,
 ) -> InlineKeyboardMarkup:
-    quality = settings.get("quality", "1080p")
+    quality = settings.get("quality", _SRCH_DEFAULT_SETTINGS["quality"])
     audio = settings.get("audio", False)
     subs = settings.get("subs", False)
 
