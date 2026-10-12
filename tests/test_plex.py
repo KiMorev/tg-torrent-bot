@@ -22,6 +22,7 @@ from plex import (
     PlexConnectionError,
     PlexParseError,
     _normalise_resolution,
+    _normalise_episode_fetch_result,
     _parse_video,
     _parse_show,
     check_before_download,
@@ -717,8 +718,71 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         self.assertEqual(seasons[1].resolution, "1080")
         self.assertEqual(len(seasons[1].file_paths), 2)
         self.assertEqual(seasons[1].episode_numbers, (1, 2))
+        self.assertEqual(seasons[1].episode_file_numbers, {
+            "/video/Show/S01/E01.mkv": (1,),
+            "/video/Show/S01/E02.mkv": (2,),
+        })
         self.assertEqual(seasons[2].resolution, "4k")
         self.assertEqual(seasons[2].episode_numbers, (1,))
+        self.assertEqual(seasons[2].episode_file_numbers, {"/video/Show/S02/E01.mkv": (1,)})
+
+    def test_per_file_numbers_expose_wrong_plex_episode_assignment(self):
+        client = _make_client()
+        filename = "/video/Show/Show.S02E03.mkv"
+        responses = [
+            _mock_response('<MediaContainer><Directory ratingKey="12" index="2" leafCount="1"/></MediaContainer>'),
+            _mock_response(f'<MediaContainer><Video index="1"><Media><Part file="{filename}"/></Media></Video></MediaContainer>'),
+        ]
+        with patch.object(client._session, "get", side_effect=responses) as mock_get:
+            season = client.get_show_seasons("100")[2]
+        self.assertEqual(season.episode_file_numbers[filename], (1,))
+        self.assertNotIn(3, season.episode_file_numbers[filename])
+        self.assertEqual(mock_get.call_count, 2)
+
+    def test_every_part_of_every_version_keeps_its_episode_number(self):
+        client = _make_client()
+        filenames = ["/video/Show/E04.pt1.mp4", "/video/Show/E04.pt2.mp4", "/video/Show/E04.1080p.mkv"]
+        responses = [
+            _mock_response('<MediaContainer><Directory ratingKey="12" index="2" leafCount="1"/></MediaContainer>'),
+            _mock_response(
+                '<MediaContainer><Video index="4">'
+                f'<Media videoResolution="720"><Part file="{filenames[0]}"/><Part file="{filenames[1]}"/></Media>'
+                f'<Media videoResolution="1080"><Part file="{filenames[2]}"/></Media>'
+                '</Video></MediaContainer>'
+            ),
+        ]
+        with patch.object(client._session, "get", side_effect=responses):
+            season = client.get_show_seasons("100")[2]
+        self.assertEqual(season.episode_file_numbers, {filename: (4,) for filename in filenames})
+
+    def test_same_file_combines_all_episode_indexes(self):
+        client = _make_client()
+        filename = "/video/Show/Show.S02E01-E02.mkv"
+        responses = [
+            _mock_response('<MediaContainer><Directory ratingKey="12" index="2" leafCount="2"/></MediaContainer>'),
+            _mock_response(
+                '<MediaContainer>'
+                f'<Video index="2"><Media><Part file="{filename}"/><Part file="{filename}"/></Media></Video>'
+                f'<Video index="1"><Media><Part file="{filename}"/></Media></Video>'
+                '</MediaContainer>'
+            ),
+        ]
+        with patch.object(client._session, "get", side_effect=responses):
+            season = client.get_show_seasons("100")[2]
+        self.assertEqual(season.episode_numbers, (1, 2))
+        self.assertEqual(season.episode_file_numbers, {filename: (1, 2)})
+
+    def test_legacy_episode_fetch_tuples_keep_empty_per_file_mapping(self):
+        filename = "/video/Show/E01.mkv"
+        for value, numbers in [(([filename], "1080"), ()), (([filename], "1080", (1,)), (1,))]:
+            with self.subTest(value=value):
+                self.assertEqual(_normalise_episode_fetch_result(value), ([filename], "1080", numbers, {}))
+                client = _make_client()
+                seasons = _xml('<MediaContainer><Directory ratingKey="11" index="1" leafCount="1"/></MediaContainer>')
+                with patch.object(client, "_get", return_value=seasons), patch.object(client, "_fetch_season_episode_files", return_value=value):
+                    season = client.get_show_seasons("100")[1]
+                self.assertEqual(season.episode_numbers, numbers)
+                self.assertEqual(season.episode_file_numbers, {})
 
     def test_skips_specials_season_zero(self):
         client = _make_client()

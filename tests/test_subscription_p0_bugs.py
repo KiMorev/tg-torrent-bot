@@ -107,9 +107,11 @@ class SubscriptionTorrentPathTests(unittest.TestCase):
                     {"kind": "series", "season_num": 2, "series_query": "Oldschool"},
                 )
 
-            self.assertTrue(original.samefile(plex))
-            self.assertEqual(plex.read_bytes(), b"new episode content")
-            self.assertEqual(expected, (f"{folder.name}/{plex.name}",))
+            self.assertFalse(original.samefile(plex))
+            self.assertEqual(original.read_bytes(), b"new episode content")
+            self.assertEqual(plex.read_bytes(), b"old episode")
+            self.assertEqual(expected, (f"{folder.name}/{original.name}",))
+            self.assertIn(f"ep: S02E01: {original.name}", (folder / ".plexmatch").read_text(encoding="utf-8"))
             self.assertEqual(count, 1)
 
     def test_restore_failure_stops_jackett_download_without_magnet_fallback(self):

@@ -119,6 +119,7 @@ class PlexSeason:
     file_paths: list[str] = field(default_factory=list)   # all episode .file paths
     resolution: str = ""                      # best across episodes ("4k"/"1080"/…)
     episode_numbers: tuple[int, ...] = field(default_factory=tuple)
+    episode_file_numbers: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -536,11 +537,11 @@ class PlexClient:
                 or season_num in fetch_resolution_for
             )
             if should_fetch:
-                file_paths, resolution, episode_numbers = _normalise_episode_fetch_result(
+                file_paths, resolution, episode_numbers, episode_file_numbers = _normalise_episode_fetch_result(
                     self._fetch_season_episode_files(season_key)
                 )
             else:
-                file_paths, resolution, episode_numbers = [], "", ()
+                file_paths, resolution, episode_numbers, episode_file_numbers = [], "", (), {}
             seasons[season_num] = PlexSeason(
                 rating_key=season_key,
                 season_number=season_num,
@@ -548,26 +549,30 @@ class PlexClient:
                 file_paths=file_paths,
                 resolution=resolution,
                 episode_numbers=episode_numbers,
+                episode_file_numbers=episode_file_numbers,
             )
         return seasons
 
-    def _fetch_season_episode_files(self, season_rating_key: str) -> tuple[list[str], str, tuple[int, ...]]:
-        """Return (file_paths, best_resolution, episode_numbers) for one season.
+    def _fetch_season_episode_files(
+        self, season_rating_key: str,
+    ) -> tuple[list[str], str, tuple[int, ...], dict[str, tuple[int, ...]]]:
+        """Return file paths, resolution, episode numbers and per-file numbers.
 
         Best-effort: missing data or transient failures yield an empty list +
         empty resolution; the caller can fall back to substring match later.
         """
         if not season_rating_key:
-            return [], "", ()
+            return [], "", (), {}
         try:
             root = self._get(f"/library/metadata/{season_rating_key}/children")
         except Exception as exc:
             logger.debug("Plex season children fetch failed for %s: %s",
                          season_rating_key, exc)
-            return [], "", ()
+            return [], "", (), {}
 
         files: list[str] = []
         episode_numbers: set[int] = set()
+        episode_file_numbers: dict[str, set[int]] = {}
         best_resolution = ""
         for video in root.findall("Video"):
             episode_number = _safe_positive_int(video.get("index"))
@@ -582,7 +587,11 @@ class PlexClient:
                     fp = part.get("file", "")
                     if fp:
                         files.append(fp)
-        return files, best_resolution, tuple(sorted(episode_numbers))
+                        if episode_number:
+                            episode_file_numbers.setdefault(fp, set()).add(episode_number)
+        return files, best_resolution, tuple(sorted(episode_numbers)), {
+            fp: tuple(sorted(numbers)) for fp, numbers in episode_file_numbers.items()
+        }
 
 
 # ------------------------------------------------------------------
@@ -622,16 +631,18 @@ def _parse_video(video: ElementTree.Element) -> PlexMovie:
     )
 
 
-def _normalise_episode_fetch_result(value: object) -> tuple[list[str], str, tuple[int, ...]]:
+def _normalise_episode_fetch_result(
+    value: object,
+) -> tuple[list[str], str, tuple[int, ...], dict[str, tuple[int, ...]]]:
     if not isinstance(value, tuple):
-        return [], "", ()
+        return [], "", (), {}
     if len(value) == 2:
         files, resolution = value
         episode_numbers = ()
     elif len(value) >= 3:
         files, resolution, episode_numbers = value[:3]
     else:
-        return [], "", ()
+        return [], "", (), {}
     if not isinstance(files, list):
         files = []
     numbers = tuple(
@@ -641,7 +652,14 @@ def _normalise_episode_fetch_result(value: object) -> tuple[list[str], str, tupl
             if parsed
         })
     )
-    return files, str(resolution or ""), numbers
+    file_numbers = value[3] if len(value) >= 4 and isinstance(value[3], dict) else {}
+    episode_file_numbers = {
+        fp: tuple(sorted({
+            parsed for parsed in (_safe_positive_int(item) for item in (values or ())) if parsed
+        }))
+        for fp, values in file_numbers.items()
+    }
+    return files, str(resolution or ""), numbers, episode_file_numbers
 
 
 def _safe_positive_int(value: object) -> int:

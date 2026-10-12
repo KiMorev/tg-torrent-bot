@@ -20,7 +20,8 @@ from filename_normalizer import (
     has_arc_episode_filenames,
     infer_series_season_from_filenames,
     inspect_series_filenames,
-    normalize_dotted_episode_files,
+    episode_assignment_from_filename,
+    prepare_episode_match_hints,
     normalize_dotted_episode_name,
     restore_dotted_episode_torrent_paths,
 )
@@ -37,254 +38,296 @@ class FilenameNormalizerTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(normalize_dotted_episode_name(source), target)
 
-    def test_dotted_episode_files_keep_torrent_paths_and_are_idempotent(self):
+    def test_episode_assignment_accepts_tokens_and_rejects_ambiguity(self):
+        for name, expected in [
+            ("Show.S02.E01.mkv", (2, (1,))),
+            ("Show.S02E01-E02.mkv", (2, (1, 2))),
+            ("Show.S02.E01-E03.mkv", (2, (1, 2, 3))),
+            ("Show.s2_e103.MKV", (2, (103,))),
+            ("Show.S02 E01.mkv", (2, (1,))),
+            ("Show.S02-E01.mkv", (2, (1,))),
+            ("Show.S00E01.mkv", (0, (1,))),
+            ("Show.S02.E00.mkv", None),
+            ("Show.S02.E03-E01.mkv", None),
+            ("Show.S02.E01.E02.mkv", None),
+            ("Show.S02.E01-E02-E03.mkv", None),
+            ("Show.S02.E01.S03.E02.mkv", None),
+            ("Show.S02.E01-02.mkv", None),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(episode_assignment_from_filename(Path(name)), expected)
+
+    def _legacy_ignore(self, folder, raw, target, *, names=None, recorded=True):
+        ledger = {raw.name: target.stat().st_ino} if recorded else {}
+        (folder / ".plexignore").write_text(
+            "# user rules\nextras/*\n"
+            "# PlexLoader torrent paths: begin\n"
+            + "\n".join(names if names is not None else [raw.name]) + "\n"
+            "# PlexLoader alias inodes: " + json.dumps(ledger) + "\n"
+            "# PlexLoader torrent paths: end\n"
+            "# after owned block\n"
+        )
+
+    def test_dotted_hints_keep_originals_subtitles_and_create_no_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "Oldschool.S02.E13.2026.mkv"
-            source.write_bytes(b"episode 13")
-            ready = root / "Oldschool.S02E01.2026.mkv"
-            ready.write_bytes(b"episode 1")
-            subtitle = root / "Oldschool.S02.E13.2026.srt"
+            raw = root / "Oldschool.S02.E13.2026.mkv"
+            standard = root / "Oldschool.S02E01.2026.mkv"
+            subtitle = root / "Oldschool.S02.E13.2026.eng.srt"
+            raw.write_bytes(b"episode 13")
+            standard.write_bytes(b"episode 1")
             subtitle.write_text("subtitle")
-            target = root / "Oldschool.S02E13.2026.mkv"
+            with patch("filename_normalizer.os.link", side_effect=AssertionError("no new aliases")):
+                visible, changed = prepare_episode_match_hints([raw, standard, subtitle])
+                repeat, unchanged = prepare_episode_match_hints([raw, standard, subtitle])
+            self.assertCountEqual(visible, [raw, standard])
+            self.assertCountEqual(repeat, [raw, standard])
+            self.assertEqual((changed, unchanged), (1, 0))
+            self.assertEqual(raw.read_bytes(), b"episode 13")
+            self.assertEqual(subtitle.read_text(), "subtitle")
+            self.assertFalse(raw.with_name(raw.name.replace("S02.E", "S02E")).exists())
+            self.assertFalse((root / ".plexignore").exists())
+            lines = (root / ".plexmatch").read_text().splitlines()
+            self.assertIn(f"ep: S02E13: {raw.name}", lines)
+            self.assertFalse(any(standard.name in line or subtitle.name in line for line in lines))
 
-            aliases = normalize_dotted_episode_files([source, ready, subtitle])
-
-            self.assertEqual(aliases, {source: target})
-            self.assertTrue(source.samefile(target))
-            self.assertEqual(target.read_bytes(), b"episode 13")
-            self.assertTrue(subtitle.exists())
-            self.assertEqual(normalize_dotted_episode_files([source, target, ready, subtitle]), {})
-            ignore = (root / ".plexignore").read_text()
-            self.assertIn(source.name, ignore.splitlines())
-            self.assertNotIn(target.name, ignore.splitlines())
-            self.assertNotIn(subtitle.name, ignore.splitlines())
-
-    def test_dotted_episode_collision_checks_entire_batch_before_linking(self):
+    def test_standard_files_are_returned_without_sidecars_or_movie_name_restrictions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            first = root / "Show.S02.E01.mkv"
-            second = root / "Show.S02.E02.mkv"
-            existing = root / "Show.S02E02.mkv"
-            for path, content in [(first, b"first"), (second, b"second"), (existing, b"existing")]:
-                path.write_bytes(content)
-
-            with self.assertRaises(RenamePlanError):
-                normalize_dotted_episode_files([first, second])
-
-            self.assertEqual(first.read_bytes(), b"first")
-            self.assertEqual(second.read_bytes(), b"second")
-            self.assertEqual(existing.read_bytes(), b"existing")
-            self.assertFalse((root / "Show.S02E01.mkv").exists())
+            paths = [root / " Movie.mkv", root / "Show.S02_E01.mkv"]
+            for path in paths:
+                path.write_bytes(b"video")
+            visible, changed = prepare_episode_match_hints(paths)
+            self.assertCountEqual(visible, paths)
+            self.assertEqual(changed, 0)
+            self.assertFalse((root / ".plexmatch").exists())
             self.assertFalse((root / ".plexignore").exists())
 
-    def test_dotted_episode_files_report_write_failure(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            source.write_bytes(b"episode")
-            with patch("filename_normalizer.os.link", side_effect=PermissionError("read only")):
-                with self.assertRaises(PermissionError):
-                    normalize_dotted_episode_files([source])
-            self.assertEqual(source.read_bytes(), b"episode")
-            self.assertFalse(source.with_name("Show.S02E01.mkv").exists())
-
-    def test_existing_samefile_alias_is_accepted_and_added_to_ignore(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            target = Path(tmp) / "Show.S02E01.mkv"
-            source.write_bytes(b"episode")
-            os.link(source, target)
-
-            self.assertEqual(normalize_dotted_episode_files([source, target]), {})
-            self.assertIn(source.name, (Path(tmp) / ".plexignore").read_text().splitlines())
-
-    def test_unmanaged_equal_content_is_still_a_collision(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            target = Path(tmp) / "Show.S02E01.mkv"
-            source.write_bytes(b"episode")
-            target.write_bytes(b"episode")
-
-            with self.assertRaises(RenamePlanError):
-                normalize_dotted_episode_files([source])
-            self.assertFalse(source.samefile(target))
-
-    def test_changed_content_is_visible_through_existing_alias(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            target = Path(tmp) / "Show.S02E01.mkv"
-            source.write_bytes(b"old")
-            normalize_dotted_episode_files([source])
-
-            source.write_bytes(b"new content")
-
-            self.assertEqual(normalize_dotted_episode_files([source, target]), {})
-            self.assertEqual(target.read_bytes(), b"new content")
-
-    def test_replaced_torrent_file_retargets_managed_alias(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            target = Path(tmp) / "Show.S02E01.mkv"
-            source.write_bytes(b"old")
-            normalize_dotted_episode_files([source])
-            replacement = Path(tmp) / "replacement"
-            replacement.write_bytes(b"new")
-            os.replace(replacement, source)
-            self.assertEqual(target.read_bytes(), b"old")
-
-            self.assertEqual(normalize_dotted_episode_files([source, target]), {source: target})
-
-            self.assertTrue(source.samefile(target))
-            self.assertEqual(target.read_bytes(), b"new")
-            self.assertEqual(normalize_dotted_episode_files([source]), {})
-
-    def test_failed_retarget_keeps_original_and_previous_alias(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            target = Path(tmp) / "Show.S02E01.mkv"
-            source.write_bytes(b"old")
-            normalize_dotted_episode_files([source])
-            source.unlink()
-            source.write_bytes(b"new")
-
-            with patch("filename_normalizer.os.link", side_effect=OSError("hardlinks unsupported")):
-                with self.assertRaises(OSError):
-                    normalize_dotted_episode_files([source])
-
-            self.assertEqual(source.read_bytes(), b"new")
-            self.assertEqual(target.read_bytes(), b"old")
-
-    def test_replaced_managed_target_is_preserved_as_user_file(self):
+    def test_hint_range_and_user_rules_are_preserved_and_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "Show.S02.E01.mkv"
+            raw = root / "Show.S02.E01-E02.mkv"
+            raw.write_bytes(b"combined")
+            sidecar = root / ".plexmatch"
+            user_rules = "# My rules\r\ntitle: My Show\r\npattern: Specials/* {sp}.mkv\r\n"
+            sidecar.write_bytes(user_rules.encode())
+            self.assertEqual(prepare_episode_match_hints([raw]), ([raw], 1))
+            with sidecar.open("a", encoding="utf-8", newline="") as stream:
+                stream.write("# User suffix\r\n")
+            second = root / "Show.S02.E03.mkv"
+            second.write_bytes(b"third")
+            self.assertEqual(prepare_episode_match_hints([raw, second])[1], 1)
+            with sidecar.open(encoding="utf-8", newline="") as stream:
+                updated = stream.read()
+            self.assertTrue(updated.startswith(user_rules))
+            self.assertTrue(updated.endswith("# User suffix\r\n"))
+            self.assertIn(f"ep: S02E01-E02: {raw.name}", updated.splitlines())
+            self.assertEqual(updated.count("# PlexLoader episode hints: begin"), 1)
+            self.assertEqual(prepare_episode_match_hints([raw, second])[1], 0)
+
+    def test_conflicting_user_hint_aborts_all_folder_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folders = [root / "a", root / "b"]
+            sources = []
+            for folder in folders:
+                folder.mkdir()
+                raw = folder / "Show.S02.E01.mkv"
+                raw.write_bytes(b"episode")
+                sources.append(raw)
+            conflicting = folders[1] / ".plexmatch"
+            user_rule = f"episode: S01E01: {sources[1].name}\n"
+            conflicting.write_text(user_rule)
+            with self.assertRaises(RenamePlanError):
+                prepare_episode_match_hints(sources)
+            self.assertFalse((folders[0] / ".plexmatch").exists())
+            self.assertEqual(conflicting.read_text(), user_rule)
+            self.assertTrue(all(path.read_bytes() == b"episode" for path in sources))
+
+    def test_matching_user_hint_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
+            raw.write_bytes(b"episode")
+            text = f"Episode: s2e1: {raw.name}\n"
+            (root / ".plexmatch").write_text(text)
+            self.assertEqual(prepare_episode_match_hints([raw])[1], 1)
+            self.assertTrue((root / ".plexmatch").read_text().startswith(text))
+            self.assertEqual(prepare_episode_match_hints([raw])[1], 0)
+
+    def test_malformed_blocks_and_non_utf8_fail_before_writes(self):
+        for filename, content in [
+            (".plexmatch", b"# PlexLoader episode hints: begin\n"),
+            (".plexmatch", b"# PlexLoader episode hints: end\n# PlexLoader episode hints: begin\n"),
+            (".plexmatch", b"# PlexLoader episode hints: begin\ngarbage\n# PlexLoader episode hints: end\n"),
+            (".plexmatch", b"\xff\xfe# user rules"),
+            (".plexignore", b"# PlexLoader torrent paths: begin\n"),
+            (".plexignore", b"\xff\xfe# user rules"),
+        ]:
+            with self.subTest(filename=filename, content=content), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                raw = root / "Show.S02.E01.mkv"
+                raw.write_bytes(b"episode")
+                sidecar = root / filename
+                sidecar.write_bytes(content)
+                with self.assertRaises(RenamePlanError):
+                    prepare_episode_match_hints([raw])
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(raw.read_bytes(), b"episode")
+                self.assertFalse(raw.with_name("Show.S02E01.mkv").exists())
+                if filename == ".plexignore":
+                    self.assertFalse((root / ".plexmatch").exists())
+
+    def test_ambiguous_dotted_batch_creates_no_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [root / "Show.S02.E01.mkv", root / "Show.S02.E02.E03.mkv"]
+            for path in paths:
+                path.write_bytes(b"episode")
+            with self.assertRaises(RenamePlanError):
+                prepare_episode_match_hints(paths)
+            self.assertFalse((root / ".plexmatch").exists())
+            self.assertTrue(all(path.exists() for path in paths))
+
+    def test_newline_filename_is_rejected_before_access(self):
+        with self.assertRaises(RenamePlanError):
+            prepare_episode_match_hints([Path("Show.S02.E01\nOther.mkv")])
+
+    def test_atomic_match_write_failure_keeps_user_text_and_media(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
+            raw.write_bytes(b"episode")
+            sidecar = root / ".plexmatch"
+            text = "# user rules\ntitle: Show\n"
+            sidecar.write_text(text)
+            with patch("filename_normalizer.os.replace", side_effect=PermissionError("read only")):
+                with self.assertRaises(PermissionError):
+                    prepare_episode_match_hints([raw])
+            self.assertEqual(raw.read_bytes(), b"episode")
+            self.assertEqual(sidecar.read_text(), text)
+            self.assertEqual(set(path.name for path in root.iterdir()), {raw.name, ".plexmatch"})
+
+    def test_legacy_samefile_alias_is_hidden_but_never_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
             target = root / "Show.S02E01.mkv"
-            source.write_bytes(b"torrent")
-            normalize_dotted_episode_files([source])
-            replacement = root / "manual"
+            raw.write_bytes(b"episode")
+            os.link(raw, target)
+            self._legacy_ignore(root, raw, target)
+            with patch("filename_normalizer.os.link", side_effect=AssertionError("no new aliases")):
+                visible, changed = prepare_episode_match_hints([raw, target])
+            self.assertEqual((visible, changed), ([raw], 1))
+            self.assertTrue(raw.samefile(target))
+            lines = (root / ".plexignore").read_text().splitlines()
+            self.assertNotIn(raw.name, lines)
+            self.assertIn(target.name, lines)
+            self.assertIn("extras/*", lines)
+            self.assertIn("# after owned block", lines)
+            self.assertEqual(prepare_episode_match_hints([raw, target]), ([raw], 0))
+
+    def test_replaced_raw_uses_hints_without_modifying_proven_old_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
+            target = root / "Show.S02E01.mkv"
+            raw.write_bytes(b"old")
+            os.link(raw, target)
+            self._legacy_ignore(root, raw, target)
+            raw.unlink()
+            raw.write_bytes(b"new")
+            target_inode = target.stat().st_ino
+            visible, changed = prepare_episode_match_hints([raw, target])
+            self.assertEqual((visible, changed), ([raw], 1))
+            self.assertEqual(raw.read_bytes(), b"new")
+            self.assertEqual(target.read_bytes(), b"old")
+            self.assertEqual(target.stat().st_ino, target_inode)
+            self.assertFalse(raw.samefile(target))
+
+    def test_unproven_foreign_target_is_visible_and_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
+            target = root / "Show.S02E01.mkv"
+            raw.write_bytes(b"source")
+            target.write_bytes(b"user file")
+            self._legacy_ignore(root, raw, target, recorded=False)
+            visible, changed = prepare_episode_match_hints([raw, target])
+            self.assertCountEqual(visible, [raw, target])
+            self.assertEqual(changed, 1)
+            self.assertEqual(target.read_bytes(), b"user file")
+            self.assertNotIn(target.name, (root / ".plexignore").read_text().splitlines())
+            self.assertNotIn(raw.name, (root / ".plexignore").read_text().splitlines())
+
+    def test_replaced_hidden_alias_is_unhidden_without_modification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
+            target = root / "Show.S02E01.mkv"
+            raw.write_bytes(b"source")
+            os.link(raw, target)
+            self._legacy_ignore(root, raw, target)
+            prepare_episode_match_hints([raw, target])
+            replacement = root / "user.tmp"
             replacement.write_bytes(b"user replacement")
             os.replace(replacement, target)
-            ignore_before = (root / ".plexignore").read_bytes()
-            another = root / "Show.S02.E02.mkv"
-            another.write_bytes(b"another torrent")
-
-            with self.assertRaises(RenamePlanError):
-                normalize_dotted_episode_files([another, source])
-
+            visible, changed = prepare_episode_match_hints([raw, target])
+            self.assertCountEqual(visible, [raw, target])
+            self.assertEqual(changed, 0)
             self.assertEqual(target.read_bytes(), b"user replacement")
-            self.assertEqual(source.read_bytes(), b"torrent")
-            self.assertFalse(another.with_name("Show.S02E02.mkv").exists())
-            self.assertEqual((root / ".plexignore").read_bytes(), ignore_before)
+            self.assertNotIn(target.name, (root / ".plexignore").read_text().splitlines())
 
-    def test_missing_or_zero_inode_proof_prevents_retarget(self):
-        for ledger in [{}, {"Show.S02.E01.mkv": 0}, {"Show.S02.E01.mkv": None}]:
-            with self.subTest(ledger=ledger), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                source = root / "Show.S02.E01.mkv"
-                target = root / "Show.S02E01.mkv"
-                source.write_bytes(b"new")
-                target.write_bytes(b"old")
-                (root / ".plexignore").write_text(
-                    "# PlexLoader torrent paths: begin\n" + source.name + "\n"
-                    "# PlexLoader alias inodes: " + json.dumps(ledger) + "\n"
-                    "# PlexLoader torrent paths: end\n"
-                )
-                with self.assertRaises(RenamePlanError):
-                    normalize_dotted_episode_files([source])
-                self.assertEqual(target.read_bytes(), b"old")
-                self.assertEqual(source.read_bytes(), b"new")
+    def test_ignore_transition_retry_keeps_published_hints_and_originals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "Show.S02.E01.mkv"
+            target = root / "Show.S02E01.mkv"
+            raw.write_bytes(b"episode")
+            os.link(raw, target)
+            self._legacy_ignore(root, raw, target)
+            with patch("filename_normalizer._write_dotted_ignore", side_effect=PermissionError("ignore failed")):
+                with self.assertRaises(PermissionError):
+                    prepare_episode_match_hints([raw, target])
+            self.assertIn(f"ep: S02E01: {raw.name}", (root / ".plexmatch").read_text().splitlines())
+            self.assertIn(raw.name, (root / ".plexignore").read_text().splitlines())
+            self.assertTrue(raw.samefile(target))
+            self.assertEqual(prepare_episode_match_hints([raw, target]), ([raw], 0))
+            self.assertNotIn(raw.name, (root / ".plexignore").read_text().splitlines())
 
-    def test_concurrent_normalization_keeps_both_ignore_entries(self):
+    def test_concurrent_hint_writes_keep_both_episode_entries(self):
         import filename_normalizer
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sources = [root / f"Show.S02.E{episode:02d}.mkv" for episode in [1, 2]]
             for source in sources:
                 source.write_bytes(b"episode")
-            write_ignore = filename_normalizer._write_dotted_ignore
-
+            writer = filename_normalizer._write_sidecar
             def delayed_write(*args):
                 time.sleep(0.05)
-                write_ignore(*args)
-
-            with patch("filename_normalizer._write_dotted_ignore", side_effect=delayed_write):
+                writer(*args)
+            with patch("filename_normalizer._write_sidecar", side_effect=delayed_write):
                 with ThreadPoolExecutor(max_workers=2) as executor:
-                    results = list(executor.map(lambda source: normalize_dotted_episode_files([source]), sources))
-
-            self.assertEqual(len(results), 2)
-            lines = (root / ".plexignore").read_text().splitlines()
-            for source in sources:
-                self.assertIn(source.name, lines)
-                self.assertTrue(source.samefile(source.with_name(normalize_dotted_episode_name(source.name))))
-            ledger_line = next(line for line in lines if line.startswith("# PlexLoader alias inodes: "))
-            self.assertEqual(set(json.loads(ledger_line.split(": ", 1)[1])), {source.name for source in sources})
+                    list(executor.map(lambda source: prepare_episode_match_hints([source]), sources))
+            lines = (root / ".plexmatch").read_text().splitlines()
+            for episode, source in enumerate(sources, 1):
+                self.assertIn(f"ep: S02E{episode:02d}: {source.name}", lines)
+                self.assertTrue(source.exists())
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions are enforced on the NAS and Linux CI")
-    def test_plexignore_is_readable_and_preserves_existing_mode(self):
+    def test_plexmatch_is_readable_and_preserves_existing_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "Show.S02.E01.mkv"
-            source.write_bytes(b"first")
-            normalize_dotted_episode_files([source])
-            ignore = root / ".plexignore"
-            self.assertEqual(stat.S_IMODE(ignore.stat().st_mode), 0o644)
-            ignore.chmod(0o640)
+            raw = root / "Show.S02.E01.mkv"
+            raw.write_bytes(b"first")
+            prepare_episode_match_hints([raw])
+            sidecar = root / ".plexmatch"
+            self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o644)
+            sidecar.chmod(0o640)
             second = root / "Show.S02.E02.mkv"
             second.write_bytes(b"second")
-
-            normalize_dotted_episode_files([second])
-
-            self.assertEqual(stat.S_IMODE(ignore.stat().st_mode), 0o640)
-
-    def test_plexignore_preserves_user_rules_and_updates_managed_block(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ignore = root / ".plexignore"
-            user_rules = "# Keep my rules\r\ntrailers/*\r\n*.sample.mkv\r\n"
-            ignore.write_bytes(user_rules.encode())
-            source = root / "Show.S02.E01.mkv"
-            source.write_bytes(b"first")
-            normalize_dotted_episode_files([source])
-            with ignore.open(encoding="utf-8", newline="") as stream:
-                initial = stream.read()
-            self.assertTrue(initial.startswith(user_rules))
-            with ignore.open("a", encoding="utf-8", newline="") as stream:
-                stream.write("# After managed block\r\nextras/*\r\n")
-            second = root / "Show.S02.E02.mkv"
-            second.write_bytes(b"second")
-
-            normalize_dotted_episode_files([source, second])
-
-            with ignore.open(encoding="utf-8", newline="") as stream:
-                updated = stream.read()
-            self.assertTrue(updated.startswith(user_rules))
-            self.assertTrue(updated.endswith("# After managed block\r\nextras/*\r\n"))
-            self.assertEqual(updated.count("# PlexLoader torrent paths: begin"), 1)
-            self.assertEqual(updated.splitlines().count(source.name), 1)
-            self.assertEqual(updated.splitlines().count(second.name), 1)
-
-    def test_ignore_write_failure_preserves_original_data_and_user_rules(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "Show.S02.E01.mkv"
-            source.write_bytes(b"episode")
-            ignore = root / ".plexignore"
-            ignore.write_text("# user rule\nextras/*\n")
-            with patch("filename_normalizer.os.replace", side_effect=PermissionError("read only")):
-                with self.assertRaises(PermissionError):
-                    normalize_dotted_episode_files([source])
-            self.assertEqual(source.read_bytes(), b"episode")
-            self.assertEqual(ignore.read_text(), "# user rule\nextras/*\n")
-
-    def test_malformed_managed_block_prevents_file_mutation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "Show.S02.E01.mkv"
-            source.write_bytes(b"episode")
-            (Path(tmp) / ".plexignore").write_text("# PlexLoader torrent paths: begin\n")
-            with self.assertRaises(RenamePlanError):
-                normalize_dotted_episode_files([source])
-            self.assertFalse(source.with_name("Show.S02E01.mkv").exists())
+            prepare_episode_match_hints([second])
+            self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o640)
 
     def test_arc_episode_plan_uses_sequential_plex_episode_numbers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -664,8 +707,25 @@ class TorrentPathRestoreTests(unittest.TestCase):
         replacement = self.storage / "replacement"
         replacement.write_bytes(b"new")
         os.replace(replacement, raw)
-        self.assertEqual(normalize_dotted_episode_files([raw]), {raw: target})
-        self.assertEqual(target.read_bytes(), b"new")
+        self.assertEqual(prepare_episode_match_hints([raw, target]), ([raw], 1))
+        self.assertEqual(raw.read_bytes(), b"new")
+        self.assertEqual(target.read_bytes(), b"legacy")
+
+    def test_next_restore_keeps_raw_visible_after_hint_transition(self):
+        target = self.storage / "Show.S02E01.mkv"
+        target.write_bytes(b"legacy")
+        raw = self.storage / "Show.S02.E01.mkv"
+        self.write_torrent(raw.name)
+        self.assertEqual(restore_dotted_episode_torrent_paths(self.torrent, self.storage), 1)
+        self.assertEqual(prepare_episode_match_hints([raw, target]), ([raw], 1))
+
+        self.assertEqual(restore_dotted_episode_torrent_paths(self.torrent, self.storage), 0)
+
+        lines = (self.storage / ".plexignore").read_text().splitlines()
+        self.assertNotIn(raw.name, lines)
+        self.assertIn(target.name, lines)
+        self.assertTrue(raw.samefile(target))
+        self.assertEqual(prepare_episode_match_hints([raw, target]), ([raw], 0))
 
     def test_invalid_torrent_is_reported_without_changes(self):
         self.torrent.write_bytes(b"not a torrent")

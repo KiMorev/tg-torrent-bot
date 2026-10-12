@@ -105,24 +105,84 @@ def normalize_dotted_episode_name(name: str) -> str:
 _IGNORE_BEGIN = "# PlexLoader torrent paths: begin"
 _IGNORE_END = "# PlexLoader torrent paths: end"
 _IGNORE_ALIASES = "# PlexLoader alias inodes: "
+_MATCH_BEGIN = "# PlexLoader episode hints: begin"
+_MATCH_END = "# PlexLoader episode hints: end"
 _DOTTED_FILES_LOCK = threading.RLock()
+_EPISODE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\bS(?P<season>\d{1,2})[\s._-]?E(?P<first>\d{1,3})"
+    r"(?:-E(?P<last>\d{1,3}))?\b"
+)
+_HINT_CODE_RE = re.compile(r"(?i)S\d{1,2}E\d{1,3}(?:-E\d{1,3})?")
+_DOTTED_MARKER_RE = re.compile(r"(?i)\bS\d+\.E\d+")
+
+
+def episode_assignment_from_filename(path: Path) -> tuple[int, tuple[int, ...]] | None:
+    name = path.stem
+    if any(char in path.name for char in "\r\n"):
+        return None
+    matches = list(_EPISODE_ASSIGNMENT_RE.finditer(name))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    first = int(match.group("first"))
+    last = int(match.group("last") or first)
+    remainder = name[:match.start()] + name[match.end():]
+    if first <= 0 or last < first or re.search(r"(?i)\bE\d+\b", remainder):
+        return None
+    if re.match(r"-\d{1,3}\b", name[match.end():]):
+        return None
+    return int(match.group("season")), tuple(range(first, last + 1))
+
+
+def _read_sidecar(path: Path) -> str:
+    if not path.exists():
+        return ""
+    if path.is_symlink():
+        raise RenamePlanError(f"sidecar is a symlink: {path}")
+    try:
+        with path.open(encoding="utf-8", newline="") as stream:
+            return stream.read()
+    except UnicodeError as exc:
+        raise RenamePlanError(f"sidecar must use UTF-8: {path}") from exc
+
+
+def _managed_block(text: str, begin: str, end: str, path: Path) -> tuple[str, str, str]:
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == begin]
+    ends = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == end]
+    if not starts and not ends:
+        return text, "", ""
+    if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
+        raise RenamePlanError(f"invalid PlexLoader block: {path}")
+    return "".join(lines[:starts[0]]), "".join(lines[starts[0]+1:ends[0]]), "".join(lines[ends[0]+1:])
+
+
+def _replace_managed_block(text: str, begin: str, end: str, body: str, path: Path) -> str:
+    prefix, _old, suffix = _managed_block(text, begin, end, path)
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    return prefix + begin + "\n" + body + end + "\n" + suffix
+
+
+def _write_sidecar(path: Path, text: str) -> None:
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False) as stream:
+            temp_path = Path(stream.name)
+            stream.write(text)
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def _dotted_ignore_state(folder: Path) -> tuple[str, set[str], dict[str, int]]:
     ignore = folder / ".plexignore"
-    if not ignore.exists():
-        return "", set(), {}
-    with ignore.open(encoding="utf-8", newline="") as stream:
-        text = stream.read()
-    if _IGNORE_BEGIN not in text and _IGNORE_END not in text:
-        return text, set(), {}
-    if text.count(_IGNORE_BEGIN) != 1 or text.count(_IGNORE_END) != 1:
-        raise RenamePlanError(f"invalid PlexLoader ignore block: {ignore}")
-    start = text.index(_IGNORE_BEGIN) + len(_IGNORE_BEGIN)
-    end = text.index(_IGNORE_END)
-    if end < start:
-        raise RenamePlanError(f"invalid PlexLoader ignore block: {ignore}")
-    lines = text[start:end].splitlines()
+    text = _read_sidecar(ignore)
+    _prefix, body, _suffix = _managed_block(text, _IGNORE_BEGIN, _IGNORE_END, ignore)
+    lines = body.splitlines()
     inode_lines = [line[len(_IGNORE_ALIASES):] for line in lines if line.startswith(_IGNORE_ALIASES)]
     try:
         inodes = json.loads(inode_lines[0]) if inode_lines else {}
@@ -135,73 +195,107 @@ def _dotted_ignore_state(folder: Path) -> tuple[str, set[str], dict[str, int]]:
 
 def _write_dotted_ignore(folder: Path, text: str, names: set[str], inodes: dict[str, int]) -> None:
     ledger = _IGNORE_ALIASES + json.dumps(inodes, ensure_ascii=False, sort_keys=True)
-    block = _IGNORE_BEGIN + "\n" + "\n".join(sorted(names)) + "\n" + ledger + "\n" + _IGNORE_END
-    if _IGNORE_BEGIN in text:
-        updated = text[:text.index(_IGNORE_BEGIN)] + block + text[text.index(_IGNORE_END) + len(_IGNORE_END):]
-    else:
-        updated = text + ("\n" if text and not text.endswith("\n") else "") + block + "\n"
-    if updated == text:
-        return
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=folder, delete=False) as stream:
-            temp_path = Path(stream.name)
-            stream.write(updated)
-        ignore = folder / ".plexignore"
-        mode = stat.S_IMODE(ignore.stat().st_mode) if ignore.exists() else 0o644
-        os.chmod(temp_path, mode)
-        os.replace(temp_path, ignore)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+    ignore = folder / ".plexignore"
+    body = "\n".join(sorted(names)) + ("\n" if names else "") + ledger + "\n"
+    updated = _replace_managed_block(text, _IGNORE_BEGIN, _IGNORE_END, body, ignore)
+    if updated != text:
+        _write_sidecar(ignore, updated)
 
 
-def normalize_dotted_episode_files(files: list[Path]) -> dict[Path, Path]:
-    """Keep torrent paths and expose Plex names as hardlinks, without copying data."""
+def prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
+    """Write exact Plex episode hints without changing media files or their names."""
     with _DOTTED_FILES_LOCK:
-        return _normalize_dotted_episode_files(files)
+        return _prepare_episode_match_hints(files)
 
 
-def _normalize_dotted_episode_files(files: list[Path]) -> dict[Path, Path]:
-    aliases = {
-        path: path.with_name(normalize_dotted_episode_name(path.name))
-        for path in files
-        if is_video_file(path) and normalize_dotted_episode_name(path.name) != path.name
-    }
-    seen_targets: set[str] = set()
-    ignore_states = {source.parent: _dotted_ignore_state(source.parent) for source in aliases}
-    for source, target in aliases.items():
-        if source.is_symlink() or not source.is_file():
-            raise RenamePlanError(f"source file missing: {source}")
-        key = os.path.normcase(str(target))
-        recorded_inode = ignore_states[source.parent][2].get(source.name)
-        source_inode = source.stat().st_ino
-        managed = (
-            type(recorded_inode) is int and recorded_inode > 0 and target.exists()
-            and target.stat().st_ino == recorded_inode
-            and type(source_inode) is int and source_inode > 0 and source_inode != recorded_inode
-        )
-        if key in seen_targets or target.is_symlink() or (
-            target.exists() and (not target.is_file() or (not source.samefile(target) and not managed))
-        ):
-            raise RenamePlanError(f"target already exists: {target}")
-        seen_targets.add(key)
-    changed = {}
-    for source, target in aliases.items():
-        if target.exists() and source.samefile(target):
+def _prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
+    videos = list(dict.fromkeys(_video_files(files)))
+    assignments: dict[Path, tuple[int, tuple[int, ...]]] = {}
+    for path in videos:
+        if not _DOTTED_MARKER_RE.search(path.stem):
             continue
-        if target.exists():
-            with tempfile.TemporaryDirectory(prefix=".plexloader-link-", dir=target.parent) as temp:
-                replacement = Path(temp) / target.name
-                os.link(source, replacement)
-                os.replace(replacement, target)
-        else:
-            os.link(source, target)
-        changed[source] = target
+        if any(char in path.name for char in "\r\n") or path.name != path.name.strip():
+            raise RenamePlanError(f"unsafe filename for Plex hint: {path}")
+        assignment = episode_assignment_from_filename(path)
+        if assignment is None:
+            raise RenamePlanError(f"ambiguous episode filename: {path}")
+        if path.is_symlink() or not path.is_file():
+            raise RenamePlanError(f"source file missing: {path}")
+        assignments[path] = assignment
+
+    ignore_states = {path.parent: _dotted_ignore_state(path.parent) for path in videos}
+    match_writes: dict[Path, str] = {}
+    changed = 0
+    for folder in dict.fromkeys(path.parent for path in assignments):
+        sidecar = folder / ".plexmatch"
+        text = _read_sidecar(sidecar)
+        prefix, body, suffix = _managed_block(text, _MATCH_BEGIN, _MATCH_END, sidecar)
+        hints: dict[str, str] = {}
+        for line in body.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            match = re.fullmatch(r"(?i)\s*(?:episode|ep)\s*:\s*([^:]+):\s*(.+)", line)
+            if match is None or _HINT_CODE_RE.fullmatch(match[1].strip()) is None or episode_assignment_from_filename(Path(match[1].strip() + ".mkv")) is None:
+                raise RenamePlanError(f"invalid PlexLoader episode hint: {sidecar}")
+            name = match[2].strip()
+            if name in hints:
+                raise RenamePlanError(f"duplicate PlexLoader episode hint: {sidecar}")
+            hints[name] = match[1].strip()
+        for path, (season, episodes) in assignments.items():
+            if path.parent != folder:
+                continue
+            code = f"S{season:02d}E{episodes[0]:02d}"
+            if len(episodes) > 1:
+                code += f"-E{episodes[-1]:02d}"
+            for line in (prefix + suffix).splitlines():
+                match = re.fullmatch(r"(?i)\s*(?:episode|ep)\s*:\s*([^:]+):\s*(.+)", line)
+                if match and match[2].strip() == path.name:
+                    existing = episode_assignment_from_filename(Path(match[1].strip() + ".mkv")) if _HINT_CODE_RE.fullmatch(match[1].strip()) else None
+                    if existing != (season, episodes):
+                        raise RenamePlanError(f"conflicting user episode hint: {sidecar}: {path.name}")
+            changed += hints.get(path.name) != code
+            hints[path.name] = code
+        hint_body = "".join(f"ep: {hints[name]}: {name}\n" for name in sorted(hints))
+        updated = _replace_managed_block(text, _MATCH_BEGIN, _MATCH_END, hint_body, sidecar)
+        if updated != text:
+            match_writes[sidecar] = updated
+
+    ignore_updates = {}
     for folder, (text, managed, inodes) in ignore_states.items():
-        folder_aliases = {source.name: target.stat().st_ino for source, target in aliases.items() if source.parent == folder}
-        _write_dotted_ignore(folder, text, managed | folder_aliases.keys(), inodes | folder_aliases)
-    return changed
+        names = set(managed)
+        folder_sources = {path.name: path for path in assignments if path.parent == folder}
+        folder_sources.update({name: folder / name for name in inodes if normalize_dotted_episode_name(name) != name})
+        for raw_name, source in folder_sources.items():
+            target = source.with_name(normalize_dotted_episode_name(raw_name))
+            if raw_name not in managed and target.name not in managed:
+                continue
+            names.discard(raw_name)
+            recorded = inodes.get(raw_name)
+            proven = (
+                source.is_file() and not source.is_symlink()
+                and target.is_file() and not target.is_symlink()
+                and (source.samefile(target) or (type(recorded) is int and recorded > 0 and target.stat().st_ino == recorded))
+            )
+            if proven:
+                names.add(target.name)
+            else:
+                names.discard(target.name)
+        if names != managed:
+            ignore_updates[folder] = (text, names, inodes)
+
+    # Publish hints before exposing the original names to the Plex scanner.
+    for path, text in match_writes.items():
+        _write_sidecar(path, text)
+    for folder, (text, names, inodes) in ignore_updates.items():
+        _write_dotted_ignore(folder, text, names, inodes)
+    return [
+        path for path in videos
+        if not (
+            path.name in ignore_updates.get(path.parent, ignore_states[path.parent])[1]
+            and normalize_dotted_episode_name(path.name) == path.name
+            and episode_assignment_from_filename(path) is not None
+        )
+    ], changed
 
 
 def restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path) -> int:
@@ -251,7 +345,8 @@ def _restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path
             os.link(target, source)
     for folder, (text, managed, inodes) in ignore_states.items():
         folder_aliases = {source.name: target.stat().st_ino for source, target, _new in pairs if source.parent == folder}
-        _write_dotted_ignore(folder, text, managed | folder_aliases.keys(), inodes | folder_aliases)
+        visible_raw = {source.name for source, target, _new in pairs if source.parent == folder and target.name in managed}
+        _write_dotted_ignore(folder, text, (managed | folder_aliases.keys()) - visible_raw, inodes | folder_aliases)
     return sum(new for _source, _target, new in pairs)
 
 

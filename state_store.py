@@ -340,9 +340,9 @@ class JsonStateStore:
                     for name, sent_ids in raw_plex_poll.items():
                         if not isinstance(sent_ids, list):
                             continue
-                        sent = sorted({str(chat_id) for chat_id in sent_ids if chat_id})
-                        if sent:
-                            plex_poll[str(name)] = sent
+                        plex_sent = sorted({str(chat_id) for chat_id in sent_ids if chat_id})
+                        if plex_sent:
+                            plex_poll[str(name)] = plex_sent
                 # Skip entries that carry no useful state at all.
                 if not status and not subscribers and not plex_done and not plex_poll:
                     continue

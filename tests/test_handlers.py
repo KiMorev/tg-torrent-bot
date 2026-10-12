@@ -6067,6 +6067,7 @@ class PlexPollingTests(unittest.TestCase):
             episode_count=10,
             file_paths=["/volume1/video/Klinika S03/Klinika S03E01.mkv"],
             resolution="1080",
+            episode_file_numbers={"/volume1/video/Klinika S03/Klinika S03E01.mkv": (1,)},
         )
         show = PlexShow("Клиника", 2001, "show-key-99", seasons={3: season})
         fake_app = MagicMock()
@@ -6074,15 +6075,22 @@ class PlexPollingTests(unittest.TestCase):
         meta = {"kind": "series", "title": "Klinika S03", "year": 0,
                 "quality": "1080", "series_query": "Клиника", "season_num": 3}
 
-        async def fake_ensure(show_arg):
+        async def fake_ensure(show_arg, **kwargs):
             return show_arg.seasons
 
+        scan_client = MagicMock()
+        scan_client.refresh_show_section.return_value = True
+        scan_client.get_show_seasons.return_value = show.seasons
         with (
             patch.object(bot, "_refresh_plex_library", AsyncMock()),
             patch.object(bot, "_plex_show_find", return_value=show),
             patch.object(bot, "_plex_ensure_show_seasons", AsyncMock(side_effect=fake_ensure)),
             patch.object(bot, "_plex_machine_id", "machine-1"),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "plex_client", scan_client),
+            patch.object(bot, "_prepare_completed_task_plex_files", side_effect=lambda task, task_meta: (
+                task["title"], task_meta, ("Klinika S03/Klinika S03E01.mkv",), 0,
+            )),
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "task1", "Klinika S03", [100],
@@ -6143,6 +6151,7 @@ class PlexPollingTests(unittest.TestCase):
             episode_count=4,
             file_paths=[f"/volume1/video/{task_title}"],
             resolution="1080",
+            episode_file_numbers={f"/volume1/video/{task_title}": (1,)},
         )
         show = PlexShow("Clarkson's Farm", 2021, "show-key-cf", seasons={5: season})
         fake_app = MagicMock()
@@ -6157,6 +6166,9 @@ class PlexPollingTests(unittest.TestCase):
             "season_num": 5,
         }
 
+        scan_client = MagicMock()
+        scan_client.refresh_show_section.return_value = True
+        scan_client.get_show_seasons.return_value = show.seasons
         with (
             patch.object(bot, "_refresh_plex_library", AsyncMock()),
             patch.object(bot, "_plex_show_find", return_value=None),
@@ -6164,6 +6176,10 @@ class PlexPollingTests(unittest.TestCase):
             patch.object(bot, "_plex_machine_id", "machine-1"),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
             patch.object(bot, "state_store", store),
+            patch.object(bot, "plex_client", scan_client),
+            patch.object(bot, "_prepare_completed_task_plex_files", side_effect=lambda task, task_meta: (
+                task["title"], task_meta, (task_title,), 0,
+            )),
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "task1", task_title, [100],
@@ -6188,20 +6204,30 @@ class PlexPollingTests(unittest.TestCase):
         """A legacy task (no meta) whose DS title looks like a series should still
         try the series path by reconstructing meta from the title."""
         from plex import PlexShow, PlexSeason
-        season = PlexSeason("sk2", 4, 10, ["/volume1/video/Show.X.S04E01/Show.X.S04E01.mkv"], "720")
+        season = PlexSeason(
+            "sk2", 4, 10, ["/volume1/video/Show.X.S04E01/Show.X.S04E01.mkv"], "720",
+            episode_file_numbers={"/volume1/video/Show.X.S04E01/Show.X.S04E01.mkv": (1,)},
+        )
         show = PlexShow("Show X", 2018, "show2", seasons={4: season})
         fake_app = MagicMock()
         fake_app.bot.send_message = AsyncMock()
 
-        async def fake_ensure(show_arg):
+        async def fake_ensure(show_arg, **kwargs):
             return show_arg.seasons
 
+        scan_client = MagicMock()
+        scan_client.refresh_show_section.return_value = True
+        scan_client.get_show_seasons.return_value = show.seasons
         with (
             patch.object(bot, "_refresh_plex_library", AsyncMock()),
             patch.object(bot, "_plex_show_find", return_value=show),
             patch.object(bot, "_plex_ensure_show_seasons", AsyncMock(side_effect=fake_ensure)),
             patch.object(bot, "_plex_machine_id", "m1"),
             patch.object(bot, "_PLEX_POLLING_TASKS", {}),
+            patch.object(bot, "plex_client", scan_client),
+            patch.object(bot, "_prepare_completed_task_plex_files", side_effect=lambda task, task_meta: (
+                task["title"], task_meta, ("Show.X.S04E01/Show.X.S04E01.mkv",), 0,
+            )) as prepare,
         ):
             asyncio.run(_plex_poll_after_finish(
                 fake_app, "legacy_task", "Show.X.S04E01", [100],
@@ -6209,6 +6235,7 @@ class PlexPollingTests(unittest.TestCase):
             ))
 
         fake_app.bot.send_message.assert_awaited_once()
+        self.assertEqual(prepare.call_args.args[1]["kind"], "series")
         text = fake_app.bot.send_message.call_args.kwargs["text"]
         self.assertIn("Сезон 4", text)
 

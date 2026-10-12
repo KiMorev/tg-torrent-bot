@@ -236,7 +236,8 @@ from filename_normalizer import (
     inspect_series_filenames,
     is_plex_episode_filename,
     is_video_file,
-    normalize_dotted_episode_files,
+    episode_assignment_from_filename,
+    prepare_episode_match_hints,
     normalize_dotted_episode_name,
     restore_dotted_episode_torrent_paths,
 )
@@ -5329,14 +5330,14 @@ def _plex_show_find_by_title_match_key(
     return None
 
 
-async def _plex_ensure_show_seasons(show: "PlexShow") -> dict[int, "PlexSeason"]:
+async def _plex_ensure_show_seasons(show: "PlexShow", *, force: bool = False) -> dict[int, "PlexSeason"]:
     """Lazily populate ``show.seasons`` via :meth:`PlexClient.get_show_seasons`.
 
     First call hits the network (one request per season + season list).
     Subsequent calls reuse the cached dict on the show instance. Returns
     an empty dict on any failure.
     """
-    if show.seasons:
+    if show.seasons and not force:
         return show.seasons
     if plex_client is None:
         return {}
@@ -6484,7 +6485,10 @@ async def _plex_find_series_by_ds_title(
 
     shows_snapshot = list(_plex_shows_library.values())
     for show in shows_snapshot:
-        seasons = show.seasons or await _plex_ensure_show_seasons(show)
+        seasons = (
+            await _plex_ensure_show_seasons(show, force=True) if expected_files
+            else show.seasons or await _plex_ensure_show_seasons(show)
+        )
         for season in seasons.values():
             if season_num > 0 and season.season_number != season_num:
                 if _plex_season_matches_ds_title(season, name):
@@ -6505,11 +6509,18 @@ def _plex_season_matches_ds_title(
     if not name:
         return False
     if expected_files:
-        paths = [str(fp).replace("\\", "/").casefold() for fp in getattr(season, "file_paths", None) or []]
-        return all(
-            any(fp.endswith("/" + expected.casefold()) for fp in paths)
-            for expected in expected_files
-        )
+        assignments = getattr(season, "episode_file_numbers", None) or {}
+        for expected in expected_files:
+            assignment = episode_assignment_from_filename(Path(expected))
+            if assignment is None or assignment[0] != getattr(season, "season_number", None):
+                return False
+            matches = [
+                fp for fp in getattr(season, "file_paths", None) or []
+                if str(fp).replace("\\", "/").casefold().endswith("/" + expected.casefold())
+            ]
+            if not matches or any(tuple(sorted(assignments.get(fp, ()))) != assignment[1] for fp in matches):
+                return False
+        return True
     for fp in getattr(season, "file_paths", None) or []:
         if _plex_file_path_matches_ds_title(fp, name):
             return True
@@ -6547,7 +6558,10 @@ async def _plex_poll_lookup_target(
         if series_query and season_num > 0:
             show = _plex_show_find(series_query, int(meta.get("year") or 0))
             if show is not None:
-                seasons = await _plex_ensure_show_seasons(show)
+                seasons = (
+                    await _plex_ensure_show_seasons(show, force=True) if expected_files
+                    else await _plex_ensure_show_seasons(show)
+                )
                 season = seasons.get(season_num)
                 if season is not None:
                     if _plex_season_matches_ds_title(season, task_title, expected_files=expected_files):
@@ -6703,20 +6717,20 @@ async def _plex_poll_after_finish(
     delivery_retry_needed = False
     try:
         try:
-            task_title, meta, expected_files, renamed_count = await asyncio.to_thread(
+            task_title, meta, expected_files, hint_count = await asyncio.to_thread(
                 _prepare_completed_task_plex_files, {"id": task_id, "title": task_title}, meta,
             )
         except (RenamePlanError, OSError) as exc:
-            logger.warning("Plex filename normalization failed task_id=%s: %s", task_id, exc)
+            logger.warning("Plex episode match hints failed task_id=%s: %s", task_id, exc)
             await _delete_hint_messages()
             delivery_retry_needed = True
             for cid in _plex_poll_target_chat_ids(task_id, "normalization_failed", chat_ids):
                 sent, _retry_later, _label = await _send_plex_poll_message(
                     app, chat_id=cid,
                     text=(
-                        "⚠️ Не удалось исправить имена серий для Plex. "
-                        "Проверьте права записи в /storage, поддержку жёстких ссылок "
-                        "и отсутствие файлов с совпадающими именами. "
+                        "⚠️ Не удалось подготовить сопоставление серий для Plex. "
+                        "Проверьте доступ к файлам в /storage, права записи "
+                        "и содержимое .plexmatch и .plexignore. "
                         "Plex-проверка отложена."
                     ),
                     reply_markup=_task_error_keyboard(
@@ -6726,11 +6740,11 @@ async def _plex_poll_after_finish(
                 if sent:
                     _mark_plex_poll_sent(task_id, "normalization_failed", cid)
             return
-        if renamed_count:
-            logger.info("Plex filename normalization task_id=%s renamed=%d", task_id, renamed_count)
+        if hint_count:
+            logger.info("Plex episode match hints task_id=%s hints=%d", task_id, hint_count)
             _record_download_history(
-                "files_normalized", task_id=task_id, chat_ids=chat_ids, meta=meta,
-                renamed_count=renamed_count,
+                "plex_match_hints", task_id=task_id, chat_ids=chat_ids, meta=meta,
+                hint_count=hint_count,
             )
         scan_required = bool(expected_files)
         for attempt in range(max_attempts):
@@ -6830,6 +6844,8 @@ async def _plex_poll_after_finish(
                 return
 
         # Exhausted all attempts — choose message based on whether we ever reached Plex.
+        if scan_required:
+            delivery_retry_needed = True
         timeout_min = int(max_attempts * interval_seconds // 60)
         title_esc = html_module.escape(task_title)
         if refresh_succeeded_at_least_once:
@@ -6893,6 +6909,11 @@ async def _plex_poll_after_finish(
         cancelled = True
         await _delete_hint_messages()
         logger.info("Plex polling task cancelled for task_id=%s", task_id)
+        raise
+    except Exception:
+        delivery_retry_needed = True
+        await _delete_hint_messages()
+        logger.exception("Plex polling failed task_id=%s; will retry", task_id)
         raise
     finally:
         if cancelled:
@@ -7230,16 +7251,17 @@ def _completed_task_video_files(task: dict) -> tuple[Path | None, list[Path]]:
 def _prepare_completed_task_plex_files(
     task: dict, meta: dict | None,
 ) -> tuple[str, dict | None, tuple[str, ...], int]:
-    """Normalize episode tokens before lookup, including /seasons catch-up tasks."""
+    """Prepare Plex episode hints without changing the torrent's file paths."""
     task_title = str(task.get("title") or "")
     _root, files = _completed_task_video_files(task)
-    renames = normalize_dotted_episode_files(files)
-    files = list(dict.fromkeys(
-        path.with_name(normalize_dotted_episode_name(path.name)) for path in files
-    ))
+    if not files and ((meta or {}).get("kind") == "series" or _plex_is_series(task_title)):
+        raise RenamePlanError("completed series files unavailable")
+    if not any(is_plex_episode_filename(path) for path in files):
+        return task_title, meta, (), 0
+    files, hint_count = prepare_episode_match_hints(files)
     episodes = [path for path in files if is_plex_episode_filename(path)]
     if not episodes:
-        return task_title, meta, (), len(renames)
+        return task_title, meta, (), hint_count
     updated = dict(meta or {})
     updated["kind"] = "series"
     updated["series_query"] = updated.get("series_query") or _extract_series_base_query(task_title)
@@ -7254,11 +7276,9 @@ def _prepare_completed_task_plex_files(
         for path in episodes
         if not season_num or _extract_season_from_query(path.name) == season_num
     )
-    if len(files) == 1 and files[0].name == normalize_dotted_episode_name(task_title):
-        task_title = files[0].name
     if updated != meta:
         _remember_task_meta(str(task.get("id") or ""), updated)
-    return task_title, updated, expected_files, len(renames)
+    return task_title, updated, expected_files, hint_count
 
 
 def _inspect_completed_task_normalization(
@@ -7447,24 +7467,39 @@ async def _start_plex_polling_for_completed_task(
     app: Application,
     task: dict,
     chat_ids: set[int],
+    *,
+    restart: bool = False,
 ) -> bool:
     task_id = str(task.get("id") or "")
     if not task_id or not PLEX_ENABLED:
         return False
-    if task_id in _PLEX_POLLING_TASKS or _plex_poll_is_done(task_id, _load_notified_tasks()):
-        return False
-    _PLEX_POLLING_TASKS[task_id] = None
-    _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
-        _plex_poll_after_finish(
-            app,
-            task_id,
-            task.get("title") or "",
-            sorted(chat_ids),
-            meta=_get_task_meta(task_id),
-            hint_msg_ids={},
+    async with _task_notifications_lock_for_current_loop():
+        if restart:
+            previous = _PLEX_POLLING_TASKS.pop(task_id, None)
+            if previous is not None and not previous.done():
+                previous.cancel()
+                await asyncio.gather(previous, return_exceptions=True)
+            notified = _load_notified_tasks()
+            entry = notified.get(task_id)
+            if isinstance(entry, dict):
+                entry.pop("plex_done", None)
+                entry.pop("plex_poll", None)
+                # Explicit restart must bypass _save_notified_tasks' preservation
+                # of Plex flags from concurrent notification snapshots.
+                state_store.save_notified_tasks(notified)
+        if task_id in _PLEX_POLLING_TASKS or _plex_poll_is_done(task_id, _load_notified_tasks()):
+            return False
+        _PLEX_POLLING_TASKS[task_id] = asyncio.create_task(
+            _plex_poll_after_finish(
+                app,
+                task_id,
+                task.get("title") or "",
+                sorted(chat_ids),
+                meta=_get_task_meta(task_id),
+                hint_msg_ids={},
+            )
         )
-    )
-    return True
+        return True
 
 
 def _normalization_poll_recipients(task_id: str, chat_id: int | None) -> set[int]:
@@ -7639,9 +7674,17 @@ async def _handle_normalization_callback(
         )
         return
 
+    status = "finished" if _is_complete_despite_error(task) else str(task.get("status") or "").lower()
+    if str(task.get("type") or "").lower() != "bt" or status not in {"finished", "seeding"}:
+        await query.edit_message_text(
+            "Переименование и проверка Plex доступны после завершения торрентной загрузки.",
+            reply_markup=_task_error_keyboard(retry_callback=query.data or None),
+        )
+        return
+
     if action == "norm_skip":
         recipients = _normalization_poll_recipients(task_id, chat_id)
-        started = await _start_plex_polling_for_completed_task(context.application, task, recipients)
+        started = await _start_plex_polling_for_completed_task(context.application, task, recipients, restart=True)
         suffix = "\n🔄 Проверяю Plex." if started else ""
         await query.edit_message_text(
             f"Оставил файлы как есть.{suffix}",
@@ -7735,7 +7778,7 @@ async def _handle_normalization_callback(
             target_dir=str(plan.target_dir),
         )
         recipients = _normalization_poll_recipients(task_id, chat_id)
-        started = await _start_plex_polling_for_completed_task(context.application, task, recipients)
+        started = await _start_plex_polling_for_completed_task(context.application, task, recipients, restart=True)
         suffix = "\n🔄 Проверяю появление в Plex." if started else ""
         await query.edit_message_text(
             f"✅ Файлы переименованы для Plex.{suffix}",

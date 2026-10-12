@@ -1,4 +1,4 @@
-"""Post-download episode names, Plex scan ordering and incomplete-season polling."""
+"""Episode hints, scan ordering, verified assignments and manual guards."""
 import asyncio
 import os
 import tempfile
@@ -15,10 +15,12 @@ os.environ.setdefault("DS_PASSWORD", "testpass")
 os.environ.setdefault("DS_DESTINATION", "video")
 
 import bot
+from filename_normalizer import RenameItem
 from plex import PlexSeason, PlexShow, PlexTimeoutError
+from state_store import JsonStateStore
 
 
-class PlexFilenameNormalizationTests(unittest.TestCase):
+class PlexEpisodeMatchTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -32,10 +34,10 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
         self.app.bot.send_message = AsyncMock()
         self.client = MagicMock()
         self.client.refresh_show_section.return_value = True
+        self.client.get_show_seasons.side_effect = lambda rating_key: self.show.seasons
         self.refresh = AsyncMock()
         self.history = MagicMock()
         self.done = MagicMock()
-        self.remember = MagicMock()
         self.mark_sent = bot._mark_plex_poll_sent
         for name, value in {
             "ALLOWED_CHAT_IDS": {100},
@@ -51,7 +53,7 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
             "_mark_plex_poll_sent": MagicMock(),
             "_mark_plex_poll_done": self.done,
             "_record_download_history": self.history,
-            "_remember_task_meta": self.remember,
+            "_remember_task_meta": MagicMock(),
         }.items():
             self.stack.enter_context(patch.object(bot, name, value))
 
@@ -64,159 +66,135 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
     def plex_path(self, path):
         return "/volume1/video/" + path.relative_to(self.storage).as_posix()
 
-    def test_pack_keeps_torrent_names_before_scan_and_waits_for_correct_season_and_paths(self):
-        sources = [self.folder / f"Oldschool.S02.E{ep:02d}.2026.mkv" for ep in [1, 2]]
-        targets = [path.with_name(path.name.replace("S02.E", "S02E")) for path in sources]
-        for source in sources:
-            source.write_bytes(b"episode")
+    def index_files(self, season_number, assignments):
+        paths = {self.plex_path(path): tuple(numbers) for path, numbers in assignments.items()}
+        season = PlexSeason("season", season_number, len(paths), file_paths=list(paths), episode_file_numbers=paths)
+        self.show.seasons = {season_number: season}
+        return season
+
+    def test_pack_writes_hints_before_scan_and_waits_for_correct_season_and_each_episode(self):
+        files = [self.folder / f"Oldschool.S02.E{ep:02d}.2026.mkv" for ep in (1, 2)]
+        for path in files:
+            path.write_bytes(b"episode")
 
         def scan():
-            self.assertTrue(all(path.exists() for path in targets))
-            self.assertTrue(all(source.samefile(target) for source, target in zip(sources, targets)))
-            ignored = (self.folder / ".plexignore").read_text(encoding="utf-8").splitlines()
-            self.assertTrue(all(path.name in ignored for path in sources))
-            self.assertFalse(any(path.name in ignored for path in targets))
+            hints = (self.folder / ".plexmatch").read_text(encoding="utf-8")
+            for ep, path in enumerate(files, start=1):
+                self.assertIn(f"ep: S02E{ep:02d}: {path.name}", hints)
+                self.assertEqual(path.read_bytes(), b"episode")
+                self.assertFalse(path.with_name(path.name.replace("S02.E", "S02E")).exists())
             return True
 
         async def refresh(*args, **kwargs):
             self.client.refresh_show_section.assert_called_once()
-            attempt = self.refresh.await_count
-            if attempt == 1:
-                self.show.seasons = {1: PlexSeason("stale", 1, 2, file_paths=[self.plex_path(path) for path in sources])}
+            if self.refresh.await_count == 1:
+                self.index_files(1, {files[0]: (1,), files[1]: (2,)})
+            elif self.refresh.await_count == 2:
+                self.index_files(2, {files[0]: (1,), files[1]: (1,)})
             else:
-                paths = sources if attempt == 2 else targets
-                self.show.seasons = {2: PlexSeason("season2", 2, 2, file_paths=[self.plex_path(path) for path in paths])}
+                self.index_files(2, {files[0]: (1,), files[1]: (2,)})
 
         self.client.refresh_show_section.side_effect = scan
         self.refresh.side_effect = refresh
         self.poll()
-
         self.assertEqual(self.refresh.await_count, 3)
         self.app.bot.send_message.assert_awaited_once()
         self.assertIn("Сезон 2", self.app.bot.send_message.await_args.kwargs["text"])
-        self.assertEqual(self.history.call_args_list[0].args[0], "files_normalized")
-        self.assertEqual(self.history.call_args_list[0].kwargs["renamed_count"], 2)
+        self.assertEqual(self.history.call_args_list[0].args[0], "plex_match_hints")
+        self.assertEqual(self.history.call_args_list[0].kwargs["hint_count"], 2)
 
-    def test_catch_up_ignores_existing_season_until_new_episode_is_indexed(self):
-        self.meta["source"] = "continue"
-        old = self.folder / "Oldschool.S02E01.2026.mkv"
-        new = self.folder / "Oldschool.S02.E02.2026.mkv"
-        target = self.folder / "Oldschool.S02E02.2026.mkv"
+    def test_catch_up_waits_for_new_raw_episode_path(self):
+        old = self.folder / "Oldschool.S02E01.mkv"
+        new = self.folder / "Oldschool.S02.E02.mkv"
         old.write_bytes(b"old")
         new.write_bytes(b"new")
-        season = self.show.seasons[2]
-        season.file_paths = [self.plex_path(old)]
+        self.index_files(2, {old: (1,)})
 
         async def refresh(*args, **kwargs):
             if self.refresh.await_count == 2:
-                season.file_paths.append(self.plex_path(target))
+                self.index_files(2, {old: (1,), new: (2,)})
 
         self.refresh.side_effect = refresh
         self.poll()
-
         self.assertEqual(old.read_bytes(), b"old")
-        self.assertEqual(target.read_bytes(), b"new")
-        self.assertTrue(new.samefile(target))
+        self.assertEqual(new.read_bytes(), b"new")
         self.assertEqual(self.refresh.await_count, 2)
-        self.app.bot.send_message.assert_awaited_once()
         self.assertIn("добавлен в Plex", self.app.bot.send_message.await_args.kwargs["text"])
 
-    def test_single_episode_catch_up_keeps_working_with_original_ds_title_on_retry(self):
-        self.meta["source"] = "continue"
+    def test_single_episode_repeat_preserves_ds_title_and_only_records_changed_hints(self):
         source = self.storage / "Oldschool.S02.E13.2026.mkv"
-        target = self.storage / "Oldschool.S02E13.2026.mkv"
         source.write_bytes(b"episode 13")
-        self.show.seasons[2].file_paths = [self.plex_path(target)]
-
+        self.index_files(2, {source: (13,)})
         self.poll(title=source.name, attempts=1)
         self.poll(title=source.name, attempts=1)
-
-        self.assertTrue(source.samefile(target))
-        self.assertEqual(target.read_bytes(), b"episode 13")
+        self.assertEqual(source.read_bytes(), b"episode 13")
+        self.assertFalse(source.with_name("Oldschool.S02E13.2026.mkv").exists())
         self.assertEqual(self.app.bot.send_message.await_count, 2)
-        self.assertTrue(all("Сезон 2" in call.kwargs["text"] for call in self.app.bot.send_message.await_args_list))
-        self.assertEqual(sum(call.args[0] == "files_normalized" for call in self.history.call_args_list), 1)
+        self.assertEqual(sum(call.args[0] == "plex_match_hints" for call in self.history.call_args_list), 1)
 
-    def test_repeat_prepare_deduplicates_preserved_originals_and_plex_names(self):
-        sources = [self.folder / f"Oldschool.S02.E{ep:02d}.2026.mkv" for ep in [1, 2]]
-        targets = [path.with_name(path.name.replace("S02.E", "S02E")) for path in sources]
-        for source in sources:
-            source.write_bytes(b"episode")
-        task = {"id": "task", "title": self.title}
-
-        first = bot._prepare_completed_task_plex_files(task, self.meta)
-        second = bot._prepare_completed_task_plex_files(task, self.meta)
-
-        expected = tuple(path.relative_to(self.storage).as_posix() for path in targets)
-        self.assertCountEqual(first[2], expected)
-        self.assertCountEqual(second[2], expected)
-        self.assertEqual(first[3], 2)
-        self.assertEqual(second[3], 0)
-        self.assertTrue(all(source.samefile(target) for source, target in zip(sources, targets)))
-        self.show.seasons[2].file_paths = [self.plex_path(path) for path in targets]
+    def test_standard_format_needs_no_hints_but_still_verifies_episode_index(self):
+        source = self.folder / "Oldschool.S02E01.mkv"
+        source.write_bytes(b"episode")
+        self.index_files(2, {source: (2,)})
         self.poll(attempts=1)
-        self.app.bot.send_message.assert_awaited_once()
-        self.assertIn("Сезон 2", self.app.bot.send_message.await_args.kwargs["text"])
+        self.assertFalse((self.folder / ".plexmatch").exists())
+        self.assertIn("не появился в Plex", self.app.bot.send_message.await_args.kwargs["text"])
 
-    def test_replaced_torrent_file_updates_managed_plex_name(self):
+    def test_multi_episode_file_requires_all_and_only_expected_indices(self):
+        source = self.folder / "Oldschool.S02.E01-E02.mkv"
+        source.write_bytes(b"two episodes")
+        expected = (source.relative_to(self.storage).as_posix(),)
+        season = self.index_files(2, {source: (1,)})
+        self.assertFalse(bot._plex_season_matches_ds_title(season, self.title, expected_files=expected))
+        season.episode_file_numbers[self.plex_path(source)] = (1, 2)
+        self.assertTrue(bot._plex_season_matches_ds_title(season, self.title, expected_files=expected))
+        season.episode_file_numbers[self.plex_path(source)] = (1, 2, 3)
+        self.assertFalse(bot._plex_season_matches_ds_title(season, self.title, expected_files=expected))
+
+    def test_write_failure_defers_without_marking_done_and_can_retry(self):
         source = self.folder / "Oldschool.S02.E01.mkv"
-        target = self.folder / "Oldschool.S02E01.mkv"
-        source.write_bytes(b"old episode")
-        task = {"id": "task", "title": self.title}
-        bot._prepare_completed_task_plex_files(task, self.meta)
-        self.assertTrue(source.samefile(target))
-        source.unlink()
-        source.write_bytes(b"updated episode")
-        self.assertEqual(target.read_bytes(), b"old episode")
-
-        prepared = bot._prepare_completed_task_plex_files(task, self.meta)
-
-        self.assertEqual(prepared[2], (target.relative_to(self.storage).as_posix(),))
-        self.assertEqual(prepared[3], 1)
-        self.assertTrue(source.samefile(target))
-        self.assertEqual(source.read_bytes(), b"updated episode")
-        self.assertEqual(target.read_bytes(), b"updated episode")
-
-    def test_collision_defers_polling_without_overwriting_or_marking_done(self):
-        source = self.folder / "Oldschool.S02.E01.mkv"
-        target = self.folder / "Oldschool.S02E01.mkv"
-        source.write_bytes(b"downloaded")
-        target.write_bytes(b"existing")
-
+        source.write_bytes(b"episode")
+        self.index_files(2, {source: (1,)})
+        with patch.object(bot, "prepare_episode_match_hints", side_effect=PermissionError("read only")):
+            self.poll()
+        self.client.refresh_show_section.assert_not_called()
+        self.refresh.assert_not_awaited()
+        self.done.assert_not_called()
+        buttons = [button for row in self.app.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard for button in row]
+        self.assertTrue(any(button.callback_data == "task:norm_skip:task" for button in buttons))
+        self.assertTrue(any(button.callback_data == "task:close:" for button in buttons))
         self.poll()
+        self.done.assert_called_once()
+        self.assertEqual(source.read_bytes(), b"episode")
+        self.assertIn("добавлен в Plex", self.app.bot.send_message.await_args.kwargs["text"])
 
-        self.assertEqual(source.read_bytes(), b"downloaded")
-        self.assertEqual(target.read_bytes(), b"existing")
+    def test_missing_storage_cannot_accept_old_season_by_folder_name(self):
+        source = self.folder / "Oldschool.S02.E01.mkv"
+        self.index_files(2, {source: (1,)})
+        self.poll()
         self.client.refresh_show_section.assert_not_called()
         self.refresh.assert_not_awaited()
         self.done.assert_not_called()
         self.assertIn("Plex-проверка отложена", self.app.bot.send_message.await_args.kwargs["text"])
-        buttons = [button for row in self.app.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard for button in row]
-        self.assertTrue(any(button.callback_data == "task:norm_skip:task" for button in buttons))
-        self.assertTrue(any(button.callback_data == "task:close:" for button in buttons))
 
-    def test_write_failure_defers_polling(self):
+    def test_malformed_hint_encoding_is_a_controlled_retryable_error(self):
         source = self.folder / "Oldschool.S02.E01.mkv"
         source.write_bytes(b"episode")
-        target = source.with_name("Oldschool.S02E01.mkv")
-        with patch("filename_normalizer.os.link", side_effect=PermissionError("read only")):
-            self.poll()
-        self.assertEqual(source.read_bytes(), b"episode")
-        self.assertFalse(target.exists())
-        self.client.refresh_show_section.assert_not_called()
-        self.refresh.assert_not_awaited()
+        (self.folder / ".plexmatch").write_bytes("ep: S02E01: x.mkv".encode("utf-16"))
+        self.poll()
         self.done.assert_not_called()
+        self.assertEqual(source.read_bytes(), b"episode")
+        self.assertIn("Plex-проверка отложена", self.app.bot.send_message.await_args.kwargs["text"])
 
-    def test_normalization_error_is_not_repeated_while_waiting_for_manual_fix(self):
+    def test_preparation_error_notification_is_not_repeated_while_waiting_for_fix(self):
         source = self.folder / "Oldschool.S02.E01.mkv"
-        target = self.folder / "Oldschool.S02E01.mkv"
-        source.write_bytes(b"downloaded")
-        target.write_bytes(b"existing")
+        source.write_bytes(b"episode")
         notified = {}
         with (
             patch.object(bot, "_load_notified_tasks", return_value=notified),
             patch.object(bot, "_save_notified_tasks"),
             patch.object(bot, "_mark_plex_poll_sent", self.mark_sent),
+            patch.object(bot, "prepare_episode_match_hints", side_effect=bot.RenamePlanError("bad hints")),
         ):
             self.poll()
             self.poll()
@@ -225,19 +203,45 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
 
     def test_scan_failure_is_retried_before_lookup(self):
         source = self.folder / "Oldschool.S02.E01.mkv"
-        target = self.folder / "Oldschool.S02E01.mkv"
         source.write_bytes(b"episode")
-        self.show.seasons[2].file_paths = [self.plex_path(target)]
+        self.index_files(2, {source: (1,)})
         self.client.refresh_show_section.side_effect = [PlexTimeoutError("offline"), False, True]
-
         self.poll()
-
         self.assertEqual(self.client.refresh_show_section.call_count, 3)
         self.refresh.assert_awaited_once()
-        self.app.bot.send_message.assert_awaited_once()
         self.assertIn("Сезон 2", self.app.bot.send_message.await_args.kwargs["text"])
 
-    def test_series_fallback_skips_wrong_season_and_finds_correct_duplicate_show(self):
+    def test_unexpected_poll_error_keeps_retry_available(self):
+        source = self.folder / "Oldschool.S02.E01.mkv"
+        source.write_bytes(b"episode")
+        self.refresh.side_effect = RuntimeError("unexpected response")
+        with self.assertRaises(RuntimeError):
+            self.poll()
+        self.done.assert_not_called()
+        self.assertNotIn("task", bot._PLEX_POLLING_TASKS)
+
+    def test_exhausted_scan_failures_do_not_permanently_complete_polling(self):
+        source = self.folder / "Oldschool.S02.E01.mkv"
+        source.write_bytes(b"episode")
+        self.client.refresh_show_section.return_value = False
+        self.poll(attempts=1)
+        self.done.assert_not_called()
+        self.assertNotIn("task", bot._PLEX_POLLING_TASKS)
+        self.refresh.assert_not_awaited()
+
+    def test_poll_refetches_episode_assignments_even_if_show_list_refresh_keeps_old_cache(self):
+        source = self.folder / "Oldschool.S02.E01.mkv"
+        source.write_bytes(b"episode")
+        self.index_files(2, {source: (2,)})
+        fresh = PlexSeason("fresh", 2, 1, file_paths=[self.plex_path(source)],
+                           episode_file_numbers={self.plex_path(source): (1,)})
+        self.client.get_show_seasons.side_effect = None
+        self.client.get_show_seasons.return_value = {2: fresh}
+        self.poll(attempts=1)
+        self.client.get_show_seasons.assert_called_once_with("show")
+        self.assertIn("добавлен в Plex", self.app.bot.send_message.await_args.kwargs["text"])
+
+    def test_series_fallback_skips_wrong_season(self):
         fp = f"/volume1/video/{self.title}/Oldschool.S02E01.mkv"
         wrong = PlexShow("Олдскул", 2025, "wrong", seasons={1: PlexSeason("season1", 1, 1, file_paths=[fp])})
         self.show.seasons[2].file_paths = [fp]
@@ -248,3 +252,124 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
             target, _, title = asyncio.run(bot._plex_poll_lookup_target(self.title, self.meta))
         self.assertIs(target, self.show.seasons[2])
         self.assertIn("Сезон 2", title)
+
+
+class ManualRenameCompletionGuardTests(unittest.TestCase):
+    def test_stale_apply_callback_does_not_rename_unfinished_task(self):
+        for status in ("downloading", "paused", "waiting", "error"):
+            with self.subTest(status=status):
+                task = {"id": "task", "title": "Old series", "type": "bt", "status": status}
+                query = MagicMock(data="task:norm_apply:task:1")
+                query.edit_message_text = AsyncMock()
+                context = MagicMock()
+                with (
+                    patch.object(bot, "_can_access_task_id", return_value=True),
+                    patch.object(bot, "ds_client") as ds,
+                    patch.object(bot, "_inspect_completed_task_normalization") as inspect,
+                    patch.object(bot, "apply_rename_plan") as rename,
+                    patch.object(bot, "_is_complete_despite_error", return_value=False),
+                ):
+                    ds.list_tasks.return_value = [task]
+                    asyncio.run(bot._handle_normalization_callback(query, context, "norm_apply", "task:1", 100))
+                inspect.assert_not_called()
+                rename.assert_not_called()
+                self.assertIn("после завершения", query.edit_message_text.await_args.args[0])
+
+    def test_completed_task_still_physically_renames_and_starts_plex_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "01.mkv"
+            target = root / "Season 01" / "Old series - S01E01.mkv"
+            source.write_bytes(b"old series")
+            plan = bot.RenamePlan("Old series", 1, root, target.parent, (
+                RenameItem(source, target, 1, "Episode", 1, 1),
+            ))
+            task = {"id": "task", "title": "Old series", "type": "bt", "status": "finished"}
+            query = MagicMock(data="task:norm_apply:task:1")
+            query.edit_message_text = AsyncMock()
+            context = MagicMock()
+            with (
+                patch.object(bot, "_can_access_task_id", return_value=True),
+                patch.object(bot, "ds_client") as ds,
+                patch.object(bot, "_get_task_meta", return_value={"kind": "series"}),
+                patch.object(bot, "_inspect_completed_task_normalization", return_value={"plan": plan}),
+                patch.object(bot, "_remember_normalized_task_meta"),
+                patch.object(bot, "_record_download_history"),
+                patch.object(bot, "_normalization_poll_recipients", return_value=[100]),
+                patch.object(bot, "_start_plex_polling_for_completed_task", AsyncMock(return_value=True)) as poll,
+            ):
+                ds.list_tasks.return_value = [task]
+                asyncio.run(bot._handle_normalization_callback(query, context, "norm_apply", "task:1", 100))
+            self.assertFalse(source.exists())
+            self.assertEqual(target.read_bytes(), b"old series")
+            poll.assert_awaited_once_with(context.application, task, [100], restart=True)
+
+    def test_restart_after_rename_resets_only_plex_delivery_and_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JsonStateStore(**{
+                name + "_file": root / (name + ".json") for name in (
+                    "approved_chat_ids", "tracker_processed", "task_owners", "notified_tasks", "auto_delete_tasks",
+                )
+            })
+            expected = {"status": "finished", "sent": ["200"], "failures": {"200": 1}, "subscribers": ["300"]}
+            store.save_notified_tasks({"task": {**expected, "plex_done": True, "plex_poll": {"found": ["100"]}}})
+            polling = {"task": None}
+            poll = AsyncMock()
+            with (
+                patch.object(bot, "PLEX_ENABLED", True),
+                patch.object(bot, "_PLEX_POLLING_TASKS", polling),
+                patch.object(bot, "state_store", store),
+                patch.object(bot, "_get_task_meta", return_value={"kind": "series"}),
+                patch.object(bot, "_plex_poll_after_finish", poll),
+            ):
+                async def run():
+                    started = await bot._start_plex_polling_for_completed_task(
+                        MagicMock(), {"id": "task", "title": "Old series"}, {100}, restart=True,
+                    )
+                    await polling["task"]
+                    return started
+                self.assertTrue(asyncio.run(run()))
+            self.assertEqual(store.load_notified_tasks()["task"], expected)
+            poll.assert_awaited_once()
+
+    def test_restart_cancellation_cannot_race_with_automatic_poll_start(self):
+        polling = {}
+        poll = AsyncMock()
+        with (
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "_PLEX_POLLING_TASKS", polling),
+            patch.object(bot, "_load_notified_tasks", return_value={}),
+            patch.object(bot, "_get_task_meta", return_value={"kind": "series"}),
+            patch.object(bot, "_plex_poll_after_finish", poll),
+        ):
+            async def run():
+                cancelled = asyncio.Event()
+                cleanup = asyncio.Event()
+                async def previous_poll():
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+                        await cleanup.wait()
+                        polling.pop("task", None)
+                previous = asyncio.create_task(previous_poll())
+                polling["task"] = previous
+                await asyncio.sleep(0)
+                restarting = asyncio.create_task(bot._start_plex_polling_for_completed_task(
+                    MagicMock(), {"id": "task", "title": "Old series"}, {100}, restart=True,
+                ))
+                await cancelled.wait()
+                async def automatic_start():
+                    async with bot._task_notifications_lock_for_current_loop():
+                        return "task" not in polling
+                automatic = asyncio.create_task(automatic_start())
+                await asyncio.sleep(0)
+                self.assertFalse(automatic.done())
+                cleanup.set()
+                self.assertTrue(await restarting)
+                self.assertFalse(await automatic)
+                await polling["task"]
+                self.assertTrue(previous.cancelled())
+            asyncio.run(run())
+        poll.assert_awaited_once()
