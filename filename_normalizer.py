@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import stat
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+from torrent_utils import bdecode_torrent
 
 
 VIDEO_EXTENSIONS = {
@@ -96,24 +102,157 @@ def normalize_dotted_episode_name(name: str) -> str:
     return DOTTED_EPISODE_RE.sub(r"\1\2", name)
 
 
+_IGNORE_BEGIN = "# PlexLoader torrent paths: begin"
+_IGNORE_END = "# PlexLoader torrent paths: end"
+_IGNORE_ALIASES = "# PlexLoader alias inodes: "
+_DOTTED_FILES_LOCK = threading.RLock()
+
+
+def _dotted_ignore_state(folder: Path) -> tuple[str, set[str], dict[str, int]]:
+    ignore = folder / ".plexignore"
+    if not ignore.exists():
+        return "", set(), {}
+    with ignore.open(encoding="utf-8", newline="") as stream:
+        text = stream.read()
+    if _IGNORE_BEGIN not in text and _IGNORE_END not in text:
+        return text, set(), {}
+    if text.count(_IGNORE_BEGIN) != 1 or text.count(_IGNORE_END) != 1:
+        raise RenamePlanError(f"invalid PlexLoader ignore block: {ignore}")
+    start = text.index(_IGNORE_BEGIN) + len(_IGNORE_BEGIN)
+    end = text.index(_IGNORE_END)
+    if end < start:
+        raise RenamePlanError(f"invalid PlexLoader ignore block: {ignore}")
+    lines = text[start:end].splitlines()
+    inode_lines = [line[len(_IGNORE_ALIASES):] for line in lines if line.startswith(_IGNORE_ALIASES)]
+    try:
+        inodes = json.loads(inode_lines[0]) if inode_lines else {}
+        if len(inode_lines) > 1 or not isinstance(inodes, dict):
+            raise ValueError("invalid inode ledger")
+    except ValueError as exc:
+        raise RenamePlanError(f"invalid PlexLoader inode ledger: {ignore}") from exc
+    return text, {line for line in lines if line and not line.startswith("#")}, inodes
+
+
+def _write_dotted_ignore(folder: Path, text: str, names: set[str], inodes: dict[str, int]) -> None:
+    ledger = _IGNORE_ALIASES + json.dumps(inodes, ensure_ascii=False, sort_keys=True)
+    block = _IGNORE_BEGIN + "\n" + "\n".join(sorted(names)) + "\n" + ledger + "\n" + _IGNORE_END
+    if _IGNORE_BEGIN in text:
+        updated = text[:text.index(_IGNORE_BEGIN)] + block + text[text.index(_IGNORE_END) + len(_IGNORE_END):]
+    else:
+        updated = text + ("\n" if text and not text.endswith("\n") else "") + block + "\n"
+    if updated == text:
+        return
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=folder, delete=False) as stream:
+            temp_path = Path(stream.name)
+            stream.write(updated)
+        ignore = folder / ".plexignore"
+        mode = stat.S_IMODE(ignore.stat().st_mode) if ignore.exists() else 0o644
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, ignore)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def normalize_dotted_episode_files(files: list[Path]) -> dict[Path, Path]:
-    """Join Sxx.Eyy tokens in place, checking every target before renaming."""
-    renames = {
+    """Keep torrent paths and expose Plex names as hardlinks, without copying data."""
+    with _DOTTED_FILES_LOCK:
+        return _normalize_dotted_episode_files(files)
+
+
+def _normalize_dotted_episode_files(files: list[Path]) -> dict[Path, Path]:
+    aliases = {
         path: path.with_name(normalize_dotted_episode_name(path.name))
         for path in files
         if is_video_file(path) and normalize_dotted_episode_name(path.name) != path.name
     }
     seen_targets: set[str] = set()
-    for source, target in renames.items():
-        if not source.is_file():
+    ignore_states = {source.parent: _dotted_ignore_state(source.parent) for source in aliases}
+    for source, target in aliases.items():
+        if source.is_symlink() or not source.is_file():
             raise RenamePlanError(f"source file missing: {source}")
         key = os.path.normcase(str(target))
-        if key in seen_targets or target.exists():
+        recorded_inode = ignore_states[source.parent][2].get(source.name)
+        source_inode = source.stat().st_ino
+        managed = (
+            type(recorded_inode) is int and recorded_inode > 0 and target.exists()
+            and target.stat().st_ino == recorded_inode
+            and type(source_inode) is int and source_inode > 0 and source_inode != recorded_inode
+        )
+        if key in seen_targets or target.is_symlink() or (
+            target.exists() and (not target.is_file() or (not source.samefile(target) and not managed))
+        ):
             raise RenamePlanError(f"target already exists: {target}")
         seen_targets.add(key)
-    for source, target in renames.items():
-        source.rename(target)
-    return renames
+    changed = {}
+    for source, target in aliases.items():
+        if target.exists() and source.samefile(target):
+            continue
+        if target.exists():
+            with tempfile.TemporaryDirectory(prefix=".plexloader-link-", dir=target.parent) as temp:
+                replacement = Path(temp) / target.name
+                os.link(source, replacement)
+                os.replace(replacement, target)
+        else:
+            os.link(source, target)
+        changed[source] = target
+    for folder, (text, managed, inodes) in ignore_states.items():
+        folder_aliases = {source.name: target.stat().st_ino for source, target in aliases.items() if source.parent == folder}
+        _write_dotted_ignore(folder, text, managed | folder_aliases.keys(), inodes | folder_aliases)
+    return changed
+
+
+def restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path) -> int:
+    """Restore exact torrent names from legacy Plex names before DSM verifies pieces."""
+    with _DOTTED_FILES_LOCK:
+        return _restore_dotted_episode_torrent_paths(torrent_path, storage_root)
+
+
+def _restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path) -> int:
+    if not storage_root.is_dir():
+        return 0
+    try:
+        _, info = bdecode_torrent(torrent_path.read_bytes())
+        if not isinstance(info, dict):
+            raise ValueError("missing info dictionary")
+
+        def component(value: bytes) -> str:
+            name = value.decode("utf-8")
+            if not name or name in {".", ".."} or any(c in name for c in "/\\:") or any(ord(c) < 32 for c in name):
+                raise ValueError("unsafe torrent path")
+            return name
+
+        root_name = component(info.get(b"name.utf-8", info.get(b"name", b"")))
+        root = storage_root.resolve()
+        entries = info.get(b"files")
+        paths = [storage_root / root_name] if entries is None else [
+            storage_root / root_name / Path(*(component(part) for part in entry.get(b"path.utf-8", entry.get(b"path", []))))
+            for entry in entries
+        ]
+        pairs = []
+        for source in paths:
+            target = source.with_name(normalize_dotted_episode_name(source.name))
+            if not source.resolve().is_relative_to(root) or not target.resolve().is_relative_to(root):
+                raise ValueError("torrent path escapes storage")
+            if source == target or not is_video_file(source) or not target.exists():
+                continue
+            if source.is_symlink() or target.is_symlink() or not target.is_file():
+                raise ValueError("unsafe torrent file")
+            if source.exists() and not source.samefile(target):
+                continue
+            pairs.append((source, target, not source.exists()))
+    except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
+        raise RenamePlanError(f"invalid torrent paths: {exc}") from exc
+    ignore_states = {source.parent: _dotted_ignore_state(source.parent) for source, _target, _new in pairs}
+    for source, target, new in pairs:
+        if new:
+            os.link(target, source)
+    for folder, (text, managed, inodes) in ignore_states.items():
+        folder_aliases = {source.name: target.stat().st_ino for source, target, _new in pairs if source.parent == folder}
+        _write_dotted_ignore(folder, text, managed | folder_aliases.keys(), inodes | folder_aliases)
+    return sum(new for _source, _target, new in pairs)
 
 
 def _video_files(files: list[Path]) -> list[Path]:

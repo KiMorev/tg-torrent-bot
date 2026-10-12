@@ -70,6 +70,69 @@ def _jackett_rt_sub(
     }
 
 
+class SubscriptionTorrentPathTests(unittest.TestCase):
+    def test_original_path_is_restored_before_ds_create_and_plex_keeps_updated_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            folder = storage / "Oldschool.S02"
+            folder.mkdir()
+            original = folder / "Oldschool.S02.E01.mkv"
+            plex = folder / "Oldschool.S02E01.mkv"
+            plex.write_bytes(b"old episode")
+            torrent = storage / "update.torrent"
+            name = original.name.encode()
+            torrent.write_bytes(
+                b"d4:infod4:name13:Oldschool.S025:filesld6:lengthi20e4:pathl"
+                + str(len(name)).encode() + b":" + name + b"eeeee"
+            )
+            ds = MagicMock()
+
+            def create(file_path, filename):
+                self.assertTrue(original.samefile(plex))
+                self.assertEqual(plex.read_bytes(), b"old episode")
+                updated = folder / "updated.tmp"
+                updated.write_bytes(b"new episode content")
+                updated.replace(original)
+                return "updated-task"
+
+            ds.create_torrent_file.side_effect = create
+            with (
+                patch.object(bot, "STORAGE_MOUNT_PATH", str(storage)),
+                patch.object(bot, "ds_client", ds),
+                patch.object(bot, "_remember_task_meta"),
+            ):
+                self.assertEqual(bot._create_subscription_torrent_task(torrent, "update.torrent"), "updated-task")
+                _, _, expected, count = bot._prepare_completed_task_plex_files(
+                    {"id": "updated-task", "title": folder.name},
+                    {"kind": "series", "season_num": 2, "series_query": "Oldschool"},
+                )
+
+            self.assertTrue(original.samefile(plex))
+            self.assertEqual(plex.read_bytes(), b"new episode content")
+            self.assertEqual(expected, (f"{folder.name}/{plex.name}",))
+            self.assertEqual(count, 1)
+
+    def test_restore_failure_stops_jackett_download_without_magnet_fallback(self):
+        from jackett import JackettResult
+        candidate = JackettResult(
+            title="Oldschool S2E1-15 of 17", size="10 GB", seeders=10,
+            torrent_url="http://jackett/torrent", magnet_url="magnet:?xt=urn:btih:test",
+            tracker="rutracker", topic_url="https://rutracker.org/forum/viewtopic.php?t=6902602",
+        )
+        ds = MagicMock()
+        jackett = MagicMock()
+        jackett.download_torrent.return_value = b"torrent"
+        with (
+            patch.object(bot, "ds_client", ds),
+            patch.object(bot, "jackett_client", jackett),
+            patch.object(bot, "restore_dotted_episode_torrent_paths", side_effect=PermissionError("read only")),
+        ):
+            with self.assertRaises(PermissionError):
+                asyncio.run(bot._jackett_subscription_auto_download(candidate, 100))
+        ds.create_torrent_file.assert_not_called()
+        ds.create_magnet.assert_not_called()
+
+
 class JackettRtDirectStateAdvanceTests(unittest.TestCase):
     """Bug A: state must NOT advance when DS download fails."""
 
@@ -127,6 +190,13 @@ class JackettRtDirectStateAdvanceTests(unittest.TestCase):
         result = self._run(sub, ds_raises=DownloadStationError("DSM 119"))
         # State frozen at 1 so next check retries the same update.
         self.assertEqual(result["sub"]["last_episode_end"], 1)
+
+    def test_state_does_not_advance_when_torrent_path_restore_fails(self):
+        for error in [bot.RenamePlanError("file conflict"), PermissionError("read only")]:
+            with self.subTest(error=type(error).__name__):
+                with patch.object(bot, "restore_dotted_episode_torrent_paths", side_effect=error):
+                    result = self._run(_jackett_rt_sub(last_end=1, total=10))
+                self.assertEqual(result["sub"]["last_episode_end"], 1)
 
     def test_state_does_not_advance_when_ds_returns_empty_task_id(self):
         sub = _jackett_rt_sub(last_end=1, total=10)

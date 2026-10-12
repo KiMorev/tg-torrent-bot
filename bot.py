@@ -238,6 +238,7 @@ from filename_normalizer import (
     is_video_file,
     normalize_dotted_episode_files,
     normalize_dotted_episode_name,
+    restore_dotted_episode_torrent_paths,
 )
 from movie_discovery import (
     _compute_card_score as _movie_compute_card_score,
@@ -6714,7 +6715,8 @@ async def _plex_poll_after_finish(
                     app, chat_id=cid,
                     text=(
                         "⚠️ Не удалось исправить имена серий для Plex. "
-                        "Проверьте права записи в /storage и отсутствие файлов с совпадающими именами. "
+                        "Проверьте права записи в /storage, поддержку жёстких ссылок "
+                        "и отсутствие файлов с совпадающими именами. "
                         "Plex-проверка отложена."
                     ),
                     reply_markup=_task_error_keyboard(
@@ -7232,7 +7234,9 @@ def _prepare_completed_task_plex_files(
     task_title = str(task.get("title") or "")
     _root, files = _completed_task_video_files(task)
     renames = normalize_dotted_episode_files(files)
-    files = [renames.get(path, path) for path in files]
+    files = list(dict.fromkeys(
+        path.with_name(normalize_dotted_episode_name(path.name)) for path in files
+    ))
     episodes = [path for path in files if is_plex_episode_filename(path)]
     if not episodes:
         return task_title, meta, (), len(renames)
@@ -24726,7 +24730,7 @@ async def _check_jackett_sub_via_rutracker_direct(
         try:
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)
-            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            task_id = await asyncio.to_thread(_create_subscription_torrent_task, temp_path, safe_name)
             if not task_id:
                 raise _missing_task_id_error("для torrent-файла подписки Rutracker")
             if chat_id and task_id:
@@ -24742,7 +24746,7 @@ async def _check_jackett_sub_via_rutracker_direct(
                     method="torrent-файл",
                     meta_source="jackett_sub",
                 )
-        except (RutrackerError, DownloadStationError) as e:
+        except (RutrackerError, DownloadStationError, RenamePlanError, OSError) as e:
             logger.warning("Failed to download Rutracker update for Jackett sub %s: %s", key, e)
         finally:
             try:
@@ -24877,6 +24881,13 @@ async def _check_jackett_sub_via_rutracker_direct(
     return True
 
 
+def _create_subscription_torrent_task(file_path: Path, filename: str) -> str:
+    restored = restore_dotted_episode_torrent_paths(file_path, Path(STORAGE_MOUNT_PATH))
+    if restored:
+        logger.info("Subscription torrent paths restored: files=%s", restored)
+    return ds_client.create_torrent_file(file_path, filename)
+
+
 async def _jackett_subscription_auto_download(
     candidate: JackettResult,
     chat_id: int | None,
@@ -24919,7 +24930,7 @@ async def _jackett_subscription_auto_download(
                     jackett_client.download_torrent, candidate.torrent_url
                 )
                 temp_path.write_bytes(torrent_bytes)
-                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                task_id = await asyncio.to_thread(_create_subscription_torrent_task, temp_path, safe_name)
                 if not task_id:
                     raise _missing_task_id_error("для torrent-файла подписки")
                 if chat_id and task_id:
@@ -25887,7 +25898,7 @@ async def _check_subscriptions(app: Application) -> None:
                 try:
                     torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
                     temp_path.write_bytes(torrent_bytes)
-                    task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                    task_id = await asyncio.to_thread(_create_subscription_torrent_task, temp_path, safe_name)
                     if not task_id:
                         raise _missing_task_id_error("для torrent-файла подписки Rutracker")
                     if chat_id and task_id:
@@ -25904,7 +25915,7 @@ async def _check_subscriptions(app: Application) -> None:
                             meta_source="rutracker_sub",
                         )
                         _schedule_task_notification_fast_wake(app, f"rutracker_sub:{task_id}")
-                except (RutrackerError, DownloadStationError) as e:
+                except (RutrackerError, DownloadStationError, RenamePlanError, OSError) as e:
                     logger.warning("Failed to update subscription %s: %s", topic_id, e)
                     # Bug A (1.2) — don't advance state when download fails,
                     # so next check retries the same update.

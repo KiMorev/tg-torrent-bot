@@ -64,7 +64,7 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
     def plex_path(self, path):
         return "/volume1/video/" + path.relative_to(self.storage).as_posix()
 
-    def test_pack_is_renamed_before_scan_and_waits_for_correct_season_and_paths(self):
+    def test_pack_keeps_torrent_names_before_scan_and_waits_for_correct_season_and_paths(self):
         sources = [self.folder / f"Oldschool.S02.E{ep:02d}.2026.mkv" for ep in [1, 2]]
         targets = [path.with_name(path.name.replace("S02.E", "S02E")) for path in sources]
         for source in sources:
@@ -72,7 +72,10 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
 
         def scan():
             self.assertTrue(all(path.exists() for path in targets))
-            self.assertFalse(any(path.exists() for path in sources))
+            self.assertTrue(all(source.samefile(target) for source, target in zip(sources, targets)))
+            ignored = (self.folder / ".plexignore").read_text(encoding="utf-8").splitlines()
+            self.assertTrue(all(path.name in ignored for path in sources))
+            self.assertFalse(any(path.name in ignored for path in targets))
             return True
 
         async def refresh(*args, **kwargs):
@@ -113,6 +116,7 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
 
         self.assertEqual(old.read_bytes(), b"old")
         self.assertEqual(target.read_bytes(), b"new")
+        self.assertTrue(new.samefile(target))
         self.assertEqual(self.refresh.await_count, 2)
         self.app.bot.send_message.assert_awaited_once()
         self.assertIn("добавлен в Plex", self.app.bot.send_message.await_args.kwargs["text"])
@@ -127,11 +131,51 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
         self.poll(title=source.name, attempts=1)
         self.poll(title=source.name, attempts=1)
 
-        self.assertFalse(source.exists())
+        self.assertTrue(source.samefile(target))
         self.assertEqual(target.read_bytes(), b"episode 13")
         self.assertEqual(self.app.bot.send_message.await_count, 2)
         self.assertTrue(all("Сезон 2" in call.kwargs["text"] for call in self.app.bot.send_message.await_args_list))
         self.assertEqual(sum(call.args[0] == "files_normalized" for call in self.history.call_args_list), 1)
+
+    def test_repeat_prepare_deduplicates_preserved_originals_and_plex_names(self):
+        sources = [self.folder / f"Oldschool.S02.E{ep:02d}.2026.mkv" for ep in [1, 2]]
+        targets = [path.with_name(path.name.replace("S02.E", "S02E")) for path in sources]
+        for source in sources:
+            source.write_bytes(b"episode")
+        task = {"id": "task", "title": self.title}
+
+        first = bot._prepare_completed_task_plex_files(task, self.meta)
+        second = bot._prepare_completed_task_plex_files(task, self.meta)
+
+        expected = tuple(path.relative_to(self.storage).as_posix() for path in targets)
+        self.assertCountEqual(first[2], expected)
+        self.assertCountEqual(second[2], expected)
+        self.assertEqual(first[3], 2)
+        self.assertEqual(second[3], 0)
+        self.assertTrue(all(source.samefile(target) for source, target in zip(sources, targets)))
+        self.show.seasons[2].file_paths = [self.plex_path(path) for path in targets]
+        self.poll(attempts=1)
+        self.app.bot.send_message.assert_awaited_once()
+        self.assertIn("Сезон 2", self.app.bot.send_message.await_args.kwargs["text"])
+
+    def test_replaced_torrent_file_updates_managed_plex_name(self):
+        source = self.folder / "Oldschool.S02.E01.mkv"
+        target = self.folder / "Oldschool.S02E01.mkv"
+        source.write_bytes(b"old episode")
+        task = {"id": "task", "title": self.title}
+        bot._prepare_completed_task_plex_files(task, self.meta)
+        self.assertTrue(source.samefile(target))
+        source.unlink()
+        source.write_bytes(b"updated episode")
+        self.assertEqual(target.read_bytes(), b"old episode")
+
+        prepared = bot._prepare_completed_task_plex_files(task, self.meta)
+
+        self.assertEqual(prepared[2], (target.relative_to(self.storage).as_posix(),))
+        self.assertEqual(prepared[3], 1)
+        self.assertTrue(source.samefile(target))
+        self.assertEqual(source.read_bytes(), b"updated episode")
+        self.assertEqual(target.read_bytes(), b"updated episode")
 
     def test_collision_defers_polling_without_overwriting_or_marking_done(self):
         source = self.folder / "Oldschool.S02.E01.mkv"
@@ -154,8 +198,11 @@ class PlexFilenameNormalizationTests(unittest.TestCase):
     def test_write_failure_defers_polling(self):
         source = self.folder / "Oldschool.S02.E01.mkv"
         source.write_bytes(b"episode")
-        with patch.object(Path, "rename", side_effect=PermissionError("read only")):
+        target = source.with_name("Oldschool.S02E01.mkv")
+        with patch("filename_normalizer.os.link", side_effect=PermissionError("read only")):
             self.poll()
+        self.assertEqual(source.read_bytes(), b"episode")
+        self.assertFalse(target.exists())
         self.client.refresh_show_section.assert_not_called()
         self.refresh.assert_not_awaited()
         self.done.assert_not_called()
