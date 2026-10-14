@@ -88,6 +88,7 @@ class SubscriptionTorrentPathTests(unittest.TestCase):
             ds = MagicMock()
 
             def create(file_path, filename):
+                self.assertIn("pattern: *.S{se}.E{ep}.*", (folder / ".plexmatch").read_text(encoding="utf-8"))
                 self.assertTrue(original.samefile(plex))
                 self.assertEqual(plex.read_bytes(), b"old episode")
                 updated = folder / "updated.tmp"
@@ -97,6 +98,7 @@ class SubscriptionTorrentPathTests(unittest.TestCase):
 
             ds.create_torrent_file.side_effect = create
             with (
+                patch.object(bot, "PLEX_ENABLED", True),
                 patch.object(bot, "STORAGE_MOUNT_PATH", str(storage)),
                 patch.object(bot, "ds_client", ds),
                 patch.object(bot, "_remember_task_meta"),
@@ -111,8 +113,8 @@ class SubscriptionTorrentPathTests(unittest.TestCase):
             self.assertEqual(original.read_bytes(), b"new episode content")
             self.assertEqual(plex.read_bytes(), b"old episode")
             self.assertEqual(expected, (f"{folder.name}/{original.name}",))
-            self.assertIn(f"ep: S02E01: {original.name}", (folder / ".plexmatch").read_text(encoding="utf-8"))
-            self.assertEqual(count, 1)
+            self.assertIn("pattern: *.S{se}.E{ep}.*", (folder / ".plexmatch").read_text(encoding="utf-8"))
+            self.assertEqual(count, 0)
 
     def test_restore_failure_stops_jackett_download_without_magnet_fallback(self):
         from jackett import JackettResult

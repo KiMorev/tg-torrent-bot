@@ -16,7 +16,7 @@
 - `download_completed` - Download Station сообщил обычное завершение;
 - `download_soft_completed` - DS показал `error`, но BT-задача скачана >=99.9% и без конкретного `error_detail`;
 - `download_failed` - добавление или финальный статус завершились ошибкой;
-- `plex_match_hints` - перед Plex-проверкой добавлены или изменены точные episode-подсказки `.plexmatch`; видеофайлы и исходные торрентные имена сохранены, `hint_count` содержит число добавленных/изменённых подсказок;
+- `plex_match_hints` - перед Plex-проверкой добавлены или изменены правила `.plexmatch`: постоянные шаблоны для `Sxx.Eyy` или точные episode-подсказки для исключений; видеофайлы и исходные торрентные имена сохранены, `hint_count` содержит число добавленных/изменённых директив;
 - `files_normalized` - после подтверждения пользователя уже скачанные файлы переименованы в Plex-формат;
 - `plex_found` - Plex нашёл фильм или сезон после скачивания;
 - `plex_not_found` - Plex не подтвердил появление за окно ожидания;
@@ -50,7 +50,7 @@
 - для YouTube: `youtube_job_id`, `youtube_video_id`, `canonical_url`, `channel`, `duration_seconds`, `format_id`, `file_path`, `file_size`;
 - профиль релиза из parsed meta: качество, source, HDR, аудио, языки, группа, edition;
 - статус DS, прогресс, размер, `error_detail`;
-- для `plex_match_hints`: `hint_count`, число добавленных/изменённых подсказок; повтор без изменений не добавляет такое же событие;
+- для `plex_match_hints`: `hint_count`, число добавленных/изменённых директив, а не покрытых ими файлов; повтор без изменений не добавляет такое же событие. Ранняя подготовка `.torrent` до создания задачи отражается в логах;
 - результат Plex lookup: rating key, тип metadata, причина timeout.
 
 ## Что нельзя сохранять
@@ -77,7 +77,7 @@
 - `_check_subscriptions()` и Jackett subscription paths - автоскачивание по подпискам;
 - `_run_task_notifications_once()` - финальные статусы DS и точечный снимок `detail,file` завершённой задачи;
 - `_handle_normalization_callback()` - подтверждённое переименование файлов сериала;
-- `_plex_poll_after_finish()` - запись `plex_match_hints`, сканирование TV-библиотеки и итог проверки ожидаемых путей, сезона и номеров серий в Plex;
+- `_plex_poll_after_finish()` - запись `plex_match_hints`, если правила при проверке завершённой задачи изменились, сканирование TV-библиотеки и итог проверки ожидаемых путей, сезона и номеров серий в Plex;
 - `youtube_callback()` и `_youtube_worker_once()` - очередь, старт, успех и ошибка YouTube-download;
 - `_youtube_plex_poll_after_finish()` - итог поиска YouTube-ролика в отдельной Plex-библиотеке.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -10,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from torrent_utils import bdecode_torrent
+
+
+logger = logging.getLogger("tg_torrent_drop")
 
 
 VIDEO_EXTENSIONS = {
@@ -107,6 +111,7 @@ _IGNORE_END = "# PlexLoader torrent paths: end"
 _IGNORE_ALIASES = "# PlexLoader alias inodes: "
 _MATCH_BEGIN = "# PlexLoader episode hints: begin"
 _MATCH_END = "# PlexLoader episode hints: end"
+_DOTTED_PATTERN = "*.S{se}.E{ep}.*"
 _DOTTED_FILES_LOCK = threading.RLock()
 _EPISODE_ASSIGNMENT_RE = re.compile(
     r"(?i)\bS(?P<season>\d{1,2})[\s._-]?E(?P<first>\d{1,3})"
@@ -135,10 +140,10 @@ def episode_assignment_from_filename(path: Path) -> tuple[int, tuple[int, ...]] 
 
 
 def _read_sidecar(path: Path) -> str:
-    if not path.exists():
-        return ""
     if path.is_symlink():
         raise RenamePlanError(f"sidecar is a symlink: {path}")
+    if not path.exists():
+        return ""
     try:
         with path.open(encoding="utf-8", newline="") as stream:
             return stream.read()
@@ -203,12 +208,40 @@ def _write_dotted_ignore(folder: Path, text: str, names: set[str], inodes: dict[
 
 
 def prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
-    """Write exact Plex episode hints without changing media files or their names."""
+    """Write persistent Plex patterns and exact exceptions without renaming media."""
     with _DOTTED_FILES_LOCK:
         return _prepare_episode_match_hints(files)
 
 
-def _prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
+def _pattern_covers_filename(name: str) -> bool:
+    return bool(re.fullmatch(r".*\.S\d{1,2}\.E\d{1,3}\..+", name))
+
+
+def _user_pattern_matches_filename(pattern: str, name: str) -> bool:
+    # Check potential overlap only; do not reinterpret user ranges or offsets.
+    parts = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            parts.append(re.escape(pattern[index + 1]))
+            index += 2
+            continue
+        if char == "*":
+            parts.append(".*")
+        elif char == "{" and "}" in pattern[index + 1:]:
+            parts.append(r"\d+")
+            index = pattern.index("}", index + 1) + 1
+            continue
+        else:
+            parts.append(re.escape(char))
+        index += 1
+    return re.fullmatch("".join(parts), name, flags=re.IGNORECASE) is not None
+
+
+def _prepare_episode_match_hints(
+    files: list[Path], *, require_files: bool = True,
+) -> tuple[list[Path], int]:
     videos = list(dict.fromkeys(_video_files(files)))
     assignments: dict[Path, tuple[int, tuple[int, ...]]] = {}
     for path in videos:
@@ -219,7 +252,7 @@ def _prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
         assignment = episode_assignment_from_filename(path)
         if assignment is None:
             raise RenamePlanError(f"ambiguous episode filename: {path}")
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or (require_files and not path.is_file()):
             raise RenamePlanError(f"source file missing: {path}")
         assignments[path] = assignment
 
@@ -231,8 +264,14 @@ def _prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
         text = _read_sidecar(sidecar)
         prefix, body, suffix = _managed_block(text, _MATCH_BEGIN, _MATCH_END, sidecar)
         hints: dict[str, str] = {}
+        has_pattern = False
         for line in body.splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if line.strip() == "pattern: " + _DOTTED_PATTERN:
+                if has_pattern:
+                    raise RenamePlanError(f"duplicate PlexLoader pattern: {sidecar}")
+                has_pattern = True
                 continue
             match = re.fullmatch(r"(?i)\s*(?:episode|ep)\s*:\s*([^:]+):\s*(.+)", line)
             if match is None or _HINT_CODE_RE.fullmatch(match[1].strip()) is None or episode_assignment_from_filename(Path(match[1].strip() + ".mkv")) is None:
@@ -241,6 +280,14 @@ def _prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
             if name in hints:
                 raise RenamePlanError(f"duplicate PlexLoader episode hint: {sidecar}")
             hints[name] = match[1].strip()
+        old_hints = dict(hints)
+        old_has_pattern = has_pattern
+        # Migrate our old single-episode entries; keep explicit range exceptions.
+        for name, code in list(hints.items()):
+            assignment = episode_assignment_from_filename(Path(code + ".mkv"))
+            if _pattern_covers_filename(name) and len(assignment[1]) == 1:
+                has_pattern = True
+                del hints[name]
         for path, (season, episodes) in assignments.items():
             if path.parent != folder:
                 continue
@@ -248,14 +295,24 @@ def _prepare_episode_match_hints(files: list[Path]) -> tuple[list[Path], int]:
             if len(episodes) > 1:
                 code += f"-E{episodes[-1]:02d}"
             for line in (prefix + suffix).splitlines():
+                user_pattern = re.fullmatch(r"(?i)\s*(?:pattern|pt)\s*:\s*(.+)", line)
+                if (user_pattern and user_pattern[1].strip() != _DOTTED_PATTERN
+                        and _user_pattern_matches_filename(user_pattern[1].strip(), path.name)):
+                    raise RenamePlanError(f"conflicting user pattern: {sidecar}: {path.name}")
                 match = re.fullmatch(r"(?i)\s*(?:episode|ep)\s*:\s*([^:]+):\s*(.+)", line)
                 if match and match[2].strip() == path.name:
                     existing = episode_assignment_from_filename(Path(match[1].strip() + ".mkv")) if _HINT_CODE_RE.fullmatch(match[1].strip()) else None
                     if existing != (season, episodes):
                         raise RenamePlanError(f"conflicting user episode hint: {sidecar}: {path.name}")
-            changed += hints.get(path.name) != code
-            hints[path.name] = code
-        hint_body = "".join(f"ep: {hints[name]}: {name}\n" for name in sorted(hints))
+            if len(episodes) == 1 and _pattern_covers_filename(path.name):
+                has_pattern = True
+                hints.pop(path.name, None)
+            else:
+                hints[path.name] = code
+        changed += has_pattern and not old_has_pattern
+        changed += sum(old_hints.get(name) != code for name, code in hints.items())
+        hint_body = ("pattern: " + _DOTTED_PATTERN + "\n" if has_pattern else "")
+        hint_body += "".join(f"ep: {hints[name]}: {name}\n" for name in sorted(hints))
         updated = _replace_managed_block(text, _MATCH_BEGIN, _MATCH_END, hint_body, sidecar)
         if updated != text:
             match_writes[sidecar] = updated
@@ -304,9 +361,7 @@ def restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path)
         return _restore_dotted_episode_torrent_paths(torrent_path, storage_root)
 
 
-def _restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path) -> int:
-    if not storage_root.is_dir():
-        return 0
+def _torrent_video_paths(torrent_path: Path, storage_root: Path) -> list[Path]:
     try:
         _, info = bdecode_torrent(torrent_path.read_bytes())
         if not isinstance(info, dict):
@@ -325,12 +380,49 @@ def _restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path
             storage_root / root_name / Path(*(component(part) for part in entry.get(b"path.utf-8", entry.get(b"path", []))))
             for entry in entries
         ]
-        pairs = []
+        videos = []
         for source in paths:
             target = source.with_name(normalize_dotted_episode_name(source.name))
             if not source.resolve().is_relative_to(root) or not target.resolve().is_relative_to(root):
                 raise ValueError("torrent path escapes storage")
-            if source == target or not is_video_file(source) or not target.exists():
+            if is_video_file(source):
+                videos.append(source)
+        return videos
+    except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
+        raise RenamePlanError(f"invalid torrent paths: {exc}") from exc
+
+
+def prepare_torrent_plex_files(torrent_path: Path, storage_root: Path) -> int:
+    """Prepare persistent hints before DS or legacy links can expose videos."""
+    with _DOTTED_FILES_LOCK:
+        paths = _torrent_video_paths(torrent_path, storage_root)
+        dotted = [path for path in paths if _DOTTED_MARKER_RE.search(path.stem)]
+        if not dotted:
+            return 0
+        if not storage_root.is_dir():
+            raise RenamePlanError("Plex storage mount unavailable")
+        for path in dotted:
+            parents = [parent for parent in path.parents if parent != storage_root and parent.is_relative_to(storage_root)]
+            if path.is_symlink() or any(parent.is_symlink() for parent in parents):
+                raise RenamePlanError(f"unsafe torrent file: {path}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+        _visible, changed = _prepare_episode_match_hints(paths, require_files=False)
+        restored = _restore_dotted_episode_torrent_paths(torrent_path, storage_root)
+        if restored:
+            logger.info("Plex torrent paths restored: files=%s", restored)
+        # Switch proven legacy aliases only after their original paths exist.
+        _prepare_episode_match_hints(paths, require_files=False)
+        return changed
+
+
+def _restore_dotted_episode_torrent_paths(torrent_path: Path, storage_root: Path) -> int:
+    if not storage_root.is_dir():
+        return 0
+    pairs = []
+    try:
+        for source in _torrent_video_paths(torrent_path, storage_root):
+            target = source.with_name(normalize_dotted_episode_name(source.name))
+            if source == target or not target.exists():
                 continue
             if source.is_symlink() or target.is_symlink() or not target.is_file():
                 raise ValueError("unsafe torrent file")

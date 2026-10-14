@@ -81,7 +81,7 @@ class PlexEpisodeMatchTests(unittest.TestCase):
         def scan():
             hints = (self.folder / ".plexmatch").read_text(encoding="utf-8")
             for ep, path in enumerate(files, start=1):
-                self.assertIn(f"ep: S02E{ep:02d}: {path.name}", hints)
+                self.assertIn("pattern: *.S{se}.E{ep}.*", hints)
                 self.assertEqual(path.read_bytes(), b"episode")
                 self.assertFalse(path.with_name(path.name.replace("S02.E", "S02E")).exists())
             return True
@@ -102,7 +102,7 @@ class PlexEpisodeMatchTests(unittest.TestCase):
         self.app.bot.send_message.assert_awaited_once()
         self.assertIn("Сезон 2", self.app.bot.send_message.await_args.kwargs["text"])
         self.assertEqual(self.history.call_args_list[0].args[0], "plex_match_hints")
-        self.assertEqual(self.history.call_args_list[0].kwargs["hint_count"], 2)
+        self.assertEqual(self.history.call_args_list[0].kwargs["hint_count"], 1)
 
     def test_catch_up_waits_for_new_raw_episode_path(self):
         old = self.folder / "Oldschool.S02E01.mkv"

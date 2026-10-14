@@ -22,6 +22,7 @@ from filename_normalizer import (
     inspect_series_filenames,
     episode_assignment_from_filename,
     prepare_episode_match_hints,
+    prepare_torrent_plex_files,
     normalize_dotted_episode_name,
     restore_dotted_episode_torrent_paths,
 )
@@ -88,7 +89,8 @@ class FilenameNormalizerTests(unittest.TestCase):
             self.assertFalse(raw.with_name(raw.name.replace("S02.E", "S02E")).exists())
             self.assertFalse((root / ".plexignore").exists())
             lines = (root / ".plexmatch").read_text().splitlines()
-            self.assertIn(f"ep: S02E13: {raw.name}", lines)
+            self.assertIn("pattern: *.S{se}.E{ep}.*", lines)
+            self.assertFalse(any(line.startswith("ep:") for line in lines))
             self.assertFalse(any(standard.name in line or subtitle.name in line for line in lines))
 
     def test_standard_files_are_returned_without_sidecars_or_movie_name_restrictions(self):
@@ -289,13 +291,13 @@ class FilenameNormalizerTests(unittest.TestCase):
             with patch("filename_normalizer._write_dotted_ignore", side_effect=PermissionError("ignore failed")):
                 with self.assertRaises(PermissionError):
                     prepare_episode_match_hints([raw, target])
-            self.assertIn(f"ep: S02E01: {raw.name}", (root / ".plexmatch").read_text().splitlines())
+            self.assertIn("pattern: *.S{se}.E{ep}.*", (root / ".plexmatch").read_text().splitlines())
             self.assertIn(raw.name, (root / ".plexignore").read_text().splitlines())
             self.assertTrue(raw.samefile(target))
             self.assertEqual(prepare_episode_match_hints([raw, target]), ([raw], 0))
             self.assertNotIn(raw.name, (root / ".plexignore").read_text().splitlines())
 
-    def test_concurrent_hint_writes_keep_both_episode_entries(self):
+    def test_concurrent_hint_writes_keep_one_rule_covering_both_episodes(self):
         import filename_normalizer
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -310,9 +312,95 @@ class FilenameNormalizerTests(unittest.TestCase):
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     list(executor.map(lambda source: prepare_episode_match_hints([source]), sources))
             lines = (root / ".plexmatch").read_text().splitlines()
-            for episode, source in enumerate(sources, 1):
-                self.assertIn(f"ep: S02E{episode:02d}: {source.name}", lines)
+            self.assertEqual(lines.count("pattern: *.S{se}.E{ep}.*"), 1)
+            self.assertFalse(any(line.startswith("ep:") for line in lines))
+            for source in sources:
                 self.assertTrue(source.exists())
+
+    def test_pattern_stays_unchanged_when_a_new_episode_appears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            first = folder / "Oldschool.S02.E15.2026.mkv"
+            first.write_bytes(b"old")
+            self.assertEqual(prepare_episode_match_hints([first])[1], 1)
+            rule = (folder / ".plexmatch").read_bytes()
+            next_episode = folder / "Oldschool.S02.E16.2026.mkv"
+            next_episode.write_bytes(b"new")
+            self.assertEqual(prepare_episode_match_hints([first, next_episode])[1], 0)
+            self.assertEqual((folder / ".plexmatch").read_bytes(), rule)
+
+    def test_migration_replaces_owned_single_hints_and_keeps_ranges_and_user_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            raw = folder / "Show.S02.E03.mkv"
+            raw.write_bytes(b"video")
+            before = "# My rules\ntitle: Show\n"
+            after = "# My suffix\n"
+            (folder / ".plexmatch").write_text(
+                before + "# PlexLoader episode hints: begin\n"
+                "ep: S02E01: Show.S02.E01.mkv\n"
+                "ep: S02E02-E03: Show.S02.E02-E03.mkv\n"
+                "# PlexLoader episode hints: end\n" + after
+            )
+            self.assertEqual(prepare_episode_match_hints([raw])[1], 1)
+            rule = (folder / ".plexmatch").read_text()
+            self.assertTrue(rule.startswith(before) and rule.endswith(after))
+            self.assertIn("pattern: *.S{se}.E{ep}.*", rule)
+            self.assertNotIn("ep: S02E01:", rule)
+            self.assertIn("ep: S02E02-E03:", rule)
+            self.assertEqual(prepare_episode_match_hints([raw])[1], 0)
+
+    def test_overlapping_user_pattern_is_not_silently_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            raw = folder / "Show.S02.E01.mkv"
+            raw.write_bytes(b"video")
+            sidecar = folder / ".plexmatch"
+            user_rule = "pattern: *.S{se}.E{ep,+1}.*\n"
+            sidecar.write_text(user_rule)
+            with self.assertRaisesRegex(RenamePlanError, "conflicting user pattern"):
+                prepare_episode_match_hints([raw])
+            self.assertEqual(sidecar.read_text(), user_rule)
+
+    def test_matching_user_pattern_and_exact_exception_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            raw = folder / "S02.E01.mkv"
+            raw.write_bytes(b"video")
+            text = "pattern: *.S{se}.E{ep}.*\n"
+            (folder / ".plexmatch").write_text(text)
+            self.assertEqual(prepare_episode_match_hints([raw])[1], 1)
+            updated = (folder / ".plexmatch").read_text()
+            self.assertTrue(updated.startswith(text))
+            self.assertIn("ep: S02E01: S02.E01.mkv", updated)
+
+    def test_escaped_user_pattern_conflict_stops_preparation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            raw = folder / "Show{Alt}.S02.E01.mkv"
+            raw.write_bytes(b"episode")
+            sidecar = folder / ".plexmatch"
+            user_rule = r"pattern: Show\{Alt\}.S{se}.E{ep,+1}.*" + "\n"
+            sidecar.write_text(user_rule)
+            with self.assertRaisesRegex(RenamePlanError, "conflicting user pattern"):
+                prepare_episode_match_hints([raw])
+            self.assertEqual(sidecar.read_text(), user_rule)
+            self.assertEqual(raw.read_bytes(), b"episode")
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlinks are tested on Linux CI")
+    def test_dangling_sidecar_symlink_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            raw = folder / "Show.S02.E01.mkv"
+            raw.write_bytes(b"episode")
+            sidecar = folder / ".plexmatch"
+            missing = folder / "missing-user-rules"
+            sidecar.symlink_to(missing)
+            with self.assertRaisesRegex(RenamePlanError, "symlink"):
+                prepare_episode_match_hints([raw])
+            self.assertTrue(sidecar.is_symlink())
+            self.assertEqual(sidecar.readlink(), missing)
+            self.assertFalse(missing.exists())
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions are enforced on the NAS and Linux CI")
     def test_plexmatch_is_readable_and_preserves_existing_mode(self):
@@ -736,6 +824,59 @@ class TorrentPathRestoreTests(unittest.TestCase):
     def test_missing_storage_mount_leaves_subscription_download_unchanged(self):
         self.torrent.write_bytes(b"not inspected without mounted storage")
         self.assertEqual(restore_dotted_episode_torrent_paths(self.torrent, self.root / "missing"), 0)
+
+    def test_preparation_writes_rules_before_videos_or_restored_aliases_exist(self):
+        folder = self.storage / "Show" / "Season 02"
+        folder.mkdir(parents=True)
+        target = folder / "Show.S02E01.mkv"
+        target.write_bytes(b"legacy")
+        raw = folder / "Show.S02.E01.mkv"
+        self.write_torrent("Show", [["Season 02", raw.name], ["Season 02", "Show.S02.E02.mkv"]])
+        real_link = os.link
+
+        def link(source, destination):
+            self.assertIn("pattern: *.S{se}.E{ep}.*", (folder / ".plexmatch").read_text())
+            self.assertFalse(raw.exists())
+            real_link(source, destination)
+
+        with patch("filename_normalizer.os.link", side_effect=link):
+            self.assertEqual(prepare_torrent_plex_files(self.torrent, self.storage), 1)
+        self.assertTrue(raw.samefile(target))
+        self.assertFalse((folder / "Show.S02.E02.mkv").exists())
+        ignore = (folder / ".plexignore").read_text().splitlines()
+        self.assertIn(target.name, ignore)
+        self.assertNotIn(raw.name, ignore)
+        self.assertEqual(prepare_torrent_plex_files(self.torrent, self.storage), 0)
+
+    def test_preparation_failure_cannot_expose_legacy_alias(self):
+        target = self.storage / "Show.S02E01.mkv"
+        target.write_bytes(b"legacy")
+        self.write_torrent("Show.S02.E01.mkv")
+        with patch("filename_normalizer.os.replace", side_effect=PermissionError("read only")):
+            with self.assertRaises(PermissionError):
+                prepare_torrent_plex_files(self.torrent, self.storage)
+        self.assertFalse((self.storage / "Show.S02.E01.mkv").exists())
+        self.assertEqual(target.read_bytes(), b"legacy")
+
+    def test_new_folders_receive_rules_without_creating_videos(self):
+        self.write_torrent("Show", [["Season 02", "Show.S02.E01.mkv"], ["Season 03", "Show.S03.E01-E02.mkv"]])
+        self.assertEqual(prepare_torrent_plex_files(self.torrent, self.storage), 2)
+        self.assertIn("pattern: *.S{se}.E{ep}.*", (self.storage / "Show/Season 02/.plexmatch").read_text())
+        self.assertIn("ep: S03E01-E02: Show.S03.E01-E02.mkv", (self.storage / "Show/Season 03/.plexmatch").read_text())
+        self.assertEqual(list(self.storage.rglob("*.mkv")), [])
+
+    def test_canonical_or_movie_torrent_needs_no_writable_storage(self):
+        for name in ("Movie.2026.mkv", "Show.S02E01.mkv"):
+            with self.subTest(name=name):
+                self.write_torrent(name)
+                self.assertEqual(prepare_torrent_plex_files(self.torrent, self.root / "missing"), 0)
+                self.assertFalse((self.root / "missing").exists())
+
+    def test_dotted_torrent_requires_existing_storage_mount(self):
+        self.write_torrent("Show.S02.E01.mkv")
+        with self.assertRaisesRegex(RenamePlanError, "mount unavailable"):
+            prepare_torrent_plex_files(self.torrent, self.root / "missing")
+        self.assertFalse((self.root / "missing").exists())
 
 
 if __name__ == "__main__":

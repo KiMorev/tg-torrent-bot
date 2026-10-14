@@ -238,6 +238,7 @@ from filename_normalizer import (
     is_video_file,
     episode_assignment_from_filename,
     prepare_episode_match_hints,
+    prepare_torrent_plex_files,
     normalize_dotted_episode_name,
     restore_dotted_episode_torrent_paths,
 )
@@ -10854,7 +10855,7 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
                 )
                 temp_path.write_bytes(torrent_bytes)
                 task_id = await asyncio.to_thread(
-                    ds_client.create_torrent_file, temp_path, safe_name
+                    _create_plex_prepared_torrent_task, temp_path, safe_name
                 )
                 if not task_id:
                     raise _missing_task_id_error("для torrent-файла")
@@ -10880,7 +10881,7 @@ async def _attempt_pending_download(entry: dict) -> tuple[str, str]:
                     )
                     temp_path.write_bytes(torrent_bytes)
                     task_id = await asyncio.to_thread(
-                        ds_client.create_torrent_file, temp_path, safe_name
+                        _create_plex_prepared_torrent_task, temp_path, safe_name
                     )
                     if not task_id:
                         raise _missing_task_id_error("для torrent-файла (Rutracker direct)")
@@ -18469,6 +18470,8 @@ def _format_download_error(exc: Exception) -> str:
     """
     msg = str(exc)
     lower = msg.lower()
+    if isinstance(exc, RenamePlanError):
+        return "❌ Не удалось подготовить правила Plex. Загрузка не началась."
     if isinstance(exc, JackettError):
         if "404" in msg or "not found" in lower:
             return "❌ Jackett не отдал torrent-файл. Раздача могла временно пропасть с трекера."
@@ -18501,6 +18504,12 @@ def _format_download_error(exc: Exception) -> str:
 
 
 def _download_failure_text(exc: Exception, *, can_queue: bool) -> str:
+    if isinstance(exc, RenamePlanError):
+        return (
+            "⚠️ Не удалось подготовить правила Plex\n\n"
+            "Загрузка не началась. Проверьте доступ бота к папке загрузок "
+            "и правила в .plexmatch, затем повторите попытку."
+        )
     lines = [
         "⚠️ Не удалось добавить загрузку",
         "",
@@ -18718,7 +18727,7 @@ async def _download_and_add(
                     jackett_client.download_torrent, result["torrent_url"]
                 )
                 temp_path.write_bytes(torrent_bytes)
-                task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+                task_id = await asyncio.to_thread(_create_plex_prepared_torrent_task, temp_path, safe_name)
             except JackettMagnetRedirect as magnet_redir:
                 # Tracker has no .torrent — its download URL redirects to magnet.
                 magnet = magnet_redir.magnet_url or result.get("magnet_url", "")
@@ -18755,7 +18764,7 @@ async def _download_and_add(
                         )
                         temp_path.write_bytes(torrent_bytes)
                         task_id = await asyncio.to_thread(
-                            ds_client.create_torrent_file, temp_path, safe_name
+                            _create_plex_prepared_torrent_task, temp_path, safe_name
                         )
                         direct_rt_ok = True
                     except RutrackerError as rt_err:
@@ -18778,7 +18787,7 @@ async def _download_and_add(
                             )
                             temp_path.write_bytes(torrent_bytes)
                             task_id = await asyncio.to_thread(
-                                ds_client.create_torrent_file, temp_path, safe_name
+                                _create_plex_prepared_torrent_task, temp_path, safe_name
                             )
                         except JackettMagnetRedirect as retry_redir:
                             magnet = retry_redir.magnet_url or result.get("magnet_url", "")
@@ -18821,7 +18830,7 @@ async def _download_and_add(
             # Direct Rutracker search result (not via Jackett) — use rutracker_client
             torrent_bytes = await asyncio.to_thread(rutracker_client.download_torrent, topic_id)
             temp_path.write_bytes(torrent_bytes)
-            task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+            task_id = await asyncio.to_thread(_create_plex_prepared_torrent_task, temp_path, safe_name)
         elif result.get("magnet_url"):
             # Fallback: magnet link (no .torrent available)
             task_id = await asyncio.to_thread(ds_client.create_magnet, result["magnet_url"])
@@ -18952,7 +18961,7 @@ async def _download_and_add(
         _register_task_card_from_query(query, task_id)
         if task_id and _card_chat_id and _card_msg_id:
             _start_task_card_refresh(context.application, _card_chat_id, _card_msg_id, task_id)
-    except (RutrackerError, JackettError, DownloadStationError) as e:
+    except (RutrackerError, JackettError, DownloadStationError, RenamePlanError) as e:
         logger.warning("Download failed for index=%s: %s", index, e, exc_info=True)
         _record_download_history(
             "download_failed",
@@ -23652,6 +23661,10 @@ async def plex_cancel_download(update: Update, context: ContextTypes.DEFAULT_TYP
 async def plex_confirm_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle plex:confirm for magnet/torrent uploads (outside ConversationHandler)."""
     query = update.callback_query
+    pending = context.user_data.get("plex_pending")
+    if isinstance(pending, dict) and pending.get("retry_message_id") and pending["retry_message_id"] != _message_id_from_message(query.message):
+        await query.answer("Это сообщение устарело. Повторите в последнем сообщении.", show_alert=True)
+        return
     await query.answer()
 
     pending = context.user_data.pop("plex_pending", None)
@@ -24935,11 +24948,24 @@ async def _check_jackett_sub_via_rutracker_direct(
     return True
 
 
-def _create_subscription_torrent_task(file_path: Path, filename: str) -> str:
-    restored = restore_dotted_episode_torrent_paths(file_path, Path(STORAGE_MOUNT_PATH))
-    if restored:
-        logger.info("Subscription torrent paths restored: files=%s", restored)
+def _create_plex_prepared_torrent_task(file_path: Path, filename: str) -> str:
+    """Publish Plex rules before Download Station can expose new episode files."""
+    if PLEX_ENABLED:
+        try:
+            changed = prepare_torrent_plex_files(file_path, Path(STORAGE_MOUNT_PATH))
+        except OSError as exc:
+            raise RenamePlanError(f"Plex torrent preparation failed: {exc}") from exc
+        if changed:
+            logger.info("Plex torrent rules prepared: hints=%s", changed)
     return ds_client.create_torrent_file(file_path, filename)
+
+
+def _create_subscription_torrent_task(file_path: Path, filename: str) -> str:
+    if not PLEX_ENABLED:
+        restored = restore_dotted_episode_torrent_paths(file_path, Path(STORAGE_MOUNT_PATH))
+        if restored:
+            logger.info("Subscription torrent paths restored: files=%s", restored)
+    return _create_plex_prepared_torrent_task(file_path, filename)
 
 
 async def _jackett_subscription_auto_download(
@@ -27509,6 +27535,10 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Fast path: close (delete) the message — no task_id needed.
     if (query.data or "").startswith(f"{TASK_CALLBACK_PREFIX}:close"):
         chat_id = _chat_id_from_query(query)
+        pending = context.user_data.get("plex_pending")
+        message_id = _message_id_from_message(query.message)
+        if isinstance(pending, dict) and message_id and pending.get("retry_message_id") == message_id:
+            _cleanup_plex_pending(context.user_data.pop("plex_pending"))
         try:
             if query.message:
                 await query.message.delete()
@@ -28234,12 +28264,13 @@ async def _do_process_torrent(
 
     *progress_message* is the message to edit with status updates.
     Used by both handle_doc and plex_confirm_standalone.
-    Cleans up *temp_path* on exit.
+    Cleans up *temp_path* on exit, except while a Plex preparation retry is pending.
     """
+    keep_for_retry = False
     try:
         logger.info("Creating Download Station task from torrent file %s", safe_name)
         await _safe_edit_message(progress_message, "⏳ Добавляю torrent-файл в Download Station…")
-        task_id = await asyncio.to_thread(ds_client.create_torrent_file, temp_path, safe_name)
+        task_id = await asyncio.to_thread(_create_plex_prepared_torrent_task, temp_path, safe_name)
         if not task_id:
             msg_text = _task_added_message(
                 "torrent-файл",
@@ -28292,12 +28323,27 @@ async def _do_process_torrent(
             _hd_msg_id = _message_id_from_message(progress_message)
             if _hd_chat_id and _hd_msg_id:
                 _start_task_card_refresh(context.application, _hd_chat_id, _hd_msg_id, task_id)
+    except RenamePlanError as e:
+        logger.warning("Plex torrent preparation failed: %s", e, exc_info=True)
+        previous = context.user_data.get("plex_pending")
+        if isinstance(previous, dict) and previous.get("retry_message_id") and previous.get("temp_path") != str(temp_path):
+            _cleanup_plex_pending(previous)
+        context.user_data["plex_pending"] = {
+            "type": "torrent", "temp_path": str(temp_path), "safe_name": safe_name,
+            "retry_message_id": _message_id_from_message(progress_message),
+        }
+        keep_for_retry = True
+        await _safe_edit_message(
+            progress_message,
+            _download_failure_text(e, can_queue=False),
+            reply_markup=_task_error_keyboard(retry_callback="plex:confirm"),
+        )
     except Exception as e:
         logger.exception("Failed to process torrent")
         await _safe_edit_message(progress_message, _torrent_file_user_error_text())
     finally:
         try:
-            if temp_path.exists():
+            if not keep_for_retry and temp_path.exists():
                 temp_path.unlink()
         except OSError:
             pass
