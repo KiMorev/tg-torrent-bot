@@ -120,6 +120,7 @@ class PlexSeason:
     resolution: str = ""                      # best across episodes ("4k"/"1080"/…)
     episode_numbers: tuple[int, ...] = field(default_factory=tuple)
     episode_file_numbers: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    episode_identity_conflicts: dict[str, dict[str, tuple[int, ...]]] = field(default_factory=dict)  # file -> GUID -> seasons
 
 
 @dataclass
@@ -483,6 +484,7 @@ class PlexClient:
           • ``episode_count`` from Plex's leafCount
           • ``file_paths`` — every episode's media file path
           • ``resolution`` — best resolution seen across episodes
+          • ``episode_identity_conflicts`` — files whose canonical episode GUID also appears in another season
 
         Episode listing is one HTTP call per season (Plex doesn't support
         nested expansion). Specials (season_number == 0) are skipped.
@@ -525,6 +527,7 @@ class PlexClient:
             return {}
 
         seasons: dict[int, PlexSeason] = {}
+        guid_files: dict[str, dict[int, set[str]]] = {}
         for directory in root.findall("Directory"):
             season_num = int(directory.get("index") or 0)
             if season_num <= 0:
@@ -537,11 +540,16 @@ class PlexClient:
                 or season_num in fetch_resolution_for
             )
             if should_fetch:
-                file_paths, resolution, episode_numbers, episode_file_numbers = _normalise_episode_fetch_result(
+                file_paths, resolution, episode_numbers, episode_file_numbers, episode_file_guids = _normalise_episode_fetch_result(
                     self._fetch_season_episode_files(season_key)
                 )
             else:
                 file_paths, resolution, episode_numbers, episode_file_numbers = [], "", (), {}
+                episode_file_guids = {}
+            if fetch_resolution_for is None and episode_count > 0 and not file_paths:
+                raise PlexParseError(
+                    f"Plex episode identity check incomplete season={season_num}: episode files unavailable"
+                )
             seasons[season_num] = PlexSeason(
                 rating_key=season_key,
                 season_number=season_num,
@@ -551,31 +559,41 @@ class PlexClient:
                 episode_numbers=episode_numbers,
                 episode_file_numbers=episode_file_numbers,
             )
+            for path, guids in episode_file_guids.items():
+                for guid in guids:
+                    guid_files.setdefault(guid, {}).setdefault(season_num, set()).add(path)
+        for guid, per_season in guid_files.items():
+            if len(per_season) > 1:
+                for season_num, paths in per_season.items():
+                    for path in paths:
+                        seasons[season_num].episode_identity_conflicts.setdefault(path, {})[guid] = tuple(sorted(per_season))
         return seasons
 
     def _fetch_season_episode_files(
         self, season_rating_key: str,
-    ) -> tuple[list[str], str, tuple[int, ...], dict[str, tuple[int, ...]]]:
-        """Return file paths, resolution, episode numbers and per-file numbers.
+    ) -> tuple[list[str], str, tuple[int, ...], dict[str, tuple[int, ...]], dict[str, tuple[str, ...]]]:
+        """Return paths, resolution, episode numbers and per-file numbers/GUIDs.
 
         Best-effort: missing data or transient failures yield an empty list +
         empty resolution; the caller can fall back to substring match later.
         """
         if not season_rating_key:
-            return [], "", (), {}
+            return [], "", (), {}, {}
         try:
             root = self._get(f"/library/metadata/{season_rating_key}/children")
         except Exception as exc:
             logger.debug("Plex season children fetch failed for %s: %s",
                          season_rating_key, exc)
-            return [], "", (), {}
+            return [], "", (), {}, {}
 
         files: list[str] = []
         episode_numbers: set[int] = set()
         episode_file_numbers: dict[str, set[int]] = {}
+        episode_file_guids: dict[str, set[str]] = {}
         best_resolution = ""
         for video in root.findall("Video"):
             episode_number = _safe_positive_int(video.get("index"))
+            guid = video.get("guid", "")
             if episode_number:
                 episode_numbers.add(episode_number)
             for media in video.findall("Media"):
@@ -589,8 +607,12 @@ class PlexClient:
                         files.append(fp)
                         if episode_number:
                             episode_file_numbers.setdefault(fp, set()).add(episode_number)
+                        if guid.startswith("plex://episode/"):
+                            episode_file_guids.setdefault(fp, set()).add(guid)
         return files, best_resolution, tuple(sorted(episode_numbers)), {
             fp: tuple(sorted(numbers)) for fp, numbers in episode_file_numbers.items()
+        }, {
+            fp: tuple(sorted(guids)) for fp, guids in episode_file_guids.items()
         }
 
 
@@ -633,16 +655,16 @@ def _parse_video(video: ElementTree.Element) -> PlexMovie:
 
 def _normalise_episode_fetch_result(
     value: object,
-) -> tuple[list[str], str, tuple[int, ...], dict[str, tuple[int, ...]]]:
+) -> tuple[list[str], str, tuple[int, ...], dict[str, tuple[int, ...]], dict[str, tuple[str, ...]]]:
     if not isinstance(value, tuple):
-        return [], "", (), {}
+        return [], "", (), {}, {}
     if len(value) == 2:
         files, resolution = value
         episode_numbers = ()
     elif len(value) >= 3:
         files, resolution, episode_numbers = value[:3]
     else:
-        return [], "", (), {}
+        return [], "", (), {}, {}
     if not isinstance(files, list):
         files = []
     numbers = tuple(
@@ -659,7 +681,8 @@ def _normalise_episode_fetch_result(
         }))
         for fp, values in file_numbers.items()
     }
-    return files, str(resolution or ""), numbers, episode_file_numbers
+    file_guids = value[4] if len(value) >= 5 and isinstance(value[4], dict) else {}
+    return files, str(resolution or ""), numbers, episode_file_numbers, file_guids
 
 
 def _safe_positive_int(value: object) -> int:

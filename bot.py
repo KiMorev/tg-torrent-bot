@@ -5344,6 +5344,8 @@ async def _plex_ensure_show_seasons(show: "PlexShow", *, force: bool = False) ->
     try:
         seasons = await asyncio.to_thread(plex_client.get_show_seasons, show.rating_key)
     except Exception as exc:
+        if force and isinstance(exc, PlexParseError):
+            raise
         logger.debug("Plex show seasons fetch failed for %r: %s", show.title, exc)
         return {}
     if seasons:
@@ -6491,7 +6493,7 @@ async def _plex_find_series_by_ds_title(
         )
         for season in seasons.values():
             if season_num > 0 and season.season_number != season_num:
-                if _plex_season_matches_ds_title(season, name):
+                if any(_plex_file_path_matches_ds_title(fp, name) for fp in season.file_paths):
                     logger.info(
                         "Plex lookup: ignoring stale season %d for task_title=%r expected_season=%d",
                         season.season_number, name, season_num,
@@ -6508,6 +6510,7 @@ def _plex_season_matches_ds_title(
     name = ds_title.strip()
     if not name:
         return False
+    matched_files = []
     if expected_files:
         assignments = getattr(season, "episode_file_numbers", None) or {}
         for expected in expected_files:
@@ -6520,11 +6523,19 @@ def _plex_season_matches_ds_title(
             ]
             if not matches or any(tuple(sorted(assignments.get(fp, ()))) != assignment[1] for fp in matches):
                 return False
-        return True
-    for fp in getattr(season, "file_paths", None) or []:
-        if _plex_file_path_matches_ds_title(fp, name):
-            return True
-    return False
+            matched_files.extend(matches)
+    else:
+        matched_files = [
+            fp for fp in getattr(season, "file_paths", None) or []
+            if _plex_file_path_matches_ds_title(fp, name)
+        ]
+    conflicts = getattr(season, "episode_identity_conflicts", None) or {}
+    for fp in matched_files:
+        for guid, seasons in conflicts.get(fp, {}).items():
+            raise PlexParseError(
+                f"Plex episode identity conflict file={fp!r} guid={guid} seasons={seasons}"
+            )
+    return bool(matched_files)
 
 
 async def _plex_poll_lookup_target(

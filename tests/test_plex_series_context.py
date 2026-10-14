@@ -53,7 +53,7 @@ class GetShowSeasonsLiteTests(unittest.TestCase):
         with (
             patch.object(c, "_get", return_value=self._fake_seasons_xml()),
             patch.object(c, "_fetch_season_episode_files",
-                         return_value=([], "1080")) as fetch_files,
+                         side_effect=lambda key: ([f"/video/{key}/E01.mkv"], "1080")) as fetch_files,
         ):
             seasons = c.get_show_seasons_lite("show1", fetch_resolution_for=None)
         # 3 seasons → 3 file-fetch calls.

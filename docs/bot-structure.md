@@ -113,7 +113,7 @@
 | `movie_discovery.py` | Фильтрация релизов, нормализация названий, scoring и сбор карточек `/new`. |
 | `release_quality.py` | Общая проверка экранных источников, нормализация разрешений и quality-first ключ сортировки для поиска, новинок и сезонов. |
 | `youtube_downloads.py` | YouTube URL parsing, metadata через `yt-dlp`, выбор MP4/H.264/AAC формата без транскодирования, retry временных download-сбоев, cleanup частичных файлов, план путей, sidecar-файлы, collection-friendly MP4 tags и audio-language remux/copy для Plex. |
-| `plex.py` | Plex API, фильмы, сериалы, сезоны, файловые пути с фактическими episode indexes для проверки `.plexmatch`, коллекции, постеры, качество, unmatched detection. |
+| `plex.py` | Plex API, фильмы, сериалы, сезоны, файловые пути с фактическими episode indexes для проверки `.plexmatch`; обнаруживает canonical episode GUID, общие для разных сезонов одного сериала, чтобы polling откладывал успех для затронутых файлов и повторял проверку в фоне. Коллекции, постеры, качество, unmatched detection. |
 | `diagnostics.py` | Короткая сводка и подробные разделы диагностики внешних сервисов для `/admin`. |
 | `state_store.py` | Atomic JSON load/save через `JsonStateStore`, append-only JSONL для истории загрузок. |
 | `task_views.py` | Форматирование списка задач и карточки задачи. |

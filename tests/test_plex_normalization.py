@@ -6,6 +6,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from xml.etree import ElementTree
 
 os.environ.setdefault("BOT_TOKEN", "111:testtoken")
 os.environ.setdefault("ALLOWED_CHAT_IDS", "999")
@@ -16,7 +17,7 @@ os.environ.setdefault("DS_DESTINATION", "video")
 
 import bot
 from filename_normalizer import RenameItem
-from plex import PlexSeason, PlexShow, PlexTimeoutError
+from plex import PlexClient, PlexParseError, PlexSeason, PlexShow, PlexTimeoutError
 from state_store import JsonStateStore
 
 
@@ -150,6 +151,88 @@ class PlexEpisodeMatchTests(unittest.TestCase):
         self.assertTrue(bot._plex_season_matches_ds_title(season, self.title, expected_files=expected))
         season.episode_file_numbers[self.plex_path(source)] = (1, 2, 3)
         self.assertFalse(bot._plex_season_matches_ds_title(season, self.title, expected_files=expected))
+
+    def test_cross_season_identity_collision_keeps_poll_retryable_and_background_retries(self):
+        source = self.folder / "Oldschool.S02.E17.2026.mkv"
+        source.write_bytes(b"episode 17")
+        season = self.index_files(2, {source: (17,)})
+        season.episode_identity_conflicts = {
+            self.plex_path(source): {"plex://episode/shared": (1, 2)},
+        }
+        bot._PLEX_POLLING_TASKS["task"] = None
+        with self.assertLogs("tg_torrent_drop", level="ERROR") as logs:
+            with self.assertRaisesRegex(PlexParseError, r"guid=plex://episode/shared seasons=\(1, 2\)"):
+                self.poll(attempts=1)
+        self.assertIn("will retry", "\n".join(logs.output))
+        self.done.assert_not_called()
+        self.assertNotIn("task", bot._PLEX_POLLING_TASKS)
+        self.app.bot.send_message.assert_not_awaited()
+        self.assertFalse(any(call.args[0] in {"plex_found", "plex_not_found"} for call in self.history.call_args_list))
+
+        season.episode_identity_conflicts = {}
+        task = {"id": "task", "title": self.title, "type": "bt", "status": "seeding", "size": 0}
+        notified = {"task": {"status": "done", "sent": ["100"], "failures": {}}}
+        ds = MagicMock()
+        ds.list_tasks.return_value = [task]
+        ds.get_task_info.return_value = None
+
+        async def next_background_pass():
+            await bot._run_task_notifications_once(self.app)
+            await bot._PLEX_POLLING_TASKS["task"]
+
+        with (
+            patch.object(bot, "ds_client", ds),
+            patch.object(bot, "PLEX_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATIONS_ENABLED", True),
+            patch.object(bot, "TASK_NOTIFICATION_STATUSES", {"seeding"}),
+            patch.object(bot, "TASK_NOTIFY_EXTERNAL_TASKS", True),
+            patch.object(bot, "_load_task_owners", return_value={"task": 100}),
+            patch.object(bot, "_load_notified_tasks", return_value=notified),
+            patch.object(bot, "_save_notified_tasks"),
+            patch.object(bot, "_get_task_meta", return_value=self.meta),
+            patch.object(bot, "_inspect_completed_task_normalization", return_value={"status": "no_action"}),
+        ):
+            asyncio.run(next_background_pass())
+        self.done.assert_called_once_with("task")
+        self.app.bot.send_message.assert_awaited_once()
+        self.assertIn("добавлен в Plex", self.app.bot.send_message.await_args.kwargs["text"])
+
+    def test_path_fallback_rejects_colliding_identity_only_for_expected_files(self):
+        source = self.folder / "Oldschool.S02.E17.mkv"
+        season = self.index_files(2, {source: (17,)})
+        expected = (source.relative_to(self.storage).as_posix(),)
+        season.episode_identity_conflicts = {
+            self.plex_path(source): {"plex://episode/shared": (1, 2)},
+        }
+        with patch.object(bot, "_plex_show_find", return_value=None):
+            with self.assertRaises(PlexParseError):
+                asyncio.run(bot._plex_poll_lookup_target(self.title, self.meta, expected_files=expected))
+            with self.assertRaises(PlexParseError):
+                asyncio.run(bot._plex_poll_lookup_target(self.title, self.meta))
+        season.episode_identity_conflicts = {"/video/unrelated.S02E16.mkv": {"plex://episode/other": (1, 2)}}
+        self.assertTrue(bot._plex_season_matches_ds_title(season, self.title, expected_files=expected))
+
+    def test_other_season_read_failure_defers_success_and_can_retry_with_complete_metadata(self):
+        source = self.folder / "Oldschool.S02.E17.mkv"
+        source.write_bytes(b"episode 17")
+        self.index_files(2, {source: (17,)})
+        seasons_xml = ElementTree.fromstring('<MediaContainer><Directory ratingKey="s1" index="1" leafCount="17"/><Directory ratingKey="s2" index="2" leafCount="17"/></MediaContainer>')
+        old_xml = ElementTree.fromstring('<MediaContainer><Video index="17" guid="plex://episode/season1"><Media><Part file="/video/Oldschool/Oldschool.S01E17.mkv"/></Media></Video></MediaContainer>')
+        new_xml = ElementTree.fromstring(f'<MediaContainer><Video index="17" guid="plex://episode/season2"><Media><Part file="{self.plex_path(source)}"/></Media></Video></MediaContainer>')
+        parser = PlexClient("http://unit.invalid", "unit-token")
+        self.client.get_show_seasons.side_effect = parser.get_show_seasons
+        with patch.object(parser, "_get", side_effect=[seasons_xml, PlexTimeoutError("season 1 timeout"), seasons_xml, old_xml, new_xml]):
+            with self.assertLogs("tg_torrent_drop", level="ERROR"):
+                with self.assertRaisesRegex(PlexParseError, "identity check incomplete season=1"):
+                    self.poll(attempts=1)
+            self.done.assert_not_called()
+            self.assertNotIn("task", bot._PLEX_POLLING_TASKS)
+            self.app.bot.send_message.assert_not_awaited()
+            self.assertFalse(any(call.args[0] in {"plex_found", "plex_not_found"} for call in self.history.call_args_list))
+            self.poll(attempts=1)
+        self.done.assert_called_once_with("task")
+        self.app.bot.send_message.assert_awaited_once()
+        self.assertIn("добавлен в Plex", self.app.bot.send_message.await_args.kwargs["text"])
 
     def test_write_failure_defers_without_marking_done_and_can_retry(self):
         source = self.folder / "Oldschool.S02.E01.mkv"

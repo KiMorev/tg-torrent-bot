@@ -725,6 +725,55 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         self.assertEqual(seasons[2].resolution, "4k")
         self.assertEqual(seasons[2].episode_numbers, (1,))
         self.assertEqual(seasons[2].episode_file_numbers, {"/video/Show/S02/E01.mkv": (1,)})
+        self.assertEqual(seasons[1].episode_identity_conflicts, {})
+        self.assertEqual(seasons[2].episode_identity_conflicts, {})
+
+    def test_canonical_episode_guid_shared_across_seasons_marks_only_affected_files(self):
+        client = _make_client()
+        old = "/video/Oldschool/Oldschool.S01E16.mkv"
+        new = "/video/Oldschool/Oldschool.S02.E16.mkv"
+        other = "/video/Oldschool/Oldschool.S02.E17.mkv"
+        guid = "plex://episode/shared"
+        responses = [
+            _mock_response('<MediaContainer><Directory ratingKey="6551" index="1"/><Directory ratingKey="6584" index="2"/></MediaContainer>'),
+            _mock_response(f'<MediaContainer><Video ratingKey="6567" index="16" guid="{guid}"><Media><Part file="{old}"/></Media></Video></MediaContainer>'),
+            _mock_response(
+                f'<MediaContainer><Video ratingKey="6692" index="16" guid="{guid}"><Media><Part file="{new}"/></Media></Video>'
+                f'<Video index="17" guid="plex://episode/other"><Media><Part file="{other}"/></Media></Video></MediaContainer>'
+            ),
+        ]
+        with patch.object(client._session, "get", side_effect=responses):
+            seasons = client.get_show_seasons("100")
+        self.assertEqual(seasons[1].episode_identity_conflicts, {old: {guid: (1, 2)}})
+        self.assertEqual(seasons[2].episode_identity_conflicts, {new: {guid: (1, 2)}})
+        self.assertEqual(seasons[2].episode_file_numbers, {new: (16,), other: (17,)})
+
+    def test_distinct_canonical_guids_and_unmatched_guids_do_not_conflict_across_seasons(self):
+        for first_guid, second_guid in (
+            ("plex://episode/season1", "plex://episode/season2"),
+            ("local://episode/unknown", "local://episode/unknown"),
+        ):
+            with self.subTest(guids=(first_guid, second_guid)):
+                client = _make_client()
+                responses = [
+                    _mock_response('<MediaContainer><Directory ratingKey="11" index="1"/><Directory ratingKey="12" index="2"/></MediaContainer>'),
+                    _mock_response(f'<MediaContainer><Video index="1" guid="{first_guid}"><Media><Part file="/video/S01E01.mkv"/></Media></Video></MediaContainer>'),
+                    _mock_response(f'<MediaContainer><Video index="1" guid="{second_guid}"><Media><Part file="/video/S02E01.mkv"/></Media></Video></MediaContainer>'),
+                ]
+                with patch.object(client._session, "get", side_effect=responses):
+                    seasons = client.get_show_seasons("100")
+                self.assertTrue(all(not season.episode_identity_conflicts for season in seasons.values()))
+
+    def test_full_identity_check_rejects_failed_read_of_nonempty_season_but_lite_is_graceful(self):
+        seasons_xml = '<MediaContainer><Directory ratingKey="11" index="1" leafCount="17"/><Directory ratingKey="12" index="2" leafCount="17"/></MediaContainer>'
+        client = _make_client()
+        with patch.object(client, "_get", side_effect=[_xml(seasons_xml), PlexTimeoutError("season 1 timeout")]):
+            with self.assertRaisesRegex(PlexParseError, "identity check incomplete season=1"):
+                client.get_show_seasons("100")
+        with patch.object(client, "_get", side_effect=[_xml(seasons_xml), PlexTimeoutError("season 1 timeout")]):
+            seasons = client.get_show_seasons_lite("100", fetch_resolution_for=[1])
+        self.assertEqual(seasons[1].file_paths, [])
+        self.assertEqual(seasons[2].file_paths, [])
 
     def test_per_file_numbers_expose_wrong_plex_episode_assignment(self):
         client = _make_client()
@@ -745,7 +794,7 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         responses = [
             _mock_response('<MediaContainer><Directory ratingKey="12" index="2" leafCount="1"/></MediaContainer>'),
             _mock_response(
-                '<MediaContainer><Video index="4">'
+                '<MediaContainer><Video index="4" guid="plex://episode/same">'
                 f'<Media videoResolution="720"><Part file="{filenames[0]}"/><Part file="{filenames[1]}"/></Media>'
                 f'<Media videoResolution="1080"><Part file="{filenames[2]}"/></Media>'
                 '</Video></MediaContainer>'
@@ -754,6 +803,7 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         with patch.object(client._session, "get", side_effect=responses):
             season = client.get_show_seasons("100")[2]
         self.assertEqual(season.episode_file_numbers, {filename: (4,) for filename in filenames})
+        self.assertEqual(season.episode_identity_conflicts, {})
 
     def test_same_file_combines_all_episode_indexes(self):
         client = _make_client()
@@ -776,7 +826,7 @@ class PlexClientGetShowSeasonsTests(unittest.TestCase):
         filename = "/video/Show/E01.mkv"
         for value, numbers in [(([filename], "1080"), ()), (([filename], "1080", (1,)), (1,))]:
             with self.subTest(value=value):
-                self.assertEqual(_normalise_episode_fetch_result(value), ([filename], "1080", numbers, {}))
+                self.assertEqual(_normalise_episode_fetch_result(value), ([filename], "1080", numbers, {}, {}))
                 client = _make_client()
                 seasons = _xml('<MediaContainer><Directory ratingKey="11" index="1" leafCount="1"/></MediaContainer>')
                 with patch.object(client, "_get", return_value=seasons), patch.object(client, "_fetch_season_episode_files", return_value=value):
