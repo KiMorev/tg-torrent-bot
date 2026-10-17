@@ -1003,6 +1003,13 @@ def _search_result_has_download_picker(result: dict) -> bool:
     return bool(_extract_series_base_query(str(result.get("title") or "")))
 
 
+def _search_result_quality_keyboard(page: int = 0) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=f"{SEARCH_CALLBACK_PREFIX}:result_quality:{value}")]
+            for label, value in _SRCH_QUALITY_OPTIONS]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{SEARCH_CALLBACK_PREFIX}:res_page:{page}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _search_results_keyboard(
     results: list[dict],
     page: int = 0,
@@ -1076,6 +1083,10 @@ def _search_results_keyboard(
             )
         rows.append(nav_row)
 
+    if not show_back_to_discovery:
+        rows.append([InlineKeyboardButton(
+            "🎞 Сменить качество", callback_data=f"{SEARCH_CALLBACK_PREFIX}:result_quality:open",
+        )])
     if show_back_to_cluster_picker:
         rows.append([
             InlineKeyboardButton(

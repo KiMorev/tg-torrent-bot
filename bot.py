@@ -111,6 +111,7 @@ from keyboards import (
     _search_mode_label,
     _search_options_keyboard,
     _search_results_keyboard,
+    _search_result_quality_keyboard,
     tracker_selection_label,
     _season_input_keyboard,
     _season_select_keyboard,
@@ -14846,6 +14847,33 @@ async def search_didmean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data["srch_query"] = suggestion
     context.user_data["srch_search_query"] = full_query
     return await _execute_search(query, context, full_query)
+
+
+async def search_result_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Change resolution without dropping the current query's audio/subtitle requirements."""
+    query = update.callback_query
+    await query.answer()
+    value = query.data.rsplit(":", 1)[-1]
+    if value == "open":
+        await query.edit_message_text(
+            "Выберите качество. Требования к аудио и субтитрам сохранятся.",
+            reply_markup=_search_result_quality_keyboard(context.user_data.get("srch_results_page", 0)),
+        )
+        return SEARCH_RESULTS
+    if value not in {quality for _, quality in _SRCH_QUALITY_OPTIONS}:
+        return SEARCH_RESULTS
+    search_query = context.user_data.get("srch_search_query", "").strip()
+    if not search_query:
+        await query.edit_message_text(
+            "Запрос потерян — начните поиск заново.", reply_markup=_search_error_keyboard(),
+        )
+        return SEARCH_RESULTS
+    base, _, audio, subs = _split_query_settings(search_query)
+    settings = dict(context.user_data.get("srch_settings") or {})
+    settings.update(quality=value, audio=audio, subs=subs)
+    context.user_data["srch_settings"] = settings
+    _mark_search_setting_source(context, "quality", "explicit")
+    return await _execute_search(query, context, _build_search_query(base, settings))
 
 
 async def search_no_quality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -29865,6 +29893,7 @@ def main() -> None:
                     MessageHandler(filters.VOICE, voice_message_entry),
                 ],
                 SEARCH_RESULTS: [
+                    CallbackQueryHandler(search_result_quality, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:result_quality:(open|4K|1080p|720p|any)$"),
                     CallbackQueryHandler(search_series_bulk_open, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_open:[A-Za-z0-9_]+$"),
                     CallbackQueryHandler(search_download_pick, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:dl_pick:\d+$"),
                     CallbackQueryHandler(search_series_bulk_plan, pattern=rf"^{SEARCH_CALLBACK_PREFIX}:bulk_plan:\d+$"),

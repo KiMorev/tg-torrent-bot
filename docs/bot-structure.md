@@ -77,6 +77,8 @@
 
 ## Callback namespaces
 
+В `SEARCH_RESULTS` callback `srch:result_quality:open` открывает выбор качества; `srch:result_quality:4K|1080p|720p|any` обрабатывает `search_result_quality`, повторяя текущий поиск с сохранением аудио/субтитров и трекеров. Возврат без изменений — `srch:res_page:<page>`.
+
 | Namespace | Где формируется | Где обрабатывается |
 |---|---|---|
 | `srch:*` | `keyboards.py`, локально в search-блоке `bot.py`; `srch:mode:*` переключает настройку `Что скачать` без отдельного меню | `ConversationHandler` в `bot.py::main` |

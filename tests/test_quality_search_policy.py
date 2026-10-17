@@ -101,6 +101,68 @@ class SearchQualityPolicyTests(unittest.TestCase):
 
 
 class SearchQualityFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_result_quality_picker_and_back_callbacks(self):
+        _, callback = _message_and_query("srch:result_quality:open")
+        context = _context()
+        context.user_data["srch_results_page"] = 2
+        self.assertEqual(await bot.search_result_quality(
+            SimpleNamespace(callback_query=callback), context,
+        ), bot.SEARCH_RESULTS)
+        keyboard = callback.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertEqual(
+            [button.callback_data for row in keyboard.inline_keyboard for button in row],
+            ["srch:result_quality:4K", "srch:result_quality:1080p",
+             "srch:result_quality:720p", "srch:result_quality:any", "srch:res_page:2"],
+        )
+        buttons = bot._search_results_keyboard([{"title": "Ted 2160p"}])
+        self.assertIn("srch:result_quality:open", [
+            button.callback_data for row in buttons.inline_keyboard for button in row
+        ])
+
+    async def test_result_quality_preserves_query_constraints_and_trackers(self):
+        for quality in ("4K", "1080p", "720p", "any"):
+            with self.subTest(quality=quality):
+                _, callback = _message_and_query(f"srch:result_quality:{quality}")
+                context = _context("Ted")
+                context.user_data["srch_search_query"] = "Ted Сезон: 2 4K Original Sub"
+                context.user_data["srch_settings"] = {"quality": "4K", "audio": False, "subs": False}
+                with patch.object(bot, "_execute_search", AsyncMock(return_value=bot.SEARCH_RESULTS)) as execute:
+                    await bot.search_result_quality(SimpleNamespace(callback_query=callback), context)
+                base, picked, audio, subs = bot._split_query_settings(execute.call_args.args[2])
+                self.assertEqual(base, "Ted Сезон: 2")
+                self.assertEqual(picked, {"4K": "2160p", "any": None}.get(quality, quality))
+                self.assertTrue(audio)
+                self.assertTrue(subs)
+                self.assertEqual(context.user_data["srch_jackett_selected"], {"rutracker"})
+                self.assertEqual(context.user_data["srch_settings"]["quality"], quality)
+
+    async def test_result_quality_missing_query_has_recovery_buttons(self):
+        _, callback = _message_and_query("srch:result_quality:1080p")
+        with patch.object(bot, "_execute_search", AsyncMock()) as execute:
+            await bot.search_result_quality(SimpleNamespace(callback_query=callback), _context())
+        execute.assert_not_awaited()
+        buttons = callback.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertGreaterEqual(sum(len(row) for row in buttons.inline_keyboard), 2)
+
+    async def test_result_quality_updates_actual_results_and_back_restores_page(self):
+        releases = [
+            _release("Dune (2021) WEB-DL 2160p Original Sub"),
+            _release("Dune (2021) WEB-DL 1080p Original Sub"),
+        ]
+        context, _, callback = await self._search(releases, query="Dune 4K Original Sub")
+        callback.data = "srch:result_quality:open"
+        await bot.search_result_quality(SimpleNamespace(callback_query=callback), context)
+        callback.data = "srch:res_page:0"
+        await bot.search_results_page(SimpleNamespace(callback_query=callback), context)
+        self.assertIn("2160p", context.user_data["srch_results"][0]["title"])
+        callback.data = "srch:result_quality:1080p"
+        with patch.object(bot, "jackett_client", SimpleNamespace(search=Mock(return_value=releases))), \
+             patch.object(bot, "rutracker_client", None):
+            await bot.search_result_quality(SimpleNamespace(callback_query=callback), context)
+        self.assertEqual(len(context.user_data["srch_results"]), 1)
+        self.assertIn("1080p", context.user_data["srch_results"][0]["title"])
+        self.assertEqual(context.user_data["srch_search_query"], "Dune 1080p Original Sub")
+
     def setUp(self):
         self.patches = [
             patch.object(bot, "search_stages", return_value=[]),
